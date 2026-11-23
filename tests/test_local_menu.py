@@ -610,3 +610,13 @@ class TryHomecoming(LocalMenuTests):
         self.assertEqual(code, 0)
         backup_menu.assert_called_once_with(self.mind_path, temporary=True)
         self.assertIn("7  Back up to a USB stick", text)
+
+
+class TryMenuFits(unittest.TestCase):
+    def test_every_try_hint_shares_a_line_with_its_label(self):
+        from mind import console_ui
+        entries = list(local_menu.MENU) + [("1", "Try PipOS", local_menu.TRY_HINT_LOGGED)]
+        label_width = max(len(entry[1]) for entry in entries) + 3
+        longest = max(len(entry[2]) for entry in entries if len(entry) > 2 and entry[2])
+        self.assertLessEqual(4 + label_width + longest, console_ui.MAX_WIDTH,
+                             "a hint this long pushes every hint below its label and the menu overflows the panel")

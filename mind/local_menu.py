@@ -40,7 +40,9 @@ MEDIA_DEPTH = 4
 MEDIA_MIN_BYTES = 1024**2
 BACKUP_SUFFIXES = (".age", ".agekey", ".key", ".txt")
 TRY_HINT = "Meet the being. Nothing is kept."
-TRY_HINT_LOGGED = "Conversations are not kept. Boot diagnostics are saved on this stick."
+# Short enough to share a line with its label: a longer hint moves every hint
+# onto its own line and the Try menu no longer fits the 1280x800 panel.
+TRY_HINT_LOGGED = "Nothing is kept. Logs go to this stick."
 MENU = (
     ("1", "Try PipOS", TRY_HINT),
     ("2", "Install PipOS", "Make this Mac its home."),

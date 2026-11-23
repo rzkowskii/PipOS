@@ -196,7 +196,7 @@ class IsoMedia(unittest.TestCase):
     def test_laptop_menu_rules(self):
         """The laptop Try media's own checks on its boot menu, against the ISO."""
         with patch.object(smoke, "LAPTOP_TRY_IMAGE", ISO):
-            smoke.LaptopTryMedia.test_boot_menu_is_on_the_panel_with_three_entries_and_a_timeout(self)
+            smoke.LaptopTryMedia.test_boot_menu_is_on_the_panel_with_six_entries_and_a_timeout(self)
             smoke.LaptopTryMedia.test_stick_has_a_fat_log_partition(self)
 
 
