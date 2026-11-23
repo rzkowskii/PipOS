@@ -9,7 +9,8 @@ BEING_SITE = $(BR2_EXTERNAL_BEINGOS_PATH)/..
 BEING_SITE_METHOD = local
 BEING_LICENSE = GPL-3.0 (PipOS), MIT (pico face detector), OFL-1.1 (console font), Apache-2.0 (default model)
 BEING_LICENSE_FILES = LICENSE
-BEING_DEPENDENCIES = host-rustc host-pkgconf sdl2 python3 jpeg
+# host-python3 is the target's own Python version, so it compiles the mind.
+BEING_DEPENDENCIES = host-rustc host-pkgconf host-python3 sdl2 python3 jpeg
 
 # '*' is an unusable password hash. A locked '!' account also blocks SSH keys.
 # being-shell runs the caged workshop shell and being-panel its renderers
@@ -33,6 +34,9 @@ BEING_HAS_BODYCARE = $(wildcard $(BEING_SITE)/crates/bodycare/Cargo.toml)
 BEING_HAS_HANDS = $(wildcard $(BEING_SITE)/mind/hands.py)
 BEING_HAS_SHELF = $(wildcard $(BEING_SITE)/mind/workshop_shelf/shelf.py)
 BEING_HAS_SHELLRC = $(wildcard $(BR2_EXTERNAL_BEINGOS_PATH)/package/being/being-hands-shellrc)
+BEING_HAS_AUDIO_INIT = $(and $(wildcard $(BR2_EXTERNAL_BEINGOS_PATH)/package/being/being-audio-init),\
+	$(wildcard $(BR2_EXTERNAL_BEINGOS_PATH)/package/being/being-audio-init.service))
+BEING_HAS_BENCH = $(wildcard $(BR2_EXTERNAL_BEINGOS_PATH)/package/being/being-bench.service)
 
 # The source is the whole repository; leave behind what the build does not need.
 BEING_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = \
@@ -114,6 +118,47 @@ define BEING_INSTALL_SHELLRC
 endef
 endif
 
+# The microphone's mixer, set before the ears start (docs/PIP-FUNCTIONS.md, L1.2).
+ifneq ($(BEING_HAS_AUDIO_INIT),)
+define BEING_INSTALL_AUDIO_INIT
+	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-audio-init $(TARGET_DIR)/usr/libexec/being/being-audio-init
+endef
+define BEING_INSTALL_AUDIO_INIT_UNIT
+	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-audio-init.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/being-audio-init.service
+endef
+endif
+
+# Bench mode: only a measuring boot (being.bench=1) starts it.
+ifneq ($(BEING_HAS_BENCH),)
+define BEING_INSTALL_BENCH_UNIT
+	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-bench.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/being-bench.service
+endef
+endif
+
+# The signed descriptor of every model role (dream, vad, asr, tts,
+# embeddings, speaker). model_pack.verify(role) binds each pack to the one
+# shipped here; post-image.sh refuses an image whose copy differs.
+define BEING_INSTALL_MODEL_PACKS
+	rm -rf $(TARGET_DIR)/usr/share/being/model-packs
+	for descriptor in $(BEING_PKGDIR)/model-packs/*/pack.json; do \
+		[ -f "$$descriptor" ] || continue; \
+		role=$$(basename "$$(dirname "$$descriptor")"); \
+		$(INSTALL) -D -m 0644 "$$descriptor" \
+			$(TARGET_DIR)/usr/share/being/model-packs/$$role/pack.json || exit 1; \
+	done
+endef
+
+# Every organ written in Python starts from compiled modules. The image is
+# read-only and rebuilt whole, so a module never changes under its .pyc:
+# unchecked-hash files load without reading the source to compare it, and
+# they are the same on every build of the same source.
+define BEING_COMPILE_PYTHON
+	$(HOST_DIR)/bin/python3 -m compileall -q -f --invalidation-mode unchecked-hash \
+		-d /usr/lib/being $(TARGET_DIR)/usr/lib/being
+endef
+
 define BEING_INSTALL_TARGET_CMDS
 	# Start from an empty tree, so a module or file removed from the source
 	# is removed from the image too.
@@ -134,6 +179,7 @@ define BEING_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-hardware-report $(TARGET_DIR)/usr/sbin/being-hardware-report
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-boot-record $(TARGET_DIR)/usr/libexec/being-boot-record
 	$(INSTALL) -D -m 0755 $(@D)/eyes-capture $(TARGET_DIR)/usr/libexec/being/eyes-capture
+	$(BEING_INSTALL_AUDIO_INIT)
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/facefinder $(TARGET_DIR)/usr/share/being/facefinder
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/PICO-LICENSE $(TARGET_DIR)/usr/share/being/PICO-LICENSE
 	$(BEING_INSTALL_LAN_MAINTENANCE)
@@ -145,6 +191,7 @@ define BEING_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/share/being/default-model/pack.json
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/default-model/LICENSE \
 		$(TARGET_DIR)/usr/share/being/default-model/LICENSE
+	$(BEING_INSTALL_MODEL_PACKS)
 	$(BEING_INSTALL_LAB_BODY)
 	$(BEING_INSTALL_BODYCARE)
 	$(BEING_INSTALL_SHELF)
@@ -153,6 +200,7 @@ define BEING_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/lib/sysctl.d/50-being-hardening.conf
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/60-being-power.rules \
 		$(TARGET_DIR)/usr/lib/udev/rules.d/60-being-power.rules
+	$(BEING_COMPILE_PYTHON)
 endef
 
 define BEING_INSTALL_INIT_SYSTEMD
@@ -219,6 +267,8 @@ define BEING_INSTALL_INIT_SYSTEMD
 		$(TARGET_DIR)/usr/lib/systemd/system/workshop.slice
 	$(BEING_INSTALL_BODYCARE_UNIT)
 	$(BEING_INSTALL_HANDS_UNIT)
+	$(BEING_INSTALL_AUDIO_INIT_UNIT)
+	$(BEING_INSTALL_BENCH_UNIT)
 endef
 
 $(eval $(generic-package))

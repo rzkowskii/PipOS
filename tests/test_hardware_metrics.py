@@ -252,6 +252,19 @@ class HardwareMetricsTests(unittest.TestCase):
         self.assertEqual(data["samples"][0]["power"]["packages"], {})
         self.assertIsNone(data["window"]["package_power_mean_watts"])
 
+    def test_battery_wear_uses_the_real_laptops_charge_figures(self):
+        # The first real boot (23 November): 4,684 of 5,770 mAh after 71 cycles.
+        for name, text in (("type", "Battery"), ("capacity", "79"), ("status", "Charging"),
+                           ("charge_full", "4684000"), ("charge_full_design", "5770000"), ("cycle_count", "71")):
+            self.write(f"sys/class/power_supply/BAT0/{name}", text + "\n")
+        battery, = metrics.power_info(self.root / "sys")["batteries"]
+        self.assertEqual((battery["health_percent"], battery["cycles"]), (81, 71))
+        self.write("sys/class/power_supply/BAT0/charge_full_design", "0\n")
+        self.write("sys/class/power_supply/BAT0/cycle_count", "0\n")
+        battery, = metrics.power_info(self.root / "sys")["batteries"]
+        self.assertNotIn("health_percent", battery)
+        self.assertNotIn("cycles", battery, "0 means the controller does not count")
+
     def test_power_and_wifi_window_use_only_valid_readings(self):
         samples = [metrics.snapshot(self.root, elapsed) for elapsed in range(4)]
         for sample, (watts, status, carrier, signal) in zip(samples, (

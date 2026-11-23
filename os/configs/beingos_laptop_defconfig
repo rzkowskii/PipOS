@@ -129,6 +129,10 @@ BR2_PACKAGE_CORTEX=y
 
 # The local audio loop.
 BR2_PACKAGE_POCKETSPHINX=y
+# The voice engines after the wake word: Silero VAD, Moonshine and Piper.
+# Prebuilt; ONNX Runtime picks its CPU kernels at run time, and
+# lab/sherpa_avx_smoke.py runs it on an Ivy Bridge CPU model (AVX, no AVX2).
+BR2_PACKAGE_SHERPA_ONNX=y
 BR2_PACKAGE_ALSA_UTILS=y
 BR2_PACKAGE_ALSA_UTILS_APLAY=y
 BR2_PACKAGE_ALSA_UTILS_AMIXER=y

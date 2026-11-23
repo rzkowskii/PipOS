@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from . import console_ui as ui
-from . import install_disks, installer, setup, usb_logs
+from . import install_disks, installer, setup, type_chat, usb_logs
 from .initiative import POLICY_PATH as INITIATIVE_POLICY_PATH, load_policy as load_initiative_policy
 from .initiative_setup import describe_policy
 from .profile import FACTORY_CONFIG, PROFILE_FILE, factory_profile, load_profile
@@ -47,9 +47,12 @@ MENU = (
     ("3", "Restore a being", "Bring a backed-up being home."),
     ("4", "Setup", "Name, voice and personality."),
     ("5", "Check hardware", "See what PipOS can find."),
-    ("6", "Back up to a USB stick", "Save this Try being to a stick."),
+    ("6", "Talk to Pip by typing", "When Pip can't hear you."),
+    ("7", "Back up to a USB stick", "Save this Try being to a stick."),
     ("Q", "Return to PipOS", None),
 )
+TYPE_CHAT_KEY = "6"
+BACKUP_KEY = "7"
 RESTORE_CHOICES = (
     ("1", "Restore with conversation archive",
      "Who the being is, its settings and past conversations. Reminders, Wi-Fi and the weather city start fresh."),
@@ -669,21 +672,42 @@ def guided_checks():
     input(ui.prompt("Press Enter to go back. "))
 
 
-def menu_entries():
-    """The Try menu, worded for what this boot really keeps."""
+def wake_phrase():
+    try:
+        return installer.display_text(load_profile(FACTORY_CONFIG, MIND_DIR).wake_word).strip()
+    except Exception:  # the welcome must never fail on a profile problem
+        return ""
+
+
+def menu_entries(name=None):
+    """The Try menu, worded for what this boot really keeps, with the being's own name."""
     try:
         logged = usb_logs.logging_enabled() is True
     except OSError:
         logged = False
-    if not logged:
-        return MENU
-    return tuple((key, label, TRY_HINT_LOGGED if hint == TRY_HINT else hint) for key, label, hint in MENU)
+    name = name or "Pip"
+    entries = []
+    for key, label, hint in MENU:
+        if key == TYPE_CHAT_KEY:
+            label, hint = f"Talk to {name} by typing", f"When {name} can't hear you."
+        elif logged and hint == TRY_HINT:
+            hint = TRY_HINT_LOGGED
+        entries.append((key, label, hint))
+    return tuple(entries)
+
+
+def how_to_talk(name):
+    name = name or "Pip"
+    wake = wake_phrase() or f"Hey {name}"
+    return f'Say "{wake}", wait for a chirp, then talk. Or choose "Talk to {name} by typing".'
 
 
 def welcome():
     if not ui.enabled():
+        name = being_name()
         print("\nPipOS")
-        ui.options(menu_entries())
+        print(how_to_talk(name))
+        ui.options(menu_entries(name))
         return
     name = being_name()
     ui.screen(f"Hello, I'm {name}." if name else "Hello.", context="Running from USB")
@@ -693,7 +717,9 @@ def welcome():
     ui.para("Right now I'm running from the USB stick. Try keeps your choices and our conversations "
             "in memory until you restart.", "muted")
     ui.line()
-    ui.options(menu_entries())
+    ui.para(how_to_talk(name), "plain")
+    ui.line()
+    ui.options(menu_entries(name))
 
 
 IDLE_SECONDS = 240
@@ -755,7 +781,9 @@ def try_menu():
                 if ui.enabled():
                     if input(ui.prompt("G runs the guided checks. Press Enter to go back. ")).strip().lower() == "g":
                         guided_checks()
-            elif choice == "6":
+            elif choice == TYPE_CHAT_KEY:
+                type_chat.main()
+            elif choice == BACKUP_KEY:
                 from . import care
 
                 care.backup_menu(MIND_DIR, temporary=True)

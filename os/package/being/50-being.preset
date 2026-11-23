@@ -7,6 +7,10 @@ disable systemd-networkd-wait-online.service
 disable systemd-resolved.service
 disable systemd-timesyncd.service
 enable being-network-online.target
+# Started by the night shift through systemctl, never at boot.
+disable being-dream-cortex.service
+# Pulled in only on a measuring boot (being.bench=1, being-try-generator).
+disable being-bench.service
 enable being-*.service
 enable rauc.service
 # being-wifi starts its own supplicant for the saved interface.

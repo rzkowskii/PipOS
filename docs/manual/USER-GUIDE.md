@@ -31,22 +31,23 @@ does today. Features still in progress are marked *not yet*. The
 2. [Meeting Pip for the first time](#meeting-pip-for-the-first-time)
 3. [Reading Pip's face](#reading-pips-face)
 4. [Talking to Pip](#talking-to-pip)
-5. [Everyday things to ask](#everyday-things-to-ask)
-6. [Reminders and timers](#reminders-and-timers)
-7. [What Pip remembers, and how to change it](#what-pip-remembers-and-how-to-change-it)
-8. [Making Pip yours](#making-pip-yours)
-9. [The lid, battery and sleep](#the-lid-battery-and-sleep)
-10. [Network, weather and privacy](#network-weather-and-privacy)
-11. [The camera](#the-camera)
-12. [Overnight journal](#overnight-journal)
-13. [Installing Pip on the laptop](#installing-pip-on-the-laptop)
-14. [Backing up Pip](#backing-up-pip)
-15. [Updates](#updates)
-16. [Settings you cannot reach yet](#settings-you-cannot-reach-yet)
-17. [Troubleshooting](#troubleshooting)
-18. [Known limitations](#known-limitations)
-19. [Quick reference card](#quick-reference-card)
-20. [Glossary](#glossary)
+5. [Things you can say](#things-you-can-say)
+6. [Everyday things to ask](#everyday-things-to-ask)
+7. [Reminders and timers](#reminders-and-timers)
+8. [What Pip remembers, and how to change it](#what-pip-remembers-and-how-to-change-it)
+9. [Making Pip yours](#making-pip-yours)
+10. [The lid, battery and sleep](#the-lid-battery-and-sleep)
+11. [Network, weather and privacy](#network-weather-and-privacy)
+12. [The camera](#the-camera)
+13. [Overnight journal](#overnight-journal)
+14. [Installing Pip on the laptop](#installing-pip-on-the-laptop)
+15. [Backing up Pip](#backing-up-pip)
+16. [Updates](#updates)
+17. [Settings you cannot reach yet](#settings-you-cannot-reach-yet)
+18. [Troubleshooting](#troubleshooting)
+19. [Known limitations](#known-limitations)
+20. [Quick reference card](#quick-reference-card)
+21. [Glossary](#glossary)
 
 ---
 
@@ -70,10 +71,15 @@ Before you ever erase macOS, the design asks for three chores:
 
 1. Plug in the PipOS USB stick and power on while holding **Option (⌥)**.
    Choose the EFI boot entry.
-2. The boot menu offers three choices and starts the first after 5 s:
+2. The boot menu starts the first entry after 5 s:
    - **Try PipOS**
    - **show boot messages** (press **v**)
    - **safe graphics** (press **s**). Use this if the screen stays black.
+   - Newer sticks add **alternative microphone** (**m**) and
+     **alternative microphone 2** (**n**), two set-ups for a microphone
+     that hears "Hey Pip" but not the words after it, and **measure
+     speed** (**b**), which times Pip's models and voices on this laptop
+     and saves the numbers with the stick's logs.
 3. The start menu appears. Press **1 – Try PipOS**.
 4. The screen goes black, and then two cyan eyes open. They peek,
    blink and settle. Pip is awake.
@@ -128,11 +134,14 @@ Pip has no mouth. Everything it shows is in the eyes.
 
 Pip also shows feelings while it talks: joy, curiosity, surprise,
 skepticism, concern or sleepiness. Click or tap the trackpad and it
-glances down.
+glances down. If it heard you but could not make out the words, it
+squints for a moment, the way someone says "pardon?".
 
 ## Talking to Pip
 
-1. **Say "Hey Pip"**, then pause until its eyes lock on you.
+1. **Say "Hey Pip"**, then pause until its eyes lock on you. Or press
+   **Space** or **Return**, or click the trackpad, while the eyes rest:
+   that does the same.
 2. **Speak** your request in one go.
 3. Pip thinks, then answers in one or two short sentences.
 4. For **20 seconds** afterwards Pip stays attentive. You can ask a
@@ -146,6 +155,14 @@ Controls you can use at any time:
 | **M** or **F10** | Mute or unmute the microphone. The face shows when it is muted |
 | **F2** | Open settings. In Try mode it opens the start menu; choose **4 – Setup** |
 | **F9** | Bring the face back if the screen stays blank because Pip has no lid reading |
+| **Space**, **Return** or a click | While the eyes rest: listen, as if you had said "Hey Pip". Not while the terminal has the keyboard, and not while muted |
+| **F2**, then **6** (Try stick) or **F2**, then **Y** (installed) | Type to Pip instead of talking. It answers on screen and out loud. **Esc** leaves |
+
+If Pip hears you but cannot make out the words, it says "Sorry, I
+didn't catch that." (once each time you wake it). The second time within
+ten minutes it adds "You can also type to me: press F2, then 6." (on an
+installed Pip, "then Y"). Once it has answered you, a cough or the TV in the
+few seconds after its reply gets no apology.
 
 Tips for good conversations:
 
@@ -165,7 +182,8 @@ Tips for good conversations:
   measured yet.
 - **Muted means deaf.** While muted, Pip does not react to "Hey Pip" at
   all, even after you close and reopen the lid. Press **M** or **F10** to
-  unmute. There is no voice command for it.
+  unmute. "Stop listening" mutes it by voice (*new*), but nothing spoken
+  can unmute it, because it cannot hear you.
 - **Time limits.**
   - If you stop speaking for 15 seconds, Pip stops listening.
   - If its thinking stalls (no progress for 45 seconds, or 10 minutes in
@@ -178,6 +196,122 @@ Tips for good conversations:
   remember about …?" straight after telling it. Setup refuses a wake
   phrase that has words outside the dictionary, and says the dictionary
   does not contain that phrase.
+
+## Things you can say
+
+Pip answers most everyday requests with a fixed program, not the language
+model, so the answer is instant and exact. These are examples: close
+variations work too, and "Hey Pip" in front is optional while Pip is
+already listening. Anything not on these lists goes to the language model
+as ordinary conversation.
+
+Items marked *new* are the second wave of work (24 November 2026). So far
+they have been tested only on the development Mac, and
+[STATUS.md](../../STATUS.md) records which of them have landed and which
+have reached a stick.
+
+### Hearing and voice
+
+| Say | Pip |
+|---|---|
+| "What did you hear?" / "What did I just say?" | *New.* Reads back exactly what it heard, for example "I heard: 'set a timer for five minutes'." It keeps that only until it next sleeps |
+| "Say that again" / "Pardon?" / "What did you say?" | *New.* Repeats its last line |
+| "How well can you hear me?" / "Check your hearing" | *New.* Says how quiet the room is and how clearly your voice reaches it, from measured levels |
+| "Speak up" / "Be quieter" / "Set your volume to 5" | Changes its volume |
+| "Use your natural voice" / "Use your original voice" / "Which voice are you using?" | *New.* Switches between the natural voice (Alba) and the original robot voice. The natural voice is only chosen by itself if it measured fast enough on this laptop |
+
+### Time and routines
+
+| Say | Pip |
+|---|---|
+| "What time is it?" / "What's the date?" / "What day is it?" | Reads the clock and calendar |
+| "What time is it in London?" / "What's the time difference to London?" | *New.* The time elsewhere |
+| "Set the time to 7:30 pm" | Sets its clock (and the laptop's hardware clock) |
+| "Set a timer for 10 minutes" / "How long left on my timer?" / "Cancel my timer" | Timers. "How long left" is *new* |
+| "Remind me to call Mum tomorrow at 9 am" / "What are my reminders?" | Reminders. See [Reminders and timers](#reminders-and-timers) |
+| "Wake me up at 7" / "Wake me at half past six" / "Set an alarm for 6:30 tomorrow" / "Set an alarm for ten minutes" | *New.* Alarms. "Quarter past" and "quarter to" work too. Alarms ring in quiet hours; reminders wait for them to end |
+| "Every weekday at 7, remind me to take my tablets" / "Every Tuesday at 8 pm, remind me to put the bins out" | *New.* Repeating reminders |
+| "Snooze" / "Five more minutes" / "Okay" / "Thanks" / "Got it" | *New.* When something rings, Pip says it three times, two minutes apart, until you answer. "Snooze" puts it off |
+| "Good morning" (your first words of the day) | *New.* A short morning brief: today's reminders, anything about its body that matters, and at most one tentative thing from its night |
+
+If its clock was reset while it was off, Pip asks once: "I lost track of
+time. What time is it?" (*new*).
+
+### Lists, notes and memory
+
+| Say | Pip |
+|---|---|
+| "Remember that my orchid is called Silverleaf" / "What do you remember about my orchid?" | Remembers and recalls. See [What Pip remembers](#what-pip-remembers-and-how-to-change-it) |
+| "Forget about my sister's birthday" / "Forget that" | Counts what matches and waits for your yes, then really deletes it |
+| "Add milk to my shopping list" / "Add eggs and bread to the shopping list" | *New.* Lists, as many as you like |
+| "What's on my shopping list?" / "Take milk off my shopping list" / "Cross off milk" | *New.* It reads back five items, then says how many more |
+| "Clear my shopping list" / "What lists do you have?" | *New.* Clearing asks yes or no first |
+| "Make a note: the plumber comes Thursday" / "Read my notes" / "Delete my last note" | *New.* Notes that survive restarts |
+| "What did we talk about?" / "What did we do yesterday?" | *New.* From a short record Pip writes each night |
+| "When did you last back up?" / "Back yourself up" | *New.* Backing up needs a stick labelled for backups, and asks yes or no |
+| "Start guest mode" / "End guest mode" / "Don't remember this" | Private conversations |
+
+Lists and notes are kept in their own file. They survive restarts, go into
+backups and are erased by "forget everything". Forgetting a topic leaves
+them alone: take items off a list yourself. When Pip is set to keep nothing
+after a restart (Care, Memory), it keeps no lists or notes at all and says
+so. "Take that off" undoes the last thing added only within ten minutes.
+
+A backup stick is one labelled `being-backup` (exFAT or ext4) or
+`PIP-BACKUP` (FAT labels hold 11 characters). Pip writes into its
+`PipOS-backups` folder and keeps the newest five sets. The first backup must
+be made from the F2 menu, because that creates the backup key.
+
+### Body and system
+
+| Say | Pip |
+|---|---|
+| "How's your battery?" / "Are you charging?" / "How long will your battery last?" | The real battery reading |
+| "How's your battery health?" | *New.* For example "My battery holds 81 percent of what it did when new, after 71 charge cycles." |
+| "How warm are you?" / "Why is your fan loud?" | *New.* From its temperature sensors and fan |
+| "How much space do you have?" / "How much memory are you using?" / "How long have you been awake?" | *New.* Disk, memory and uptime |
+| "Are you okay?" / "Run a check-up" / "What's wrong?" | *New.* Up to three findings, the worst first |
+| "What did you do last night?" / "What have you been up to?" | *New.* From its action log, which keeps counts and kinds only, never words |
+| "Stop listening" | *New.* Mutes the microphone. Press **M** to let it listen again |
+| "Brighter" / "Dimmer" / "Set your brightness to 50 percent" | *New.* The screen's brightness |
+| "Go to sleep" / "Good night" | Sleeps until you wake it |
+| "Shut down" / "Switch off" / "Restart yourself" | *New.* Asks first, then saves itself before it goes |
+| "What version are you?" / "Did your update work?" | *New.* Updates themselves stay in the F2 menu |
+
+Care (F2, then **C**) has a **Health** page (key **H**) with the same
+check-up as "Are you okay?". About every ten minutes while it rests, Pip
+quietly checks its own parts; a stuck part may be restarted or the
+microphone reset, and that is logged, never spoken.
+
+### The workshop
+
+| Say | Pip |
+|---|---|
+| "Open the terminal" / "Minimise the terminal" / "Show me your face" / "Close the terminal" | *New.* A small terminal beside its eyes |
+| "Write a script that counts down from ten" / "In the terminal, draw a box" | *New.* It types the program itself |
+| "Stop writing that script for a second" / "Carry on" / "Cancel that" | *New.* Pause, resume or stop |
+| "Run it" / "Did it work?" / "Fix it" | *New.* Runs only when you say so, and reports what happened |
+| "What can you install?" / "Play snake" | *New.* Small programs from its shelf |
+| "Show me how you're feeling" / "Open the monitor" / "Show me the clock" / "Show my timers" / "Show me the time" | *New.* A live body monitor, or a big clock with your timers, the next reminders and the next alarm. Opening one minimises the terminal |
+| "Show me your face" / "Close the clock" / **Esc** | *New.* Closes the monitor or the clock |
+
+The terminal is off in guest mode, and its files are kept in memory only.
+Guests are refused the shelf, the monitor and the clock ("My clock stays
+closed while a guest is here. It shows your reminders.").
+
+### Conversation and play
+
+| Say | Pip |
+|---|---|
+| "What can you do?" / "What else can you do?" / "What can you do with lists?" | A short tour of what it can do |
+| "Are you alive?" / "Are you sentient?" / "What are you?" | An honest answer, always the same, from code |
+| "What did you dream about?" / "Did you dream last night?" | From its dream journal only |
+| "What's 17 times 23?" / "What's 15 percent of 80?" / "Square root of 144" | *New.* Sums, said in words. It says "about" when it rounds |
+| "How many grams in a pound?" / "180 Fahrenheit in Celsius" / "How many cups in a litre?" | *New.* Conversions. A cup is the metric 250 ml and a tablespoon the Australian 20 ml, and it says so. Pints, gallons and fluid ounces are UK measures unless you say "US". Data sizes count in thousands |
+| "How do you spell necessary?" | *New.* Letter by letter |
+| "Tell me a joke" / "Tell me a fun fact" | *New.* From a bundled collection, without repeats |
+| "Let's play a game" / "Guess the number" / "Rock paper scissors" / "Twenty questions" | *New.* "I give up" or "Stop the game" ends one |
+| "Tell me a story" | *New.* A longer reply from the language model, spoken as it is written |
 
 ## Everyday things to ask
 
@@ -221,10 +355,14 @@ Anything else is ordinary conversation.
   - times that have passed;
   - invalid dates;
   - times skipped or repeated when the clocks change.
-- Reminders are one-off. "Every day" is not supported yet.
+- A plain reminder rings once. Repeating reminders ("every weekday at 7")
+  and alarms are *new*: see [Things you can say](#time-and-routines).
 - Timers can be seconds, minutes, hours or days.
-- Pip confirms each item with its number, for example "Reminder 3 set for
-  tomorrow at 9:00 in the morning." Use that number to cancel it.
+- Pip confirms a one-off reminder with its number, for example "Reminder 3
+  set for tomorrow at 9:00 in the morning." Use that number to cancel it.
+  Timers, alarms and repeats are confirmed in plain words ("Okay, ten
+  minutes, starting now.") and get a number only when two of a kind run.
+- "What timers do I have?" counts down ("Timer 2, five minutes left.").
 - In a list, past-due items are called "overdue". If a task matches more
   than one reminder, Pip asks for the number.
 - Reminders and timers work offline and survive restarts.
@@ -330,7 +468,14 @@ Press **F2** on the face, or choose **4 – Setup** from the USB menu.
 | **6** | Personality: *Warm and curious*, *Calm and concise*, *Playful and dry*, *Gentle and reflective*, random, or tune five traits yourself |
 | **7** | Surprise me: random name, voice and personality. The wake phrase also becomes "Hey" plus the new name, if the recognizer knows that name |
 | **8** | Network mode (installed Pip only) |
-| **9** | Quiet hours and announcements |
+| **9** | Quiet hours and announcements. Its **5** turns the morning brief on or off |
+| **N** | Natural or original voice (also `being-setup --voice`) |
+| **C** | Senses and memory (Care): camera, dreams, memory, clock, and the **Health** page (**H**) |
+| **A** | Volume and microphone |
+| **T** | Time zone |
+| **B** | Back up to a USB stick (installed Pip only) |
+| **U** | Update from a USB stick (installed Pip only) |
+| **Y** | Talk to Pip by typing (installed Pip only; on a Try stick it is item **6** of the start menu) |
 | **P** | Hear a sample. Press **F10** first to mute the microphone so Pip doesn't hear itself |
 | **K** | Keep your changes |
 | **Q** | Cancel |

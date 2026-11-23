@@ -57,6 +57,29 @@ class LocalMenuTests(unittest.TestCase):
         self.scan.assert_not_called()
         self.confirm.assert_not_called()
 
+    def test_try_menu_offers_talking_by_typing_and_how_to_talk(self):
+        factory = Path(__file__).resolve().parent.parent / "config"
+        with patch.object(local_menu.type_chat, "main", return_value=0) as typing, \
+                patch.object(local_menu, "FACTORY_CONFIG", factory):
+            code, text, _, _ = self.run_keys(["6", "q"])
+        self.assertEqual(code, 0)
+        typing.assert_called_once_with()
+        text = local_menu.ui.plain(text)
+        self.assertIn("6  Talk to Pip by typing", text)
+        text = " ".join(text.split())
+        self.assertIn('Say "Hey Pip", wait for a chirp, then talk. Or choose "Talk to Pip by typing".', text)
+        self.assertEqual(text.count("Talk to Pip by typing"), 4, "on the menu and in the welcome, both times")
+        self.setup.assert_not_called()
+        self.confirm.assert_not_called()
+
+    def test_typing_entry_and_welcome_use_the_beings_own_name_and_wake_phrase(self):
+        save_profile(self.mind_path, replace(Profile(), name="Clover", wake_word="Hello Clover"))
+        with patch.object(local_menu.type_chat, "main", return_value=0):
+            _, text, _, _ = self.run_keys(["q"])
+        text = " ".join(local_menu.ui.plain(text).split())
+        self.assertIn("6 Talk to Clover by typing", text)
+        self.assertIn('Say "Hello Clover", wait for a chirp, then talk. Or choose "Talk to Clover by typing".', text)
+
     def test_installed_opens_only_setup_and_requires_tty(self):
         self.try_boot.return_value = False
         code, text, _, keyboard = self.run_keys([])
@@ -293,7 +316,8 @@ class ConsoleScreens(LocalMenuTests):
         self.assertEqual(code, 0)
         screen = local_menu.ui.plain(self.last_screen(text))
         for entry in ("1  Try PipOS", "2  Install PipOS", "3  Restore a being", "4  Setup",
-                      "5  Check hardware", "Q  Return to PipOS"):
+                      "5  Check hardware", "6  Talk to Pip by typing", "7  Back up to a USB stick",
+                      "Q  Return to PipOS"):
             self.assertIn(entry, screen)
         self.assertTrue(self.prompts(keyboard)[0].endswith("Choice: "))
         self.assertTrue(self.prompts(keyboard)[0].rstrip().splitlines()[-1].strip().startswith("›"))
@@ -582,7 +606,7 @@ class TryHomecoming(LocalMenuTests):
         folder.mkdir()
         with (patch.object(local_menu.usb_logs, "current_folder", return_value=folder),
               patch("mind.care.backup_menu") as backup_menu):
-            code, text, _, _ = self.run_keys(["6", "q"])
+            code, text, _, _ = self.run_keys(["7", "q"])
         self.assertEqual(code, 0)
         backup_menu.assert_called_once_with(self.mind_path, temporary=True)
-        self.assertIn("6  Back up to a USB stick", text)
+        self.assertIn("7  Back up to a USB stick", text)

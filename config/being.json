@@ -6,7 +6,7 @@
   "cortex_url": "http://127.0.0.1:8080",
   "model": "default",
   "ctx_tokens": 4096,
-  "max_tokens": 96,
+  "max_tokens": 64,
   "temperature": 0.7,
   "top_k": 20,
   "top_p": 0.8,

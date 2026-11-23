@@ -11,6 +11,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -77,9 +78,12 @@ class GrubTests(unittest.TestCase):
                 self.assertIn("msr.allow_writes=off", args.split())
         try_config = render(BOARD / "try-grub.cfg", "laptop")
         lines = kernel_lines(try_config)
-        self.assertEqual(len(lines), 3, lines)
+        # Normal, messages and safe graphics, then the round-2 entries
+        # (two microphone quirks and the measuring boot) once they exist.
+        self.assertIn(len(lines), (3, 6), lines)
         for line in lines:
             self.assertIn("hid_apple.fnmode=2", line)
+            self.assertIn("msr.allow_writes=off", line)
 
     def test_only_the_normal_installed_boot_is_quiet(self):
         args = extra_args(render(BOARD / "grub.cfg", "laptop"))
@@ -402,6 +406,16 @@ class BoardScriptTests(unittest.TestCase):
             subprocess.run(["sh", "-n", str(PACKAGE / script)], check=True, timeout=10)
 
 
+def environment(sections, section="Service"):
+    """Every Environment= assignment in a unit, as a dict."""
+    env = {}
+    for line in values(sections, section, "Environment"):
+        for word in shlex.split(line):
+            key, _, value = word.partition("=")
+            env[key] = value
+    return env
+
+
 def config_options(path):
     options = {}
     for line in Path(path).read_text().splitlines():
@@ -422,6 +436,33 @@ class KernelAndImageConfigTests(unittest.TestCase):
         for option in ("CONFIG_SATA_MOBILE_LPM_POLICY", "CONFIG_PSI_DEFAULT_DISABLED", "CONFIG_X86_MSR"):
             self.assertNotIn(option, kernel)
         self.assertEqual(config_options(BOARD / "linux-laptop.config").get("CONFIG_X86_MSR"), "m")
+
+    def test_laptop_kernel_keeps_msi_the_pcie_ports_and_every_cgroup_controller(self):
+        # The laptop kernel is linux.config with linux-laptop.config merged
+        # over it (a later line wins). The 2012 xHCI needs MSI to find the
+        # USB stick; the sandboxes need memcg, pids, PSI and cgroup BPF.
+        resolved = {**config_options(BOARD / "linux.config"), **config_options(BOARD / "linux-laptop.config")}
+        # CPUWeight= and CPUQuota= need the CPU controller and bandwidth
+        # control, or systemd ignores them and the model shares the two
+        # cores evenly with the eyes and the voice.
+        for option in ("CONFIG_PCI", "CONFIG_PCI_MSI", "CONFIG_PCIEPORTBUS", "CONFIG_CGROUPS", "CONFIG_MEMCG",
+                       "CONFIG_CGROUP_PIDS", "CONFIG_PSI", "CONFIG_BPF_SYSCALL", "CONFIG_CGROUP_BPF",
+                       "CONFIG_CGROUP_SCHED", "CONFIG_FAIR_GROUP_SCHED", "CONFIG_CFS_BANDWIDTH"):
+            self.assertEqual(resolved.get(option), "y", option)
+        self.assertNotIn("CONFIG_PSI_DEFAULT_DISABLED", resolved)
+
+    def test_both_images_ship_the_voice_engines(self):
+        externals = (OS / "Config.in").read_text()
+        self.assertIn('source "$BR2_EXTERNAL_BEINGOS_PATH/package/sherpa-onnx/Config.in"', externals)
+        for name in ("beingos_x86_64_defconfig", "beingos_laptop_defconfig"):
+            with self.subTest(defconfig=name):
+                self.assertEqual(config_options(OS / "configs" / name).get("BR2_PACKAGE_SHERPA_ONNX"), "y")
+
+    def test_every_external_package_config_exists(self):
+        # Kconfig stops the whole build on a missing source file.
+        for path in re.findall(r'^source "\$BR2_EXTERNAL_BEINGOS_PATH/(\S+)"$', (OS / "Config.in").read_text(), re.M):
+            with self.subTest(path=path):
+                self.assertTrue((OS / path).is_file(), f"os/{path} is sourced but missing")
 
     def test_both_images_use_libseccomp_hash_checks_and_strip_setuid(self):
         for name in ("beingos_x86_64_defconfig", "beingos_laptop_defconfig"):
@@ -574,6 +615,250 @@ class UnitTests(unittest.TestCase):
                         if line and not line.startswith("#"))
         self.assertEqual(settings["user.max_user_namespaces"], "0")
         self.assertEqual(settings["kernel.unprivileged_bpf_disabled"], "1")
+
+
+class OrganUnitTuningTests(unittest.TestCase):
+    """Wave 2 unit tuning (docs/PIP-FUNCTIONS.md, L10.4 and L10.5)."""
+
+    def test_the_mind_never_waits_for_the_model(self):
+        mind = unit(PACKAGE / "being-mind.service")
+        after = " ".join(values(mind, "Unit", "After")).split()
+        self.assertIn("being-brainstem.service", after)
+        self.assertNotIn("being-cortex.service", after)
+        for key in ("Requires", "Wants", "BindsTo", "Requisite"):
+            self.assertNotIn("being-cortex.service", " ".join(values(mind, "Unit", key)), key)
+
+    def test_face_voice_brainstem_and_mind_come_first_for_the_cpu(self):
+        for name in ("being-face.service", "being-mind.service", "being-brainstem.service"):
+            with self.subTest(unit=name):
+                self.assertEqual(values(unit(PACKAGE / name), "Service", "CPUWeight"), ["1000"])
+
+    def test_python_organs_are_free_to_use_their_compiled_modules(self):
+        for name in ("being-mind.service", "being-face.service", "being-local-screen.service"):
+            with self.subTest(unit=name):
+                self.assertNotIn("PYTHONDONTWRITEBYTECODE", environment(unit(PACKAGE / name)))
+
+    def test_face_has_a_writable_shader_cache_that_survives_its_restarts(self):
+        face = unit(PACKAGE / "being-face.service")
+        env = environment(face)
+        self.assertEqual(env["MESA_SHADER_CACHE_DIR"], "/run/being/mesa")
+        self.assertTrue(env["MESA_SHADER_CACHE_MAX_SIZE"].endswith("M"))
+        self.assertEqual(values(face, "Service", "RuntimeDirectory"), ["being/mesa"])
+        self.assertEqual(values(face, "Service", "RuntimeDirectoryPreserve"), ["yes"])
+        # The brainstem owns /run/being itself and keeps it across restarts.
+        stem = unit(PACKAGE / "being-brainstem.service")
+        self.assertEqual(values(stem, "Service", "RuntimeDirectory"), ["being"])
+        self.assertEqual(values(stem, "Service", "RuntimeDirectoryPreserve"), ["yes"])
+        # The Try menu (being-console) shares it; the first boot logged
+        # "Failed to create /root/.cache for shader cache" from it.
+        self.assertEqual(environment(unit(PACKAGE / "being-local-screen.service"))["MESA_SHADER_CACHE_DIR"],
+                         "/run/being/mesa")
+
+    def test_face_is_watched_and_its_frame_loop_kicks_the_watchdog(self):
+        face = unit(PACKAGE / "being-face.service")
+        self.assertEqual(values(face, "Service", "WatchdogSec"), ["5s"])
+        self.assertEqual(values(face, "Service", "NotifyAccess"), ["main"])
+        self.assertEqual(values(face, "Service", "Restart"), ["always"])
+        source = (ROOT / "crates/face/src/main.rs").read_text()
+        self.assertIn("bus::notify::Notifier::from_env()", source)
+        loop = source.index("'run: loop {")
+        self.assertLess(loop, source.index("watchdog.kick();", loop), "kicked inside the frame loop")
+        # The slowest frame rate (a dark panel) still kicks well inside 5 s.
+        self.assertIn("Activity::Blank => 5,", (ROOT / "crates/face/src/pace.rs").read_text())
+        # A long verbose boot wait kicks too.
+        self.assertIn('hold_for_boot_messages("face", &mut || watchdog.kick())', source)
+
+    def test_the_mind_is_watched_only_once_it_pings(self):
+        mind = unit(PACKAGE / "being-mind.service")
+        if values(mind, "Service", "WatchdogSec"):
+            self.assertTrue((ROOT / "mind/sd_notify.py").exists(), "a watchdog with nothing to ping it")
+            self.assertIn("sd_notify.keep_alive(", (ROOT / "mind/__main__.py").read_text())
+            self.assertEqual(values(mind, "Service", "NotifyAccess"), ["main"])
+            self.assertEqual(values(mind, "Service", "WatchdogSec"), ["30s"])
+            # Pings come well inside the watchdog.
+            from mind import sd_notify
+            self.assertLessEqual(sd_notify.PING_SECONDS * 2, 30)
+
+
+BRAINSTEM = ROOT / "target/debug/brainstem"
+
+
+@unittest.skipUnless(BRAINSTEM.exists(), "brainstem is not built: run `cargo build -p brainstem`")
+class MindWithoutCortexTests(unittest.IsolatedAsyncioTestCase):
+    """The mind starts before the model (no After=being-cortex.service), so
+    with no model server at all it must still answer what code answers."""
+
+    async def test_a_mind_with_no_cortex_still_tells_the_time(self):
+        import asyncio
+        import io
+        import socket
+        from mind.bus import Bus
+        from sim.body import SUBS, SimBody
+        from tests.test_end_to_end import Watcher
+
+        work = self.enterContext(tempfile.TemporaryDirectory(prefix="bnc-", dir="/tmp"))
+        bus_path = os.path.join(work, "bus.sock")
+        # A port nothing listens on: the cortex is not there at all.
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            closed = probe.getsockname()[1]
+        procs = []
+
+        def spawn(argv, **kwargs):
+            proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
+            procs.append(proc)
+            return proc
+
+        def stop_all():
+            for proc in procs:
+                if proc.poll() is None:
+                    proc.terminate()
+            for proc in procs:
+                proc.wait(timeout=5)
+
+        self.addCleanup(stop_all)
+        spawn([str(BRAINSTEM), "--bus", bus_path, "--require", "mind,voice"])
+        for _ in range(250):
+            if os.path.exists(bus_path):
+                break
+            await asyncio.sleep(0.02)
+        watcher = Watcher(bus_path)
+        await watcher.start()
+        self.addAsyncCleanup(watcher.stop)
+        spawn([sys.executable, "-m", "mind", "--bus", bus_path, "--cortex", f"http://127.0.0.1:{closed}",
+               "--mind-dir", os.path.join(work, "mind")], cwd=ROOT)
+        heard = io.StringIO()
+        lines = asyncio.Queue()
+
+        async def typed():
+            while (line := await lines.get()) is not None:
+                yield line
+
+        body = SimBody(Bus("voice", SUBS, path=bus_path), "Richard", silent=True, out=heard)
+        body_task = asyncio.create_task(body.run(typed()))
+
+        async def finish():
+            lines.put_nowait(None)
+            await asyncio.wait_for(body_task, 5)
+
+        self.addAsyncCleanup(finish)
+        await watcher.until("the mind", lambda e: e["t"] == "mind.ready", timeout=15)
+        await watcher.state("idle")
+        lines.put_nowait("What time is it?")
+        await watcher.until("the answer", lambda e: e["t"] == "say.done" and e.get("final"), timeout=15)
+        said = " ".join(line.strip() for line in heard.getvalue().splitlines()
+                        if line.strip() and not line.startswith("("))
+        self.assertRegex(said, r"It's (\w+|\d)")
+
+
+class ImageRecipeTests(unittest.TestCase):
+    """What being.mk puts in the image beside the organs (L10.2, L10.3)."""
+
+    recipe = (PACKAGE / "being.mk").read_text()
+
+    def define(self, name):
+        match = re.search(rf"^define {name}\n(.*?)^endef$", self.recipe, re.M | re.S)
+        self.assertIsNotNone(match, name)
+        return match[1]
+
+    def test_audio_init_is_installed_once_its_files_exist(self):
+        self.assertIn("$(BEING_PKGDIR)/being-audio-init $(TARGET_DIR)/usr/libexec/being/being-audio-init",
+                      self.define("BEING_INSTALL_AUDIO_INIT"))
+        self.assertIn("system/being-audio-init.service", self.define("BEING_INSTALL_AUDIO_INIT_UNIT"))
+        self.assertIn("$(BEING_INSTALL_AUDIO_INIT)", self.define("BEING_INSTALL_TARGET_CMDS"))
+        self.assertIn("$(BEING_INSTALL_AUDIO_INIT_UNIT)", self.define("BEING_INSTALL_INIT_SYSTEMD"))
+        for name in ("being-audio-init", "being-audio-init.service"):
+            self.assertIn(f"package/being/{name})", self.recipe.split("BEING_HAS_AUDIO_INIT =", 1)[1].split("\n\n", 1)[0])
+        service = PACKAGE / "being-audio-init.service"
+        if service.exists():
+            sections = unit(service)
+            self.assertEqual(values(sections, "Service", "ExecStart")[0].lstrip("-+!@").split()[0],
+                             "/usr/libexec/being/being-audio-init")
+            self.assertIn("being-voice.service", " ".join(values(sections, "Unit", "Before")))
+
+    def test_bench_unit_is_installed_and_started_only_by_a_measuring_boot(self):
+        self.assertIn("system/being-bench.service", self.define("BEING_INSTALL_BENCH_UNIT"))
+        self.assertIn("$(BEING_INSTALL_BENCH_UNIT)", self.define("BEING_INSTALL_INIT_SYSTEMD"))
+        self.assertIn("package/being/being-bench.service)", self.recipe)
+
+    def test_every_model_pack_descriptor_is_shipped_where_model_pack_reads_it(self):
+        packs = self.define("BEING_INSTALL_MODEL_PACKS")
+        self.assertIn("$(BEING_PKGDIR)/model-packs/*/pack.json", packs)
+        self.assertIn("$(TARGET_DIR)/usr/share/being/model-packs/$$role/pack.json", packs)
+        self.assertIn("$(BEING_INSTALL_MODEL_PACKS)", self.define("BEING_INSTALL_TARGET_CMDS"))
+        roles = {path.parent.name for path in (PACKAGE / "model-packs").glob("*/pack.json")}
+        self.assertTrue({"dream", "vad", "asr", "tts", "embeddings", "speaker"} <= roles, roles)
+        # The shell loop, run as make would after expanding $$ to $.
+        target = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        script = (packs.replace("$(TARGET_DIR)", str(target)).replace("$(BEING_PKGDIR)", str(PACKAGE))
+                  .replace("$(INSTALL)", "install").replace("$$", "$").replace("\\\n", " "))
+        # A portable stand-in for GNU `install -D -m MODE SRC DST`.
+        shim = 'install() { shift 3; mkdir -p "$(dirname "$2")"; cp "$1" "$2"; }\n'
+        subprocess.run(["sh", "-ec", shim + script.replace("\t", "")], check=True)
+        for role in roles:
+            self.assertEqual((target / "usr/share/being/model-packs" / role / "pack.json").read_bytes(),
+                             (PACKAGE / "model-packs" / role / "pack.json").read_bytes())
+
+    def test_python_ships_compiled_with_unchecked_hashes(self):
+        self.assertIn("host-python3", re.search(r"^BEING_DEPENDENCIES = (.*)$", self.recipe, re.M)[1].split())
+        compile_ = self.define("BEING_COMPILE_PYTHON")
+        self.assertIn("$(HOST_DIR)/bin/python3 -m compileall", compile_)
+        self.assertIn("--invalidation-mode unchecked-hash", compile_)
+        self.assertIn("-d /usr/lib/being $(TARGET_DIR)/usr/lib/being", compile_)
+        install = self.define("BEING_INSTALL_TARGET_CMDS")
+        # After everything Python is in place, so nothing is left uncompiled.
+        self.assertGreater(install.index("$(BEING_COMPILE_PYTHON)"), install.index("$(@D)/mind/*.py"))
+        self.assertGreater(install.index("$(BEING_COMPILE_PYTHON)"), install.index("$(BEING_INSTALL_LAB_BODY)"))
+
+    def test_every_mind_module_compiles_the_way_the_image_compiles_it(self):
+        target = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        shutil.copytree(ROOT / "mind", target / "usr/lib/being/mind",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "workshop_shelf"))
+        result = subprocess.run([sys.executable, "-m", "compileall", "-q", "-f", "--invalidation-mode",
+                                 "unchecked-hash", "-d", "/usr/lib/being", str(target / "usr/lib/being")],
+                                capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        compiled = list((target / "usr/lib/being/mind/__pycache__").glob("turn.*.pyc"))
+        self.assertEqual(len(compiled), 1)
+        flags = int.from_bytes(compiled[0].read_bytes()[4:8], "little")
+        self.assertEqual(flags, 0b01, "hash-based and unchecked (PEP 552)")
+
+    def test_preset_keeps_the_night_and_bench_units_off_and_the_organs_on(self):
+        rules = [line.split() for line in (PACKAGE / "50-being.preset").read_text().splitlines()
+                 if line.strip() and not line.startswith("#")]
+
+        def verdict(name):
+            # systemd uses the first line whose pattern matches.
+            import fnmatch
+            return next((action for action, pattern in rules if fnmatch.fnmatchcase(name, pattern)), None)
+
+        self.assertEqual(verdict("being-dream-cortex.service"), "disable")
+        self.assertEqual(verdict("being-bench.service"), "disable")
+        self.assertEqual(verdict("being-lab-dev.service"), "disable")
+        for name in ("being-mind.service", "being-face.service", "being-voice.service", "being-audio-init.service"):
+            self.assertEqual(verdict(name), "enable", name)
+
+
+class BenchBootTests(unittest.TestCase):
+    GUID = "aec08b06-4dd2-4b82-88a0-2822192e249c"
+
+    def generate(self, command_line):
+        work = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (work / "cmdline").write_text(command_line + "\n")
+        dirs = [work / name for name in ("normal", "early", "late")]
+        for directory in dirs:
+            directory.mkdir()
+        script = (PACKAGE / "being-try-generator").read_text().replace("/proc/cmdline", shlex.quote(str(work / "cmdline")))
+        subprocess.run(["/bin/sh", "-c", script, "gen", *map(str, dirs)], check=True, capture_output=True, timeout=5)
+        return dirs[1] / "multi-user.target.wants/being-bench.service"
+
+    def test_only_a_try_boot_with_bench_on_starts_bench_mode(self):
+        link = self.generate(f"being.try=1 being.models={self.GUID} being.bench=1")
+        self.assertEqual(os.readlink(link), "/usr/lib/systemd/system/being-bench.service")
+        for line in (f"being.try=1 being.models={self.GUID}", f"being.try=1 being.models={self.GUID} being.bench=0",
+                     f"being.bench=1 being.models={self.GUID}"):
+            with self.subTest(cmdline=line):
+                self.assertFalse(os.path.lexists(self.generate(line)))
 
 
 class PowerRuleTests(unittest.TestCase):

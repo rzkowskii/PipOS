@@ -2,8 +2,8 @@ import unittest
 from datetime import date, datetime
 
 from mind.commands import (
-    Command, clock_time, correction_value, greeting, history_query, may_be_command, parse, reflect,
-    splice_correction, subject_of, volume_level,
+    Command, clock_time, correction_value, greeting, history_query, may_be_command, parse, reflect, ring_reply,
+    snooze_minutes, splice_correction, subject_of, volume_level,
 )
 
 
@@ -29,7 +29,8 @@ class CommandsTest(unittest.TestCase):
         self.check("What did I tell you about Hobart?", "recall_heard", "Hobart")
         self.check("What did I say about the coffee shop?", "recall_heard", "the coffee shop")
         self.check("When did I mention the coffee shop?", "recall_heard", "the coffee shop")
-        self.check("What did we talk about yesterday?", "recall", "yesterday")
+        self.check("What did we talk about on 2026-11-19?", "recall", "on 2026-11-19")
+        self.check("What did we talk about today?", "recall", "today")
         self.check("Pip, what were we talking about?", "talked_about")
         self.check("What did we talk about earlier?", "talked_about")
 
@@ -220,6 +221,10 @@ class NewCommandsTest(unittest.TestCase):
                      "Are you charging?", "How long will your battery last?"):
             self.check(said, "battery")
 
+    def test_battery_health_belongs_to_the_body_handler(self):
+        for said in ("How's your battery health?", "How is your battery health"):
+            self.assertIsNone(parse(said, "Pip"), said)
+
     def test_look_no_longer_takes_what_is_this(self):
         self.assertIsNone(parse("What is this?", "Pip"))
         self.check("What do you see?", "look")
@@ -251,6 +256,8 @@ class NewCommandsTest(unittest.TestCase):
             ("the bins go out on Tuesday", "Monday", "the bins go out on Monday"),
             ("hunter2", "swordfish", None),
             ("my cat is called Tom", "a very long new name for him", None),
+            ("my orchid is called Silverleaf", "called Moonleaf", "my orchid is called Moonleaf"),
+            ("my dog is named Rex", "named Bo", "my dog is named Bo"),
         ]:
             with self.subTest(fact=fact):
                 self.assertEqual(splice_correction(fact, value), result)
@@ -262,3 +269,103 @@ class NewCommandsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RoutinesCommandsTest(unittest.TestCase):
+    """L5.2, L5.4, L5.8 and L5.9: new command kinds and the public gate."""
+
+    def check(self, said, kind, arg=""):
+        self.assertEqual(parse(said, "Pip"), Command(kind, arg), said)
+
+    def test_a_past_day_is_the_diary_and_recall_still_works(self):
+        for said, arg in (("What did we do yesterday?", "yesterday"),
+                          ("Pip, what did we talk about on Monday?", "on Monday"),
+                          ("What were we talking about last Friday", "last Friday"),
+                          ("What did we do last week?", "last week")):
+            with self.subTest(said=said):
+                self.check(said, "diary", arg)
+                topic, start, end = history_query(arg)
+                self.assertEqual(topic, "")
+                self.assertIsNotNone(start)
+        for said, kind, arg in (("What did we talk about the orchid?", "recall", "the orchid"),
+                                ("What do you remember about my orchid?", "recall", "my orchid"),
+                                ("What did I say about the orchid?", "recall_heard", "the orchid"),
+                                ("What did we talk about?", "talked_about", ""),
+                                ("What did we do?", "talked_about", ""),
+                                ("What did we talk about Monday's film?", "recall", "Monday's film")):
+            with self.subTest(said=said):
+                self.check(said, kind, arg)
+
+    def test_snooze_and_acknowledgement(self):
+        for said, minutes in (("Snooze", "10"), ("Snooze for ten minutes", "10"), ("snooze it for 5 minutes", "5"),
+                              ("Five more minutes", "5"), ("Give me 15 more minutes please", "15"),
+                              ("A few more minutes", "5"), ("Snooze the alarm for half an hour", "30")):
+            with self.subTest(said=said):
+                self.check(said, "snooze", minutes)
+        for said in ("Stop the alarm", "Turn off the timer", "Dismiss my reminder", "I'm up", "I am awake"):
+            with self.subTest(said=said):
+                self.check(said, "ack")
+        for said in ("Okay", "thanks", "I need five more minutes", "Give me lots more minutes", "stop"):
+            with self.subTest(said=said):
+                self.assertIsNone(parse(said, "Pip"))
+        self.assertIsNone(snooze_minutes("a thousand"))
+        self.assertIsNone(snooze_minutes("three hours"))
+
+    def test_while_ringing_short_answers_count(self):
+        for said in ("Okay", "OK thanks", "Thanks, Pip", "Thank you", "got it", "Stop", "I'm up", "alright then",
+                     "Pip, stop the alarm"):
+            with self.subTest(said=said):
+                self.assertEqual(ring_reply(said, "Pip"), Command("ack"))
+        self.assertEqual(ring_reply("Snooze", "Pip"), Command("snooze", "10"))
+        self.assertEqual(ring_reply("ten more minutes", "Pip"), Command("snooze", "10"))
+        for said in ("Tell me a story", "What time is it?", "okay so tell me about dogs"):
+            with self.subTest(said=said):
+                self.assertIsNone(ring_reply(said, "Pip"))
+
+    def test_time_elsewhere(self):
+        for said, kind, arg in (
+            ("What time is it in London?", "world_time", "London"),
+            ("What's the time in New York right now?", "world_time", "New York"),
+            ("Pip, what time is it now in Tokyo", "world_time", "Tokyo"),
+            ("What's the time difference to London?", "time_difference", "London"),
+            ("What's the time difference between London and Tokyo?", "time_difference", "London and Tokyo"),
+            ("How many hours ahead is Perth?", "time_difference", "Perth"),
+            ("How far behind is London from here?", "time_difference", "London"),
+            ("Is London ahead or behind us?", "time_difference", "London"),
+        ):
+            with self.subTest(said=said):
+                self.check(said, kind, arg)
+        self.check("What time is it?", "time")
+
+    def test_help(self):
+        for said, kind, arg in (
+            ("What can you do?", "skills", ""), ("Help", "skills", ""), ("What can I say?", "skills", ""),
+            ("What else can you do?", "skills_more", ""),
+            ("What can you do with lists?", "skills_group", "lists"),
+            ("What can you do with the terminal?", "skills_group", "the terminal"),
+            ("What can you do with your body?", "skills_group", "your body"),
+            ("Help me with alarms", "skills_group", "alarms"),
+            ("What can you do for me?", "skills", ""),
+        ):
+            with self.subTest(said=said):
+                self.check(said, kind, arg)
+
+    def test_help_with_something_it_has_no_help_for_is_conversation(self):
+        for said in ("Help me with my homework", "help me with it", "What can you do with a paperclip?",
+                     "help with dinner", "what can you do about me"):
+            with self.subTest(said=said):
+                self.assertIsNone(parse(said, "Pip"), said)
+        self.check("Help me with the shopping list", "skills_group", "the shopping list")
+        self.check("What can you do with timers?", "skills_group", "timers")
+
+    def test_the_public_gate(self):
+        for partial in ("wake me up at", "set an alarm", "every weekday at", "snooze", "five more minutes",
+                        "how long left", "what time is it in", "what's the time difference",
+                        "what else can you do", "what did we do", "I'm up", "help", "stop the alarm"):
+            with self.subTest(partial=partial):
+                self.assertTrue(may_be_command(partial, "Pip"), partial)
+                self.assertTrue(may_be_command(partial), partial)
+        for said in ("tell me a story", "I like the sea", "how does a rainbow form", "every so often I sing",
+                     "stop being silly"):
+            with self.subTest(said=said):
+                self.assertFalse(may_be_command(said, "Pip"), said)

@@ -421,6 +421,8 @@ impl Machine {
                 }
             }
             "hear.wake" if !self.muted => self.engage(now, &mut out),
+            // Space, Return or a click while the eyes rest: the same as its name.
+            "key.attend" if !self.muted => self.engage(now, &mut out),
             "hear.speech_start" => {
                 self.last_activity = now;
                 if self.state == State::Attending && !self.muted {
@@ -479,7 +481,11 @@ impl Machine {
                     self.attend(now, &mut out);
                 }
             }
-            "key.mute" => self.set_muted(!self.muted, now, &mut out),
+            "key.mute" => {
+                // The M key toggles; "stop listening" (from the mind) says `on: true`.
+                let on = ev.bool("on").unwrap_or(!self.muted);
+                self.set_muted(on, now, &mut out);
+            }
             "key.touch" if !self.lid_blocked && !matches!(self.state, State::Asleep | State::Waking) => {
                 self.last_stimulus = now;
                 out.push(Event::new("face.gaze").with("x", 0.0).with("y", -0.75).with("hold", 0.75));
@@ -642,6 +648,45 @@ mod tests {
         m.on_event(&ev("hear.wake"), 30.2);
         assert_eq!(m.state(), State::Waking, "the eyes finish opening first");
         m.on_tick(30.2 + Config::default().min_wake);
+        assert_eq!(m.state(), State::Attending);
+    }
+
+    #[test]
+    fn the_attention_key_is_handled_like_its_name() {
+        let mut m = awake();
+        m.on_event(&ev("key.attend"), 11.0);
+        assert_eq!(m.state(), State::Attending, "resting: the ears open");
+        m.on_event(&ev("hear.speech_start"), 11.5);
+        assert_eq!(m.state(), State::Listening);
+        m.on_event(&ev("key.attend"), 12.0);
+        assert_eq!(m.state(), State::Listening, "never interrupts the owner mid-sentence");
+
+        // "Stop listening" twice stays muted; it never toggles back.
+        let mut m = awake();
+        m.on_event(&Event::new("key.mute").with("on", true), 11.0);
+        m.on_event(&Event::new("key.mute").with("on", true), 11.1);
+        assert!(m.muted());
+        m.on_event(&ev("key.mute"), 11.2);
+        assert!(!m.muted(), "the M key toggles");
+
+        // Muted: the key does not open the ears behind the owner's back.
+        let mut m = awake();
+        m.on_event(&ev("key.mute"), 11.0);
+        m.on_event(&ev("key.attend"), 11.5);
+        assert_eq!(m.state(), State::Idle);
+
+        // Behind a closed lid it is ignored; asleep with the lid open it wakes and attends.
+        let mut m = awake();
+        m.set_env(Some(true), false, false, 20.0);
+        m.on_event(&ev("key.attend"), 20.5);
+        assert_eq!(m.state(), State::Asleep);
+        m.set_env(Some(false), false, false, 30.0);
+        m.on_tick(30.0 + Config::default().min_wake);
+        m.on_event(&ev("being.sleep"), 40.0);
+        assert_eq!(m.state(), State::Asleep);
+        m.on_event(&ev("key.attend"), 41.0);
+        assert_eq!(m.state(), State::Waking);
+        m.on_tick(41.0 + Config::default().min_wake);
         assert_eq!(m.state(), State::Attending);
     }
 

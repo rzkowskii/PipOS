@@ -12,12 +12,26 @@ ExecStartPre=+/bin/mkdir -p /mind/cortex
 Environment=BEING_CORTEX_THREADS=2 BEING_CORTEX_PROMPT_THREADS=2
 # Qwen's recurrent context checkpoints are copied into each saved slot file.
 Environment=LLAMA_ARG_CTX_CHECKPOINTS=6
-# The active slot retains its prefix and can still be saved and restored.
-# Avoid the separate RAM cache for old prompt branches on this one-slot OS.
+# A 512-token logical batch: a cancelled request releases the slot at the
+# next batch boundary, so smaller batches stop sooner (7.3 s to 1.75 s in the
+# lab). The physical batch matches it.
+Environment=LLAMA_ARG_BATCH=512 LLAMA_ARG_UBATCH=512
+# Past replies are rendered exactly as they were generated, empty thinking
+# block included, so the next turn reads only the new words.
+Environment=LLAMA_ARG_CHAT_TEMPLATE_FILE=/usr/share/being/chat-template.jinja
+# Lock the weights in memory. Off by default; a drop-in sets it to 1 when the
+# bench shows page-outs. LimitMEMLOCK lets the switch work when it is on.
+Environment=LLAMA_ARG_MLOCK=0
+LimitMEMLOCK=infinity
+# Two slots of 4096 tokens each: slot 0 is the conversation, slot 1 the
+# workshop's code writing (mind/hands.py), so writing a script never evicts
+# the conversation's cache. The mind pins every request to slot 0.
+# The active slots retain their prefixes and can still be saved and restored.
+# Avoid the separate RAM cache for old prompt branches.
 ExecStart=/usr/bin/llama-server \
     --model /models/reflex.gguf \
     --host 127.0.0.1 --port 8080 \
-    --ctx-size 4096 --parallel 1 \
+    --ctx-size 8192 --parallel 2 \
     --threads ${BEING_CORTEX_THREADS} --threads-batch ${BEING_CORTEX_PROMPT_THREADS} \
     --cache-ram 0 --no-cache-idle-slots \
     --reasoning-budget 0 \
@@ -25,8 +39,10 @@ ExecStart=/usr/bin/llama-server \
     --no-webui
 Restart=always
 RestartSec=1
-# Thinking must never take the CPU from the face or the voice.
+# Thinking must never take the CPU from the face or the voice: they run at
+# CPUWeight=1000, the dream model and the workshop at 20.
 Nice=5
+CPUWeight=100
 # The model server reads /models, writes only its saved slots, and is
 # reachable only on loopback: it has no authentication, so nothing but the
 # organs on this machine may talk to it, and it may talk to nothing else.

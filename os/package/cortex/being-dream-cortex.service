@@ -1,0 +1,60 @@
+[Unit]
+Description=Being: dream cortex (the night model)
+# Started and stopped by the mind's night shift, with the lid closed and on
+# mains power; never enabled at boot (50-being.preset disables it).
+ConditionPathExists=!/mind/.being-restore-in-progress
+ConditionPathExists=/models/dream/dream.gguf
+# A measuring boot (bench mode) must not share its cores with the night model.
+ConditionKernelCommandLine=!being.bench=1
+RequiresMountsFor=/models
+StartLimitIntervalSec=0
+
+[Service]
+# Only a dream pack that matches its signed descriptor is loaded. The check
+# runs outside the sandbox (+) so it can use the verdict cache in
+# /mind/cortex and skip a full hash of an unchanged file (mind/model_pack.py).
+ExecCondition=+/usr/bin/python3 /usr/lib/being/mind/model_pack.py verify --role dream
+# One request at a time over a 2K context: a chunk of the day's conversation
+# behind a fixed instruction prefix. Thinking is off (it would spend the
+# night's budget), and there are no saved slots: nothing it reads is kept.
+ExecStart=/usr/bin/llama-server \
+    --model /models/dream/dream.gguf \
+    --host 127.0.0.1 --port 8081 \
+    --ctx-size 2048 --parallel 1 \
+    --threads 2 --threads-batch 2 \
+    --reasoning-budget 0 \
+    --cache-ram 0 \
+    --no-webui
+# The night shift stops it; a crash is not retried behind its back.
+Restart=no
+# It keeps nothing, so a wake need not wait for it to finish a batch: a
+# prompt batch of the 1.7B model can take tens of seconds on this laptop
+# (estimate), and the conversation model needs the cores now.
+TimeoutStopSec=2
+# Dreaming takes only what the face, the voice and the mind leave.
+Nice=10
+CPUWeight=20
+IOWeight=20
+# The night model reads /models and nothing else, writes nothing, and is
+# reachable only on loopback: it has no authentication.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+InaccessiblePaths=-/mind
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native

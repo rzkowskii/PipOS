@@ -48,6 +48,16 @@ class LaptopUnits(unittest.TestCase):
         self.assertIn("being-voice.service", units)
         self.assertTrue(LAB_ONLY.isdisjoint(units), LAB_ONLY & units)
 
+    def test_wave_two_units_are_on_the_laptop_image(self):
+        # The microphone mixer runs before the ears on every image, and the
+        # bench unit ships everywhere but only a measuring boot starts it.
+        units = laptop_units()
+        for name in ("being-audio-init.service", "being-bench.service"):
+            self.assertIn(name, units)
+        recipe = re.sub(r"ifeq \(\$\(BR2_PACKAGE_BEING_(?:LAN_MAINTENANCE|LAB_BODY)\),y\).*?endif", "",
+                        (PACKAGE / "being.mk").read_text(), flags=re.S)
+        self.assertIn("$(TARGET_DIR)/usr/libexec/being/being-audio-init", recipe)
+
     def test_every_named_unit_exists_or_is_guarded(self):
         units = laptop_units()
         for unit, files in sorted(named_units().items()):

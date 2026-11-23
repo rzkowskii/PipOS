@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import care
 from . import console_ui as ui
+from . import voice_engines
 from .bus import Bus
 from .initiative_setup import configure_initiative
 from .network_enforce import installed
@@ -147,6 +148,126 @@ def preview(profile):
     except (OSError, subprocess.SubprocessError):
         ui.note("Audio preview is unavailable. The sample is shown above." if not ui.enabled()
                 else f'Audio preview is unavailable. The sample: "{line}"', "warning")
+
+
+# --- natural or original voice ---------------------------------------------------
+
+VOICE_SERVICE = "being-voice.service"
+ENGINE_CHOICES = ("auto", "piper", "flite")
+
+
+def engine_labels(status):
+    return {"auto": "Automatic", "piper": f"Natural ({status['label']})", "flite": "Original"}
+
+
+def voice_engine_rows(status):
+    labels = engine_labels(status)
+    limit = voice_engines.TTS_RTF_LIMIT
+    if not status["installed"]:
+        speed = "Not installed in this image"
+    elif status["rtf"] is None:
+        speed = "Not measured on this laptop yet"
+    else:
+        verdict = "fast enough" if status["rtf"] <= limit else "too slow for automatic use"
+        speed = f"{status['rtf']:.2f} of real time ({verdict})"
+    rows = [care.row("Speaking with", labels[status["active"]]),
+            care.row("Choice", labels[status["preference"]] +
+                     (", by measured speed" if status["preference"] == "auto" else ", chosen by you")),
+            care.row("Natural voice speed", speed)]
+    return rows + ["", f"Automatic uses the natural voice only if it measures {limit:g} of real time or less.",
+                   "That means a 2-second sentence takes at most 0.7 seconds to make."]
+
+
+def engine_sample(profile, engine, audio):
+    """Write a sample of `engine` ("piper" or "flite") speaking to `audio`."""
+    line = sample(profile)
+    if engine == "piper":
+        from .tts_sherpa import PiperEngine
+
+        piper = PiperEngine()
+        try:
+            piper.synthesize_blocking(line, audio, profile.rate)
+        finally:
+            piper.close()
+    else:
+        subprocess.run(synthesis_command(profile.voice, profile.rate, line, audio), check=True, timeout=5,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return line
+
+
+def play_engine_sample(profile, engine):
+    try:
+        with tempfile.TemporaryDirectory(prefix="being-preview-") as directory:
+            audio = Path(directory) / "sample.wav"
+            line = engine_sample(profile, engine, audio)
+            ui.para(f'"{line}"', "muted", indent="  ")
+            if not asyncio.run(play_preview(audio)):
+                ui.note("Audio preview needs PipOS awake with the lid open and microphone muted.", "warning")
+    except Exception as error:  # a voice that will not load must not end setup
+        ui.note(f"Could not play that voice: {error}", "warning")
+
+
+def measure_natural_voice(mind_dir):
+    from .tts_sherpa import PiperEngine
+
+    piper = PiperEngine()
+    try:
+        ui.note("Measuring the natural voice: three sentences, a few seconds.")
+        result = voice_engines.measure_tts(piper)
+        entry = voice_engines.record(mind_dir, "tts", voice_engines.tts_key(voice_engines.build_id(), piper),
+                                     result)
+    except Exception as error:
+        ui.note(f"Could not measure the natural voice: {error}", "warning")
+        return None
+    finally:
+        piper.close()
+    ui.note(f"The natural voice measured {entry['rtf']:.2f} of real time.", "success")
+    return entry
+
+
+def apply_engine(mind_dir, choice, *, dry_run=False, appliance=False):
+    if dry_run:
+        ui.note("Preview only: the voice choice was not saved.")
+        return False
+    voice_engines.save_preference(mind_dir, choice)
+    if appliance and installed(VOICE_SERVICE):
+        result = subprocess.run(["systemctl", "try-restart", VOICE_SERVICE], check=False, timeout=60,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if result.returncode:
+            ui.note("Saved. The voice could not restart; the choice applies after the next restart.", "warning")
+            return True
+    ui.note("Voice choice saved.", "success")
+    return True
+
+
+def voice_page(mind_dir, profile, *, dry_run=False, appliance=False):
+    """Choose the natural (Piper) or original (Flite) voice, or let speed decide."""
+    while True:
+        status = voice_engines.tts_status(mind_dir)
+        labels = engine_labels(status)
+        entries = [("1", labels["auto"], "Natural if it is fast enough here"),
+                   ("2", labels["piper"], "Not installed" if not status["installed"] else None),
+                   ("3", labels["flite"], "Pip's first voice")]
+        entries = [entry if entry[2] else entry[:2] for entry in entries]
+        if status["installed"]:
+            entries += [("N", "Play the natural voice"), ("M", "Measure the natural voice now")]
+        entries.append(("O", "Play the original voice"))
+        choice = care.menu("Natural or original voice", entries, intro=voice_engine_rows(status),
+                           context="Setup")
+        if choice is None:
+            return
+        if choice in ("1", "2", "3"):
+            selected = ENGINE_CHOICES[int(choice) - 1]
+            if selected == "piper" and not status["installed"]:
+                ui.note("The natural voice is not installed in this image.", "warning")
+                continue
+            apply_engine(mind_dir, selected, dry_run=dry_run, appliance=appliance)
+        elif choice == "n":
+            play_engine_sample(profile, "piper")
+        elif choice == "o":
+            play_engine_sample(profile, "flite")
+        elif choice == "m":
+            measure_natural_voice(mind_dir)
 
 
 async def restart_try_organs():
@@ -360,14 +481,21 @@ def configure_network(mind_dir):
     return subprocess.run(command, check=False).returncode
 
 
-def system_entries(appliance, installed_being):
+# Typing to the being from Setup (an installed being's F2): the voice's
+# "You can also type to me" hint names this key (mind/type_chat.py).
+TYPE_CHAT_KEY = "Y"
+
+
+def system_entries(appliance, installed_being, name=None):
     """Owner controls beyond the profile. They act at once, apart from Keep."""
     if not appliance:
         return []
+    name = name or "Pip"
     entries = [("C", "Senses and memory", "Camera, dreams, memory, clock"),
                ("A", "Volume and microphone"), ("T", "Time zone")]
     if installed_being:
-        entries += [("B", "Back up to a USB stick"), ("U", "Update from a USB stick")]
+        entries += [("B", "Back up to a USB stick"), ("U", "Update from a USB stick"),
+                    (TYPE_CHAT_KEY, f"Talk to {name} by typing", f"When {name} can't hear you.")]
     return entries
 
 
@@ -382,6 +510,10 @@ def run_system_entry(choice, mind_dir, *, temporary):
         care.backup_menu(mind_dir, temporary=temporary)
     elif choice == "u":
         care.update_menu(try_boot=temporary)
+    elif choice == TYPE_CHAT_KEY.lower():
+        from . import type_chat
+
+        type_chat.main(mind_dir=mind_dir)
 
 
 def personalize(profile, mind_dir, *, dry_run=False, network_dir=None, temporary=False, appliance=False):
@@ -394,8 +526,8 @@ def personalize(profile, mind_dir, *, dry_run=False, network_dir=None, temporary
                    ("5", "Speaking speed"), ("6", "Personality"), ("7", "Surprise me", "A random new character")]
         if network_dir is not None:
             entries.append(("8", "Network"))
-        entries += [("9", "Quiet hours and announcements")]
-        extra = system_entries(appliance and not dry_run, network_dir is not None)
+        entries += [("9", "Quiet hours and announcements"), ("N", "Natural or original voice")]
+        extra = system_entries(appliance and not dry_run, network_dir is not None, name=profile.name)
         entries += extra
         entries += [("P", "Play sample"), ("K", "Keep these choices", "Finish setup"), ("Q", "Cancel")]
         if ui.enabled():
@@ -438,6 +570,8 @@ def personalize(profile, mind_dir, *, dry_run=False, network_dir=None, temporary
             ui.screen("Quiet hours and announcements" if ui.enabled() else None, context="Setup")
             with ui.indented(skip="Quiet hours and announcements"):
                 configure_initiative(mind_dir, dry_run=dry_run, temporary=temporary)
+        elif choice == "n":
+            voice_page(mind_dir, profile, dry_run=dry_run, appliance=appliance)
         elif choice in {key.lower() for key, *_ in extra}:
             try:
                 run_system_entry(choice, mind_dir, temporary=temporary)
@@ -469,6 +603,7 @@ def main(argv=None):
     mode.add_argument("--time-zone", action="store_true", help="choose the time zone")
     mode.add_argument("--backup", action="store_true", help="back up to a USB stick")
     mode.add_argument("--update", action="store_true", help="update the system from a USB stick")
+    mode.add_argument("--voice", action="store_true", help="choose the natural or original voice")
     args = parser.parse_args(argv)
     if not args.show and not sys.stdin.isatty():
         parser.error("personalization requires an interactive terminal")
@@ -494,6 +629,9 @@ def main(argv=None):
                 raise ValueError("Network setup is available on the installed appliance.")
             return configure_network(network_dir)
         profile = load_profile(args.config, mind_dir)
+        if args.voice:
+            voice_page(mind_dir, profile, appliance=on_appliance)
+            return 0
         if args.show:
             print(json.dumps(asdict(profile), ensure_ascii=False))
             return 0

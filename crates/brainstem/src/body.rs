@@ -17,6 +17,10 @@ pub struct Body {
     energy_wh: Option<f64>,
     power_w: Option<f64>,
     voltage_v: Option<f64>,
+    /// How much the battery holds now against when new (percent), and its
+    /// charge cycles, when the battery says.
+    health_pct: Option<f64>,
+    cycles: Option<i64>,
     temp: Option<f64>,
     lux: Option<f64>,
     lid_closed: Option<bool>,
@@ -51,6 +55,8 @@ impl Body {
             energy_wh: None,
             power_w: None,
             voltage_v: None,
+            health_pct: None,
+            cycles: None,
             temp: Some(45.0),
             lux: Some(150.0),
             lid_closed: Some(false),
@@ -90,6 +96,16 @@ impl Body {
         }
     }
 
+    /// Battery wear changes over months, so a change is published at once
+    /// but costs nothing in between.
+    #[cfg(any(target_os = "linux", test))]
+    pub fn set_wear(&mut self, health_pct: Option<f64>, cycles: Option<i64>) {
+        if (self.health_pct, self.cycles) != (health_pct, cycles) {
+            (self.health_pct, self.cycles) = (health_pct, cycles);
+            self.dirty = true;
+        }
+    }
+
     #[cfg(any(target_os = "linux", test))]
     pub fn set_temperature(&mut self, temp: Option<f64>) {
         if self.temp != temp {
@@ -113,6 +129,7 @@ impl Body {
         // Energy and draw change every reading; they are published with the
         // next periodic state, not as a change of their own.
         (self.energy_wh, self.power_w, self.voltage_v) = (reading.energy_wh, reading.power_w, reading.voltage_v);
+        self.set_wear(reading.health_pct, reading.cycles);
         self.set_temperature(reading.temp);
         self.set_lux(reading.lux);
     }
@@ -239,6 +256,13 @@ impl Body {
                     Some(serde_json::Value::Bool(closed)) => self.set_lid(Some(*closed)),
                     _ => {}
                 }
+                // A pretend worn battery, so the lab can rehearse "battery health".
+                if let Some(v) = ev.f64("health_pct") {
+                    self.health_pct = Some(v.clamp(0.0, 100.0).round());
+                }
+                if let Some(v) = ev.data.get("cycles").and_then(serde_json::Value::as_i64) {
+                    self.cycles = Some(v.max(0));
+                }
                 if let Some(v) = ev.f64("hour") {
                     self.hour = if (0.0..24.0).contains(&v) { Some(v as u32) } else { None };
                 }
@@ -248,7 +272,7 @@ impl Body {
                 self.last_contact = now;
                 self.last_stimulus = now;
             }
-            "hear.wake" | "hear.speech_start" | "key.interrupt" => self.last_stimulus = now,
+            "hear.wake" | "hear.speech_start" | "key.interrupt" | "key.attend" => self.last_stimulus = now,
             _ => {}
         }
     }
@@ -357,6 +381,8 @@ impl Body {
             .with("minutes_left", self.care.minutes_left().map(f64::round))
             .with("charging", self.charging)
             .with("on_ac", self.on_ac)
+            .with("health_pct", self.health_pct)
+            .with("cycles", self.cycles)
             .with("temp", self.temp)
             .with("lux", self.lux)
             .with("lid_closed", self.lid_closed)
@@ -423,6 +449,10 @@ pub mod sysfs {
         pub power_w: Option<f64>,
         /// The pack voltage, volts.
         pub voltage_v: Option<f64>,
+        /// Full charge now over full charge when new, percent.
+        pub health_pct: Option<f64>,
+        /// Charge cycles the battery has counted.
+        pub cycles: Option<i64>,
     }
 
     impl Reading {
@@ -500,6 +530,23 @@ pub mod sysfs {
         pub energy_wh: Option<f64>,
         pub power_w: Option<f64>,
         pub voltage_v: Option<f64>,
+        pub health_pct: Option<f64>,
+        pub cycles: Option<i64>,
+    }
+
+    /// Battery wear: full charge (or energy) now over full when new, as a
+    /// whole percent, and the cycle count. A worn pack can report a little
+    /// over its design figure when new; that is shown as 100. A cycle count
+    /// of 0 is what many controllers report when they do not count, so it is
+    /// unknown rather than "brand new".
+    pub fn battery_wear(dir: &Path) -> (Option<f64>, Option<i64>) {
+        let health = ["charge", "energy"].into_iter().find_map(|kind| {
+            let full = read_number(&dir.join(format!("{kind}_full"))).filter(|v| *v > 0)?;
+            let design = read_number(&dir.join(format!("{kind}_full_design"))).filter(|v| *v > 0)?;
+            Some((full as f64 * 100.0 / design as f64).round().clamp(0.0, 100.0))
+        });
+        let cycles = read_number(&dir.join("cycle_count")).filter(|c| (1..100_000).contains(c));
+        (health, cycles)
     }
 
     /// Energy left, draw and voltage, from energy_* and power_now, or from
@@ -559,6 +606,7 @@ pub mod sysfs {
                     }
                     power.battery = battery_percent(&path);
                     (power.energy_wh, power.power_w, power.voltage_v) = battery_energy(&path);
+                    (power.health_pct, power.cycles) = battery_wear(&path);
                     if power.battery.is_none() {
                         notes.once(format!("power:{name}:unreadable"), || {
                             format!("power: battery {name} reports no readable charge")
@@ -834,6 +882,8 @@ pub mod sysfs {
         energy: Option<(f64, Instant)>,
         draw: Option<(f64, Instant)>,
         volts: Option<(f64, Instant)>,
+        health: Option<(f64, Instant)>,
+        cycles: Option<(i64, Instant)>,
     }
 
     impl Sensors {
@@ -849,6 +899,8 @@ pub mod sysfs {
                 energy: None,
                 draw: None,
                 volts: None,
+                health: None,
+                cycles: None,
             }
         }
 
@@ -875,6 +927,8 @@ pub mod sysfs {
                 energy_wh: hold(power.energy_wh, &mut self.energy, now),
                 power_w: hold(power.power_w, &mut self.draw, now),
                 voltage_v: hold(power.voltage_v, &mut self.volts, now),
+                health_pct: hold(power.health_pct, &mut self.health, now),
+                cycles: hold(power.cycles, &mut self.cycles, now),
             }
         }
 
@@ -1269,6 +1323,8 @@ mod tests {
                 energy_wh: Some(52.2),
                 power_w: None,
                 voltage_v: None,
+                health_pct: None,
+                cycles: None,
             }
         );
         let notes = sensors.notes.take().join("\n");
@@ -1294,6 +1350,42 @@ mod tests {
         assert!(!survey.contains("mouse0"), "{survey}");
         let order: Vec<_> = sysfs::backlight_controls(tree.root()).into_iter().map(|(name, _, _)| name).collect();
         assert_eq!(order, ["intel_backlight", "acpi_video0"]);
+    }
+
+    #[test]
+    fn battery_health_and_cycles_come_from_the_real_laptops_figures() {
+        // The first real boot (23 November): 4,684 of 5,770 mAh, 71 cycles.
+        let tree = macbook_pro_9_2("wear");
+        let bat = "sys/class/power_supply/BAT0";
+        tree.file(&format!("{bat}/charge_full"), "4684000\n");
+        tree.file(&format!("{bat}/charge_full_design"), "5770000\n");
+        tree.file(&format!("{bat}/cycle_count"), "71\n");
+        let reading = Sensors::new(tree.0.clone()).read(Instant::now());
+        assert_eq!((reading.health_pct, reading.cycles), (Some(81.0), Some(71)));
+        let mut body = Body::physical(0.0);
+        body.sense(&reading);
+        let state = body.tick(0.0).into_iter().find(|e| e.topic == "body.state").unwrap();
+        assert_eq!(state.f64("health_pct"), Some(81.0));
+        assert_eq!(state.data["cycles"].as_i64(), Some(71));
+
+        // Energy figures stand in for charge ones; nonsense is unknown.
+        tree.remove(&format!("{bat}/charge_full"));
+        tree.file(&format!("{bat}/energy_full_design"), "75000000\n");
+        let power = sysfs::read_power(tree.root(), &mut sysfs::Notes::default());
+        assert_eq!(power.health_pct, Some(80.0), "60 of 75 Wh");
+        tree.file(&format!("{bat}/energy_full_design"), "0\n");
+        tree.file(&format!("{bat}/cycle_count"), "0\n");
+        let power = sysfs::read_power(tree.root(), &mut sysfs::Notes::default());
+        assert_eq!((power.health_pct, power.cycles), (None, None), "0 cycles means not counted");
+        tree.file(&format!("{bat}/energy_full_design"), "50000000\n");
+        let power = sysfs::read_power(tree.root(), &mut sysfs::Notes::default());
+        assert_eq!(power.health_pct, Some(100.0), "never more than new");
+
+        // The lab can pretend.
+        let mut sim = Body::new(0.0);
+        sim.on_event(&Event::new("sim.body").with("health_pct", 64.4).with("cycles", 900), 0.0);
+        let state = sim.snapshot();
+        assert_eq!((state.f64("health_pct"), state.data["cycles"].as_i64()), (Some(64.0), Some(900)));
     }
 
     #[test]

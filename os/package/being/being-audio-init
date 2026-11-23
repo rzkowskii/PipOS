@@ -1,0 +1,258 @@
+#!/bin/sh
+# Set the sound card's mixer to working levels before the voice organ starts.
+#
+# The kernel leaves an HDA codec's mixer where the hardware powered up, and on
+# a read-only root there is no saved /var/lib/alsa/asound.state for alsactl to
+# restore, so "alsactl init" only guesses. On the MacBookPro9,2 (Cirrus Logic
+# CS4206, codec SSID 106b:5200) the generic HDA parser creates these simple
+# controls (public alsa-info dumps of that model):
+#
+#   Master, Speaker, Bass Speaker, Headphone   playback volume and switch
+#   PCM                                        playback volume (0 dB at 100%)
+#   Capture                                    capture volume and switch
+#   Digital                                    ADC digital capture gain
+#   Mic Boost                                  0-3, 10 dB a step (pin 0x0d, the
+#                                              fixed internal microphone)
+#   Auto-Mute Mode, IEC958 ...                 left as they are
+#
+# There is one input, so no "Input Source" enum appears on that machine; other
+# codecs get one, and the internal mic is chosen there when it exists.
+#
+# Every control is looked up first ("amixer scontrols", then "amixer sget" for
+# its capabilities): nothing is assumed to exist, nothing here fails the boot,
+# and only named outputs are unmuted, never an analog input's playback path
+# (that would feed the microphone back into the speakers). The state before
+# and after goes to the journal as "being-audio-init: ...".
+#
+# The owner's own levels come first: when the voice has kept the card state
+# in the mind (/mind/audio/asound.state, saved after "louder" or "quieter"),
+# that state is restored instead of the defaults below. `--defaults` skips it,
+# for a repair after the kept state left the microphone silent.
+#
+# Nothing is written outside /run unless /var/lib/alsa is writable.
+
+CARD=${BEING_AUDIO_CARD:-0}
+PLAYBACK=${BEING_AUDIO_PLAYBACK:-85%}
+PCM_LEVEL=${BEING_AUDIO_PCM:-100%}
+CAPTURE=${BEING_AUDIO_CAPTURE:-85%}
+DIGITAL=${BEING_AUDIO_DIGITAL:-0dB}
+RUN_DIR=${BEING_AUDIO_RUN:-/run/being-audio}
+CMDLINE=${BEING_AUDIO_CMDLINE:-/proc/cmdline}
+WAIT=${BEING_AUDIO_WAIT:-5}
+STATE_DIR=${BEING_AUDIO_STATE_DIR:-/var/lib/alsa}
+MIC_TEST=${BEING_AUDIO_MIC_TEST:-/usr/sbin/being-usb-logs}
+MIND_STATE=${BEING_AUDIO_MIND_STATE:-/mind/audio/asound.state}
+PROC_ASOUND=${BEING_AUDIO_PROC:-/proc/asound}
+
+say() {
+    printf '%s\n' "being-audio-init: $*"
+}
+
+use_kept=1
+for argument in "$@"; do
+    case "$argument" in
+        --defaults) use_kept=0 ;;
+        *) say "WARNING: unknown argument $argument ignored" ;;
+    esac
+done
+
+cmdline=$(cat "$CMDLINE" 2>/dev/null)
+case " $cmdline " in
+    *" being.audio=keep "*)
+        say "being.audio=keep on the kernel command line: mixer left as it is"
+        exit 0 ;;
+esac
+
+if ! command -v amixer >/dev/null 2>&1; then
+    say "WARNING: amixer is not installed; mixer left as it is"
+    exit 0
+fi
+
+# sound.target can be reached a moment before the control device answers.
+tries=0
+until amixer -c "$CARD" scontrols >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    if [ "$tries" -gt "$WAIT" ]; then
+        say "no sound card $CARD; nothing to set"
+        exit 0
+    fi
+    sleep 1
+done
+
+# The control names, one per line, as amixer wants them back: Name,index
+controls() {
+    amixer -c "$CARD" scontrols 2>/dev/null |
+        sed -n "s/^Simple mixer control '\(.*\)',\([0-9][0-9]*\)\$/\1,\2/p"
+}
+
+# One line per control: its values, channel names shortened.
+describe() {
+    amixer -c "$CARD" sget "$1" 2>/dev/null |
+        grep -E '^  (Mono|Front Left|Front Right|Rear Left|Rear Right|Front Center|Woofer|Side Left|Side Right|Rear Center|Item[0-9]+): .' |
+        sed -e 's/^  //' -e 's/^Front Left:/FL:/' -e 's/^Front Right:/FR:/' |
+        tr '\n' ' ' | sed 's/ *$//'
+}
+
+show_state() {
+    controls | while IFS= read -r id; do
+        say "$1: ${id%,0} = $(describe "$id")"
+    done
+}
+
+# Run one amixer setting; a refusal is logged and the rest carries on.
+apply() {
+    id=$1
+    shift
+    if out=$(amixer -c "$CARD" -q sset "$id" "$@" 2>&1); then
+        say "set ${id%,0}: $*"
+    else
+        say "WARNING: could not set ${id%,0} ($*): $(printf '%s\n' "$out" | tr '\n' ' ')"
+    fi
+}
+
+has_cap() {
+    case " $caps " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
+# The highest step of a control, from "Limits: [Playback|Capture] 0 - 3".
+upper_limit() {
+    printf '%s\n' "$info" | sed -n 's/^  Limits:.* \([0-9][0-9]*\)$/\1/p' | head -n 1
+}
+
+show_state before
+
+# The owner's kept levels, when the voice saved them in the mind.
+restored=0
+if [ "$use_kept" = 1 ] && [ -f "$MIND_STATE" ] && command -v alsactl >/dev/null 2>&1; then
+    if out=$(alsactl -f "$MIND_STATE" restore "$CARD" 2>&1); then
+        restored=1
+        say "restored the kept levels from $MIND_STATE"
+    else
+        say "WARNING: could not restore $MIND_STATE ($(printf '%s\n' "$out" | tr '\n' ' ')); setting the defaults"
+    fi
+fi
+
+if [ "$restored" = 0 ]; then
+
+    all=$(controls)
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        name=${id%,*}
+        info=$(amixer -c "$CARD" sget "$id" 2>/dev/null)
+        caps=$(printf '%s\n' "$info" | sed -n 's/^  Capabilities: //p' | head -n 1)
+        lower=$(printf '%s\n' "$name" | tr 'A-Z' 'a-z')
+
+        case "$lower" in
+            # Digital outputs, beeps, jack behaviour and loopback paths stay as they are.
+            iec958*|*spdif*|*beep*|auto-mute*|*loopback*|"independent hp"|*"channel mode"*)
+                continue ;;
+        esac
+
+        case "$lower" in
+            *boost*)
+                # A moderate microphone pre-amp: 2 of 3 steps (+20 dB on the CS4206).
+                top=$(upper_limit)
+                if [ -n "$top" ] && [ "$top" -gt 0 ]; then
+                    apply "$id" "$(( (top * 2 + 1) / 3 ))"
+                fi
+                continue ;;
+            "input source"|"capture source"|"input source "*|"capture source "*)
+                if has_cap enum || has_cap cenum; then
+                    items=$(printf '%s\n' "$info" | sed -n "s/^  Items: //p" | head -n 1)
+                    pick=
+                    for want in "Internal Mic" "Int Mic" "Internal Microphone" "Mic" "Front Mic"; do
+                        case "$items" in
+                            *"'$want'"*) pick=$want; break ;;
+                        esac
+                    done
+                    if [ -n "$pick" ]; then
+                        apply "$id" "$pick"
+                    else
+                        say "no internal microphone among ${name}'s items: $items"
+                    fi
+                fi
+                continue ;;
+            digital)
+                # The CS4206 ADC's digital gain: unity, not the +29 dB it can reach.
+                if has_cap cvolume || has_cap volume; then
+                    apply "$id" capture "$DIGITAL"
+                fi
+                continue ;;
+        esac
+
+        # Capture: the main capture gain and switch, and an internal mic's own
+        # capture control where a codec has one. Toggled off then on: on some
+        # MacBooks the capture path only woke after the switch changed.
+        case "$lower" in
+            capture|"capture "*|"internal mic"|"int mic"|"internal microphone"|mic|"front mic")
+                if has_cap cvolume; then
+                    apply "$id" capture "$CAPTURE"
+                fi
+                if has_cap cswitch; then
+                    amixer -c "$CARD" -q sset "$id" capture nocap >/dev/null 2>&1
+                    apply "$id" capture cap
+                fi
+                ;;
+        esac
+
+        # Playback: only named outputs. "Mic" and "Line" playback controls are the
+        # analog loopback into the speakers and are never unmuted here.
+        case "$lower" in
+            master|speaker|"bass speaker"|*" speaker"|headphone|"headphone "*|front|surround|center|lfe|side|"line out"|pcm)
+                level=$PLAYBACK
+                [ "$lower" = pcm ] && level=$PCM_LEVEL
+                if has_cap pvolume || has_cap volume; then
+                    apply "$id" playback "$level"
+                fi
+                if has_cap pswitch; then
+                    apply "$id" playback unmute
+                fi
+                ;;
+        esac
+    done <<EOF
+$all
+EOF
+fi
+
+show_state after
+
+# Keep a copy for the diagnostics; never on the read-only root.
+if mkdir -p "$RUN_DIR" 2>/dev/null; then
+    amixer -c "$CARD" scontents > "$RUN_DIR/scontents" 2>/dev/null || true
+    # The jack sensors (is the headphone socket seen as plugged, muting the
+    # speakers?) are card controls, not simple mixer ones.
+    amixer -c "$CARD" contents > "$RUN_DIR/contents" 2>/dev/null || true
+    if command -v alsactl >/dev/null 2>&1; then
+        alsactl -f "$RUN_DIR/asound.state" store "$CARD" >/dev/null 2>&1 || true
+    fi
+fi
+if [ -d "$STATE_DIR" ] && [ -w "$STATE_DIR" ] && command -v alsactl >/dev/null 2>&1; then
+    if alsactl -f "$STATE_DIR/asound.state" store "$CARD" >/dev/null 2>&1; then
+        say "saved the levels to $STATE_DIR/asound.state"
+    fi
+fi
+
+# On a Try boot, measure the microphone once while nothing else is listening.
+# Only levels are kept; the sound itself never leaves memory.
+case " $cmdline " in
+    *" being.try=1 "*)
+        card_id=$(cat "$PROC_ASOUND/card$CARD/id" 2>/dev/null)
+        if [ "$card_id" = Loopback ]; then
+            # The lab's virtual cable, not a microphone: recording from it here
+            # would only hold the cable's rate for the lab's own tests.
+            say "card $CARD is the Loopback cable; no microphone to measure"
+        elif [ -x "$MIC_TEST" ]; then
+            "$MIC_TEST" mic-test --card "$CARD" --out "$RUN_DIR/mic-level.json" 2>&1 |
+                sed 's/^being-usb-logs: /being-audio-init: /'
+        fi ;;
+esac
+
+if [ "$restored" = 1 ]; then
+    say "done: card $CARD with the kept levels from $MIND_STATE"
+else
+    say "done: card $CARD playback $PLAYBACK, PCM $PCM_LEVEL, capture $CAPTURE, digital $DIGITAL"
+fi
+exit 0

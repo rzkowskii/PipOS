@@ -5,10 +5,14 @@ Plain SQLite with full-text search. Everything here can be read with the
 """
 
 import json
+import math
+import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
+from array import array
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -132,7 +136,158 @@ END;
 CREATE TRIGGER IF NOT EXISTS episodes_dream_delete AFTER DELETE ON episodes BEGIN
     DELETE FROM dream_journal WHERE source_id = old.id;
 END;
+
+-- Sentence vectors (int8 codes plus one scale). They are derived from the
+-- words, so they go the moment the words change or go.
+CREATE TABLE IF NOT EXISTS episode_vec (
+    episode_id INTEGER PRIMARY KEY REFERENCES episodes (id) ON DELETE CASCADE,
+    model      TEXT NOT NULL,
+    scale      REAL NOT NULL,
+    q8         BLOB NOT NULL,
+    bits       BLOB NOT NULL       -- sign bits, for a fast first pass
+);
+CREATE TABLE IF NOT EXISTS fact_vec (
+    fact_id INTEGER PRIMARY KEY REFERENCES facts (id) ON DELETE CASCADE,
+    model   TEXT NOT NULL,
+    scale   REAL NOT NULL,
+    q8      BLOB NOT NULL,
+    bits    BLOB NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS episode_vec_stale AFTER UPDATE OF text ON episodes
+WHEN new.text IS NOT old.text BEGIN
+    DELETE FROM episode_vec WHERE episode_id = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS fact_vec_stale AFTER UPDATE OF text ON facts
+WHEN new.text IS NOT old.text BEGIN
+    DELETE FROM fact_vec WHERE fact_id = old.id;
+END;
+
+-- What the dream model proposed and code checked. A candidate is never told
+-- as a fact until it recurs on a later night or the owner confirms it.
+CREATE TABLE IF NOT EXISTS candidate_facts (
+    id         INTEGER PRIMARY KEY,
+    owner      TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    claim      TEXT NOT NULL,
+    claim_key  TEXT NOT NULL,
+    modality   TEXT NOT NULL,
+    first_night TEXT NOT NULL,
+    last_night TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'candidate',   -- candidate, promoted
+    created    REAL NOT NULL,
+    promoted   REAL,
+    fact_id    INTEGER REFERENCES facts (id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS candidate_facts_key ON candidate_facts (owner, claim_key);
+-- Each exact quote a candidate rests on.
+CREATE TABLE IF NOT EXISTS candidate_sources (
+    candidate_id INTEGER NOT NULL REFERENCES candidate_facts (id) ON DELETE CASCADE,
+    episode_id   INTEGER NOT NULL REFERENCES episodes (id) ON DELETE CASCADE,
+    night        TEXT NOT NULL,
+    quote        TEXT NOT NULL,
+    PRIMARY KEY (candidate_id, episode_id)
+);
+CREATE INDEX IF NOT EXISTS candidate_sources_episode ON candidate_sources (episode_id);
+-- Anything made from other records: a child exists only while every parent does.
+CREATE TABLE IF NOT EXISTS derivations (
+    child_kind  TEXT NOT NULL,    -- candidate, diary_topic
+    child_id    INTEGER NOT NULL,
+    parent_kind TEXT NOT NULL,    -- episode, fact, candidate
+    parent_id   INTEGER NOT NULL,
+    PRIMARY KEY (child_kind, child_id, parent_kind, parent_id)
+);
+CREATE INDEX IF NOT EXISTS derivations_parent ON derivations (parent_kind, parent_id);
+CREATE TRIGGER IF NOT EXISTS candidate_sources_gone AFTER UPDATE OF text ON episodes
+WHEN new.text IS NOT old.text BEGIN
+    DELETE FROM candidate_facts WHERE id IN (SELECT candidate_id FROM candidate_sources WHERE episode_id = old.id);
+END;
+-- A quote that goes takes its candidate with it, even if another quote remains.
+CREATE TRIGGER IF NOT EXISTS candidate_source_deleted AFTER DELETE ON candidate_sources BEGIN
+    DELETE FROM candidate_facts WHERE id = old.candidate_id;
+END;
+-- A promoted candidate's fact was made from it, and goes with it.
+CREATE TRIGGER IF NOT EXISTS candidate_fact_deleted AFTER DELETE ON candidate_facts
+WHEN old.fact_id IS NOT NULL BEGIN
+    DELETE FROM facts WHERE id = old.fact_id;
+END;
+
+-- The nightly day record: counts, and topics that cite their episodes.
+CREATE TABLE IF NOT EXISTS diary_days (
+    owner          TEXT NOT NULL,
+    day            TEXT NOT NULL,
+    conversations  INTEGER NOT NULL,
+    owner_lines    INTEGER NOT NULL,
+    reminders_done INTEGER NOT NULL,
+    timers         INTEGER NOT NULL,
+    body_events    TEXT NOT NULL,       -- JSON object of counts, never words
+    built          REAL NOT NULL,
+    PRIMARY KEY (owner, day)
+);
+CREATE TABLE IF NOT EXISTS diary_topics (
+    id     INTEGER PRIMARY KEY,
+    owner  TEXT NOT NULL,
+    day    TEXT NOT NULL,
+    rank   INTEGER NOT NULL,
+    topic  TEXT NOT NULL,
+    FOREIGN KEY (owner, day) REFERENCES diary_days (owner, day) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS diary_topic_sources (
+    topic_id   INTEGER NOT NULL REFERENCES diary_topics (id) ON DELETE CASCADE,
+    episode_id INTEGER NOT NULL REFERENCES episodes (id) ON DELETE CASCADE,
+    PRIMARY KEY (topic_id, episode_id)
+);
+CREATE INDEX IF NOT EXISTS diary_topic_sources_episode ON diary_topic_sources (episode_id);
+CREATE TRIGGER IF NOT EXISTS diary_topic_gone AFTER UPDATE OF text ON episodes
+WHEN new.text IS NOT old.text BEGIN
+    DELETE FROM diary_topics WHERE id IN (SELECT topic_id FROM diary_topic_sources WHERE episode_id = old.id);
+END;
+CREATE TRIGGER IF NOT EXISTS diary_topic_source_deleted AFTER DELETE ON diary_topic_sources BEGIN
+    DELETE FROM diary_topics WHERE id = old.topic_id;
+END;
 """
+
+# Hybrid recall. RRF fuses the word ranking with the meaning ranking; a
+# candidate also needs enough cosine similarity to be worth saying.
+RRF_K = 60
+HYBRID_POOL = 50
+# Pip's facts are the owner's own. A question about the owner ("what's my
+# flower called?") may be matched on meaning at COSINE_FLOOR; one that is not
+# ("why is the sky blue?") must be as close as COSINE_FLOOR_IMPERSONAL.
+# Calibrated with blink-8M on the sets in tests/test_memory_hybrid.py:
+# unrelated questions peak at about 0.22, paraphrases mostly score 0.2-0.6.
+COSINE_FLOOR = 0.20
+COSINE_FLOOR_IMPERSONAL = 0.32
+# A row sharing only some of the question's words gets a cosine lift from the
+# shared tokens ("why is the sky blue?" against "the key is in the blue
+# pot"), so it has to be clearly on the subject as well.
+COSINE_FLOOR_PARTIAL = 0.45
+COSINE_FLOOR_PARTIAL_IMPERSONAL = 0.50
+# Rank fusion alone cannot tell apart two rows that share the same one word;
+# their closeness in meaning can.
+COSINE_WEIGHT = 0.05
+_PERSONAL = re.compile(r"\b(?:i|me|my|mine|myself|we|us|our|ours|i'm|i've|i'd|i'll)\b", re.IGNORECASE)
+RECENCY_WEIGHT = 0.004
+RECENCY_HALF_LIFE_DAYS = 45.0
+EMBED_BATCH = 64
+
+# Disk guard: below LOW, conversation is no longer archived and the archive is
+# compacted; below CRITICAL only what the owner asked to keep is written.
+DISK_LOW = 0.10
+DISK_CRITICAL = 0.05
+DISK_CHECK_SECONDS = 30.0
+_DEFAULT = object()
+
+
+def _search_secure_delete(db):
+    """FTS5's secure-delete removes a forgotten row's terms from the index at
+    once, so a forget never needs a full rebuild. SQLite 3.42 and later."""
+    try:
+        with db:
+            for table in ("episodes_fts", "facts_fts"):
+                db.execute(f"INSERT INTO {table} ({table}, rank) VALUES ('secure-delete', 1)")
+        return True
+    except sqlite3.Error:
+        return False
 
 # Words too common to search on, with spoken contractions and fillers.
 _STOP = frozenset(
@@ -215,8 +370,138 @@ def normalize(text):
     return " ".join(text.casefold().replace("’", "'").replace("‘", "'").split())
 
 
+def vector_text(text):
+    """What a sentence's vector is made from: its words of substance.
+
+    Function words ("what", "my", "is") are shared by nearly every question
+    and fact, so in a static model they pull every pair together; without them
+    paraphrases separate from unrelated sentences far better.
+    """
+    words = search_terms(text)
+    return " ".join(words) if words else text
+
+
+def _disk_reading(root):
+    if root is None:
+        return {"state": "ok", "free_fraction": None, "free_bytes": None}
+    try:
+        info = os.statvfs(root)
+    except (OSError, AttributeError):
+        return {"state": "ok", "free_fraction": None, "free_bytes": None}
+    total = info.f_blocks * info.f_frsize
+    free = info.f_bavail * info.f_frsize
+    fraction = free / total if total else 1.0
+    state = "critical" if fraction < DISK_CRITICAL else "low" if fraction < DISK_LOW else "ok"
+    return {"state": state, "free_fraction": round(fraction, 4), "free_bytes": free}
+
+
+# Newest first for the backfill; above the newest vector, oldest first, so
+# the watermark that cheap catch-up relies on never skips a row.
+_VECTOR_EPISODES = f"""SELECT e.id, e.text FROM episodes e
+    WHERE {_HISTORY} AND e.id > ? AND NOT EXISTS (SELECT 1 FROM episode_vec v WHERE v.episode_id = e.id)
+    ORDER BY CASE WHEN ? THEN e.id ELSE -e.id END LIMIT ?"""
+_VECTOR_FACTS = """SELECT f.id, f.text FROM facts f
+    WHERE f.id > ? AND NOT EXISTS (SELECT 1 FROM fact_vec v WHERE v.fact_id = f.id)
+    ORDER BY CASE WHEN ? THEN f.id ELSE -f.id END LIMIT ?"""
+VECTOR_RECIPE = "content-words-1"  # bump when vector_text changes: old vectors are remade at night
+PREFILTER_MIN = 2000  # above this many rows, sign bits pick who gets an exact score
+PREFILTER_KEEP = 400
+
+
+def vector_model(embedder):
+    return f"{embedder.model_id}:{VECTOR_RECIPE}"
+
+
+def _sign_bits(vector):
+    bits = 0
+    for index, value in enumerate(vector):
+        if value > 0:
+            bits |= 1 << index
+    return bits.to_bytes((len(vector) + 7) // 8, "little")
+
+
+def _index_rows(db, embedder, limit, *, recent_only=False):
+    """Embed rows with no vector, newest first. With `recent_only`, look only
+    above the newest vector: cheap enough to run before every search."""
+    from .embed import quantise
+
+    done = 0
+    model = vector_model(embedder)
+    for select, insert, newest in (
+        (_VECTOR_FACTS, "INSERT OR IGNORE INTO fact_vec (fact_id, model, scale, q8, bits) SELECT ?, ?, ?, ?, ? "
+                        "WHERE EXISTS (SELECT 1 FROM facts WHERE id = ? AND text = ?)",
+         "SELECT coalesce(max(fact_id), 0) FROM fact_vec"),
+        (_VECTOR_EPISODES, "INSERT OR IGNORE INTO episode_vec (episode_id, model, scale, q8, bits) "
+                           "SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM episodes WHERE id = ? AND text = ?)",
+         "SELECT coalesce(max(episode_id), 0) FROM episode_vec"),
+    ):
+        if done >= limit:
+            break
+        above = db.execute(newest).fetchone()[0] if recent_only else 0
+        rows = db.execute(select, (above, int(recent_only), limit - done)).fetchall()
+        if not rows:
+            continue
+        coded = []
+        for row_id, text in rows:
+            vector = embedder.embed(vector_text(text))
+            scale, q8 = quantise(vector)
+            coded.append((row_id, model, scale, q8, _sign_bits(vector), row_id, text))
+        with db:
+            db.executemany(insert, coded)
+        done += len(rows)
+    return done
+
+
+class _Indexer:
+    """Embeds new sentences on a thread of its own, with its own connection,
+    so recording a sentence never waits for its vector."""
+
+    def __init__(self, path, embedder):
+        self.path, self.embedder = path, embedder
+        self._wake = threading.Event()
+        self._stopping = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="memory-vectors", daemon=True)
+        self._thread.start()
+
+    def poke(self):
+        self._wake.set()
+
+    def stop(self):
+        self._stopping.set()
+        self._wake.set()
+        self._thread.join(timeout=2.0)
+
+    def _run(self):
+        try:
+            # A background chore: below the face, the voice and the turn.
+            os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)
+        except (AttributeError, OSError):
+            pass
+        db = None
+        try:
+            db = sqlite3.connect(self.path, timeout=0.5)
+            db.execute("PRAGMA foreign_keys = ON")
+            db.execute("PRAGMA secure_delete = ON")
+            while not self._stopping.is_set():
+                self._wake.wait()
+                self._wake.clear()
+                while not self._stopping.is_set():
+                    try:
+                        if not _index_rows(db, self.embedder, EMBED_BATCH, recent_only=True):
+                            break
+                    except sqlite3.OperationalError:
+                        # Busy with a foreground write: try again shortly.
+                        if self._stopping.wait(0.2):
+                            return
+        except sqlite3.Error as exc:
+            print("memory: vector indexing stopped:", exc, flush=True)
+        finally:
+            if db is not None:
+                db.close()
+
+
 class Memory:
-    def __init__(self, root):
+    def __init__(self, root, *, embedder=_DEFAULT):
         self.root = Path(root) if root is not None else None
         if self.root is None:
             self.db = sqlite3.connect(":memory:")
@@ -240,9 +525,28 @@ class Memory:
             added = self.db.execute("INSERT OR IGNORE INTO meta VALUES ('episode_search', '1')")
             if added.rowcount:
                 self.db.execute("INSERT INTO episodes_fts (episodes_fts) VALUES ('rebuild')")
+        self._fts_secure = _search_secure_delete(self.db)
+        if self._fts_secure:
+            with self.db:
+                # Segments written before secure-delete was on may still hold
+                # the terms of rows forgotten then: merge them away once.
+                if self.db.execute("INSERT OR IGNORE INTO meta VALUES ('search_secure', '1')").rowcount:
+                    self._rebuild_search(force=True)
         self._initialize_deletions()
+        if embedder is _DEFAULT:
+            from . import embed
+
+            embedder = embed.load()
+        self.embedder = embedder or None
+        self._indexer = None
+        self._disk = None
+        self._disk_checked = float("-inf")
+        self._clock_set_by_owner = False
 
     def close(self):
+        if self._indexer is not None:
+            self._indexer.stop()
+            self._indexer = None
         self.db.close()
 
     def _initialize_deletions(self):
@@ -379,10 +683,69 @@ class Memory:
                 raise ValueError(error)
             nonces.add(nonce)
 
-    def _rebuild_search(self):
-        # FTS segments retain old terms after logical deletion.
+    def _rebuild_search(self, *, force=False):
+        """Make sure no forgotten words survive in the search index.
+
+        With FTS5 secure-delete the triggers' deletes already remove a row's
+        terms from the index, so a forget costs only the rows it touches.
+        Without it, segments keep old terms after a logical delete and the
+        whole index has to be rebuilt.
+        """
+        if self._fts_secure and not force:
+            self._sweep_derived()
+            return
         self.db.execute("INSERT INTO facts_fts (facts_fts) VALUES ('rebuild')")
         self.db.execute("INSERT INTO episodes_fts (episodes_fts) VALUES ('rebuild')")
+        self._sweep_derived()
+
+    def optimize_search(self):
+        """Nightly: merge the search index into one segment, for speed and size."""
+        with self.db:
+            self.db.execute("INSERT INTO episodes_fts (episodes_fts) VALUES ('optimize')")
+            self.db.execute("INSERT INTO facts_fts (facts_fts) VALUES ('optimize')")
+        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def _sweep_derived(self):
+        """Delete everything derived, at any depth, from records now gone.
+
+        Candidates and diary topics already go with a source by trigger; this
+        follows the derivation table transitively ("a fact inferred from a
+        candidate made from a forgotten sentence") until nothing changes.
+        """
+        for _ in range(32):
+            dead = self.db.execute(
+                """WITH RECURSIVE dead(kind, id) AS (
+                       SELECT d.child_kind, d.child_id FROM derivations d WHERE
+                          (d.parent_kind = 'episode' AND NOT EXISTS (SELECT 1 FROM episodes e
+                               WHERE e.id = d.parent_id AND e.text NOT IN ('', '[forgotten]')))
+                          OR (d.parent_kind = 'fact' AND NOT EXISTS (SELECT 1 FROM facts f WHERE f.id = d.parent_id))
+                          OR (d.parent_kind = 'candidate' AND NOT EXISTS (
+                               SELECT 1 FROM candidate_facts c WHERE c.id = d.parent_id))
+                          OR (d.parent_kind = 'diary_topic' AND NOT EXISTS (
+                               SELECT 1 FROM diary_topics t WHERE t.id = d.parent_id))
+                       UNION
+                       SELECT d.child_kind, d.child_id FROM derivations d
+                       JOIN dead ON d.parent_kind = dead.kind AND d.parent_id = dead.id
+                   ) SELECT kind, id FROM dead"""
+            ).fetchall()
+            candidates = [row_id for kind, row_id in dead if kind == "candidate"]
+            topics = [row_id for kind, row_id in dead if kind == "diary_topic"]
+            changed = 0
+            if candidates:
+                changed += self.db.execute(
+                    "DELETE FROM candidate_facts WHERE id IN (SELECT value FROM json_each(?))",
+                    (json.dumps(candidates),)).rowcount
+            if topics:
+                changed += self.db.execute(
+                    "DELETE FROM diary_topics WHERE id IN (SELECT value FROM json_each(?))",
+                    (json.dumps(topics),)).rowcount
+            changed += self.db.execute(
+                """DELETE FROM derivations WHERE
+                       (child_kind = 'candidate' AND NOT EXISTS (SELECT 1 FROM candidate_facts c WHERE c.id = child_id))
+                    OR (child_kind = 'diary_topic' AND NOT EXISTS (SELECT 1 FROM diary_topics t WHERE t.id = child_id))"""
+            ).rowcount
+            if not changed:
+                return
 
     def _advance_revision(self, amount=1):
         self.db.execute(
@@ -394,14 +757,105 @@ class Memory:
     # -- the log ---------------------------------------------------------
 
     def log(self, kind, text, speaker=None, **meta):
-        """Append to the record of what happened. Returns the episode id."""
+        """Append to the record of what happened. Returns the episode id, or
+        None when the disk is too full to keep this kind of record."""
+        if not self._disk_allows(kind, meta):
+            return None
         now = self.now()
         with self.db:
             cur = self.db.execute(
                 "INSERT INTO episodes (ts, kind, speaker, text, meta) VALUES (?, ?, ?, ?, ?)",
                 (now, kind, speaker, text, json.dumps(meta) if meta else None),
             )
+        if kind in ("heard", "said"):
+            self._poke_indexer()
         return cur.lastrowid
+
+    # -- the disk guard ------------------------------------------------------
+
+    def disk_state(self, *, refresh=False):
+        """How full Pip's memory disk is, for the doctor and the night shift.
+
+        {"state": "ok" | "low" | "critical", "free_fraction": float | None,
+         "free_bytes": int | None}. An in-memory archive is always "ok".
+        """
+        now = time.monotonic()
+        if refresh or self._disk is None or now - self._disk_checked >= DISK_CHECK_SECONDS:
+            self._disk_checked = now
+            self._disk = _disk_reading(self.root)
+        return dict(self._disk)
+
+    def _disk_allows(self, kind, meta):
+        state = self.disk_state()["state"]
+        if state == "ok" or kind == "life":
+            return True
+        explicit = kind == "heard" and bool(meta.get("command"))
+        if state == "critical":
+            # Only what the owner asked to keep: the sentence a fact came from.
+            return explicit
+        # Low: commands are kept, conversation is no longer archived.
+        return explicit or kind == "command"
+
+    def compact(self):
+        """Give space back: merge the search index, truncate the WAL, and
+        vacuum only when there is room for the copy a vacuum makes."""
+        self.optimize_search()
+        if self.root is None:
+            return
+        try:
+            size = (self.root / "mind.db").stat().st_size
+        except OSError:
+            return
+        reading = self.disk_state(refresh=True)
+        if reading["free_bytes"] is not None and reading["free_bytes"] > 2 * size + (16 << 20):
+            self._vacuum()
+        self.disk_state(refresh=True)
+
+    def _vacuum(self):
+        self.db.execute("VACUUM")
+        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    # -- vectors ---------------------------------------------------------------
+
+    def _poke_indexer(self):
+        if self.embedder is None or self.root is None:
+            return
+        if self._indexer is None:
+            self._indexer = _Indexer(self.root / "mind.db", self.embedder)
+        self._indexer.poke()
+
+    def index_pending(self, limit=EMBED_BATCH, *, recent_only=False):
+        """Embed up to `limit` rows that have no vector yet. Returns how many.
+
+        A vector is stored only if the words it was made from are still the
+        words in the row, in the same statement: a forget that lands while a
+        sentence is being embedded can never leave its vector behind.
+        """
+        embedder = self.embedder
+        if embedder is None or self.disk_state()["state"] == "critical":
+            return 0
+        return _index_rows(self.db, embedder, limit, recent_only=recent_only)
+
+    def backfill_vectors(self, limit=500):
+        """Night work: remake vectors from an older model or recipe, then
+        embed every row still without one (an edited row, an old archive).
+        Returns how many rows were touched; 0 means it is all done."""
+        if self.embedder is None:
+            return 0
+        model = vector_model(self.embedder)
+        with self.db:
+            stale = self.db.execute(
+                "DELETE FROM episode_vec WHERE episode_id IN (SELECT episode_id FROM episode_vec "
+                "WHERE model <> ? LIMIT ?)", (model, limit)).rowcount
+            stale += self.db.execute(
+                "DELETE FROM fact_vec WHERE fact_id IN (SELECT fact_id FROM fact_vec WHERE model <> ? LIMIT ?)",
+                (model, limit)).rowcount
+        return stale + self.index_pending(limit)
+
+    def vector_counts(self):
+        """(episode vectors, fact vectors): for tests and the doctor."""
+        return (self.db.execute("SELECT count(*) FROM episode_vec").fetchone()[0],
+                self.db.execute("SELECT count(*) FROM fact_vec").fetchone()[0])
 
     def newest_timestamp(self):
         """When the most recent thing in the record happened, or None if empty."""
@@ -479,10 +933,42 @@ class Memory:
           least a day and at most a week. If the clock drops back to where it
           was, the step is undone.
         """
+        run = self._lost_clock if self.clock_lost() else self._clock
         if self.db.in_transaction:
-            return self._clock(time.time() if reading is None else reading)
+            return run(time.time() if reading is None else reading)
         with self.db:
-            return self._clock(time.time() if reading is None else reading)
+            return run(time.time() if reading is None else reading)
+
+    def clock_lost(self):
+        """True while this boot's clock came from systemd's epoch, not a
+        working clock battery, and nobody has set the time since."""
+        if self._clock_set_by_owner:
+            return False
+        now = time.monotonic()
+        cached = getattr(self, "_lost_cache", None)
+        if cached is not None and now - cached[0] < 60.0:
+            return cached[1]
+        lost = False
+        try:
+            from . import clock_epoch
+
+            lost = clock_epoch.epoch_advanced() is True
+        except Exception:  # no way to tell is not a reason to doubt
+            lost = False
+        self._lost_cache = (now, lost)
+        return lost
+
+    def _lost_clock(self, reading):
+        """A clock known to be wrong: stamps never go backwards, and nothing
+        may expire, because no time from it can be believed."""
+        noted, newest = self._meta_number("clock_seen"), self.newest_timestamp()
+        known = max((value for value in (noted, newest) if value is not None), default=None)
+        latest = max(known or CLOCK_FLOOR, CLOCK_FLOOR)
+        if reading < latest - CLOCK_SLACK:
+            # Rows written now are raised to the right time once it is known.
+            self._mark("behind")
+            return None, latest
+        return None, reading
 
     def owner_set_clock(self, reading):
         """The clock was set by hand (Setup, or "set the time to" by voice).
@@ -494,6 +980,7 @@ class Memory:
         """
         if reading < CLOCK_FLOOR:
             raise ValueError("a time before this software existed cannot be right")
+        self._clock_set_by_owner = True
         with self.db:
             noted, newest = self._meta_number("clock_seen"), self.newest_timestamp()
             known = max((value for value in (noted, newest) if value is not None), default=None)
@@ -600,9 +1087,14 @@ class Memory:
 
     def recall_history(
         self, query, *, limit=3, start=None, end=None, all_terms=False, for_edit=False, kind=None,
-        include_fact_sources=True, journal_owner=None, speaker=None,
+        include_fact_sources=True, journal_owner=None, speaker=None, meaning=True,
     ):
-        """Search retained conversations by relevance or a date range."""
+        """Search retained conversations by relevance or a date range.
+
+        With `meaning` (the default) and the embedding model installed, a
+        relevance search also finds sentences by what they mean. A caller
+        that keeps only rows sharing its words (an ordinary sentence looking
+        for context) passes meaning=False and saves the vector search."""
         terms = list(dict.fromkeys(search_terms(query)))
         if not terms and query.strip():
             return []
@@ -642,7 +1134,14 @@ class Memory:
             params.append(end)
         columns = f"e.id, e.ts, e.kind, e.speaker, e.text, {excerpt}"
         where = " AND ".join(conditions)
-        if terms and type(limit) is int and 0 < limit <= 6:
+        rows = None
+        if meaning and terms and not for_edit and not all_terms and type(limit) is int and limit != 0:
+            rows = self._history_hybrid(
+                query, terms, params[0], [c for c in conditions if c != "episodes_fts MATCH ?"], params[1:],
+                where, params, limit)
+        if rows is not None:
+            pass
+        elif terms and type(limit) is int and 0 < limit <= 6:
             # Tied hits can all pass SQLite's top-N filter as timestamps rise.
             # Rank narrow rows and build excerpts only for the final winners.
             # Keeping both passes in one statement preserves the read snapshot.
@@ -683,6 +1182,42 @@ class Memory:
         if row and row[-1]:
             return [Episode(*row[:-1])]
         return rows
+
+    def _history_hybrid(self, query, terms, match, plain_conditions, plain_params, where, params, limit):
+        """Conversation found by its words or its meaning, under the same filters."""
+        vector = self._query_vector(query)
+        if vector is None:
+            return None
+        self._catch_up()
+        lexical = [row[0] for row in self.db.execute(
+            f"SELECT e.id FROM episodes_fts JOIN episodes e ON e.id = episodes_fts.rowid WHERE {where} "
+            f"ORDER BY {_HISTORY_SCORE}, e.ts DESC, e.id DESC LIMIT ?", (*params, HYBRID_POOL))]
+        complete = set(lexical)
+        if len(terms) > 1:
+            every = " AND ".join(f'"{term}"' for term in terms)
+            complete = {row[0] for row in self.db.execute(
+                f"SELECT e.id FROM episodes_fts JOIN episodes e ON e.id = episodes_fts.rowid WHERE {where} LIMIT ?",
+                (every, *params[1:], HYBRID_POOL))}
+        cosines = self._cosines("episode_vec", "episode_id", "JOIN episodes e ON e.id = v.episode_id",
+                                " AND ".join(plain_conditions), plain_params, vector)
+        pool = set(lexical) | set(cosines)
+        if not pool:
+            return []
+        rows = {row[0]: row for row in self.db.execute(
+            "SELECT e.id, e.ts, e.kind, e.speaker, e.text FROM episodes e "
+            "WHERE e.id IN (SELECT value FROM json_each(?))", (json.dumps(sorted(pool)),))}
+        cosines = {i: c for i, c in cosines.items() if i in rows}
+        ids = self._fuse([i for i in lexical if i in rows], complete, cosines,
+                         {row_id: row[1] for row_id, row in rows.items()}, limit,
+                         personal=bool(_PERSONAL.search(query.replace("’", "'"))))
+        excerpts = {}
+        words = [row_id for row_id in ids if row_id in set(lexical)]
+        if words:
+            excerpts = dict(self.db.execute(
+                "SELECT rowid, snippet(episodes_fts, 0, '', '', ' … ', 24) FROM episodes_fts "
+                "WHERE episodes_fts MATCH ? AND rowid IN (SELECT value FROM json_each(?))",
+                (match, json.dumps(words))).fetchall())
+        return [Episode(*rows[row_id], excerpts.get(row_id)) for row_id in ids]
 
     def history_neighbor(self, episode):
         """Return the other half of a nearby exchange, when available."""
@@ -760,6 +1295,7 @@ class Memory:
             )
             if source is not None:
                 self.db.execute("INSERT OR IGNORE INTO fact_tellings VALUES (?, ?)", (cur.lastrowid, source))
+        self._poke_indexer()
         return cur.lastrowid
 
     def latest_facts(self, limit=5, speaker=None):
@@ -813,6 +1349,10 @@ class Memory:
         terms = search_terms(query)
         if not terms:
             return []
+        if not all_terms:
+            hybrid = self._recall_hybrid(query, terms, limit)
+            if hybrid is not None:
+                return hybrid
         match = (" AND " if all_terms else " OR ").join(f'"{t}"' for t in terms)
         rows = self.db.execute(
             "SELECT f.id, f.ts, f.text, f.speaker, f.confidence, bm25(facts_fts), "
@@ -833,6 +1373,129 @@ class Memory:
         if limit >= 0:
             rows = rows[:limit]
         return [self._fact(r) for r in rows]
+
+    # -- hybrid recall ------------------------------------------------------
+
+    def _query_vector(self, query):
+        if self.embedder is None:
+            return None
+        vector = self.embedder.embed(vector_text(query))
+        return vector if any(vector) else None
+
+    def _catch_up(self, limit=16):
+        """Embed the newest few rows the indexer has not reached yet, so a
+        sentence said a moment ago can already be found by meaning. An
+        archive in RAM (a guest, a session) has no indexer and is small, so
+        it is brought fully up to date."""
+        if self.db.in_transaction:
+            return
+        if self.root is None:
+            limit = 100_000
+        try:
+            self.index_pending(limit, recent_only=True)
+        except sqlite3.OperationalError:
+            pass  # the indexer is writing; its rows will be there next time
+
+    def _cosines(self, table, key, join, where, params, vector):
+        """Cosine of `vector` with the stored vectors of rows passing `where`.
+
+        Few rows are all scored exactly. Above PREFILTER_MIN, the sign bits
+        (one popcount each) choose PREFILTER_KEEP rows for an exact score, so
+        a search over 10,000 sentences stays a few milliseconds of Python.
+        """
+        from .embed import dot
+
+        base = f"FROM {table} v {join} WHERE {where}"
+        count = self.db.execute(f"SELECT count(*) {base}", params).fetchone()[0]
+        if not count:
+            return {}
+        if count > PREFILTER_MIN:
+            query = int.from_bytes(_sign_bits(vector), "little")
+            width = len(vector)
+            close = []
+            for row_id, bits in self.db.execute(f"SELECT v.{key}, v.bits {base}", params):
+                close.append((width - (query ^ int.from_bytes(bits, "little")).bit_count(), row_id))
+            close.sort(reverse=True)
+            chosen = [row_id for _, row_id in close[:PREFILTER_KEEP]]
+            rows = self.db.execute(
+                f"SELECT {key}, scale, q8 FROM {table} WHERE {key} IN (SELECT value FROM json_each(?))",
+                (json.dumps(chosen),))
+        else:
+            rows = self.db.execute(f"SELECT v.{key}, v.scale, v.q8 {base}", params)
+        found = {}
+        for row_id, scale, q8 in rows:
+            if scale:
+                found[row_id] = dot(vector, array("b", q8)) * scale
+        return found
+
+    @staticmethod
+    def _fuse(lexical, complete, cosines, told, limit, *, personal=True):
+        """Reciprocal-rank fusion of the word ranking and the meaning ranking,
+        with a small pull towards what was said most recently and towards the
+        closer meaning (rank alone cannot separate two rows sharing one word).
+
+        `lexical` ranks rows sharing any of the question's words; `complete`
+        holds those with every word. A row with every word is always a
+        candidate; a row with only some needs COSINE_FLOOR_PARTIAL; a row
+        found by meaning alone needs COSINE_FLOOR. Questions that are not
+        about the owner use the stricter _IMPERSONAL floors. Nothing near
+        enough means "I don't recall", never a guess.
+        """
+        lexical = list(lexical)[:HYBRID_POOL]
+        semantic = sorted(cosines, key=lambda row_id: (-cosines[row_id], -row_id))[:HYBRID_POOL]
+        words = set(lexical)
+        scores = {}
+        for rank, row_id in enumerate(lexical, 1):
+            scores[row_id] = scores.get(row_id, 0.0) + 1.0 / (RRF_K + rank)
+        for rank, row_id in enumerate(semantic, 1):
+            scores[row_id] = scores.get(row_id, 0.0) + 1.0 / (RRF_K + rank)
+        newest = max((told[row_id] for row_id in scores if row_id in told), default=None)
+        floor = COSINE_FLOOR if personal else COSINE_FLOOR_IMPERSONAL
+        partial = COSINE_FLOOR_PARTIAL if personal else COSINE_FLOOR_PARTIAL_IMPERSONAL
+        kept = []
+        for row_id, score in scores.items():
+            similarity = cosines.get(row_id)
+            if row_id in complete:
+                pass
+            elif row_id in words:
+                if similarity is not None and similarity < partial:
+                    continue
+            elif similarity is None or similarity < floor:
+                continue
+            if similarity is not None:
+                score += COSINE_WEIGHT * similarity
+            if newest is not None and row_id in told:
+                age_days = max(0.0, newest - told[row_id]) / 86_400
+                score += RECENCY_WEIGHT * 0.5 ** (age_days / RECENCY_HALF_LIFE_DAYS)
+            kept.append((score, row_id))
+        kept.sort(key=lambda entry: (-entry[0], -entry[1]))
+        ids = [row_id for _, row_id in kept]
+        return ids if limit < 0 else ids[:limit]
+
+    def _recall_hybrid(self, query, terms, limit):
+        vector = self._query_vector(query)
+        if vector is None:
+            return None
+        self._catch_up()
+        match = " OR ".join(f'"{t}"' for t in terms)
+        lexical = [row[0] for row in self.db.execute(
+            "SELECT f.id FROM facts_fts JOIN facts f ON f.id = facts_fts.rowid WHERE facts_fts MATCH ? "
+            "ORDER BY bm25(facts_fts), f.ts DESC LIMIT ?", (match, HYBRID_POOL))]
+        complete = {row[0] for row in self.db.execute(
+            "SELECT rowid FROM facts_fts WHERE facts_fts MATCH ? LIMIT ?",
+            (" AND ".join(f'"{t}"' for t in terms), HYBRID_POOL))} if len(terms) > 1 else set(lexical)
+        cosines = self._cosines("fact_vec", "fact_id", "", "1", (), vector)
+        pool = set(lexical) | set(cosines)
+        if not pool:
+            return []
+        rows = {row[0]: row for row in self.db.execute(
+            "SELECT id, ts, text, speaker, confidence, max(ts, coalesce(confirmed, ts)) FROM facts "
+            "WHERE id IN (SELECT value FROM json_each(?))", (json.dumps(sorted(pool)),))}
+        told = {row_id: row[5] for row_id, row in rows.items()}
+        cosines = {i: c for i, c in cosines.items() if i in rows}
+        ids = self._fuse([i for i in lexical if i in rows], complete, cosines, told, limit,
+                         personal=bool(_PERSONAL.search(query.replace("’", "'"))))
+        return [self._fact(rows[row_id]) for row_id in ids]
 
     def forget(self, fact_ids):
         """Delete facts for good, and blank the log entries they came from."""
@@ -965,6 +1628,18 @@ class Memory:
                     fact for fact, text, source in self.db.execute("SELECT id, text, source FROM facts")
                     if source in stale or (whole is not None and whole.search(text))
                 ))))
+                # Facts the dream promoted from these sentences go too, and are
+                # counted, so their words are scrubbed wherever they were said.
+                fact_ids = tuple(dict.fromkeys((*fact_ids, *(row[0] for row in self.db.execute(
+                    "SELECT c.fact_id FROM candidate_facts c JOIN candidate_sources s ON s.candidate_id = c.id "
+                    "WHERE c.fact_id IS NOT NULL AND s.episode_id IN (SELECT value FROM json_each(?))",
+                    (json.dumps(list(stale)),))))))
+            else:
+                # The owner's correction wins: the fact is theirs now, no
+                # longer the dream's, and the dream's candidate goes.
+                self.db.execute(
+                    "UPDATE candidate_facts SET fact_id = NULL WHERE fact_id IN (SELECT value FROM json_each(?))",
+                    (json.dumps(list(fact_ids)),))
             self._begin_deletion_batch()
             if replacement is None:
                 self._redact_episodes(stale)

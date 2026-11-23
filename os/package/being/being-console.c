@@ -808,6 +808,9 @@ static char key_character(SDL_Keysym key)
         return '\r';
     if (code == SDLK_BACKSPACE)
         return '\177';
+    /* A lone Esc leaves the typing chat (mind/type_chat.py). */
+    if (code == SDLK_ESCAPE)
+        return '\033';
     if (code >= SDLK_KP_1 && code <= SDLK_KP_9)
         return (char)('1' + code - SDLK_KP_1);
     if (code == SDLK_KP_0)
@@ -839,7 +842,9 @@ static bool handle_key(SDL_KeyboardEvent event, struct session *session, struct 
         terminal->scroll = SDL_clamp(position, 0, max_scroll(terminal));
         return true;
     }
-    if (kms || key.sym == SDLK_RETURN || key.sym == SDLK_KP_ENTER || key.sym == SDLK_BACKSPACE) {
+    /* SDL_TEXTINPUT never carries Enter, Backspace or Esc, so they come from here. */
+    if (kms || key.sym == SDLK_RETURN || key.sym == SDLK_KP_ENTER || key.sym == SDLK_BACKSPACE ||
+        key.sym == SDLK_ESCAPE) {
         char character = key_character(key);
         if (character) {
             enqueue(session, terminal, &character, 1);

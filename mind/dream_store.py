@@ -148,3 +148,152 @@ def journal(db_connection, owner, *, limit=20):
         (owner, limit),
     )
     return [JournalEntry(published_at, Episode(*source), revision) for published_at, revision, *source in rows]
+
+
+# -- candidates from the dream model ------------------------------------------
+#
+# What the dream model found, after dream_verify passed it. A candidate is
+# never told as a fact. It is promoted when it is found again, from a
+# different sentence, on a later night, or when the owner confirms it. Each
+# rests on the exact quotes it came from: forgetting any of those sentences
+# takes the candidate, and anything derived from it, with it.
+
+PROMOTED_CONFIDENCE = 0.7
+_MODEL_CURSOR = "dream_model_through:"
+
+
+@dataclass(frozen=True)
+class Candidate:
+    id: int
+    kind: str
+    claim: str
+    modality: str
+    status: str
+    first_night: str
+    last_night: str
+    quotes: tuple  # ((episode id, quote), ...)
+    fact_id: int | None = None
+
+
+def claim_key(text):
+    """Two claims are the same claim when their words of substance agree
+    (stemmed, in any order, a negation kept apart): the model seldom words a
+    recurring fact identically on two nights."""
+    from .dream_verify import claim_signature
+
+    return claim_signature(text)
+
+
+def dream_cursor(memory, owner):
+    """The last episode the dream model has read for `owner`."""
+    row = memory.db.execute("SELECT value FROM meta WHERE key = ?", (_MODEL_CURSOR + owner,)).fetchone()
+    try:
+        return int(row[0]) if row else 0
+    except ValueError:
+        return 0
+
+
+def save_candidates(memory, owner, items, *, night, through=None):
+    """Store checked items as candidates, and move the cursor, together.
+
+    Returns the ids of candidates promoted by this save (found again on a
+    later night from a different sentence). An item whose sentence has gone
+    since it was read is dropped.
+    """
+    promoted = []
+    db = memory.db
+    stamp = time.time()
+    with _background_transaction(db, "BEGIN IMMEDIATE"):
+        for item in items:
+            alive = db.execute(
+                "SELECT 1 FROM episodes WHERE id = ? AND text NOT IN ('', '[forgotten]') AND instr(text, ?) > 0",
+                (item.episode_id, item.quote)).fetchone()
+            if not alive:
+                continue
+            key = claim_key(item.claim)
+            row = db.execute(
+                "SELECT id, status, first_night FROM candidate_facts WHERE owner = ? AND claim_key = ?",
+                (owner, key)).fetchone()
+            if row is None:
+                candidate = db.execute(
+                    "INSERT INTO candidate_facts (owner, kind, claim, claim_key, modality, first_night, last_night, "
+                    "created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (owner, item.kind, item.claim, key, item.modality, night, night, stamp)).lastrowid
+                db.execute("INSERT OR IGNORE INTO candidate_sources VALUES (?, ?, ?, ?)",
+                           (candidate, item.episode_id, night, item.quote))
+                continue
+            candidate, status, first_night = row
+            earlier = db.execute(
+                "SELECT 1 FROM candidate_sources WHERE candidate_id = ? AND night < ? AND episode_id <> ?",
+                (candidate, night, item.episode_id)).fetchone()
+            db.execute("INSERT OR IGNORE INTO candidate_sources VALUES (?, ?, ?, ?)",
+                       (candidate, item.episode_id, night, item.quote))
+            db.execute("UPDATE candidate_facts SET last_night = max(last_night, ?) WHERE id = ?", (night, candidate))
+            if status == "candidate" and earlier:
+                _promote(db, candidate, owner, stamp)
+                promoted.append(candidate)
+        if through is not None:
+            db.execute(
+                "INSERT INTO meta VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (_MODEL_CURSOR + owner, str(int(through))))
+    return promoted
+
+
+def _promote(db, candidate, owner, stamp):
+    """Make a candidate a fact, linked to every sentence it rests on."""
+    from .memory import normalize
+
+    claim, = db.execute("SELECT claim FROM candidate_facts WHERE id = ?", (candidate,)).fetchone()
+    sources = [row[0] for row in db.execute(
+        "SELECT episode_id FROM candidate_sources WHERE candidate_id = ? ORDER BY episode_id", (candidate,))]
+    known = next((fact_id for fact_id, text in db.execute("SELECT id, text FROM facts")
+                  if normalize(text) == normalize(claim)), None)
+    if known is None:
+        fact = db.execute(
+            "INSERT INTO facts (ts, text, speaker, source, confidence) VALUES (?, ?, ?, ?, ?)",
+            (stamp, " ".join(claim.split()), owner, sources[-1] if sources else None, PROMOTED_CONFIDENCE)).lastrowid
+        db.executemany("INSERT OR IGNORE INTO fact_tellings VALUES (?, ?)", ((fact, source) for source in sources))
+    else:
+        # The owner already said it: their own fact stays theirs, and is not
+        # tied to the dream's quotes.
+        fact = None
+    db.execute("UPDATE candidate_facts SET status = 'promoted', promoted = ?, fact_id = ? WHERE id = ?",
+               (stamp, fact, candidate))
+    return fact
+
+
+def confirm_candidate(memory, candidate_id, owner):
+    """The owner said yes: promote it now. Returns the new fact id, or None."""
+    with _background_transaction(memory.db, "BEGIN IMMEDIATE"):
+        row = memory.db.execute(
+            "SELECT status FROM candidate_facts WHERE id = ? AND owner = ?", (candidate_id, owner)).fetchone()
+        if row is None or row[0] != "candidate":
+            return None
+        return _promote(memory.db, candidate_id, owner, time.time())
+
+
+def derive(memory, child_id, parents):
+    """Record that candidate `child_id` was made from `parents`, a list of
+    ("episode" | "fact" | "candidate" | "diary_topic", id): it lives only while
+    every one of them does."""
+    with memory.db:
+        memory.db.executemany(
+            "INSERT OR IGNORE INTO derivations VALUES ('candidate', ?, ?, ?)",
+            ((child_id, kind, parent_id) for kind, parent_id in parents))
+
+
+def candidates(db, owner, *, status=None, night=None, limit=50):
+    """Stored candidates, newest night first, with their quotes."""
+    rows = db.execute(
+        "SELECT id, kind, claim, modality, status, first_night, last_night, fact_id FROM candidate_facts "
+        "WHERE owner = ? AND (? IS NULL OR status = ?) AND (? IS NULL OR last_night = ?) "
+        "ORDER BY last_night DESC, id DESC LIMIT ?",
+        (owner, status, status, night, night, limit)).fetchall()
+    found = []
+    for row_id, kind, claim, modality, state, first, last, fact in rows:
+        quotes = tuple(db.execute(
+            f"SELECT s.episode_id, s.quote FROM candidate_sources s JOIN episodes e ON e.id = s.episode_id "
+            f"WHERE s.candidate_id = ? AND {_HISTORY} ORDER BY s.episode_id", (row_id,)))
+        if quotes:
+            found.append(Candidate(row_id, kind, claim, modality, state, first, last, quotes, fact))
+    return found

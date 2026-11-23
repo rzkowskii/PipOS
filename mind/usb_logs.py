@@ -4,9 +4,11 @@ The laptop Try image carries a small FAT32 partition (GPT name ``try-logs``,
 volume label ``PIPLOGS``) after its model partition. On every Try boot
 ``being-usb-logs run`` mounts it, makes one folder per boot and keeps there:
 
-* ``summary.txt``: the obvious answers first (CPU, GPU driver and renderer,
-  audio, lid, battery, camera, Wi-Fi chip and firmware, failed units);
-* ``hardware-report.txt``: what /proc and /sys show about the machine;
+* ``summary.txt``: the obvious answers first (microphone level and mixer,
+  CPU, GPU driver and renderer, audio, lid, battery, camera, Wi-Fi chip and
+  firmware, failed units);
+* ``hardware-report.txt``: what /proc and /sys show about the machine, and
+  the sound card's whole mixer;
 * ``dmesg.txt`` and ``services.txt``: kernel log and unit states;
 * ``journal.txt``: the system journal, copied as it is written and synced
   every few seconds, so a crash or a power cut still leaves most of it.
@@ -14,10 +16,16 @@ volume label ``PIPLOGS``) after its model partition. On every Try boot
 The partition is only ever looked for on the disk that holds the running
 root file system, and only when that disk is attached over USB. Nothing here
 opens, mounts or writes any other disk.
+
+``being-usb-logs mic-test`` measures the microphone for three seconds, once,
+early in a Try boot before the voice organ listens (being-audio-init runs it).
+The sound stays in memory and only its peak and RMS level are kept.
 """
 
 import argparse
+import array
 import json
+import math
 import os
 import re
 import selectors
@@ -49,12 +57,20 @@ NOTABLE = (
     ("firmware", re.compile(r"firmware", re.I)),
     ("wifi", re.compile(r"\b(b43|bcma|brcm|wlan\d|wl\b|cfg80211)", re.I)),
     ("graphics", re.compile(r"\b(i915|drm|crocus|mesa|EGL|kmsdrm)", re.I)),
-    ("audio", re.compile(r"\b(snd_hda|hda[-_ ]|ALSA|cs420)", re.I)),
+    ("audio", re.compile(r"\b(snd_hda|hda[-_ ]|ALSA|cs420)|being-audio-init: (WARNING|done|no |mic )", re.I)),
     ("smc", re.compile(r"applesmc", re.I)),
     ("failed", re.compile(r"Failed with result|Failed to start|failed to load|core-dump|segfault|"
                           r"Scheduled restart job|Out of memory|Kernel panic|BUG:|Oops|watchdog", re.I)),
 )
 NOTABLE_KEEP = 40
+AUDIO_RUN = Path("run/being-audio")   # under the root: written by being-audio-init
+MIC_RESULT = Path("/") / AUDIO_RUN / "mic-level.json"
+MIC_SECONDS = 3
+MIC_RATE = 16000
+MIC_SETTLE = 0.1                      # seconds left out at the start, while the ADC ramps up
+MIC_CHANNEL_SECONDS = 1               # the short two-channel look at left against right
+CHANNEL_NAMES = ("Mono", "Front Left", "Front Right", "Rear Left", "Rear Right", "Front Center",
+                 "Woofer", "Side Left", "Side Right", "Rear Center")
 
 
 # --- small readers -----------------------------------------------------------
@@ -664,6 +680,155 @@ def sound(root):
     return cards, codecs, read(root / "proc/asound/pcm") or ""
 
 
+def simple_mixer(root):
+    """``amixer -c 0 scontents`` now, or the copy being-audio-init kept."""
+    text = run(["amixer", "-c", "0", "scontents"]) if root == Path("/") else None
+    if not text or "Simple mixer control" not in text:
+        text = read(root / AUDIO_RUN / "scontents")
+    return text
+
+
+def card_controls(root):
+    """``amixer -c 0 contents`` now, or the copy being-audio-init kept."""
+    text = run(["amixer", "-c", "0", "contents"]) if root == Path("/") else None
+    if not text or "numid=" not in text:
+        text = read(root / AUDIO_RUN / "contents")
+    return text
+
+
+def jack_line(text):
+    """What the codec senses in its sockets, from ``amixer contents``: 'Headphone Jack unplugged'."""
+    found, name = [], None
+    for line in (text or "").splitlines():
+        head = re.match(r"numid=\d+,iface=\w+,name='(.*)'", line)
+        if head:
+            name = head[1]
+            continue
+        value = re.match(r"\s*: values=(\w+)", line)
+        if value and name and name.endswith(" Jack") and not name.startswith("HDMI"):
+            found.append(f"{name} {'plugged' if value[1] == 'on' else 'unplugged' if value[1] == 'off' else value[1]}")
+            name = None
+    return "; ".join(found)
+
+
+def mixer_controls(text):
+    """Parse ``amixer scontents``: name, index, capabilities, limits, per-channel values."""
+    controls, current = [], None
+    for line in (text or "").splitlines():
+        head = re.match(r"Simple mixer control '(.*)',(\d+)\s*$", line)
+        if head:
+            current = {"name": head[1], "index": int(head[2]), "caps": [], "limits": "",
+                       "item": None, "values": []}
+            controls.append(current)
+            continue
+        if current is None:
+            continue
+        text_ = line.strip()
+        key, _, rest = text_.partition(":")
+        if key == "Capabilities":
+            current["caps"] = rest.split()
+        elif key == "Limits":
+            current["limits"] = rest.strip()
+        elif re.fullmatch(r"Item\d+", key):
+            current["item"] = rest.strip().strip("'")
+        elif key in CHANNEL_NAMES:
+            for part in re.finditer(r"(?:(Playback|Capture) )?(-?\d+) \[(\d+)%\](?: \[(-?[\d.]+)dB\])?"
+                                    r"(?: \[(on|off)\])?", rest):
+                current["values"].append({"channel": key, "dir": part[1], "raw": int(part[2]),
+                                          "percent": int(part[3]), "db": part[4], "switch": part[5]})
+    return controls
+
+
+def mixer_line(text):
+    """The controls that decide whether Pip hears and is heard, on one line."""
+    controls = mixer_controls(text)
+    if not controls:
+        return "not read (no amixer output for card 0)"
+    wanted = ("master", "speaker", "bass speaker", "headphone", "pcm", "front", "capture", "digital")
+
+    def key(control):
+        name = control["name"].lower()
+        if name in wanted:
+            return wanted.index(name)
+        if "boost" in name:
+            return len(wanted)
+        if name in ("input source", "capture source") or "mic" in name:
+            return len(wanted) + 1
+        if name == "auto-mute mode":     # with a headphone sensed, the speakers go quiet
+            return len(wanted) + 2
+        return None
+
+    shown = sorted((c for c in controls if key(c) is not None), key=lambda c: (key(c), c["index"]))
+    parts = []
+    for control in shown:
+        name = control["name"] + (f",{control['index']}" if control["index"] else "")
+        if control["item"] is not None and not control["values"]:
+            parts.append(f"{name} '{control['item']}'")
+            continue
+        top = re.findall(r"\d+", control["limits"])
+        each = []
+        for value in control["values"]:
+            if "boost" in control["name"].lower() and top:
+                text_ = f"{value['raw']}/{top[-1]}"
+            else:
+                text_ = f"{value['percent']}%"
+            if value["db"] is not None:
+                text_ += f" {value['db']}dB"
+            if value["switch"]:
+                text_ += f" {value['switch']}"
+            each.append((value["channel"], text_))
+        if not each:
+            continue
+        if len({text_ for _, text_ in each}) == 1:
+            parts.append(f"{name} {each[0][1]}")
+        else:
+            short = {"Front Left": "L", "Front Right": "R"}
+            parts.append(f"{name} " + " / ".join(f"{short.get(ch, ch)} {text_}" for ch, text_ in each))
+    return "; ".join(parts) or "no playback or capture controls on card 0"
+
+
+def mic_result(root):
+    text = read(root / AUDIO_RUN / "mic-level.json", 16384)
+    if not text:
+        return None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def decibels(value):
+    return "-inf" if value is None else f"{value:.1f}"
+
+
+def mic_line(result):
+    """'peak X dBFS, rms Y dBFS (...)' from a mic-test result, or why there is none."""
+    if not result:
+        return "not measured on this boot (being-audio-init measures it before the voice starts)"
+    if result.get("status") != "ok":
+        return f"not measured: {result.get('detail') or result.get('status') or 'unknown'}"
+    peak, rms = result.get("peak_dbfs"), result.get("rms_dbfs")
+    if peak is None:
+        verdict = "SILENT: every sample was zero, so capture is muted or the input is wrong"
+    elif peak >= -1.0:
+        verdict = "CLIPPING: the input gain is too high"
+    elif rms is not None and rms < -85:
+        verdict = "nearly silent: the microphone may be muted or not connected"
+    else:
+        verdict = "sound present"
+    text = (f"peak {decibels(peak)} dBFS, rms {decibels(rms)} dBFS ({verdict}; "
+            f"{result.get('seconds', MIC_SECONDS)} s of room sound at {result.get('at', 'an unknown time')} "
+            f"after power-on")
+    channels = result.get("channels") or []
+    if len(channels) == 2:
+        left, right = (c.get("rms_dbfs") for c in channels)
+        text += f"; left rms {decibels(left)}, right rms {decibels(right)} dBFS"
+        if left is None or right is None or abs(left - right) > 15:
+            text += ", ONE SIDE much weaker"
+    return text + ")"
+
+
 def section(title, body):
     body = body if isinstance(body, str) else json.dumps(body, indent=1, ensure_ascii=False)
     return f"===== {title} =====\n{body.rstrip()}\n\n"
@@ -699,6 +864,9 @@ def hardware_report(root=Path("/"), *, slow=False, load=False):
     add("alsa cards", lambda: sound(root)[0])
     add("alsa codecs", lambda: sound(root)[1])
     add("alsa pcm", lambda: sound(root)[2])
+    add("alsa mixer (amixer -c 0 scontents)", lambda: simple_mixer(root))
+    add("alsa mixer controls (amixer -c 0 contents)", lambda: card_controls(root))
+    add("microphone level test", lambda: mic_result(root))
     add("input devices", lambda: read(root / "proc/bus/input/devices"))
     add("lid", lambda: lid_state(root))
     add("hwmon (applesmc, coretemp, ...)", lambda: hwmon(root))
@@ -724,8 +892,37 @@ def hardware_report(root=Path("/"), *, slow=False, load=False):
     add("SSD health (smartctl)", lambda: (run(["smartctl", "-H", "-A", "/dev/sda"])
                                           or "(smartctl is not on this image)") if root == Path("/") else None)
     add("mounts", lambda: read(root / "proc/self/mounts"))
+    add("kernel features (cgroups, pressure)", lambda: kernel_features(root))
     add("loaded modules", lambda: read(root / "proc/modules"))
     return scrub("".join(parts))
+
+
+# The kernel options the units rely on: CPUWeight= and CPUQuota= need the cpu
+# controller, MemoryMax= the memory one, TasksMax= pids; the doctor reads PSI.
+KERNEL_OPTIONS = ("CONFIG_CGROUP_SCHED", "CONFIG_FAIR_GROUP_SCHED", "CONFIG_CFS_BANDWIDTH", "CONFIG_MEMCG",
+                  "CONFIG_CGROUP_PIDS", "CONFIG_PSI", "CONFIG_BPF_SYSCALL", "CONFIG_CGROUP_BPF",
+                  "CONFIG_PCI_MSI", "CONFIG_PCIEPORTBUS")
+
+
+def kernel_features(root=Path("/")):
+    """Which cgroup controllers are live, whether pressure readings exist, and
+    the options above from /proc/config.gz when the kernel ships it."""
+    found = {"cgroup controllers": (read(root / "sys/fs/cgroup/cgroup.controllers") or "").split() or None,
+             "cpu pressure (/proc/pressure/cpu)": (root / "proc/pressure/cpu").exists()}
+    config = root / "proc/config.gz"
+    if config.is_file():
+        import gzip
+
+        options = {}
+        with gzip.open(config, "rt", errors="replace") as text:
+            for line in text:
+                name = line.split("=", 1)[0].removeprefix("# ").split(" ", 1)[0].strip()
+                if name in KERNEL_OPTIONS:
+                    options[name] = line.strip().split("=", 1)[1] if "=" in line else "not set"
+        found["kernel config"] = {name: options.get(name, "not set") for name in KERNEL_OPTIONS}
+    else:
+        found["kernel config"] = "(no /proc/config.gz on this kernel)"
+    return found
 
 
 # --- the summary ------------------------------------------------------------
@@ -738,7 +935,7 @@ KNOWN = {
 }
 
 
-def summary(root=Path("/"), *, boot=None, notable=None, journal_bytes=None, failed_units=None):
+def summary(root=Path("/"), *, boot=None, notable=None, journal_bytes=None, failed_units=None, mixer=None):
     notable = notable or {}
     lines = []
 
@@ -752,6 +949,11 @@ def summary(root=Path("/"), *, boot=None, notable=None, journal_bytes=None, fail
             lines.append(f"{'(error)':<16}{error!r}")
             return default
 
+    # Hearing and voice first: they are what a silent Pip needs answered.
+    say("Mic level", guard(lambda: mic_line(mic_result(root)), "unreadable"))
+    say("Mixer", guard(lambda: "; ".join(part for part in (
+        mixer_line(mixer if mixer is not None else simple_mixer(root)),
+        jack_line(card_controls(root))) if part), "unreadable"))
     machine = guard(lambda: dmi(root))
     if isinstance(machine, dict):
         say("Machine", " ".join(v for v in (machine["sys_vendor"], machine["product_name"]) if v) or "unknown")
@@ -1100,6 +1302,84 @@ def serve():
     return 0
 
 
+# --- the microphone level test -----------------------------------------------
+
+def levels(data, channels=1, skip=0):
+    """Peak and RMS, in dBFS, of each channel of S16_LE audio held in memory."""
+    data = data[:len(data) - len(data) % (2 * channels)]
+    samples = array.array("h")
+    samples.frombytes(data)
+    if sys.byteorder == "big":
+        samples.byteswap()
+    found = []
+    for channel in range(channels):
+        chosen = samples[skip * channels + channel::channels]
+        if not chosen:
+            found.append({"peak_dbfs": None, "rms_dbfs": None, "samples": 0})
+            continue
+        peak = max(max(chosen), -min(chosen))
+        rms = math.sqrt(sum(value * value for value in chosen) / len(chosen))
+
+        def dbfs(value):
+            return round(20 * math.log10(value / 32768), 1) if value > 0 else None
+        found.append({"peak_dbfs": dbfs(peak), "rms_dbfs": dbfs(rms), "samples": len(chosen)})
+    return found
+
+
+def record(device, channels, seconds):
+    """(returncode, audio bytes, error text) from arecord, kept in memory only."""
+    if not shutil.which("arecord"):
+        return None, b"", "arecord is not installed"
+    command = ["arecord", "-q", "-D", device, "-t", "raw", "-f", "S16_LE", "-r", str(MIC_RATE),
+               "-c", str(channels), "-d", str(seconds)]
+    try:
+        done = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=seconds + 5, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        return None, b"", f"arecord failed: {error}"
+    return done.returncode, done.stdout, done.stderr.decode("utf-8", "replace")
+
+
+def voice_listening():
+    state = (run(["systemctl", "is-active", "being-voice.service"], timeout=3) or "").strip()
+    return state in ("active", "activating", "reloading", "deactivating")
+
+
+def mic_test(card=0, *, recorder=record, listening=voice_listening, root=Path("/")):
+    """Measure the microphone once while Pip is not listening. Returns levels, never audio."""
+    device = f"plughw:{card},0"
+    result = {"device": device, "seconds": MIC_SECONDS, "at": uptime(root), "status": "failed"}
+    if listening():
+        result.update(status="skipped", detail="the voice organ was already listening")
+        return result
+    code, data, error = recorder(device, 1, MIC_SECONDS)
+    if code is None:
+        result["detail"] = error
+    elif "busy" in error.lower():
+        result.update(status="busy", detail="the capture device was busy")
+    elif code != 0 or len(data) < MIC_RATE:     # under half a second came back
+        result["detail"] = f"arecord exit {code}: {' '.join(error.split())[:200] or 'no sound came back'}"
+    else:
+        mono = levels(data, 1, skip=int(MIC_RATE * MIC_SETTLE))[0]
+        result.update(status="ok", peak_dbfs=mono["peak_dbfs"], rms_dbfs=mono["rms_dbfs"])
+        # Some MacBooks wire the internal mic to one side only: say which side carries it.
+        code, both, _ = recorder(device, 2, MIC_CHANNEL_SECONDS)
+        if code == 0 and len(both) >= MIC_RATE * 2:
+            result["channels"] = [{"peak_dbfs": c["peak_dbfs"], "rms_dbfs": c["rms_dbfs"]}
+                                  for c in levels(both, 2, skip=int(MIC_RATE * MIC_SETTLE))]
+        del both
+    del data
+    return result
+
+
+def save_mic_result(result, path=MIC_RESULT):
+    path = Path(path)
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".new")
+    temporary.write_text(json.dumps(result, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
 def save_check(menu_report=None):
     """Save a 'Check hardware' result to the stick. Returns the file, or None.
 
@@ -1251,7 +1531,18 @@ def main(argv=None):
     commands.add_parser("report", help="print the hardware report")
     commands.add_parser("summary", help="print the summary")
     commands.add_parser("check", help="save a hardware check to this boot's folder on the stick")
+    test = commands.add_parser("mic-test", help="measure the microphone level once (levels only, no audio kept)")
+    test.add_argument("--card", type=int, default=0)
+    test.add_argument("--out", default=str(MIC_RESULT))
     args = parser.parse_args(argv)
+    if args.command == "mic-test":
+        try:
+            result = mic_test(args.card)
+            save_mic_result(result, args.out)
+            log(f"mic level: {mic_line(result)}")
+        except Exception as error:      # a diagnostic never fails the boot
+            log(f"mic level: not measured: {error!r}")
+        return 0
     if args.command == "run":
         return serve()
     if args.command == "report":

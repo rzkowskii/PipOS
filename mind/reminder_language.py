@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
+from .reminders import WEEKDAYS as _RULE_DAYS, next_occurrence, wall_stamp
+
 
 @dataclass(frozen=True)
 class ReminderRequest:
@@ -14,6 +16,8 @@ class ReminderRequest:
     message: str = ""
     item_kind: str | None = None
     duration_seconds: int | None = None
+    rule: str | None = None         # "daily", "weekdays" or "weekly:mon"; None rings once
+    at_local: str | None = None     # a repeat's wall-clock time, "07:00"
 
 
 class _ScheduleError(ValueError):
@@ -21,7 +25,7 @@ class _ScheduleError(ValueError):
 
 
 _POLITE = r"(?:(?:can|could|would) you )?"
-_ITEMS = r"(?:reminders|timers)"
+_ITEMS = r"(?:reminders|timers|alarms)"
 _SET = re.compile(_POLITE + r"(?:remind me|(?:set (?:me )?a|create a) reminder)\b", re.I)
 _LIST = re.compile(
     _POLITE + rf"(?:(?:list|show|read)(?: me)?(?: my| the)? (?:upcoming )?{_ITEMS}"
@@ -29,7 +33,8 @@ _LIST = re.compile(
     rf"|(?:do i have )?(?:any|upcoming) {_ITEMS})", re.I,
 )
 _CANCEL = re.compile(
-    _POLITE + r"(?:cancel|delete|remove) (?:my |the )?(reminders?|timers?)(?: (.+))?", re.I
+    _POLITE + r"(?:cancel|delete|remove|clear) (?:my |the |all my |all of my )?(?:(?:next|morning|wake ?up) )?"
+    r"(reminders?|timers?|alarms?)(?: (.+))?", re.I
 )
 _TIMER = re.compile(
     _POLITE + r"(?:start|set)(?: a| an)? (?:timer(?: for(?: (.+))?)?|(.+) timer)", re.I,
@@ -37,7 +42,12 @@ _TIMER = re.compile(
 _COMMAND_START = re.compile(
     _POLITE + r"(?:remind\b"
     r"|(?:set|start|create)(?: me)?(?: a| an)?(?: (?:reminder|timer)\b|$)"
-    r"|(?:cancel|delete|remove)(?: my| the)?(?: (?:reminders?|timers?)\b|$)"
+    r"|(?:cancel|delete|remove)(?: my| the)?(?: (?:reminders?|timers?|alarms?)\b|$)"
+    r"|wake me\b|(?:set|create)(?: me)?(?: an?| my| the)?(?: (?:daily |morning |wake ?up )?alarm\b|$)"
+    r"|(?:every|each) (?:single )?(?:day|morning|afternoon|evening|night|weekday|week|work|mon|tue|wed|thu|fri|sat|sun)"
+    r"|on weekdays\b"
+    r"|how (?:long|much time)(?: is)? (?:left|remaining|until|till|before|to go)\b|how long (?:has|does) (?:my|the)\b"
+    r"|when(?:'s| is| does) (?:my|the) (?:next )?(?:alarm|reminder|timer)\b|what time is my alarm\b"
     rf"|(?:list|show|read)(?: me)?(?: my| the)?(?: upcoming)?(?: {_ITEMS}\b|$)"
     rf"|what (?:are my(?: upcoming)?(?: {_ITEMS}\b|$)|{_ITEMS}\b)"
     rf"|do i have(?: any)?(?: {_ITEMS}\b|$)|any {_ITEMS}\b)", re.I,
@@ -62,7 +72,8 @@ _DAY_FIRST = re.compile(rf"(?P<day>{_DAY})(?: (?:at )?(?P<clock>.+))?")
 _DAY_LAST = re.compile(rf"(?P<clock>.+?) (?P<day>{_DAY})")
 _SCHEDULE_START = re.compile(rf"(?<!\S)(?:in|at|for|{_DAY})\b", re.I)
 _MERIDIEM = re.compile(r"(?<=[0-9\s])([ap])\.?\s*m\.?$")
-_DIGITAL_CLOCK = re.compile(r"([0-9]{1,2})(?::([0-9]{2}))?")
+_DIGITAL_CLOCK = re.compile(r"([0-9]{1,2})(?:[:.]([0-9]{2}))?")
+_PAST_TO = re.compile(r"(?:a )?(?P<part>half|quarter) (?P<way>past|to) (?P<hour>[\w-]+)")
 _UNITS = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
 _DURATION = re.compile(r"(.+?) (seconds?|minutes?|hours?|days?)")
 _DURATION_WORDS = {*_SMALL, *_TENS, *_UNITS, *(unit + "s" for unit in _UNITS), "a", "an", "and", "half", "timer"}
@@ -70,6 +81,8 @@ _DURATION_WORDS = {*_SMALL, *_TENS, *_UNITS, *(unit + "s" for unit in _UNITS), "
 _ASK_TIME = "When should I remind you? Try saying, remind me to call Mum in ten minutes."
 _ASK_TASK = "What should I remind you to do? Include the task and time in the same request."
 _ASK_TIMER = "How long should the timer run? Try saying, set a timer for ten minutes."
+_ASK_ALARM = "What time should I wake you? Try saying, wake me up at 7."
+_ASK_REPEAT_TIME = "What time should I remind you? Try saying, every weekday at 7, remind me to take my tablets."
 
 
 def _number(value):
@@ -103,14 +116,30 @@ def _duration_seconds(text):
     return seconds
 
 
-def _clock(text):
-    if text in ("noon", "midnight"):
-        return time(12 if text == "noon" else 0)
+def duration_seconds(text):
+    """A spoken length ("ten minutes", "half an hour") in seconds, or None."""
+    return _duration_seconds(" ".join(text.casefold().split()))
+
+
+def _clock_parts(text):
+    """(hour, minute, meridiem, leading_zero) as said, or None. Meridiem is "a", "p" or None."""
+    if text in ("noon", "midday", "midnight"):
+        return (0 if text == "midnight" else 12), 0, "24", False
     suffix = _MERIDIEM.search(text)
     if suffix:
         text = text[:suffix.start()].strip()
-    text = text.removesuffix(" o'clock")
-    if match := _DIGITAL_CLOCK.fullmatch(text):
+    text = text.removesuffix(" o'clock").removesuffix(" oclock")
+    if spoken := _PAST_TO.fullmatch(text):
+        # "Half past six", "quarter to seven": the hour on a 12-hour clock.
+        base = _number(spoken["hour"])
+        if base is None or not 1 <= base <= 12 or (spoken["part"], spoken["way"]) == ("half", "to"):
+            return None
+        if spoken["way"] == "to":
+            hour, minute = (base - 1) or 12, 45
+        else:
+            hour, minute = base, 30 if spoken["part"] == "half" else 15
+        leading_zero = False
+    elif match := _DIGITAL_CLOCK.fullmatch(text):
         digits, minutes = match.groups()
         hour, minute = int(digits), int(minutes or 0)
         leading_zero = digits.startswith("0") and len(digits) == 2
@@ -127,13 +156,56 @@ def _clock(text):
                     break
     if hour is None or hour > 23 or minute > 59:
         return None
-    if suffix:
-        if not 1 <= hour <= 12:
-            return None
-        hour = hour % 12 + (12 if suffix[1] == "p" else 0)
-    elif 1 <= hour <= 12 and not leading_zero:
+    meridiem = suffix[1] if suffix else None
+    if meridiem and not 1 <= hour <= 12:
+        return None
+    return hour, minute, meridiem, leading_zero
+
+
+def _clock(text):
+    parts = _clock_parts(text)
+    if parts is None:
+        return None
+    hour, minute, meridiem, leading_zero = parts
+    if meridiem in ("a", "p"):
+        hour = hour % 12 + (12 if meridiem == "p" else 0)
+    elif meridiem is None and 1 <= hour <= 12 and not leading_zero:
         raise _ScheduleError("Did you mean a.m. or p.m.? Please repeat the request with the full time.")
     return time(hour, minute)
+
+
+_PART_OF_DAY = re.compile(r" (?:in the (?P<am>morning)|in the (?P<pm>afternoon|evening)|at (?P<night>night)|(?P<tonight>tonight))$")
+
+
+def _hours_for(text, hint=None):
+    """The hours a spoken clock can mean, for alarms and repeats, which never ask a.m. or p.m.
+
+    Returns (candidates, minute) or None. A bare 1 to 12 with no hint means
+    both halves of the day; the caller chooses.
+    """
+    if part := _PART_OF_DAY.search(text):
+        hint = "a" if part["am"] else "p"
+        text = text[:part.start()]
+    parts = _clock_parts(text.strip())
+    if parts is None:
+        return None
+    hour, minute, meridiem, leading_zero = parts
+    if meridiem in ("a", "p"):
+        return [hour % 12 + (12 if meridiem == "p" else 0)], minute
+    if meridiem == "24" or leading_zero or not 1 <= hour <= 12:
+        return [hour], minute
+    if hint in ("a", "p"):
+        return [hour % 12 + (12 if hint == "p" else 0)], minute
+    return [hour % 12, hour % 12 + 12], minute
+
+
+def _usual_hour(candidates):
+    """One hour from a bare clock, the way people mean a routine: 6 to 11 in the
+    morning, 12 at noon, 1 to 5 in the afternoon."""
+    if len(candidates) == 1:
+        return candidates[0]
+    morning = candidates[0]
+    return morning if 6 <= morning <= 11 else morning + 12 if 1 <= morning <= 5 else 12
 
 
 def _calendar_day(label, today):
@@ -205,6 +277,17 @@ def _schedule(text, now):
 def _create_request(rest, now):
     if rest[:3].casefold() == "to ":
         task_with_time = rest[3:]
+        # Repeat phrases are found in a copy of the same length, so each
+        # position also splits the original ("call Mum, Dad, and Sue every Sunday").
+        aligned = task_with_time.replace(",", " ").replace("’", "'").lower()
+        if len(aligned) != len(task_with_time):
+            aligned = task_with_time
+        starts = sorted({match.start() for match in _SCHEDULE_START.finditer(task_with_time)}
+                        | {match.start() for match in _REPEAT.finditer(aligned)})
+        for start in starts:
+            task = task_with_time[:start].rstrip(" ,")
+            if task and (schedule := _repeat_schedule(task_with_time[start:])) is not None:
+                return _repeat_request("create", task, schedule, now)
         for match in _SCHEDULE_START.finditer(task_with_time):
             task = task_with_time[:match.start()].rstrip(" ,")
             if task and (stamp := _schedule(task_with_time[match.start():], now)) is not None:
@@ -215,10 +298,140 @@ def _create_request(rest, now):
     task = task_part[0].strip(" ,") if task_part else ""
     if not task:
         return ReminderRequest("clarify", message=_ASK_TASK)
+    if (schedule := _repeat_schedule(time_text)) is not None:
+        return _repeat_request("create", task, schedule, now)
     stamp = _schedule(time_text, now)
     if stamp is None:
         return ReminderRequest("clarify", message=_ASK_TIME)
     return ReminderRequest("create", task, stamp)
+
+
+_REPEAT = re.compile(
+    r"(?:(?:every|each) (?:single )?(?P<span>day|morning|afternoon|evening|night|weekday|week ?day|work ?day)"
+    rf"|(?:every|each) (?:week on )?(?P<weekday>{'|'.join(_WEEKDAYS)})"
+    rf"|on (?P<plural>weekdays|{'|'.join(day + 's' for day in _WEEKDAYS)})"
+    r"|(?P<daily>daily)|(?P<weekdays>weekdays))(?=$|[ ,])"
+)
+_REPEAT_FIRST = re.compile(
+    r"(?P<pre>(?:every|each|on weekdays|on \w+days|daily|weekdays)\b.*?)[, ]+"
+    r"(?P<cmd>(?:(?:can|could|would) you )?(?:please )?(?:remind me|wake me|set (?:an?|my|the) alarm)\b.*)", re.I
+)
+_RULE_SPOKEN = {"daily": "every day", "weekdays": "every weekday"}
+
+
+def spoken_rule(rule):
+    """'every weekday', 'every Tuesday': a rule as it is said back."""
+    if rule in _RULE_SPOKEN:
+        return _RULE_SPOKEN[rule]
+    return "every " + _WEEKDAYS[_RULE_DAYS.index(rule.removeprefix("weekly:"))].capitalize()
+
+
+def _rule_of(match):
+    """(rule, meridiem hint) for one repeat phrase."""
+    if match["weekday"] or (match["plural"] and match["plural"] != "weekdays"):
+        day = (match["weekday"] or match["plural"].removesuffix("s"))
+        return f"weekly:{day[:3]}", None
+    if match["weekdays"] or match["plural"] == "weekdays":
+        return "weekdays", None
+    span = (match["span"] or "day").replace(" ", "")
+    if span in ("weekday", "workday"):
+        return "weekdays", None
+    return "daily", {"morning": "a", "afternoon": "p", "evening": "p", "night": "p"}.get(span)
+
+
+def _norm(text):
+    return re.sub(r"\s*,\s*", " ", text).casefold().replace("’", "'").strip()
+
+
+def _repeat_schedule(text, rule=None, hint=None):
+    """(rule, "HH:MM") for "every weekday at 7" or "at 7 pm every Tuesday", or None.
+
+    Raises when a whole repeat is said with no time ("every day").
+    """
+    text = _norm(text).removeprefix("for ")
+    rest = None
+    if rule is None:
+        for match in _REPEAT.finditer(text):
+            if match.start() == 0 or match.end() == len(text):
+                rule, hint = _rule_of(match)
+                rest = (text[:match.start()] + " " + text[match.end():]).strip()
+                break
+        if rule is None:
+            return None
+    else:
+        rest = text
+    if not rest:
+        raise _ScheduleError(_ASK_REPEAT_TIME)
+    rest = rest.removeprefix("at ").strip()
+    hours = _hours_for(rest, hint)
+    if hours is None:
+        return None
+    candidates, minute = hours
+    return rule, f"{_usual_hour(candidates):02d}:{minute:02d}"
+
+
+def _repeat_request(kind, task, schedule, now):
+    rule, at_local = schedule
+    stamp = next_occurrence(rule, at_local, now.tzinfo, now.timestamp())
+    return ReminderRequest(kind, task, stamp, rule=rule, at_local=at_local)
+
+
+_ALARM = re.compile(
+    _POLITE + r"(?:please )?(?:wake me(?: up)?|(?:set|create|make)(?: me)?(?: an?| my| the)? "
+    r"(?:(?P<span>daily|morning|wake ?up) )?alarm)(?: (?P<rest>.+))?", re.I
+)
+
+
+def _alarm_request(match, now):
+    rest = _norm(match["rest"] or "")
+    rest = re.sub(r"^(?:to (?:go off|ring|wake me(?: up)?) )", "", rest)
+    if not rest:
+        return ReminderRequest("clarify", message=_ASK_ALARM)
+    if rest.startswith("for ") and (seconds := _duration_seconds(rest[4:])):
+        # "Set an alarm for ten minutes" is a length, like "in ten minutes".
+        return ReminderRequest("alarm", "Alarm", _relative_timestamp(now, seconds))
+    if rest.startswith("in "):
+        seconds = _duration_seconds(rest[3:])
+        if not seconds:
+            return ReminderRequest("clarify", message=_ASK_ALARM)
+        return ReminderRequest("alarm", "Alarm", _relative_timestamp(now, seconds))
+    span = (match["span"] or "").replace(" ", "")
+    if span == "daily":
+        schedule = _repeat_schedule(rest.removeprefix("for "), rule="daily")
+    else:
+        schedule = _repeat_schedule(rest)
+    if schedule is not None:
+        return _repeat_request("alarm", "Alarm", schedule, now)
+    rest = rest.removeprefix("for ").removeprefix("at ")
+    day_match = _DAY_FIRST.fullmatch(rest) or _DAY_LAST.fullmatch(rest)
+    clock_text = (day_match["clock"] if day_match else rest) or ""
+    clock_text = clock_text.removeprefix("at ").removeprefix("for ")
+    if not clock_text:
+        return ReminderRequest("clarify", message=_ASK_ALARM)
+    hours = _hours_for(clock_text, "a" if span in ("morning", "wakeup") else None)
+    if hours is None:
+        return ReminderRequest("clarify", message=_ASK_ALARM)
+    candidates, minute = hours
+    today = now.date()
+    days = [_calendar_day(day_match["day"], today)] if day_match and day_match["day"] else [today, today + timedelta(days=1)]
+    for day in days:
+        for hour in sorted(candidates):
+            stamp = wall_stamp(day, hour, minute, now.tzinfo)
+            if stamp > now.timestamp():
+                return ReminderRequest("alarm", "Alarm", stamp)
+    raise _ScheduleError("That time has already passed. Choose a time in the future.")
+
+
+_LEFT = re.compile(
+    _POLITE + r"(?:how (?:long|much time)(?: is| have i got| do i have| has it got| is there)? (?:left|remaining|to go)"
+    r"(?: (?:on|for|in) (?:my|the) (?P<a>timers?|alarms?|reminders?))?"
+    r"|how long (?:until|till|before|to) (?:my|the) (?:next )?(?P<b>timers?|alarms?|reminders?)"
+    r"(?: (?:goes off|go off|is done|finishes|ends|rings|is due))?"
+    r"|how long (?:has|does) (?:my|the) (?P<c>timer|alarm) (?:got )?(?:left|to go|have left)"
+    r"|when(?:'s| is| does| will) (?:my|the) (?:next )?(?P<d>alarms?|reminders?|timers?)"
+    r"(?: (?:set for|for|due|going off|go off|ring|finish|end|be done))?"
+    r"|what time is my (?:next )?(?P<e>alarm)(?: set for)?)", re.I
+)
 
 
 def may_be_reminder(said):
@@ -235,8 +448,22 @@ def may_be_reminder(said):
 def parse_reminder(said, *, now=None):
     """Parse a complete turn after removing any spoken address or courtesy words."""
     said = " ".join(said.strip().rstrip(".!?").split())
+    if reordered := _REPEAT_FIRST.fullmatch(said):
+        # "Every weekday at 7, remind me to..." says the same as "remind me ... every weekday at 7".
+        said = f"{reordered['cmd']} {reordered['pre']}"
+    if match := _LEFT.fullmatch(said):
+        noun = next((group for group in match.groups() if group), "timer").casefold().removesuffix("s")
+        return ReminderRequest("left", item_kind=noun)
+    if match := _ALARM.fullmatch(said):
+        try:
+            return _alarm_request(match, now or datetime.now())
+        except _ScheduleError as error:
+            return ReminderRequest("clarify", message=str(error))
+        except (OverflowError, OSError, ValueError):
+            return ReminderRequest("clarify", message=_ASK_ALARM)
     if _LIST.fullmatch(said):
-        item_kind = "timer" if "timers" in said.casefold().split() else "reminder"
+        words = said.casefold().split()
+        item_kind = "timer" if "timers" in words else "alarm" if "alarms" in words else "reminder"
         return ReminderRequest("list", item_kind=item_kind)
     if match := _CANCEL.fullmatch(said):
         noun = match[1].lower()
@@ -250,6 +477,9 @@ def parse_reminder(said, *, now=None):
             return ReminderRequest("cancel", task=task, item_kind=item_kind)
         if noun == "timer" and match[2] is None:
             return ReminderRequest("cancel", task="Timer", item_kind=item_kind)
+        if item_kind == "alarm":
+            # "Cancel my alarm", "cancel the alarm for tomorrow": the queue decides.
+            return ReminderRequest("cancel", task="Alarm" if noun == "alarm" else "", item_kind=item_kind)
         prompt = "Say its number or the exact task." if item_kind == "reminder" else "Say its number."
         return ReminderRequest("clarify", message=f"Which {item_kind}? {prompt}")
     if match := _TIMER.fullmatch(said):

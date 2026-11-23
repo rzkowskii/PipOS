@@ -292,7 +292,10 @@ class GuestConversation(RetentionCase):
         self.assertNotIn("Kiteguest", await self.say("What did I say about the amber kite?"))
         self.assertNotIn("Badgeguest", await self.say("What do you remember about my guest badge?"))
         self.assertIn("Orchidmarker", await self.say("What do you remember about my orchid?"))
-        self.assertFalse(any(action == "action=save" for action, _ in self.cortex_server.slot_calls[slot_boundary:]))
+        # The conversation cache is never saved. The identity snapshot made
+        # by the fresh mind after the restart holds only the identity prompt.
+        saved = [name for action, name in self.cortex_server.slot_calls[slot_boundary:] if action == "action=save"]
+        self.assertEqual([name for name in saved if name != "identity.slot"], [])
         self.assert_not_persisted("Kiteguest", "Badgeguest")
 
     async def test_guest_shortcut_discards_unpunctuated_attached_transcript(self):

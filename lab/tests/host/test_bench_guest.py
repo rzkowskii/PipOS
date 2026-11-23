@@ -121,7 +121,7 @@ class BenchGuest(unittest.TestCase):
 
     def test_production_flags(self):
         command = bench_guest.server_command("/models/m.gguf", {"threads": 2}, 8091, "/tmp/s")
-        for flag in ("--ctx-size", "4096", "--parallel", "--cache-ram", "--no-cache-idle-slots",
+        for flag in ("--ctx-size", "8192", "--parallel", "--cache-ram", "--no-cache-idle-slots",
                      "--reasoning-budget", "--no-webui", "127.0.0.1"):
             self.assertIn(flag, command)
         env = bench_guest.server_env({"mlock": True})

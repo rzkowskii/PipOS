@@ -58,7 +58,7 @@ class InitiativeMind(MindCase):
         with patch("mind.skills.datetime", wraps=datetime) as clock:
             clock.now.side_effect = lambda zone: moment.astimezone(zone)
             self.assertIn("Reminder 1 set", await self.ask("Remind me in one minute to water the basil"))
-            self.assertIn("Timer 2 started", await self.ask("Set a timer for two minutes"))
+            self.assertIn("two minutes, starting now", await self.ask("Set a timer for two minutes"))
             self.assertIn("Reminder 3 set", await self.ask("Remind me in three minutes to water the mint"))
             moment = moment.replace(minute=5)
             await self.heartbeat("idle")
@@ -86,9 +86,11 @@ class InitiativeMind(MindCase):
             self.confirm(first)
             await self.heartbeat()
             second = await self.offer(2)
-            self.assertEqual(await self.grant(second), "Timer 2 is up.")
+            self.assertIn("two-minute timer", await self.grant(second))
             self.confirm(second)
-            self.assertEqual(self.mind.skills.reminders.upcoming(), [])
+            # Each was said once; unanswered, each rings again after the gap.
+            queue = self.mind.skills.reminders
+            self.assertEqual([queue.delivery(entry.id).rings for entry in queue.upcoming()], [1, 1])
 
     async def test_disabled_reminders_can_be_cancelled_and_policy_changes_with_live_mind(self):
         disabled = InitiativePolicy(reminders=False)
@@ -137,7 +139,8 @@ class InitiativeMind(MindCase):
         self.bus.push("body.lid", closed=True, seq=4)
         await self.stop_mind()
         await self.start_mind()
-        self.assertEqual(self.mind.skills.reminders.upcoming(), [])
+        # The confirmed ring is counted across the restart: one of three.
+        self.assertEqual(self.mind.skills.reminders.delivery(entry.id).rings, 1)
 
     async def test_greetings_are_opt_in_and_once_per_local_date_across_restart(self):
         await self.ask("Set my time zone to Australia slash Sydney")

@@ -162,8 +162,11 @@ class HandsSessionTest(unittest.IsolatedAsyncioTestCase):
             made = RecordingRenderer(app)
             self.renderers.append(made)
             return made
+        self.mind_dir = base / "mind"
+        self.mind_dir.mkdir()
         self.hands = Hands(self.hands_bus, cage=self.cage, cortex=CodeCortex(self.llama.url), workshop=self.workshop,
-                           renderer=renderer, disabled=base / "apps.disabled")
+                           renderer=renderer, disabled=base / "apps.disabled", body_root=base / "root",
+                           state_dir=self.mind_dir)
         self.disabled = base / "apps.disabled"
         self.bridge = AppBridge(self.mind_bus, shelf=SHELF, enabled=lambda: not self.disabled.exists())
         self.bridge.hands_up = True
@@ -696,9 +699,164 @@ class HandsSessionTest(unittest.IsolatedAsyncioTestCase):
         await self.hands.on_event({"t": "organ.up", "name": "mind"})
         self.assertEqual([e["view"] for e in self.hands_bus.sent if e["app"] == "terminal"], ["shown"])
 
-    async def test_other_apps_are_honestly_not_there_yet(self):
+    # -- the shelf ----------------------------------------------------------------------
+
+    async def test_play_snake_installs_it_first_and_shows_the_terminal(self):
+        await self.open_minimised()
+        await self.hear("play snake")
+        self.assertEqual(self.said[-1], "Starting snake.")
+        self.assertEqual(self.hands.view["terminal"], "shown", "a game needs its player")
+        self.assertEqual(self.hands.job.line, "install snake && run snake")
+        await self.until(lambda: self.phase() == "running", what="the game")
+        await self.until(lambda: "No internet was used" in self.screen(), what="installed from the shelf")
+        self.assertTrue((self.workshop / "apps/snake/main.py").is_file())
+        await self.until(lambda: "Q to quit" in self.screen(), what="the board")
+        self.hands.on_key(b"q")
+        await self.until(lambda: self.phase() == "done", what="game over")
+        self.renderers[-1].wipe()
+        await self.hear("play snake")
+        self.assertEqual(self.hands.job.line, "run snake", "installed now: it just runs")
+        await self.until(lambda: "Q to quit" in self.screen(), what="the board again")
+        self.hands.on_key(b"q")
+        await self.until(lambda: self.phase() == "done", what="game over again")
+
+    async def test_the_shelf_listing_and_guests(self):
+        await self.hear("what can you install")
+        listed = self.said[-1]
+        self.assertTrue(listed.startswith("I can't download anything, but my shelf has "), listed)
+        for name in ("dice", "guess", "hangman", "life", "matrix", "snake", "stopwatch"):
+            self.assertIn(name, listed)
+        self.assertTrue(listed.endswith("Say install and a name."))
+        await self.bridge.privacy(True)
+        for text in ("what can you install", "install snake", "play snake", "run life"):
+            await self.hear(text)
+            self.assertEqual(self.said[-1], "My terminal stays closed while a guest is here.", text)
+        await self.hear("show me the clock")
+        self.assertEqual(self.said[-1], "My clock stays closed while a guest is here. It shows your reminders.")
+        await self.hear("open the monitor")
+        self.assertEqual(self.said[-1], "My monitor stays closed while a guest is here.")
+        self.assertEqual((self.hands.view["clock"], self.hands.view["monitor"]), ("closed", "closed"))
+        # hands refuses on its own too (a guest change the mind has not seen yet).
+        self.assertEqual(self.bridge._refused_line({"reason": "guest", "app": "clock"}),
+                         "My clock stays closed while a guest is here. It shows your reminders.")
+        self.assertEqual(self.hands.view["terminal"], "closed")
+        self.assertFalse((self.workshop / "apps").exists())
+
+    # -- the body monitor and the clock ---------------------------------------------
+
+    def app_renderer(self, app):
+        return [made for made in self.renderers if made.app == app][-1]
+
+    def text_of(self, app):
+        return self.app_renderer(app).data.decode("utf-8", "replace")
+
+    async def test_the_monitor_opens_over_the_terminal_and_the_clock_replaces_it(self):
+        await self.hear("open the terminal")
+        terminal = self.app_renderer("terminal")
+        with mock.patch.object(hands_module, "APP_FRAME", 0.05):
+            await self.hear("Hey Pip, show me how you're feeling")
+            self.assertEqual(self.said[-1], "Here's how I'm doing.")
+            self.assertEqual((self.hands.view["monitor"], self.hands.view["terminal"]), ("shown", "minimised"))
+            self.assertEqual((self.bridge.view["monitor"], self.bridge.view["terminal"]), ("shown", "minimised"))
+            # The terminal's panel is really hidden (SIGUSR2), not only flagged.
+            self.assertEqual(terminal.shown_log[-1], False)
+            monitor = self.app_renderer("monitor")
+            self.assertEqual(monitor.flag_log[0]["title"], "How I'm feeling")
+            self.assertIn("Thinking", self.text_of("monitor"))
+            self.assertEqual(monitor.flag_log[0]["focus"], 0, "keys stay with the face: nothing to type into")
+            size = len(monitor.data)
+            await self.until(lambda: len(monitor.data) > 2 * size, what="a frame a second")
+            await self.hear("open the monitor")
+            self.assertEqual(self.said[-1], "It's already open.")
+            await self.hear("show me the clock")
+            self.assertEqual(self.said[-1], "Here's my clock.")
+            self.assertEqual((self.hands.view["monitor"], self.hands.view["clock"]), ("closed", "shown"))
+            self.assertEqual((monitor.started, monitor.visible, monitor.wiped), (False, False, 1))
+            self.assertEqual(self.app_renderer("clock").flag_log[0]["title"], "Pip's clock")
+            self.assertIn("█", self.text_of("clock"))
+            await self.hear("show me your face")
+            self.assertEqual(self.said[-1], "Okay.")
+            self.assertEqual((self.hands.view["clock"], self.bridge.view["clock"]), ("closed", "closed"))
+            self.assertEqual(self.hands.view["terminal"], "minimised", "the terminal keeps running")
+            await self.hear("bring back the terminal")
+            self.assertEqual(self.said[-1], "Here it is.")
+            self.assertEqual(terminal.shown_log[-1], True)
+            # The terminal over a small app: the small app goes.
+            await self.hear("show my timers")
+            self.assertEqual(self.hands.view["terminal"], "minimised")
+            await self.hear("open the terminal")
+            self.assertEqual(self.said[-1], "Here it is.")
+            self.assertEqual((self.hands.view["terminal"], self.hands.view["clock"]), ("shown", "closed"))
+        self.assertLessEqual(self.hands.frame_ms["monitor"], 5.0)
+
+    async def test_the_clock_shows_timers_and_reminders_and_never_writes(self):
+        from mind.reminders import Reminders
+        now = time.time()
+        store = Reminders(self.mind_dir)
+        store.add("Timer", now + 250, kind="timer", duration=600, now=now - 350)
+        store.add("call Mum", now + 3 * 3600, now=now)
+        store.close()
+        database = self.mind_dir / "reminders.db"
+        before = (database.stat().st_mtime_ns, database.read_bytes())
+        await self.hear("show my timers")
+        self.assertEqual(self.said[-1], "Here's my clock.")
+        screen = self.text_of("clock")
+        self.assertIn("10-minute timer", screen)
+        self.assertIn("4:1", screen)
+        self.assertIn("call Mum", screen)
+        self.assertEqual((database.stat().st_mtime_ns, database.read_bytes()), before)
+        await self.hear("close the clock")
+        self.assertEqual(self.said[-1], "Closed.")
+        await self.hear("close the clock")
+        self.assertEqual(self.said[-1], "My clock isn't open.")
+
+    async def test_nothing_is_drawn_while_the_lid_is_closed(self):
+        with mock.patch.object(hands_module, "APP_FRAME", 0.05):
+            await self.hear("open the monitor")
+            monitor = self.app_renderer("monitor")
+            await self.hands.on_event({"t": "body.lid", "closed": True, "seq": 2})
+            await asyncio.sleep(0.1)
+            size = len(monitor.data)
+            await asyncio.sleep(0.3)
+            self.assertEqual(len(monitor.data), size)
+            await self.hands.on_event({"t": "body.lid", "closed": False, "seq": 3})
+            await self.until(lambda: len(monitor.data) > size, what="drawing again")
+
+    async def test_the_monitor_reads_the_body(self):
+        await self.hands.on_event({"t": "body.state", "battery": 64, "charging": False, "on_ac": False,
+                                   "minutes_left": 190, "health_pct": 81, "cycles": 71, "temp": 52.5})
+        self.hands.code_tok_s = 8.4
         await self.hear("show me how you're feeling")
-        self.assertEqual(self.said[-1], "I don't have that app yet. I can open my terminal.")
+        screen = self.text_of("monitor")
+        for words in ("64 %", "about 3 h 10 min left", "holds 81 % of what it did when new", "71 charge cycles",
+                      "52 °C", "writes 8.4 tokens a second"):
+            self.assertIn(words, screen)
+
+    async def test_a_renderer_that_ends_closes_its_app(self):
+        # The renderer's unit has a run-time limit, and may die: the app is
+        # then closed for real, and the mind hears it, so asking again opens
+        # a fresh one instead of "It's already open."
+        with mock.patch.object(hands_module, "APP_FRAME", 0.05):
+            await self.hear("show me the clock")
+            first = self.app_renderer("clock")
+            first.started = False
+            await self.until(lambda: self.hands.view["clock"] == "closed", what="closed after its renderer ended")
+            await self.until(lambda: self.bridge.view["clock"] == "closed", what="the mind told")
+            self.assertNotIn("clock", self.hands._app_sources)
+            await self.hear("show me the clock")
+            self.assertEqual(self.said[-1], "Here's my clock.")
+            self.assertIsNot(self.app_renderer("clock"), first)
+
+    async def test_guests_and_escape_close_the_small_apps(self):
+        await self.hear("open the monitor")
+        await self.hands.on_event({"t": "key.interrupt"})
+        self.assertEqual(self.hands.view["monitor"], "closed", "Esc closes it when nothing else is going on")
+        await self.hear("show me the clock")
+        await self.bridge.privacy(True)
+        await self.until(lambda: self.hands.view["clock"] == "closed", what="closed for the guest")
+        self.assertEqual(self.app_renderer("clock").wiped, 1)
+        await self.hear("show me the clock")
+        self.assertEqual(self.said[-1], "My clock stays closed while a guest is here. It shows your reminders.")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,49 @@
+config BR2_PACKAGE_SHERPA_ONNX
+	bool "sherpa-onnx"
+	depends on BR2_x86_64
+	depends on BR2_TOOLCHAIN_USES_GLIBC
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	help
+	  The speech engine library the voice organ loads through
+	  ctypes: Silero voice activity detection, Moonshine speech
+	  recognition and Piper voices. This installs the upstream
+	  prebuilt linux-x64-shared release (libsherpa-onnx-c-api.so and
+	  its bundled ONNX Runtime 1.28.2, libonnxruntime.so), pinned by
+	  sha256. It needs glibc 2.17 or newer and libstdc++.
+
+	  ONNX Runtime chooses its CPU kernels at run time. The v2.0.2
+	  no-tts build of the same runtime ran on the QEMU Ivy Bridge
+	  guest (AVX, no AVX2); lab/sherpa_avx_smoke.py checks this
+	  release's VAD, Moonshine and Piper the same way.
+
+	  The library links espeak-ng (GPL-3.0-or-later) statically.
+	  Licences and the Alba voice credit are installed to
+	  /usr/share/licenses/sherpa-onnx.
+
+	  https://github.com/k2-fsa/sherpa-onnx
+
+if BR2_PACKAGE_SHERPA_ONNX
+
+choice
+	prompt "sherpa-onnx release"
+	default BR2_PACKAGE_SHERPA_ONNX_V2_0_3
+	help
+	  Both releases have the same C API layout (mind/sherpa.py checks
+	  the version it loads) and the same ONNX Runtime 1.28.2.
+
+config BR2_PACKAGE_SHERPA_ONNX_V2_0_3
+	bool "v2.0.3"
+
+config BR2_PACKAGE_SHERPA_ONNX_V2_0_2
+	bool "v2.0.2 (fallback)"
+	help
+	  The previous release. Its no-tts build is the one first run on
+	  the Ivy Bridge QEMU guest.
+
+endchoice
+
+endif
+
+comment "sherpa-onnx needs an x86-64 glibc toolchain with C++ and threads"
+	depends on !BR2_x86_64 || !BR2_TOOLCHAIN_USES_GLIBC || !BR2_INSTALL_LIBSTDCPP || !BR2_TOOLCHAIN_HAS_THREADS

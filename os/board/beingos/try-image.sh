@@ -20,6 +20,16 @@ case "${BEING_TRY_SCREEN:-0}" in
     1) screen_option=being.screen=1; output_name=beingos-try-screen.img ;;
     *) echo "BEING_TRY_SCREEN must be 0 or 1" >&2; exit 2 ;;
 esac
+# BEING_TRY_BENCH=1: a bench stick. Every entry boots with being.bench=1
+# (being-bench.service), and the models partition also carries the quant
+# candidates in out/models/bench as the signed bench pack (/models/bench).
+bench_option=
+case "${BEING_TRY_BENCH:-0}" in
+    0) ;;
+    1) bench_option=being.bench=1 ;;
+    *) echo "BEING_TRY_BENCH must be 0 or 1" >&2; exit 2 ;;
+esac
+try_options="$screen_option${screen_option:+${bench_option:+ }}$bench_option"
 # BEING_TRY_LAPTOP=1: media from the laptop image, with no serial console.
 BEINGOS_VARIANT=lab
 case "${BEING_TRY_LAPTOP:-0}" in
@@ -51,7 +61,7 @@ read -r logs_uuid < /proc/sys/kernel/random/uuid
 insert_ids() {
     sed -e "s/TRY_DISK_UUID/$disk_uuid/g" -e "s/TRY_ESP_UUID/$esp_uuid/g" \
         -e "s/TRY_ROOT_UUID/$root_uuid/g" -e "s/TRY_MODELS_UUID/$models_uuid/g" \
-        -e "s/TRY_LOGS_UUID/$logs_uuid/g" -e "s/TRY_SCREEN/$screen_option/g" "$1"
+        -e "s/TRY_LOGS_UUID/$logs_uuid/g" -e "s/TRY_SCREEN/$try_options/g" "$1"
 }
 
 # Laptop Try media carries a FAT32 PIPLOGS partition for first-boot
@@ -75,8 +85,28 @@ if [ "$BEINGOS_VARIANT" = laptop ]; then
 fi
 ln -s "$rootfs" "$stage/input/rootfs.squashfs"
 # Installed images use LABEL=models. Give the Try copy a separate identity.
-cp --sparse=always "$models" "$stage/input/models.ext4"
-tune2fs -L being-try-models -U random "$stage/input/models.ext4"
+if [ -n "$bench_option" ]; then
+    # The same packs post-image.sh stages, plus the bench pack, signed with
+    # the same builder key, so the rootfs's descriptors still match.
+    src=$(cd "$board_dir/../../.." && pwd)
+    if [ ! -s "$src/out/models/bench/manifest.json" ]; then
+        echo "No bench models in out/models/bench: run lab/quant_candidates.py first." >&2
+        exit 1
+    fi
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$src" python3 -m lab.package_model \
+        --source "$src/out/models" --output "$stage/models-root" --bench \
+        --certificate "$BEINGOS_LAB_KEYS/cert.pem" --key "$BEINGOS_LAB_KEYS/key.pem"
+    # The same ext4 metadata allowance as post-image.sh: the bench quants make
+    # this partition about 5 GB, where the journal and inodes alone pass 140 MB.
+    models_mb=$(du -sm "$stage/models-root" | cut -f1)
+    models_mb=$(( models_mb + models_mb / 16 + 128 ))
+    mkfs.ext4 -q -d "$stage/models-root" -L being-try-models -m 0 "$stage/input/models.ext4" "${models_mb}M"
+    rm -rf "$stage/models-root"
+    tune2fs -U random "$stage/input/models.ext4"
+else
+    cp --sparse=always "$models" "$stage/input/models.ext4"
+    tune2fs -L being-try-models -U random "$stage/input/models.ext4"
+fi
 
 "$host_dir/bin/genimage" \
     --rootpath "$stage/root" --tmppath "$stage/tmp" --inputpath "$stage/input" \

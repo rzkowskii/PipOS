@@ -2,6 +2,7 @@
 recipes, typist, OSC filter, cage line, forgetting and the panel frame spec."""
 
 import ast
+import asyncio
 import hashlib
 import json
 import os
@@ -700,6 +701,85 @@ class ShelfTest(unittest.TestCase):
             path = self.SHELF / "bin" / helper
             self.assertTrue(os.access(path, os.X_OK), helper)
             self.assertIn("/usr/share/being/workshop/shelf", path.read_text())
+
+
+class UnitTest(unittest.TestCase):
+    """os/package/being/being-hands.service (PIP-FUNCTIONS L9.4)."""
+
+    def values(self, key):
+        text = (ROOT / "os/package/being/being-hands.service").read_text()
+        lines = [line.strip() for line in text.splitlines() if not line.lstrip().startswith("#")]
+        return [line.split("=", 1)[1] for line in lines if line.startswith(key + "=")]
+
+    def test_a_light_weight_and_precompiled_bytecode(self):
+        self.assertEqual(self.values("CPUWeight"), ["20"])
+        self.assertEqual(self.values("Nice"), ["10"])
+        environment = " ".join(self.values("Environment"))
+        self.assertNotIn("PYTHONDONTWRITEBYTECODE", environment)
+        self.assertIn("PYTHONPATH=/usr/lib/being", environment)
+        self.assertEqual(self.values("ProtectSystem"), ["strict"], "the shipped .pyc can never be rewritten")
+
+    def test_the_monitor_and_clock_read_only_what_hands_may(self):
+        # The clock reads /mind/reminders.db and the monitor statvfs(/mind):
+        # read-only, which the unit already guarantees.
+        self.assertEqual(self.values("ReadOnlyPaths"), ["/mind"])
+        self.assertEqual(self.values("ReadWritePaths"), ["/workshop"])
+
+
+class RendererSignalTest(unittest.IsolatedAsyncioTestCase):
+    async def test_show_and_hide_go_through_systemd(self):
+        calls = []
+
+        def run(argv, timeout=10.0):
+            calls.append(argv)
+            return 0, ""
+        renderer = hands.PanelRenderer("monitor", run=run)
+        self.assertFalse(await renderer.hide(), "no renderer running: nothing is signalled")
+        self.assertEqual(calls, [])
+
+        class Running:
+            returncode = None
+        renderer.proc = Running()
+        self.assertTrue(await renderer.hide())
+        self.assertFalse(renderer.visible)
+        self.assertTrue(await renderer.show())
+        self.assertTrue(renderer.visible)
+        self.assertEqual(calls, [
+            ["systemctl", "kill", "--kill-whom=main", "--signal=SIGUSR2", "being-panel-monitor.service"],
+            ["systemctl", "kill", "--kill-whom=main", "--signal=SIGUSR1", "being-panel-monitor.service"],
+        ])
+        failing = hands.PanelRenderer("clock", run=lambda argv, timeout=10.0: (1, ""))
+        failing.proc = Running()
+        self.assertFalse(await failing.hide())
+        self.assertTrue(failing.visible, "a refused signal changes nothing")
+
+    async def test_ready_waits_for_the_first_frame_file(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(hands, "PANEL_DIR", Path(folder)):
+            renderer = hands.PanelRenderer("clock", run=lambda argv, timeout=10.0: (0, ""))
+
+            class Running:
+                returncode = None
+            self.assertFalse(await renderer.ready(0.05), "no renderer: never ready")
+            renderer.proc = Running()
+            self.assertFalse(await renderer.ready(0.05, step=0.01), "no frame yet: gives up at the timeout")
+
+            async def appear():
+                await asyncio.sleep(0.03)
+                (Path(folder) / "clock.frame").write_bytes(b"BPF1")
+            task = asyncio.get_running_loop().create_task(appear())
+            self.assertTrue(await renderer.ready(1.0, step=0.01))
+            await task
+
+    def test_every_app_has_a_renderer_line(self):
+        for app in hands.APPS:
+            self.assertEqual(renderer_command(app)[-5], app)
+        self.assertEqual(set(hands.SMALL_APPS), {"monitor", "clock"})
+        from mind import app_clock, app_monitor
+        self.assertEqual(hands.SMALL_TITLES, {"monitor": app_monitor.TITLE, "clock": app_clock.TITLE})
+        self.assertEqual((app_monitor.COLUMNS, app_monitor.ROWS), (hands.GRID_COLUMNS, hands.GRID_ROWS))
+        self.assertEqual((app_clock.COLUMNS, app_clock.ROWS), (hands.GRID_COLUMNS, hands.GRID_ROWS))
 
 
 if __name__ == "__main__":

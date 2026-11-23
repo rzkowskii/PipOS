@@ -6,7 +6,7 @@ ConditionPathExists=/mind/camera.enabled
 
 [Service]
 EnvironmentFile=/etc/being/env
-Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 -m mind.eyes
 Restart=on-failure
 RestartSec=3

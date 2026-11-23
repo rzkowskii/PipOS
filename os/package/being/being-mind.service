@@ -3,17 +3,30 @@ Description=Being: mind
 ConditionPathExists=!/mind/.being-restore-in-progress
 StartLimitIntervalSec=0
 RequiresMountsFor=/mind
-After=being-brainstem.service being-cortex.service
+# Not after the cortex: its model check takes seconds (18 s from the Try
+# stick), and the mind answers the time, timers and typing without a model.
+# It finds the cortex by itself once it is up. On the way down the two stop
+# together, so the mind saves the model's cache when a power-off is
+# announced (the brainstem's notice), not in its last moment.
+After=being-brainstem.service
 
 [Service]
 EnvironmentFile=/etc/being/env
-Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+# The image ships compiled modules (being.mk), so nothing is compiled here.
+Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 -m mind --bus ${BEING_BUS} --config /etc/being --mind-dir ${BEING_MIND} \
     --cortex http://127.0.0.1:8080
 Restart=always
 RestartSec=1
+# The face, the voice, the brainstem and the mind share the CPU first; the
+# cortex (100) and the night's work (20) take what is left.
+CPUWeight=1000
 # On the way down it saves the conversation and the model's cache.
 TimeoutStopSec=20
+# Its event loop pings systemd every 5 s (mind/sd_notify.py); a loop stuck
+# for 30 s is restarted.
+WatchdogSec=30s
+NotifyAccess=main
 # Light limits only: the mind still sets the clock, reaches the cortex and,
 # in Internet mode, the weather service (plan task 3.14 moves that fetch to
 # its own sandboxed helper).

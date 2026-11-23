@@ -3,6 +3,7 @@
 import io
 import json
 import tempfile
+import time
 import unittest
 import wave
 from contextlib import redirect_stdout
@@ -139,6 +140,25 @@ class Clock(CareTestCase):
         with patch.object(care.shutil, "which", return_value=None):
             care.set_clock(self.mind, 1_800_000_000.0, settime=seen.append)
         self.assertEqual(seen, [1_800_000_000.0])
+
+    def test_a_clock_set_in_care_moves_running_timers_with_it(self):
+        from mind.reminders import Reminders
+
+        reminders = Reminders(self.mind)
+        start = time.time()
+        reminders.add("timer", start + 600, kind="timer", duration=600, now=start)
+        reminders.add("call Mum", 1_900_000_000.0, now=start)
+        reminders.db.close()
+        with patch.object(care.shutil, "which", return_value=None), \
+                patch.object(care.time, "time", return_value=start):
+            care.set_clock(self.mind, start + 86_400.0, settime=lambda value: None)
+        reminders = Reminders(self.mind)
+        try:
+            dues = dict(reminders.db.execute("SELECT kind, due_at FROM reminders").fetchall())
+        finally:
+            reminders.db.close()
+        self.assertAlmostEqual(dues["timer"], start + 600 + 86_400.0, places=3)
+        self.assertEqual(dues["reminder"], 1_900_000_000.0, "a reminder keeps its wall-clock time")
 
     def test_time_zone_page_saves_a_city(self):
         with self.keys("Sydney", "y"):
@@ -304,6 +324,37 @@ class Page(CareTestCase):
         self.assertIn("Network", installed_rows)
         with self.keys("q"):
             self.assertEqual(care.care_menu(self.mind), 0)
+
+    def test_health_page_shows_the_check_up_rows(self):
+        from mind import doctor
+
+        class Machine(doctor.System):
+            def __init__(self):
+                self.systemctl = None
+
+            def units(self, names):
+                return {name: {"Id": name, "ActiveState": "failed" if name == "being-face.service" else "active",
+                               "NRestarts": "0"} for name in names}
+
+            def failed_units(self):
+                return []
+
+            def cortex_ok(self):
+                return True
+
+            def last_backup(self, state_dir):
+                return None
+
+            def restart(self, unit):
+                raise AssertionError("the Health page only looks; it never repairs")
+
+        self.assertIn("Health", {label for _, label, _ in care.summary_rows(self.mind, False)})
+        with self.keys(""):
+            care.health_page(self.mind, False, system=Machine())
+        shown = self.out.getvalue()
+        for row in ("face: stopped (failed)", "ears and voice: running", "last backup: never", "memory disk:",
+                    "are you okay?"):
+            self.assertIn(row, shown)
 
     def test_a_damaged_memory_setting_is_shown_as_damaged(self):
         (self.mind / "memory-policy.json").write_text("{not json")

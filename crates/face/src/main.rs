@@ -59,7 +59,8 @@ For reviewing motion off-screen:
 
 Keys: Esc interrupts it, M mutes it, F1 shows captions and health (off by default and
 never logged), F2 opens appliance setup, F9 recovers a face with no lid reading, and Q
-closes the window. With the panel dark and the brainstem silent, any key shows the face.
+closes the window. Space, Return or a click while the eyes rest asks for its attention,
+as \"Hey Pip\" does. With the panel dark and the brainstem silent, any key shows the face.
 While an app panel has focus, keys go to it (M is a letter then; F10 still mutes).
 
 Full screen, the face shows itself after a few seconds with no lid reading
@@ -250,9 +251,13 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     let offscreen = args.snapshot.is_some() || args.sheet.is_some();
+    // systemd's watchdog (WatchdogSec= in being-face.service): a frame loop
+    // that stops turning is restarted. Every frame kicks it; the notifier
+    // sends at most a few datagrams per interval and never blocks.
+    let mut watchdog = if offscreen { bus::notify::Notifier::none() } else { bus::notify::Notifier::from_env() };
     #[cfg(target_os = "linux")]
     if args.fullscreen && !offscreen && !args.hidden && args.frames.is_none() {
-        verbose::hold_for_boot_messages("face");
+        verbose::hold_for_boot_messages("face", &mut || watchdog.kick());
     }
 
     let sdl = sdl2::init()?;
@@ -356,6 +361,7 @@ fn run() -> Result<(), String> {
 
     'run: loop {
         let frame_start = Instant::now();
+        watchdog.kick();
         let scene_time = if recording { clock } else { started.elapsed().as_secs_f64() };
         if args.exit_after.is_some_and(|secs| scene_time >= secs) {
             break 'run;
@@ -380,7 +386,11 @@ fn run() -> Result<(), String> {
                         continue;
                     }
                     let dark_and_alone = anim.panel_blank() && link.as_ref().is_some_and(|l| l.quiet());
-                    if key == Keycode::Escape {
+                    if ATTEND_KEYS.contains(&key) && asks_attention(&anim, panel_focus) {
+                        if let Some(link) = &mut link {
+                            link.send(Event::new("key.attend"));
+                        }
+                    } else if key == Keycode::Escape {
                         if let Some(link) = &mut link {
                             link.send(Event::new("key.interrupt"));
                         }
@@ -415,11 +425,17 @@ fn run() -> Result<(), String> {
                 SdlEvent::MouseButtonDown { mouse_btn: MouseButton::Left, which, .. } if which != u32::MAX => {
                     if let Some(link) = &mut link {
                         link.send(Event::new("key.touch"));
+                        if asks_attention(&anim, panel_focus) {
+                            link.send(Event::new("key.attend"));
+                        }
                     }
                 }
                 SdlEvent::FingerDown { touch_id, .. } if touch_id != -1 => {
                     if let Some(link) = &mut link {
                         link.send(Event::new("key.touch"));
+                        if asks_attention(&anim, panel_focus) {
+                            link.send(Event::new("key.attend"));
+                        }
                     }
                 }
                 _ => {}
@@ -682,6 +698,7 @@ fn run() -> Result<(), String> {
         }
     }
 
+    watchdog.stopping();
     if power.restore() {
         if let Some(fd) = dpms::sdl_drm_fd(&window) {
             let _ = connectors.set(fd, dpms::DPMS_ON);
@@ -746,6 +763,17 @@ impl Scene<'_> {
     }
 }
 
+/// Keys that ask for attention while the eyes rest (`key.attend`): the
+/// keyboard's way of saying "Hey Pip" when it cannot hear you.
+const ATTEND_KEYS: [Keycode; 3] = [Keycode::Space, Keycode::Return, Keycode::KpEnter];
+
+/// A press (or a click, which has no key) asks for attention only while the
+/// eyes rest and no app panel has the keyboard: typing into the terminal
+/// stays typing.
+fn asks_attention(anim: &anim::Anim, panel_focus: bool) -> bool {
+    !panel_focus && anim.resting()
+}
+
 /// Marks that the birth ceremony has played this boot (the appliance only).
 const BIRTH_MARKER: &str = "/run/being-face-born";
 /// How long a software renderer's note stays on screen.
@@ -789,8 +817,10 @@ mod verbose {
         verbose.then_some(hold)
     }
 
+    /// `kick` runs every tenth of a second while waiting, so the service
+    /// watchdog does not take a long verbose wait for a frozen face.
     #[cfg(target_os = "linux")]
-    pub fn hold_for_boot_messages(who: &str) {
+    pub fn hold_for_boot_messages(who: &str, kick: &mut dyn FnMut()) {
         use std::fs::{File, OpenOptions};
         use std::io::{ErrorKind, Read, Write};
         use std::os::unix::fs::OpenOptionsExt;
@@ -827,6 +857,7 @@ mod verbose {
         let started = Instant::now();
         let mut buf = vec![0u8; size * 64];
         let pressed = 'wait: loop {
+            kick();
             if hold.is_some_and(|d| started.elapsed() >= d) || released.exists() {
                 break false;
             }
@@ -1039,7 +1070,26 @@ fn write_png(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::verbose::{hold_from_cmdline, DEFAULT_HOLD};
+    use super::{anim, asks_attention, ATTEND_KEYS};
+    use sdl2::keyboard::Keycode;
     use std::time::Duration;
+
+    #[test]
+    fn space_return_and_a_click_ask_for_attention_only_while_resting_and_unfocused() {
+        assert!(ATTEND_KEYS.contains(&Keycode::Space) && ATTEND_KEYS.contains(&Keycode::Return));
+        assert!(!ATTEND_KEYS.contains(&Keycode::M) && !ATTEND_KEYS.contains(&Keycode::Escape));
+        let mut a = anim::Anim::new(5);
+        a.set_lid(Some(false), false, true);
+        a.set_state("idle", false, false);
+        assert!(asks_attention(&a, false));
+        assert!(!asks_attention(&a, true), "a focused terminal gets the space");
+        a.set_state("listening", false, false);
+        assert!(!asks_attention(&a, false), "already listening");
+        a.set_state("asleep", false, false);
+        assert!(asks_attention(&a, false), "a key wakes sleeping eyes, as its name does");
+        a.set_lid(Some(true), false, false);
+        assert!(!asks_attention(&a, false), "the lid is the privacy switch");
+    }
 
     #[test]
     fn only_a_verbose_boot_holds_the_screen() {

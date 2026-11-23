@@ -90,7 +90,10 @@ class MindCase(unittest.IsolatedAsyncioTestCase):
     async def start_mind(self):
         self.bus = FakeBus()
         self.memory = Memory(self.root)
-        cfg = Config(name="Pip", owner="Richard", identity="You are Pip.", settle=0.05, cortex_wait=0.3)
+        # The morning brief has tests of its own (tests/test_turn_brief.py);
+        # elsewhere the first words of the day get the ordinary reply.
+        cfg = Config(name="Pip", owner="Richard", identity="You are Pip.", settle=0.05, cortex_wait=0.3,
+                     morning_brief=False)
         for key, value in self.cfg.items():
             setattr(cfg, key, value)
         self.mind = Mind(self.bus, Cortex(self.cortex_server.url), self.memory, cfg, self.root)
@@ -240,9 +243,11 @@ class Greetings(MindCase):
             replies.add(reply)
         self.assertEqual(len(replies), 3)
         self.assertEqual(self.cortex_server.chats, [])
-        # The short exchanges are kept in the context, so a follow-up makes sense.
-        self.assertEqual([m["role"] for m in self.mind.messages], ["user", "assistant"] * 3)
-        self.assertEqual(self.mind.messages[0]["content"], text)
+        # Stock exchanges stay out of the model's history: it would read them
+        # back on every later turn for nothing (PIP-FUNCTIONS 3.2).
+        self.assertEqual(self.mind.messages, [])
+        # What it last said is still known, in RAM, for "say that again".
+        self.assertEqual(self.mind.last_said, reply)
 
     async def test_greeting_preserves_startup_warmup_and_links_its_archive_reply(self):
         await self.warmed()
@@ -527,6 +532,69 @@ class Interrupting(MindCase):
         self.assertEqual(said(self.bus), "It's 7:05 in the evening.")
 
 
+class MissedWords(MindCase):
+    async def test_a_missed_utterance_is_shown_once_per_wake_spoken_by_the_voice_and_never_kept(self):
+        self.bus.push("state.changed", state="attending")
+        self.bus.push("hear.wake")
+        self.bus.push("hear.missed")
+        concern = await self.bus.wait("mind.emotion")
+        self.assertEqual(concern["name"], "concern")
+        await asyncio.sleep(0.1)
+        # The brainstem would drop a reply while attending, so the voice says
+        # sorry itself and the mind sends nothing to be spoken.
+        self.assertEqual(self.bus.of("say.request"), [])
+        self.assertEqual(self.bus.of("mind.reply_done"), [])
+        self.assertEqual(self.cortex_server.chats, [], "an apology needs no model")
+        self.assertEqual(self.memory.recent(), [], "nothing was heard, so nothing is kept")
+
+        # A second miss in the same wake stays quiet.
+        self.bus.push("hear.missed")
+        await asyncio.sleep(0.2)
+        self.assertEqual(len(self.bus.of("mind.emotion")), 1)
+
+        # A new wake earns one more, but not while it is asleep or the lid is closed.
+        self.bus.push("hear.wake")
+        self.bus.push("state.changed", state="asleep")
+        self.bus.push("hear.missed")
+        await asyncio.sleep(0.2)
+        self.assertEqual(len(self.bus.of("mind.emotion")), 1)
+        self.bus.push("state.changed", state="attending")
+        self.bus.push("body.lid", closed=True)
+        self.bus.push("hear.missed")
+        await asyncio.sleep(0.2)
+        self.assertEqual(len(self.bus.of("mind.emotion")), 1)
+        # Attention that lapsed back to rest with nothing heard is still shown.
+        self.bus.push("body.lid", closed=False, seq=3)
+        self.bus.push("state.changed", state="idle")
+        self.bus.push("hear.missed", reason="no_speech")
+        shown = await self.bus.wait("mind.emotion", 2, 2)
+        self.assertEqual((shown["name"], shown.get("lid_seq")), ("concern", 3))
+        self.assertEqual(said(self.bus), "")
+
+        # What was missed does not get in the way of what is heard next.
+        self.bus.sent.clear()
+        await self.hear("what time is it?", 1)
+        self.assertEqual(said(self.bus), "It's 7:05 in the evening.")
+
+
+class MissedDuringAReply(MindCase):
+    delay = 0.03
+
+    async def test_a_miss_without_a_wake_or_during_a_reply_says_nothing(self):
+        self.bus.push("state.changed", state="attending")
+        self.bus.push("hear.missed")
+        await asyncio.sleep(0.2)
+        self.assertEqual(self.bus.of("say.request"), [])
+        self.bus.push("hear.wake")
+        self.bus.push("hear.final", text="tell me a long story", speaker="Richard")
+        await self.bus.wait("say.request", 2)
+        self.bus.push("hear.missed")
+        await self.bus.wait("mind.reply_done", timeout=10.0)
+        await asyncio.sleep(0.2)
+        self.assertNotIn("catch that", said(self.bus))
+        self.assertEqual(len(self.bus.of("mind.reply_done")), 1)
+
+
 class ThinkingWhileListening(MindCase):
     cfg = {"prefill": True}
 
@@ -552,7 +620,8 @@ class ThinkingWhileListening(MindCase):
         await self.bus.wait("mind.reply_done")
 
         # The first read is the warm-up on waking; the rest follow the words.
-        prefills = [p["prompt"] for p in self.cortex_server.prefills]
+        # (After the reply, its turn boundary is read too: that is not read-ahead.)
+        prefills = [p["prompt"] for p in self.cortex_server.prefills if "<|assistant|>" not in p["prompt"]]
         self.assertEqual(len(prefills), warm_requests + 1, prefills)
         self.assertTrue(prefills[-1].endswith("what is"), prefills)
         final = render(self.cortex_server.chats[0]["messages"])
@@ -602,7 +671,9 @@ class ForegroundPriority(MindCase):
         self.bus.push("hear.partial", text="tell me an ordinary story")
         self.bus.push("hear.partial", text="tell me an ordinary story please")
         await self.hear("tell me an ordinary story please", 1)
-        self.assertEqual(len(self.cortex_server.prefills), prefills)
+        # The only read after the reply is its turn boundary, never the partial words.
+        read_ahead = [p for p in self.cortex_server.prefills[prefills:] if not p["prompt"].endswith("<|user|>\n")]
+        self.assertEqual(read_ahead, [])
         self.assertEqual(len(self.cortex_server.chats), 1)
 
     async def test_final_cancels_background_before_sending_the_chat(self):
@@ -765,7 +836,7 @@ class WithoutACortex(MindCase):
             await self.hear("Remind me to call Mum tomorrow at 9 a.m.", 1)
             await self.hear("Start a ten minute timer", 2)
             self.assertEqual(said(self.bus), "Reminder 1 set for tomorrow at 9:00 in the morning. "
-                                             "Timer 2 started for 10 minutes.")
+                                             "Okay, ten minutes, starting now.")
             self.bus.sent.clear()
             await self.hear("What are my reminders?", 1)
             self.assertIn("Reminder 1, call Mum", said(self.bus))
@@ -814,7 +885,13 @@ class WithoutACortex(MindCase):
         self.bus.push("say.done", final=True, announcement=second)
         self.bus.push("body.lid", closed=True)
         await asyncio.sleep(0)
-        self.assertEqual(reminders.upcoming(), [])
+        # Said once: it stays, to ring again in two minutes until it is answered.
+        self.assertEqual([item.id for item in reminders.upcoming()], [entry.id])
+        self.assertEqual(reminders.delivery(entry.id).rings, 1)
+        self.assertIsNone(reminders.due(), "not again before the ring gap")
+        self.assertNotIn("Reminder 1", said(self.bus))
+        self.assertIn("you asked me to remind you: Check the oven.", said(self.bus))
+        self.assertEqual(self.bus.of("say.request")[0].get("chirp"), "bell", "a bell comes first")
         self.assertEqual(self.cortex_server.chats, [])
 
 
@@ -1154,7 +1231,7 @@ class SlotPersistence(MindCase):
         await super().asyncSetUp()
         await self.warmed()
         self.slot_file = self.root / "cortex" / SLOT_FILE
-        self.slot_file.parent.mkdir()
+        self.slot_file.parent.mkdir(exist_ok=True)
         self.saves = 0
         self.save_success = True
         slot = self.mind.cortex.slot
@@ -1778,7 +1855,8 @@ class HonestSelf(MindCase):
         self.assertIn("Dreaming is switched off", await self.say("What did you dream about?"))
         (self.root / "dreams-enabled").write_text("")
         self.assertEqual(await self.say("What did you dream about?"),
-                         "I didn't dream last night. Nothing new came up while I slept.")
+                         "I didn't dream last night, so I have nothing to tell you. "
+                         "I only dream with my lid closed while I'm plugged in.")
         self.assertEqual(self.cortex_server.chats, [])
 
 

@@ -110,6 +110,12 @@ booted on the real 2012 MacBook Pro, and Pip woke up on it.
 
 Not there yet, and said plainly:
 
+- **It cannot hear you on the MacBook yet.** On the first boot Pip heard
+  "Hey Pip", then could not make out the words after it: the microphone
+  came up too quiet, and it never said so. The next stick sets the
+  microphone up at start, says "Sorry, I didn't catch that.", lets you
+  type to it (F2, then 6) and listens when you press Space. That has not
+  been tried on the laptop yet.
 - **Not measured yet.** Pip runs on the real MacBook, but speed, speech
   delay, heat and battery life have not been measured there properly.
   Treat the speed figures in the design as estimates until they are.

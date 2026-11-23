@@ -13,11 +13,14 @@ BEING_LAPTOP_PATIENCE multiplies every wait (default 1; the CPU is emulated).
 Screenshots land in out/lab/laptop-smoke-*.png.
 
 The target design these tests check (other tracks implement it):
-  * GRUB shows a menu on the panel with three entries, in this order: Try
-    PipOS (the default), one that shows boot messages, and one with safe
-    graphics. It waits a few seconds, then boots the default. No entry
-    reboots on an oops, restarts within seconds of a panic, or waits for ever
-    for a missing root.
+  * GRUB shows a menu on the panel with six entries, in this order: Try
+    PipOS (the default), one that shows boot messages, one with safe
+    graphics, two with alternative microphone set-ups (the default entry plus
+    snd_hda_intel.model=mbp81 being.mic_channel=auto, hotkey m, and plus
+    snd_hda_intel.model=mbp101, hotkey n) and one that measures speed (the
+    default plus being.bench=1, hotkey b). It waits a few seconds, then boots
+    the default. No entry reboots on an oops, restarts within seconds of a
+    panic, or waits for ever for a missing root.
   * The boot-messages entry puts kernel text on the panel.
   * The safe-graphics entry still reaches the eyes, on the firmware's own
     framebuffer (simpledrm; this test gives it a plain VGA display for that).
@@ -65,9 +68,16 @@ INSTALL_WRITE = 900
 KERNEL_TEXT_LINES = 15  # a screenful of messages, not one GRUB or firmware line
 
 TRY_MENU_TEXT = ("Try PipOS", "Install PipOS", "Restore a being", "Setup", "Check hardware",
-                 "Return to PipOS")
+                 "by typing", "Return to PipOS")
 BOOT_MESSAGES_TITLE = re.compile(r"boot messages|verbose", re.I)
 SAFE_GRAPHICS_TITLE = re.compile(r"safe graphics|basic graphics|nomodeset", re.I)
+# The extra entries: (title, hotkey, kernel arguments added to the default entry's).
+EXTRA_ENTRIES = (
+    (re.compile(r"alternative microphone\)", re.I), "m", ["snd_hda_intel.model=mbp81", "being.mic_channel=auto"]),
+    (re.compile(r"alternative microphone 2\)", re.I), "n", ["snd_hda_intel.model=mbp101"]),
+    (re.compile(r"measure speed", re.I), "b", ["being.bench=1"]),
+)
+LAPTOP_ENTRIES = 6
 LOGIN_PROMPT = re.compile(r"login:|Password:")
 SHELL_PROMPT = re.compile(r"^[^\n]{0,40}[#$] ?\r?$", re.M)
 # The firmware (OVMF) mirrors its console, and so GRUB's menu, to the serial
@@ -350,6 +360,12 @@ def grub_setting(config, name):
     return "".join(values[-1]) if values else None
 
 
+def kernel_args(body):
+    """The arguments of the `linux` line in a menu entry's body, or None."""
+    match = re.search(r"^\s*(?:if\s+)?linux\s+\S+\s+(.*?)(?:;\s*then)?\s*$", body, re.M)
+    return match[1].split() if match else None
+
+
 def default_entry(config, titles):
     value = grub_setting(config, "default")
     if not value:
@@ -451,7 +467,7 @@ class FatReader(unittest.TestCase):
 class LaptopTryMedia(unittest.TestCase):
     """What is on the stick, before anything boots."""
 
-    def test_boot_menu_is_on_the_panel_with_three_entries_and_a_timeout(self):
+    def test_boot_menu_is_on_the_panel_with_six_entries_and_a_timeout(self):
         with LAPTOP_TRY_IMAGE.open("rb") as disk:
             config = grub_config(disk)
         self.assertIsNotNone(config, "no grub.cfg on the stick's EFI partition")
@@ -468,15 +484,22 @@ class LaptopTryMedia(unittest.TestCase):
                       "the menu is hidden behind a countdown")
         entries = menu_entries(config)
         titles = [title for title, _ in entries]
-        self.assertEqual(len(entries), 3, titles)
+        self.assertEqual(len(entries), LAPTOP_ENTRIES, titles)
         self.assertRegex(titles[default_entry(config, titles)], r"(?i)^Try PipOS")
         verbose = [body for title, body in entries if BOOT_MESSAGES_TITLE.search(title)]
         safe = [body for title, body in entries if SAFE_GRAPHICS_TITLE.search(title)]
         self.assertEqual((len(verbose), len(safe)), (1, 1), titles)
         self.assertNotRegex(verbose[0], r"\bquiet\b|\bloglevel=[0-3]\b",
                             "the boot-messages entry still hides the kernel's messages")
-        self.assertNotEqual(safe[0], entries[default_entry(config, titles)][1],
-                            "the safe-graphics entry boots exactly like the default")
+        default_body = entries[default_entry(config, titles)][1]
+        self.assertNotEqual(safe[0], default_body, "the safe-graphics entry boots exactly like the default")
+        for pattern, hotkey, extra in EXTRA_ENTRIES:
+            found = [body for title, body in entries if pattern.search(title)]
+            self.assertEqual(len(found), 1, (pattern.pattern, titles))
+            self.assertEqual(kernel_args(found[0]), kernel_args(default_body) + extra,
+                             f"the {pattern.pattern} entry is not the default plus {extra}")
+            self.assertRegex(config, rf'(?m)^\s*menuentry\s+"[^"]*{pattern.pattern}[^"]*"\s+--hotkey={hotkey}\s*\{{',
+                             f"the {pattern.pattern} entry has no hotkey {hotkey}")
         # A failure must stay on the panel: no reboot on an oops, a panic up
         # long enough to photograph, and no endless wait for a missing stick.
         for title, body in entries:
@@ -827,15 +850,15 @@ class LaptopSmoke(unittest.TestCase):
         self.assertNotRegex(boots, rf"(?m)^{re.escape(name)} ended cleanly",
                             "a power cut was recorded as a clean end")
 
-    def test_grub_has_three_entries_and_boot_messages_show_kernel_text(self):
-        """(1) three entries in the GRUB menu; (4) the boot-messages entry puts
+    def test_grub_has_six_entries_and_boot_messages_show_kernel_text(self):
+        """(1) six entries in the GRUB menu; (4) the boot-messages entry puts
         kernel text on the panel, and the boot still reaches the being."""
         target = self.blank_target()
         before = target.stat()
         self.start_usb(target)
         first = self.wait_grub("11-grub-menu")
         positions = [first]
-        for _ in range(3):
+        for _ in range(LAPTOP_ENTRIES):
             self.key("down")  # the first also stops the countdown
             positions.append(self.highlight_after(positions[-1]))
         self.screenshot("11-grub-last", self.vm.screen())
@@ -844,9 +867,10 @@ class LaptopSmoke(unittest.TestCase):
         for position in sorted(positions):
             if not rows or position - rows[-1] > 4:
                 rows.append(position)
-        self.assertEqual(len(rows), 3, f"highlight rows {positions}: the menu does not hold exactly three entries")
+        self.assertEqual(len(rows), LAPTOP_ENTRIES,
+                         f"highlight rows {positions}: the menu does not hold exactly {LAPTOP_ENTRIES} entries")
         pitch = [b - a for a, b in zip(rows, rows[1:])]
-        self.assertLessEqual(abs(pitch[0] - pitch[1]), 6, f"uneven entry rows {positions}")
+        self.assertLessEqual(max(pitch) - min(pitch), 6, f"uneven entry rows {positions}")
 
         verbose = self.entry_index(BOOT_MESSAGES_TITLE)
         self.key("home")

@@ -43,13 +43,22 @@ CORTEX_CONF_OPTS = \
 # Only the server is wanted.
 CORTEX_MAKE_OPTS = llama-server
 
+# The conversation model's chat template (config/chat-template.jinja): past
+# replies render byte for byte as they were generated, so the cache holds.
+CORTEX_CHAT_TEMPLATE = $(BR2_EXTERNAL_BEINGOS_PATH)/../config/chat-template.jinja
+
 define CORTEX_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/buildroot-build/bin/llama-server $(TARGET_DIR)/usr/bin/llama-server
+	$(INSTALL) -D -m 0644 $(CORTEX_CHAT_TEMPLATE) $(TARGET_DIR)/usr/share/being/chat-template.jinja
 endef
 
+# The dream model's server is started and stopped by the night shift only;
+# 50-being.preset keeps it disabled at boot.
 define CORTEX_INSTALL_INIT_SYSTEMD
 	$(INSTALL) -D -m 0644 $(CORTEX_PKGDIR)/being-cortex.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/being-cortex.service
+	$(INSTALL) -D -m 0644 $(CORTEX_PKGDIR)/being-dream-cortex.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/being-dream-cortex.service
 endef
 
 $(eval $(cmake-package))

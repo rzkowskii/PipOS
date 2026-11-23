@@ -184,7 +184,7 @@ class Reports(FakeMachine):
         notable = {"renderer": ["[  14.1] being-face[310]: face: drawn by Mesa Intel(R) HD Graphics 4000 (IVB GT2)"],
                    "failed": ["being-voice.service: Failed with result 'exit-code'."]}
         text = usb_logs.summary(self.root, boot="#3", notable=notable, journal_bytes=4096, failed_units="")
-        lines = dict(re.match(r"(.+?):\s+(.*)", line).groups() for line in text.splitlines()[3:24] if ":" in line)
+        lines = dict(re.match(r"(.+?):\s+(.*)", line).groups() for line in text.splitlines()[3:30] if ":" in line)
         self.assertEqual(lines["Machine"], "Apple Inc. MacBookPro9,2")
         self.assertIn("i5-3210M", lines["CPU"])
         self.assertNotIn("AVX2", lines["CPU"])
@@ -465,5 +465,433 @@ class Packaging(unittest.TestCase):
         self.assertIn('sed \'/^#BEGIN try-logs/,/^#END try-logs/d\'', script)
 
 
+# What "amixer -c 0 scontents" shows on a MacBookPro9,2 (CS4206, codec SSID 106b:5200),
+# from a public alsa-info dump of that model.
+MBP92_SCONTENTS = """\
+Simple mixer control 'Master',0
+  Capabilities: pvolume pvolume-joined pswitch pswitch-joined
+  Playback channels: Mono
+  Limits: Playback 0 - 127
+  Mono: Playback 112 [88%] [-7.50dB] [on]
+Simple mixer control 'Headphone',0
+  Capabilities: pvolume pswitch
+  Playback channels: Front Left - Front Right
+  Limits: Playback 0 - 127
+  Mono:
+  Front Left: Playback 0 [0%] [-57.50dB] [off]
+  Front Right: Playback 0 [0%] [-57.50dB] [off]
+Simple mixer control 'Speaker',0
+  Capabilities: pvolume pswitch
+  Playback channels: Front Left - Front Right
+  Limits: Playback 0 - 127
+  Mono:
+  Front Left: Playback 115 [91%] [0.00dB] [on]
+  Front Right: Playback 115 [91%] [0.00dB] [on]
+Simple mixer control 'Bass Speaker',0
+  Capabilities: pvolume pswitch
+  Playback channels: Front Left - Front Right
+  Limits: Playback 0 - 127
+  Mono:
+  Front Left: Playback 115 [91%] [0.00dB] [on]
+  Front Right: Playback 115 [91%] [0.00dB] [on]
+Simple mixer control 'PCM',0
+  Capabilities: pvolume
+  Playback channels: Front Left - Front Right
+  Limits: Playback 0 - 255
+  Mono:
+  Front Left: Playback 255 [100%] [0.00dB]
+  Front Right: Playback 255 [100%] [0.00dB]
+Simple mixer control 'Mic Boost',0
+  Capabilities: volume
+  Playback channels: Front Left - Front Right
+  Capture channels: Front Left - Front Right
+  Limits: 0 - 3
+  Front Left: 0 [0%] [0.00dB]
+  Front Right: 0 [0%] [0.00dB]
+Simple mixer control 'IEC958',0
+  Capabilities: pswitch pswitch-joined
+  Playback channels: Mono
+  Mono: Playback [on]
+Simple mixer control 'IEC958',1
+  Capabilities: pswitch pswitch-joined
+  Playback channels: Mono
+  Mono: Playback [on]
+Simple mixer control 'Capture',0
+  Capabilities: cvolume cswitch
+  Capture channels: Front Left - Front Right
+  Limits: Capture 0 - 63
+  Front Left: Capture 0 [0%] [-35.25dB] [off]
+  Front Right: Capture 0 [0%] [-35.25dB] [off]
+Simple mixer control 'Auto-Mute Mode',0
+  Capabilities: enum
+  Items: 'Disabled' 'Enabled'
+  Item0: 'Enabled'
+Simple mixer control 'Digital',0
+  Capabilities: cvolume
+  Capture channels: Front Left - Front Right
+  Limits: Capture 0 - 120
+  Front Left: Capture 60 [50%] [0.00dB]
+  Front Right: Capture 60 [50%] [0.00dB]
+"""
+
+# Part of "amixer -c 0 contents" on the same machine: the jack sensors are card controls.
+MBP92_CONTENTS = """\
+numid=21,iface=CARD,name='Headphone Jack'
+  ; type=BOOLEAN,access=r-------,values=1
+  : values=on
+numid=26,iface=CARD,name='HDMI/DP,pcm=3 Jack'
+  ; type=BOOLEAN,access=r-------,values=1
+  : values=off
+numid=3,iface=MIXER,name='Capture Switch'
+  ; type=BOOLEAN,access=rw------,values=2
+  : values=on,on
+"""
+
+# Another codec: an input selector, and a Mic control with an analog loopback.
+SELECTOR_SCONTENTS = """\
+Simple mixer control 'Master',0
+  Capabilities: pvolume pvolume-joined pswitch pswitch-joined
+  Playback channels: Mono
+  Limits: Playback 0 - 64
+  Mono: Playback 0 [0%] [-64.00dB] [off]
+Simple mixer control 'Mic',0
+  Capabilities: pvolume pswitch cvolume cswitch
+  Playback channels: Front Left - Front Right
+  Capture channels: Front Left - Front Right
+  Limits: Playback 0 - 31 Capture 0 - 31
+  Front Left: Playback 0 [0%] [off] Capture 0 [0%] [off]
+  Front Right: Playback 0 [0%] [off] Capture 0 [0%] [off]
+Simple mixer control 'Internal Mic Boost',0
+  Capabilities: volume
+  Playback channels: Front Left - Front Right
+  Capture channels: Front Left - Front Right
+  Limits: 0 - 3
+  Front Left: 0 [0%] [0.00dB]
+  Front Right: 0 [0%] [0.00dB]
+Simple mixer control 'Input Source',0
+  Capabilities: cenum
+  Items: 'Mic' 'Internal Mic'
+  Item0: 'Mic'
+"""
+
+FAKE_AMIXER = r"""#!/usr/bin/env python3
+import os, re, sys
+text = open(os.environ["FAKE_SCONTENTS"]).read()
+args = sys.argv[1:]
+if os.environ.get("FAKE_NO_CARD"):
+    print("amixer: Mixer attach hw:0 error: No such file or directory", file=sys.stderr)
+    sys.exit(1)
+while args and args[0] in ("-c", "-q"):
+    args = args[2:] if args[0] == "-c" else args[1:]
+blocks = re.split(r"(?m)^(?=Simple mixer control )", text)
+blocks = [b for b in blocks if b]
+def find(ident):
+    name, _, index = ident.rpartition(",")
+    for block in blocks:
+        if block.startswith("Simple mixer control '%s',%s\n" % (name, index)):
+            return block
+if args[0] == "scontrols":
+    for block in blocks:
+        print(block.splitlines()[0])
+elif args[0] == "scontents":
+    sys.stdout.write(text)
+elif args[0] == "sget":
+    block = find(args[1])
+    if block is None:
+        sys.exit(1)
+    sys.stdout.write(block)
+elif args[0] == "sset":
+    with open(os.environ["FAKE_LOG"], "a") as log:
+        log.write("sset\t" + "\t".join(args[1:]) + "\n")
+"""
+
+FAKE_LOGGER = """#!/bin/sh
+echo "$0 $*" >> "$FAKE_LOG"
+"""
+
+
+class AudioInit(unittest.TestCase):
+    """os/package/being/being-audio-init against an amixer that answers like the real laptop."""
+
+    SCRIPT = REPO / "os/package/being/being-audio-init"
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        for name, body in (("amixer", FAKE_AMIXER), ("alsactl", FAKE_LOGGER), ("mic-test", FAKE_LOGGER)):
+            (self.bin / name).write_text(body)
+            (self.bin / name).chmod(0o755)
+        self.log = self.root / "calls.log"
+        self.cmdline = self.root / "cmdline"
+        self.cmdline.write_text("root=PARTUUID=x ro being.try=1 quiet\n")
+        self.read_only = self.root / "read-only-root/var/lib/alsa"
+        self.read_only.mkdir(parents=True)
+        self.read_only.chmod(0o555)
+        self.addCleanup(self.read_only.chmod, 0o755)
+
+    def run_script(self, scontents=MBP92_SCONTENTS, cmdline=None, **extra):
+        (self.root / "scontents").write_text(scontents)
+        if cmdline is not None:
+            self.cmdline.write_text(cmdline)
+        env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", FAKE_SCONTENTS=str(self.root / "scontents"),
+                   FAKE_LOG=str(self.log), BEING_AUDIO_RUN=str(self.root / "run"),
+                   BEING_AUDIO_CMDLINE=str(self.cmdline), BEING_AUDIO_WAIT="0",
+                   BEING_AUDIO_STATE_DIR=str(self.read_only),
+                   BEING_AUDIO_MIC_TEST=str(self.bin / "mic-test"))
+        env.update(extra)
+        shell = "/bin/dash" if Path("/bin/dash").exists() else "/bin/sh"
+        done = subprocess.run([shell, str(self.SCRIPT)], env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        calls = self.log.read_text().splitlines() if self.log.exists() else []
+        return done.stdout, calls
+
+    def sets(self, calls):
+        return [tuple(line.split("\t")[1:]) for line in calls if line.startswith("sset\t")]
+
+    def test_sets_the_macbook_pro_9_2_controls(self):
+        out, calls = self.run_script()
+        sets = self.sets(calls)
+        for control in ("Master,0", "Headphone,0", "Speaker,0", "Bass Speaker,0"):
+            self.assertIn((control, "playback", "85%"), sets)
+            self.assertIn((control, "playback", "unmute"), sets)
+        self.assertIn(("PCM,0", "playback", "100%"), sets)
+        self.assertIn(("Mic Boost,0", "2"), sets)               # 2 of 3: +20 dB
+        self.assertIn(("Capture,0", "capture", "85%"), sets)
+        self.assertEqual([s for s in sets if s[0] == "Capture,0"][-1], ("Capture,0", "capture", "cap"))
+        self.assertIn(("Digital,0", "capture", "0dB"), sets)
+        touched = {s[0] for s in sets}
+        self.assertFalse({"IEC958,0", "IEC958,1", "Auto-Mute Mode,0"} & touched)
+        self.assertIn("being-audio-init: before: Master = Mono: Playback 112 [88%] [-7.50dB] [on]", out)
+        self.assertIn("being-audio-init: after: Capture = FL: Capture 0 [0%]", out)
+        self.assertIn("being-audio-init: done:", out)
+        self.assertEqual((self.root / "run/scontents").read_text(), MBP92_SCONTENTS)
+
+    def test_never_unmutes_a_microphone_into_the_speakers_and_picks_the_internal_mic(self):
+        _, calls = self.run_script(SELECTOR_SCONTENTS)
+        sets = self.sets(calls)
+        self.assertIn(("Input Source,0", "Internal Mic"), sets)
+        self.assertIn(("Internal Mic Boost,0", "2"), sets)
+        self.assertIn(("Mic,0", "capture", "85%"), sets)
+        self.assertIn(("Mic,0", "capture", "cap"), sets)
+        self.assertFalse([s for s in sets if s[0] == "Mic,0" and "playback" in s])
+
+    def test_writes_state_only_under_run_on_a_read_only_root(self):
+        _, calls = self.run_script()
+        stores = [line for line in calls if "alsactl" in line]
+        self.assertEqual(len(stores), 1)
+        self.assertIn(str(self.root / "run/asound.state"), stores[0])
+        writable = self.root / "writable/var/lib/alsa"
+        writable.mkdir(parents=True)
+        self.log.unlink()
+        out, calls = self.run_script(BEING_AUDIO_STATE_DIR=str(writable))
+        self.assertTrue(any(str(writable / "asound.state") in line for line in calls if "alsactl" in line))
+
+    def test_measures_the_mic_on_try_boots_only(self):
+        _, calls = self.run_script()
+        tests = [line for line in calls if "mic-test" in line]
+        self.assertEqual(len(tests), 1)
+        self.assertIn(f"mic-test --card 0 --out {self.root / 'run/mic-level.json'}", tests[0])
+        self.log.unlink()
+        _, calls = self.run_script(cmdline="root=PARTUUID=x ro quiet\n")
+        self.assertFalse([line for line in calls if "mic-test" in line])
+
+    def test_keeps_the_card_controls_and_skips_the_mic_test_on_the_loopback_cable(self):
+        proc = self.root / "proc-asound"
+        (proc / "card0").mkdir(parents=True)
+        (proc / "card0/id").write_text("Loopback\n")
+        out, calls = self.run_script(BEING_AUDIO_PROC=str(proc))
+        self.assertIn("Loopback cable; no microphone to measure", out)
+        self.assertFalse([line for line in calls if "mic-test" in line])
+        self.assertTrue((self.root / "run/contents").exists())
+        (proc / "card0/id").write_text("PCH\n")
+        self.log.unlink(missing_ok=True)
+        _, calls = self.run_script(BEING_AUDIO_PROC=str(proc))
+        self.assertEqual(len([line for line in calls if "mic-test" in line]), 1)
+
+    def test_no_card_or_keep_leaves_everything_and_succeeds(self):
+        out, calls = self.run_script(FAKE_NO_CARD="1")
+        self.assertIn("no sound card 0", out)
+        self.assertEqual(calls, [])
+        out, calls = self.run_script(cmdline="ro being.audio=keep being.try=1\n")
+        self.assertIn("mixer left as it is", out)
+        self.assertEqual(calls, [])
+
+    def test_unit_runs_before_the_voice_and_is_installed(self):
+        unit = (REPO / "os/package/being/being-audio-init.service").read_text()
+        self.assertIn("Before=being-voice.service", unit)
+        self.assertIn("After=alsa-restore.service alsa-state.service sound.target", unit)
+        self.assertIn("Type=oneshot", unit)
+        self.assertIn("ExecStart=/usr/libexec/being/being-audio-init", unit)
+        self.assertIn("WantedBy=multi-user.target", unit)
+        self.assertNotIn("Requires=", unit)
+        recipe = (REPO / "os/package/being/being.mk").read_text()
+        self.assertIn("$(BEING_PKGDIR)/being-audio-init $(TARGET_DIR)/usr/libexec/being/being-audio-init", recipe)
+        self.assertIn("$(BEING_PKGDIR)/being-audio-init.service \\", recipe)
+        self.assertTrue(os.access(self.SCRIPT, os.X_OK))
+
+
+def tone(amplitude, seconds=0.5, channels=1, silent_channel=None, rate=16000):
+    import array as array_
+    import math as math_
+    samples = array_.array("h")
+    for n in range(int(rate * seconds)):
+        value = int(amplitude * math_.sin(2 * math_.pi * 440 * n / rate))
+        for channel in range(channels):
+            samples.append(0 if channel == silent_channel else value)
+    if os.sys.byteorder == "big":
+        samples.byteswap()
+    return samples.tobytes()
+
+
+class MicLevel(FakeMachine):
+    def test_levels_in_dbfs(self):
+        loud = usb_logs.levels(tone(32767))[0]
+        self.assertAlmostEqual(loud["peak_dbfs"], 0.0, delta=0.1)
+        self.assertAlmostEqual(loud["rms_dbfs"], -3.0, delta=0.1)
+        half = usb_logs.levels(tone(16384))[0]
+        self.assertAlmostEqual(half["peak_dbfs"], -6.0, delta=0.1)
+        self.assertIsNone(usb_logs.levels(bytes(3200))[0]["peak_dbfs"])
+        left, right = usb_logs.levels(tone(8192, channels=2, silent_channel=0), 2)
+        self.assertIsNone(left["rms_dbfs"])
+        self.assertAlmostEqual(right["peak_dbfs"], -12.0, delta=0.1)
+
+    def test_mic_test_keeps_levels_never_audio(self):
+        calls = []
+
+        def recorder(device, channels, seconds):
+            calls.append((device, channels, seconds))
+            return 0, tone(1000, seconds=seconds, channels=channels, silent_channel=0 if channels == 2 else None), ""
+        self.write("proc/uptime", "7.2 3.0\n")
+        result = usb_logs.mic_test(0, recorder=recorder, listening=lambda: False, root=self.root)
+        self.assertEqual(calls, [("plughw:0,0", 1, 3), ("plughw:0,0", 2, 1)])
+        self.assertEqual(result["status"], "ok")
+        self.assertAlmostEqual(result["peak_dbfs"], -30.3, delta=0.2)
+        self.assertIsNone(result["channels"][0]["rms_dbfs"])
+        path = self.root / "run/being-audio/mic-level.json"
+        usb_logs.save_mic_result(result, path)
+        self.assertLess(path.stat().st_size, 1024)
+        self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["mic-level.json"])
+        line = usb_logs.mic_line(usb_logs.mic_result(self.root))
+        self.assertTrue(line.startswith("peak -30."), line)
+        self.assertIn("dBFS, rms -33.", line)
+        self.assertIn("at 7 s after power-on", line)
+        self.assertIn("ONE SIDE much weaker", line)
+
+    def test_mic_test_stays_away_while_pip_listens_or_the_device_is_busy(self):
+        never = lambda *_: self.fail("recorded while the voice was listening")
+        result = usb_logs.mic_test(0, recorder=never, listening=lambda: True, root=self.root)
+        self.assertEqual(result["status"], "skipped")
+        busy = usb_logs.mic_test(0, recorder=lambda *_: (1, b"", "arecord: main:850: audio open error: Device or resource busy"),
+                                 listening=lambda: False, root=self.root)
+        self.assertEqual(busy["status"], "busy")
+        self.assertEqual(usb_logs.mic_line(busy), "not measured: the capture device was busy")
+        missing = usb_logs.mic_test(0, recorder=lambda *_: (None, b"", "arecord is not installed"),
+                                    listening=lambda: False, root=self.root)
+        self.assertEqual(usb_logs.mic_line(missing), "not measured: arecord is not installed")
+
+    def test_mic_line_names_silence_and_clipping(self):
+        self.assertIn("SILENT", usb_logs.mic_line({"status": "ok", "peak_dbfs": None, "rms_dbfs": None}))
+        self.assertIn("CLIPPING", usb_logs.mic_line({"status": "ok", "peak_dbfs": -0.2, "rms_dbfs": -9.0}))
+        self.assertIn("not measured on this boot", usb_logs.mic_line(None))
+
+    def test_cli_saves_the_result_and_never_fails(self):
+        out = self.root / "mic.json"
+        with patch.object(usb_logs, "mic_test", return_value={"status": "ok", "peak_dbfs": -20.0, "rms_dbfs": -45.0,
+                                                              "seconds": 3, "at": "6 s"}):
+            self.assertEqual(usb_logs.main(["mic-test", "--card", "0", "--out", str(out)]), 0)
+        self.assertEqual(usb_logs.json.loads(out.read_text())["rms_dbfs"], -45.0)
+        with patch.object(usb_logs, "mic_test", side_effect=RuntimeError("no card")):
+            self.assertEqual(usb_logs.main(["mic-test", "--out", str(out)]), 0)
+
+
+class MixerSummary(Reports):
+    def test_mixer_line_shows_the_controls_that_matter(self):
+        line = usb_logs.mixer_line(MBP92_SCONTENTS)
+        self.assertTrue(line.startswith("Master 88% -7.50dB on; Speaker 91% 0.00dB on; Bass Speaker"), line)
+        self.assertIn("Headphone 0% -57.50dB off", line)
+        self.assertIn("PCM 100% 0.00dB", line)
+        self.assertIn("Capture 0% -35.25dB off", line)
+        self.assertIn("Digital 50% 0.00dB", line)
+        self.assertIn("Mic Boost 0/3 0.00dB", line)
+        self.assertNotIn("IEC958", line)
+        self.assertTrue(line.endswith("; Mic Boost 0/3 0.00dB; Auto-Mute Mode 'Enabled'"), line)
+        self.assertIn("Input Source 'Mic'", usb_logs.mixer_line(SELECTOR_SCONTENTS))
+        uneven = MBP92_SCONTENTS.replace("Front Right: Capture 0 [0%] [-35.25dB] [off]",
+                                         "Front Right: Capture 54 [85%] [5.25dB] [on]")
+        self.assertIn("Capture L 0% -35.25dB off / R 85% 5.25dB on", usb_logs.mixer_line(uneven))
+        self.assertEqual(usb_logs.mixer_line(""), "not read (no amixer output for card 0)")
+
+    def test_summary_puts_hearing_and_voice_at_the_top(self):
+        self.macbook()
+        self.write("run/being-audio/mic-level.json",
+                   '{"status": "ok", "peak_dbfs": -18.5, "rms_dbfs": -47.25, "seconds": 3, "at": "6 s"}')
+        self.write("run/being-audio/scontents", MBP92_SCONTENTS)
+        lines = usb_logs.summary(self.root, boot="#2").splitlines()
+        self.assertTrue(lines[3].startswith("Mic level:      peak -18.5 dBFS, rms -47.2 dBFS"), lines[3])
+        self.assertTrue(lines[4].startswith("Mixer:          Master 88%"), lines[4])
+        self.assertTrue(lines[5].startswith("Machine:"))
+        given = usb_logs.summary(self.root, mixer="").splitlines()
+        self.assertIn("Mixer:          not read", "\n".join(given))
+
+    def test_mixer_line_names_the_jack_sensors_and_auto_mute(self):
+        self.macbook()
+        self.write("run/being-audio/scontents", MBP92_SCONTENTS)
+        self.write("run/being-audio/contents", MBP92_CONTENTS)
+        self.assertEqual(usb_logs.jack_line(MBP92_CONTENTS), "Headphone Jack plugged")
+        self.assertEqual(usb_logs.jack_line(""), "")
+        line = [l for l in usb_logs.summary(self.root).splitlines() if l.startswith("Mixer:")][0]
+        self.assertIn("Auto-Mute Mode 'Enabled'", line)
+        self.assertTrue(line.endswith("; Headphone Jack plugged"), line)
+        self.assertNotIn("HDMI", line)
+        report = usb_logs.hardware_report(self.root)
+        self.assertIn("numid=21,iface=CARD,name='Headphone Jack'", report)
+
+    def test_hardware_report_has_the_mixer_and_mic_sections(self):
+        self.macbook()
+        self.write("run/being-audio/scontents", MBP92_SCONTENTS)
+        text = usb_logs.hardware_report(self.root)
+        for title in ("alsa mixer (amixer -c 0 scontents)", "alsa mixer controls (amixer -c 0 contents)",
+                      "microphone level test", "alsa cards", "alsa pcm"):
+            self.assertIn(f"===== {title} =====", text)
+        self.assertIn("Simple mixer control 'Mic Boost',0", text)
+
+    def test_audio_init_lines_are_notable(self):
+        journal = usb_logs.Journal(self.root / "journal.txt", self.root / "cursor")
+        journal.feed(b"[ 6.1] being-audio-init[240]: being-audio-init: mic level: peak -20.0 dBFS\n"
+                     b"[ 6.2] being-audio-init[240]: being-audio-init: set Master: playback 85%\n", free=10**9)
+        journal.stop()
+        self.assertEqual(len(journal.notable["audio"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class KernelFeatures(unittest.TestCase):
+    def test_the_report_says_which_controllers_and_options_are_live(self):
+        import gzip
+
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            (root / "sys/fs/cgroup").mkdir(parents=True)
+            (root / "sys/fs/cgroup/cgroup.controllers").write_text("cpuset cpu io memory pids\n")
+            (root / "proc/pressure").mkdir(parents=True)
+            (root / "proc/pressure/cpu").write_text("some avg10=0.00\n")
+            with gzip.open(root / "proc/config.gz", "wt") as config:
+                config.write("CONFIG_CGROUP_SCHED=y\nCONFIG_MEMCG=y\n# CONFIG_CFS_BANDWIDTH is not set\n")
+            found = usb_logs.kernel_features(root)
+            self.assertEqual(found["cgroup controllers"], ["cpuset", "cpu", "io", "memory", "pids"])
+            self.assertTrue(found["cpu pressure (/proc/pressure/cpu)"])
+            self.assertEqual(found["kernel config"]["CONFIG_CGROUP_SCHED"], "y")
+            self.assertEqual(found["kernel config"]["CONFIG_CFS_BANDWIDTH"], "not set")
+            self.assertEqual(found["kernel config"]["CONFIG_PSI"], "not set")
+            self.assertIn("===== kernel features (cgroups, pressure) =====", usb_logs.hardware_report(root))
+
+    def test_a_kernel_without_its_config_says_so(self):
+        with tempfile.TemporaryDirectory() as work:
+            found = usb_logs.kernel_features(Path(work))
+        self.assertIsNone(found["cgroup controllers"])
+        self.assertIn("no /proc/config.gz", found["kernel config"])

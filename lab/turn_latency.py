@@ -1,8 +1,15 @@
-"""Measure speculative prompt work against a dedicated single-slot llama-server.
+"""Measure speculative prompt work against a dedicated llama-server.
 
 The input is four synthetic transcript timelines. The reported clause timing
 stops before speech synthesis. Use a dedicated server: this benchmark clears
 slot 0 between trials and can write a synthetic slot file for the restore check.
+
+--conversation runs a 6-turn chat through the mind's own Cortex client and
+reports, per turn, the tokens the server read (prompt_n) against the tokens of
+the new user block. With the stable chat template (config/chat-template.jinja,
+LLAMA_ARG_CHAT_TEMPLATE_FILE) turns 2-6 should read only that block, +-2
+tokens. It runs twice: plain, and with Cortex.prime_boundary() after each
+reply, which is kept only if prompt_n falls.
 """
 
 import argparse
@@ -20,7 +27,7 @@ import time
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
-from mind.cortex import Cortex, CortexError
+from mind.cortex import Cortex, CortexError, _shared_prefix
 from mind.speech import GRAMMAR, ClauseSplitter, EchoGuard, TagParser, ThinkFilter
 from mind.turn import (
     READ_AHEAD_SECONDS, READ_AHEAD_TOKENS, WARM_BATCH_TOKENS, WARM_PREFIX_TOKENS, Config, Mind,
@@ -272,10 +279,86 @@ async def trial(cortex, system, case, mode, progress):
 
 
 async def slots(cortex):
+    """Slot 0's entry. The production server has two slots; slot 0 is the conversation."""
     result = await cortex._cancellable_request("GET", "/slots", None)
-    if not isinstance(result, list) or len(result) != 1:
-        raise CortexError("the benchmark requires exactly one slot and the /slots endpoint")
-    return result[0]
+    if not isinstance(result, list) or not result:
+        raise CortexError("the benchmark requires the /slots endpoint")
+    for entry in result:
+        if isinstance(entry, dict) and entry.get("id", 0) == 0:
+            return entry
+    raise CortexError("the server has no slot 0")
+
+
+CONVERSATION = (
+    "hello pip how are you this evening",
+    "what did you notice while i was away",
+    "tell me one thing you like about the rain",
+    "can you count to five for me",
+    "what is your favourite colour and why",
+    "thank you goodnight pip",
+)
+TOLERANCE = 2
+
+
+async def user_block_tokens(cortex, messages):
+    """Tokens after the end of the last assistant reply in the rendered prompt:
+    the end-of-turn marker, the new user message and the generation prompt.
+    Without a reply yet, the whole prompt."""
+    rendered = await cortex._render_chat(messages)
+    full = await cortex._chat_tokens(rendered)
+    replies = [m["content"] for m in messages if m["role"] == "assistant" and m["content"]]
+    if not replies or replies[-1] not in rendered:
+        return len(full)
+    head = rendered[: rendered.rindex(replies[-1]) + len(replies[-1])]
+    return len(full) - len(_shared_prefix(await cortex._chat_tokens(head), full))
+
+
+async def conversation(cortex, system, *, prime=False, turns=CONVERSATION, progress=""):
+    """One chat on a cleared slot 0. Rows per turn: prompt_n, cache_n, the user
+    block, what was primed, and whether prompt_n is the expected count +-2."""
+    if not await cortex.slot("erase", SLOT_FILE):
+        raise CortexError("slot 0 could not be reset. Use a dedicated server with --slot-save-path.")
+    messages = prompt(system)
+    rows, primed = [], 0
+    for number, text in enumerate(turns, 1):
+        messages.append({"role": "user", "content": f"({SENSES})\n{text}"})
+        block = await user_block_tokens(cortex, messages)
+        stream = cortex.stream(messages, grammar=GRAMMAR, max_tokens=REPLY_TOKENS, temperature=0)
+        async for _ in stream:
+            pass
+        timings = stream.timings or {}
+        reply = stream.raw
+        if not reply:
+            raise CortexError(f"turn {number} produced nothing")
+        messages.append({"role": "assistant", "content": reply})
+        expected = block - primed
+        prompt_n = timings.get("prompt_n")
+        rows.append({"turn": number, "prompt_n": prompt_n, "cache_n": timings.get("cache_n"),
+                     "user_block": block, "primed_before": primed, "expected": expected,
+                     "within_tolerance": None if prompt_n is None else abs(prompt_n - expected) <= TOLERANCE})
+        primed = 0
+        if prime:
+            prefix = await cortex.prime_boundary(messages)
+            # The boundary tokens the next turn no longer reads: what the
+            # cache gained past the end of this reply.
+            if prefix:
+                head = await cortex._render_chat(messages)
+                if reply in head:
+                    upto = await cortex._chat_tokens(head[: head.rindex(reply) + len(reply)])
+                    primed = max(0, len(prefix) - len(_shared_prefix(prefix, upto)))
+        print(f"{progress} turn {number}: prompt_n {prompt_n}, user block {block}", flush=True, file=sys.stderr)
+    later = [row for row in rows if row["turn"] >= 2]
+    return {"prime": prime, "turns": rows,
+            "turns_2_6_within_tolerance": all(row["within_tolerance"] for row in later) if later else None,
+            "turns_2_6_prompt_n": [row["prompt_n"] for row in later]}
+
+
+def compare_conversations(plain, primed):
+    """prime_boundary is kept only if it lowers what turns 2-6 read."""
+    def total(run):
+        return sum(n for n in run["turns_2_6_prompt_n"] if isinstance(n, int))
+    return {"plain_prompt_n": total(plain), "primed_prompt_n": total(primed),
+            "keep_prime_boundary": total(primed) < total(plain)}
 
 
 async def cancellation_probe(cortex, system, short=False):
@@ -344,6 +427,15 @@ def summarize(rows):
 async def run(args):
     cortex = Cortex(args.cortex, timeout=args.request_timeout)
     system = (ROOT / "config" / "identity.md").read_text().strip().replace("{name}", "Pip").replace("{owner}", "Alex")
+    if args.conversation:
+        await slots(cortex)
+        metadata = await cortex._cancellable_request("GET", "/props", None)
+        plain = await conversation(cortex, system, progress="plain")
+        primed = await conversation(cortex, system, prime=True, progress="primed")
+        return {"scope": "6-turn chat: tokens read per turn against the new user block (task L7.2, L7.3).",
+                "server": {key: metadata.get(key) for key in ("build_info", "model_path", "total_slots")},
+                "tolerance_tokens": TOLERANCE, "plain": plain, "prime_boundary": primed,
+                "verdict": compare_conversations(plain, primed)}
     modes = ["final-only", "legacy-ahead", "cancel-ahead"]
     cases = CASES
     if args.prefix_only:
@@ -384,6 +476,8 @@ def main():
     parser.add_argument("--repeats", type=int, choices=range(1, 6), default=1)
     parser.add_argument("--warm", action="store_true", help="measure verified cold warmup and synthetic slot restore")
     parser.add_argument("--prefix-only", action="store_true", help="compare one-shot, batched and restored warmup")
+    parser.add_argument("--conversation", action="store_true",
+                        help="6 turns: prompt_n against the user block, plain and with prime_boundary")
     parser.add_argument("--request-timeout", type=float, default=15, help="HTTP socket timeout in seconds")
     args = parser.parse_args()
     url = urlparse(args.cortex)

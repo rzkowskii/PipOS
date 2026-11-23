@@ -71,8 +71,11 @@ Pip asks for clarification in some cases:
 - A bare hour such as "at nine" gets "Did you mean a.m. or p.m.?"
 - A time in the past gets "That time has already passed."
 
-When a timer finishes, Pip says "Timer N is up." When a reminder is due,
-it says "Reminder N. *task*".
+When a timer finishes, a bell plays and Pip says "Richard, your ten-minute
+timer is done." When a reminder is due, it says "You asked me to remind you:
+*task*." An alarm says the time ("Good morning. It's 6:30 in the morning. Time to get up.").
+A ring is said in 20 words or fewer, is honest when it is late, and repeats up
+to three times until you answer ("okay" or "snooze").
 
 ### Memory
 
@@ -148,7 +151,8 @@ Sources: `crates/face/src/main.rs`, `os/package/being/being-console.c`
 | **F10** | Mute or unmute the microphone | Mute (for the **P** speaker preview) |
 | **F9** | Recover the face when the lid reading is unknown | Same |
 | **F2** | Open setup on an installed Pip, or the start menu in Try | — |
-| **Click or tap** | Pip glances down | — |
+| **Click or tap** | Pip glances down; while the eyes rest it also listens, as for "Hey Pip" | — |
+| **Space** or **Return** | While the eyes rest (idle, drowsy or asleep with the lid open) and no app panel has the keyboard: listen, as for "Hey Pip" (`key.attend`) | Typed as text |
 | **Page Up / Page Down** | — | Scroll the history |
 | **Number keys, Enter** | — | Choose menu items |
 
@@ -269,9 +273,9 @@ Source: `os/package/being/*.service`, `os/package/cortex/being-cortex.service`
 
 | Unit | Runs | Notes |
 |---|---|---|
-| `being-brainstem` | `being-brainstem --appliance-body …` | Early boot, `WatchdogSec=10s`, reboot after repeated failure |
-| `being-face` | `being-face --fullscreen` (KMS) | Skipped while the USB menu is showing |
-| `being-mind` | `python3 -m mind` | Waits for brainstem and cortex. Blocked during a restore |
+| `being-brainstem` | `being-brainstem --appliance-body …` | Early boot, `WatchdogSec=10s`, reboot after repeated failure. `CPUWeight=1000` |
+| `being-face` | `being-face --fullscreen` (KMS) | Skipped while the USB menu is showing. `WatchdogSec=5s`, pinged every frame; shader cache in `/run/being/mesa`. `CPUWeight=1000` |
+| `being-mind` | `python3 -m mind` | Waits for the brainstem only, never the cortex, so code answers work while the model loads. Blocked during a restore. `WatchdogSec=30s`, pinged from its event loop. `CPUWeight=1000` |
 | `being-voice` | `python3 -m mind.voice` | Blocked during a restore and in the serial lab |
 | `being-cortex` | `llama-server` | Gated by signed model-pack verification |
 | `being-eyes` | `python3 -m mind.eyes` | Only when `/mind/camera.enabled` exists. Sandboxed |

@@ -98,6 +98,8 @@ const YAWN_STRETCH: f32 = 0.9;
 /// Spring damping for ordinary moves; lively arrivals overshoot a touch.
 const CALM: f32 = 0.82;
 const CENTER: [f32; 2] = [0.0, 0.0];
+/// How long the "pardon?" squint lasts after words it could not make out.
+pub const MISSED_HOLD: f64 = 1.1;
 
 fn ease(t: f32, start: f32, end: f32) -> f32 {
     let x = ((t - start) / (end - start)).clamp(0.0, 1.0);
@@ -1022,6 +1024,21 @@ impl Anim {
 
     pub fn muted(&self) -> bool {
         self.muted
+    }
+
+    /// The eyes are resting: lit, listening for their name, not dazed and not
+    /// in a conversation. Space, Return or a click then asks for attention
+    /// (`key.attend`), as "Hey Pip" would.
+    pub fn resting(&self) -> bool {
+        !self.panel_blank && !self.muted && !self.dazed() && matches!(self.state.as_str(), "idle" | "drowsy" | "asleep")
+    }
+
+    /// Words were heard but not made out (`hear.missed`): a short squint, the
+    /// face's "pardon?". Nothing shows while muted, dazed, asleep or dark.
+    pub fn missed(&mut self) {
+        if !self.muted && !self.dazed() {
+            self.express("skepticism", MISSED_HOLD);
+        }
     }
 
     fn dazed(&self) -> bool {
@@ -1956,6 +1973,47 @@ mod tests {
         a.set_state("listening", false, true);
         assert_eq!(a.target_name(), "dazed");
         a.set_state("asleep", false, true);
+        assert_eq!(a.target_name(), "asleep");
+    }
+
+    #[test]
+    fn only_resting_eyes_ask_for_attention() {
+        let mut a = Anim::new(1);
+        a.set_lid(Some(false), false, true);
+        for state in ["idle", "drowsy", "asleep"] {
+            a.set_state(state, false, false);
+            assert!(a.resting(), "{state}");
+        }
+        for state in ["waking", "attending", "listening", "thinking", "speaking"] {
+            a.set_state(state, false, false);
+            assert!(!a.resting(), "{state}");
+        }
+        a.set_state("idle", true, false);
+        assert!(!a.resting(), "muted: M lets it listen again");
+        a.set_state("idle", false, true);
+        assert!(!a.resting(), "unwell");
+        a.set_state("idle", false, false);
+        a.set_link_lost(true);
+        assert!(!a.resting(), "no brainstem to hear the key");
+        a.set_link_lost(false);
+        a.set_lid(Some(true), false, false);
+        assert!(!a.resting(), "a dark panel");
+    }
+
+    #[test]
+    fn a_missed_hearing_squints_briefly_and_never_while_asleep_or_muted() {
+        let mut a = Anim::new(1);
+        a.set_lid(Some(false), false, true);
+        a.set_state("attending", false, false);
+        a.missed();
+        assert_eq!(a.target_name(), "skepticism");
+        run(&mut a, (MISSED_HOLD + 0.1) as f32);
+        assert_eq!(a.target_name(), "attentive");
+        a.set_state("idle", true, false);
+        a.missed();
+        assert_eq!(a.target_name(), "muted");
+        a.set_state("asleep", false, false);
+        a.missed();
         assert_eq!(a.target_name(), "asleep");
     }
 

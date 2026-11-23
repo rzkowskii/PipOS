@@ -10,6 +10,7 @@ def describe_policy(policy):
     quiet = f"{window.start} to {window.end} (local time)" if window else "Off"
     return (f"Automatic reminders and timers   {'On' if policy.reminders else 'Off'}\n"
             f"Daily greetings                  {'On' if policy.greetings else 'Off'}\n"
+            f"Morning brief                    {'On' if policy.brief else 'Off'}\n"
             f"Quiet hours                      {quiet}")
 
 
@@ -18,10 +19,11 @@ def configure_initiative(mind_dir, *, dry_run=False, temporary=False):
     print("\nQuiet hours and announcements")
     print("Quiet hours pause automatic speech.\nDue reminders and timers stay pending.")
     print("Daily greetings use the separately enabled camera.")
+    print("The morning brief answers your first words of the day.")
     while True:
         print(f"\n{describe_policy(policy)}")
         print("\n  1  Toggle automatic reminders\n  2  Toggle daily greetings\n  3  Set quiet hours"
-              "\n  4  Clear quiet hours\n  K  Save and go back\n  Q  Discard and go back")
+              "\n  4  Clear quiet hours\n  5  Toggle morning brief\n  K  Save and go back\n  Q  Discard and go back")
         choice = input("Choice: ").strip().lower()
         if choice == "1":
             policy = replace(policy, reminders=not policy.reminders)
@@ -40,6 +42,8 @@ def configure_initiative(mind_dir, *, dry_run=False, temporary=False):
                 print(error)
         elif choice == "4":
             policy = replace(policy, quiet_hours=None)
+        elif choice == "5":
+            policy = replace(policy, brief=not policy.brief)
         elif choice == "k":
             if dry_run:
                 print("Announcement preview finished.")

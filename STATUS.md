@@ -48,8 +48,8 @@ Generated 2026-11-23 23:28 AEDT.
 ## Evidence per milestone
 
 Evidence levels: **host** (Mac-side tests), **QEMU** (a guest run on an image
-built from the named source), **Mac** (the real MacBookPro9,2). Nothing has
-reached **Mac** yet.
+built from the named source), **Mac** (the real MacBookPro9,2). Only the
+first Try boot has reached **Mac** (23 November 2026, the frozen stick).
 
 | Milestone | Level | Evidence and limits |
 |---|---|---|
@@ -62,13 +62,13 @@ reached **Mac** yet.
 | L6 camera | QEMU (older image) | Detector fixture only; no physical camera |
 | Installer and Try menu | QEMU | `test_local_screen` 19/19 on the 23 Nov Try screen image |
 | Laptop Try stick | QEMU | `test_laptop_smoke` on the frozen stick: 6 of 7 passed (log beside it); the install-from-Try case timed out waiting for the installed eyes. Hard power-off and organ-restart checks added afterwards, not yet run |
-| Host suites | host | Rust 121/121; Python 523 run, all passing, 22 skipped (age, real model) at the plan's checkpoint |
-| First hardware boot | not started | Waiting for the owner to run [FIRST-BOOT.md](docs/FIRST-BOOT.md) |
+| Host suites | host | 24 Nov, after the wave 2 integration: Rust 236 passed, none ignored; Python 1,821 run, all passing, 29 skipped (age not installed on the Mac, Linux-only sockets, real model); lab host checks 42 passing |
+| First hardware boot | Mac | 23 Nov, frozen stick, "show boot messages" entry: booted, face drawn on the GPU, model warmed, "Hey Pip" heard but the words after it not made out; no failed units. Logs in `out/hardware-logs/first-real-boot-2026-11-23/`. Round 2 is [FIRST-BOOT.md section 8](docs/FIRST-BOOT.md#8-round-2-hearing-typing-and-speed) |
 
 ## Blockers
 
-- **First Try boot:** none in software. The owner writes the frozen stick and runs the boot script.
-- **Second Try image:** reading the Phase 0 logs, then the [Try-2] tasks of Phase 1.
+- **First Try boot:** done 23 November (Phase 0 below).
+- **Second Try image:** the wave 2 work of [PIP-FUNCTIONS.md](docs/PIP-FUNCTIONS.md) merged and built from one source-id, then the lab gates of its section 4.1. Hearing is the first thing it must fix.
 - **SSD install:** all of Phase 1 (release key and laptop identity 1.2, update and backup from F2 1.3-1.4, memory bug fixes 1.11), a sealed laptop candidate through the boot gate, and the owner's answers in [DECISIONS-OWNER.md](docs/DECISIONS-OWNER.md).
 
 ## Next gate
@@ -80,23 +80,124 @@ round's findings below.
 
 ## Phase 0: what we learned on the Mac
 
-Filled in after the first boot from `python3 lab/try_timings.py` on the
-PIPLOGS folder and the owner's notes.
+From the first boot on 23 November 2026 (the frozen stick, booted with
+"show boot messages"): `out/hardware-logs/first-real-boot-2026-11-23/`
+(`summary.txt`, `hardware-report.txt`, `journal.txt`, `dmesg.txt`). Owner
+notes: "It installed. But it just blinks and looks at me? I speak and it
+does nothing." What that boot did not measure, round 2
+([FIRST-BOOT.md section 8](docs/FIRST-BOOT.md#8-round-2-hearing-typing-and-speed))
+asks for.
 
 | Question | Answer |
 |---|---|
-| CPU (`/proc/cpuinfo`) | not yet known (recorded as i5-3210M) |
-| Renderer (crocus or llvmpipe) | |
-| Power button to eyes | |
-| Sound card and mixer | |
-| "Hey Pip" heard at 1 m / 2 m | |
-| End of speech to first word, warm turn (median) | |
-| Prompt and decode tok/s | |
-| Lid close and open | |
-| F-key codes with and without fn | |
-| Battery: cycle count, health, charge state | |
-| Failed units and restarts | |
+| CPU (`/proc/cpuinfo`) | Intel Core i5-3210M at 2.50 GHz, 2 cores, 4 threads (Ivy Bridge: AVX, no AVX2). 15,920 MiB of memory |
+| Renderer (crocus or llvmpipe) | The GPU: `Mesa Intel(R) HD Graphics 4000 (IVB GT2)`, Mesa's crocus driver, through a GLES 3.0 context. Not software rendering |
+| Power button to eyes | Not timed. The kernel took 3.25 s and userspace 20.67 s (23.9 s in all); the Try menu was up at 27 s and the face drew its first frame at 110.6 s, after the menu was left |
+| Sound card and mixer | One HDA Intel PCH card: Cirrus Logic CS4206 (codec 0) and Intel HDMI (codec 3). No mixer settings were stored or applied, and the capture level was too low (next row) |
+| "Hey Pip" heard at 1 m / 2 m | Heard once (idle to attending at 155.5 s), then nothing made out until it gave up at 175.6 s. Not counted at 1 m or 2 m |
+| End of speech to first word, warm turn (median) | Not measured: no request produced a reply |
+| Prompt and decode tok/s | Prompt reading 22.3 to 22.6 tokens a second (44 ms a token, Qwen3.5-0.8B Q4_K_M, 2 threads, 32-token batches). Decode not measured. The model's hash took 18.1 s from the stick and held the mind back to 23.9 s |
+| Lid close and open | The lid switch was found and read open. Closing was not tried |
+| F-key codes with and without fn | Not recorded. That stick sent media keys unless fn was held; newer sticks boot with `hid_apple.fnmode=2`, so the top row sends F1 to F12 |
+| Battery: cycle count, health, charge state | 71 cycles; full charge 4,684 of 5,770 mAh design (81%); 79% and charging on AC. Package temperature 48 °C at idle (cores 46 and 47 °C) |
+| Failed units and restarts | No failed units and no organ restarts. One dependency message (systemd-networkd persistent storage) on a Try boot, which keeps no state |
+| Clock | Reset: the real-time clock read 2022-01-03, and systemd moved it forward only to its own build epoch, 2026-10-17. The real date was 2026-11-23. Wave 2 has Pip notice this and ask once for the time |
+| Kernel features (plan 1.8) | systemd warned "the local system does not support BPF/cgroup firewalling", so `IPAddressDeny=` was not enforced on that stick. The likely cause is a kernel without cgroup BPF: the release commit's `linux.config` did not set `BPF_SYSCALL` or `CGROUP_BPF` (they came in later). Its systemd was also built without seccomp. The xHCI controller found the stick, so MSI worked. The current `linux.config` sets `PCI_MSI`, `PCIEPORTBUS`, `MEMCG`, `CGROUP_PIDS`, `PSI`, `BPF_SYSCALL` and `CGROUP_BPF`, and the laptop fragment overrides none of them (`tests/test_os_image.py`). It lacked the CPU controller until 24 November (`CGROUP_SCHED`, `FAIR_GROUP_SCHED`, `CFS_BANDWIDTH`, now set): without it every `CPUWeight=` and `CPUQuota=` was ignored, so the model's threads shared the two cores evenly with the eyes and the voice. Whether the memory and pids controllers and PSI were on that stick is not in its logs. The next stick's resolved `.config` should be checked in the builder before it is written |
 
 ## Log
 
 - **2026-11-23** Frozen first-boot stick `pipos-laptop-try-20261123` (SHA-256 `8de540df…6588e612`) built at 22:09 and smoke-tested in QEMU (6 of 7 passed; the install-to-internal-disk case timed out, and the first boot does not install). A commit, "PipOS: first public release", followed at 23:13; it is not tagged `first-hardware-try`, and nothing yet ties it to the stick's bytes (plan 0.1, [DECISIONS-OWNER.md](docs/DECISIONS-OWNER.md) item 4). Improvement plan written (110 tasks). Docs restructured: DESIGN.md, DECISIONS.md, DECISIONS-OWNER.md, FIRST-BOOT.md and this file; USB-READINESS.md and DESIGN-COVERAGE.md superseded; DESIGN-AND-PLAN.md marked historical; the lab notebook kept out of the public tree (it holds private session links). Lab gains `try_timings.py`, bench mode, source-ids on images, gate mode, the laptop candidate lane and `scripts/check`.
+- **2026-11-24** Wave 2 planned in [PIP-FUNCTIONS.md](docs/PIP-FUNCTIONS.md) from the first boot's logs: hearing first, then a typing fallback, honest misses, everyday code skills, rings, the night shift and speed. Image and face work for it: the mind no longer waits for the model's hash; the face, mind and brainstem get CPU weight 1000, and the kernel gains the CPU controller that makes every unit's weight count; the face (5 s) and the mind (30 s) are watched by systemd; the face and the Try menu have a writable shader cache; the image ships compiled Python modules; the microphone mixer unit and bench mode are installed (bench starts only from the Try menu's "measure speed"); Space, Return or a click while the eyes rest asks for attention; a missed hearing makes the face squint. What landed is in [Wave 2 status](#wave-2-status) below. Still to check on the laptop: hearing at 1 m and 2 m with each microphone entry, end-of-speech to first word, decode speed and bench results. Open owner decisions: alarms with the lid closed (new; the default is silence), the source tag, the LFM licence and the screenshots.
+
+## Wave 2 status
+
+Written after the integration pass of 24 November 2026. Everything here is
+**host** evidence (Mac-side tests with fakes): no image has been built from
+this source yet, so nothing below has run in QEMU or on the laptop.
+
+**Delivered (host-tested).**
+
+- **Hearing.** The audio hotfix is ported: the microphone mixer unit
+  (`being-audio-init`), software gain with an automatic channel picker, an
+  honest "Sorry, I didn't catch that." from the voice (not after a wake it
+  already answered), `voice.level`, a timing line per reply, and the Try
+  entries **m**, **n** and **b**. Typing to Pip is item 6 of the Try menu
+  and, after integration, **Y** in an installed Pip's Setup; the voice's
+  typing hint names whichever applies. Typing over Pip stops it, as Esc does.
+- **Voice engines.** The sherpa-onnx package (v2.0.3, v2.0.2 as fallback),
+  ctypes bindings checked against both release headers, Silero VAD and
+  Moonshine tiny after the wake (only the words after "Hey Pip" are
+  transcribed), a resident Piper voice, and an automatic choice from speed
+  measured on the laptop. Setup **N** chooses by hand.
+- **Mind core.** The routing order of PIP-FUNCTIONS 5.2, spoken yes for
+  destructive actions, rings (alarms ring in quiet hours, timers ring while
+  the clock is doubted, a bell before the words), the morning brief, the
+  warm-up and identity snapshot, systemd watchdog pings, and "forget
+  everything" in batches that also erases lists, joke history and the
+  action log.
+- **Everyday skills, time and body.** Calculator, units, lists and notes,
+  jokes and games, read-back; alarms, repeats, snooze, the time elsewhere
+  and help; battery health, brightness, "stop listening", shutdown with a
+  yes, the doctor and Care's Health page, the action log and voice and night
+  backups.
+- **Speed and packs.** The cortex runs `--parallel 2 --ctx-size 8192` with
+  every request in slot 0, a chat template whose past replies render byte
+  for byte, turn-boundary priming, signed descriptors for every model role
+  (now installed by `being.mk`), a verdict cache, bench mode and the quant
+  candidate tool.
+- **Memory and dreams.** Embeddings and hybrid recall, incremental search
+  index, the night shift, the dream server (now only for a checked pack and
+  never during a bench boot) and its verifier, candidates and the diary.
+- **Workshop.** The body monitor and clock panels beside the terminal.
+- **Image.** The CPU cgroup controller, compiled Python modules, the face
+  and mind watchdogs, presets for the dream and bench units.
+
+**Wired in the integration pass.** The candidate gate now knows the lab
+apps suite. The mind passes handlers the brightness answer, mute, lid and
+cortex use; tells the doctor each turn's speed; runs the doctor's quiet
+check about every ten minutes at rest; answers "what did we do yesterday"
+from the diary; lets guests ask the time elsewhere and for help; searches
+past conversation by words only for an ordinary sentence; and moves running
+timers when the clock is set by voice or in Care, still owning up to a
+doubted date. The hardware report gains a kernel features section (live
+cgroup controllers, PSI, the kernel options). PROTOCOL.md, the user guide,
+REFERENCE.md, FIRST-BOOT.md and LAB.md were corrected to match.
+
+**Partial or pending.**
+
+- Not run tonight (no image, no QEMU, no real model): the Ivy Bridge
+  sherpa-onnx smoke (L2.8), the slot-isolation probe and turn-latency
+  checks with the real model (L7.1 to L7.3), strict reply shape (L7.9),
+  three fixture days of dreaming (L8.13), and the lab apps suite (L9.6).
+- The voice, recogniser and embedding packs are not yet checked with
+  `model_pack.verify` before they are loaded; the conversation and dream
+  packs are.
+- Night maintenance (backup, rehash, re-warm) runs only when dreaming is
+  switched on, because it shares the dream's eligibility gate.
+- "Brighter" at full brightness still says "Brighter.": the brainstem's
+  answer arrives after the line. Brightness set by voice is restored only on
+  a clean brainstem stop.
+- `scripts/check-docs.py` reports only freshness: the manual pages'
+  `verified` stamps predate tonight's uncommitted sources. They need a full
+  re-check and new stamps once the work is committed.
+- Not confirmed: that the image ships `hwclock` (clock setting relies on
+  it), and the builder's resolved kernel `.config`. `IOWeight=` on the dream
+  unit has no IO controller to act on.
+
+**Needs the real laptop.** Hearing at 1 m and 2 m with each microphone
+entry; end of speech to first word; decode speed; the microphone path's
+cost per frame (switch to ALSA softvol if over 600 µs); the cost of the
+recogniser's confidence call; Piper's and Moonshine's real-time factors,
+which decide the automatic voice; whether llama-server reports `cache_n`
+for the identity snapshot; recall thresholds on real phrasing; a bench run;
+`cat /sys/fs/cgroup/cgroup.controllers` listing cpu, memory and pids; the
+doctor's restarts, the mixer reset and backups to a labelled stick.
+
+**Open owner decisions.** Alarms with the lid closed (default silence);
+whether Piper's Alba voice may be the default natural voice, since its
+model card says it was fine-tuned from a voice rejected earlier for its
+dataset licence; whether night maintenance should run without dreaming;
+whether a clock panel may stay open past four hours as a bedside clock;
+where the model-pack verdict file lives (today the model server can write
+its folder); and, as before, the source tag, the LFM licence and the
+screenshots.

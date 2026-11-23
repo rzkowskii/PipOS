@@ -47,6 +47,9 @@ class AppCommand:
     request: str = ""         # for task: just the thing asked for ("draws a spiral")
 
 
+SMALL_APPS = ("monitor", "clock")
+
+
 @dataclass
 class AppContext:
     enabled: bool = True
@@ -57,6 +60,13 @@ class AppContext:
     job_source: str = ""
     pending: str = ""         # "close" or "forget" while a yes/no question is open
     shelf: dict = field(default_factory=dict)
+    monitor: str = "closed"   # the two small apps: closed or shown (they never minimise)
+    clock: str = "closed"
+
+    @property
+    def small_app(self):
+        """The small app on screen, or ''."""
+        return next((app for app in SMALL_APPS if getattr(self, app) == "shown"), "")
 
 
 # -- normalising -------------------------------------------------------------
@@ -191,8 +201,11 @@ _PATTERNS = [
     # does not (it is too common an answer in conversation).
     ("open", rf"(?:open|start|launch|bring up|pull up|fire up|load)(?: up)? {_T}(?: for me)?|give me a (?:shell|terminal|console)"
              r"|(?:the |your |my )?(?:terminal|console)"),
-    ("open_monitor", r"show me how you(?:'re| are) feeling|show me your (?:temperature|body|vitals|insides)|open (?:the |your )?(?:body )?monitor"),
-    ("open_clock", r"show me (?:the|your) clock|show (?:me )?my timers|open (?:the |your )?clock"),
+    ("open_monitor", r"show me how you(?:'re| are) (?:feeling|doing)|show me your (?:temperature|body|vitals|insides)"
+                     r"|(?:open|show me|bring up|start|launch) (?:the |your )?(?:body )?monitor"),
+    ("open_clock", r"show me (?:the|your) (?:clock|time)|show (?:me )?my timers|(?:open|bring up|start|launch) (?:the |your )?clock"),
+    ("close_small", r"(?:close|hide|minimi[sz]e|shut|turn off|get rid of|put away|stop) (?:the |your |my )?(?P<a>(?:body )?monitor|clock|timers)"
+                    r"|put (?:the |your )?(?P<a2>clock|monitor) away|close (?:it|that)"),
     ("show_terminal", rf"(?:show(?: me)?|bring back|switch to|go back to|restore|unhide|reopen) {_T}|show (?:it|that) (?:again|to me)|bring it back"),
     ("minimise", rf"(?:minimi[sz]e|hide|put away|tuck away|shrink)(?: it| that| {_T})(?: away)?|minimi[sz]e|show me your face|(?:go|come) back to your face|put it away"),
     ("close", rf"(?:close|quit|exit|shut(?: down)?|get rid of|kill|turn off|stop) {_T}(?: completely)?|close (?:it|that) (?:completely|down)"),
@@ -212,6 +225,7 @@ _PATTERNS = [
     ("forget_file", r"forget (?:that|the|this) (?:script|program|code|file)"),
 ]
 _COMPILED = [(kind, re.compile(rf"^(?:{pattern})$")) for kind, pattern in _PATTERNS]
+_CHECK_IN = re.compile(r"^(?:how(?:'s| is) it going|what are you doing)$")
 _TASK = [
     # The verb may be left out only after "write it yourself:" ("a script
     # that..."); otherwise "a script for my play is due" would start a job.
@@ -221,18 +235,75 @@ _TASK = [
     ("terminal", re.compile(r"^(?:type|run the command|run a command to) (?P<t>.+) in (?:the|your) terminal$")),
 ]
 _FORCE = re.compile(r"(?:[, ]+(?:and )?(?:write it yourself|from scratch|without your recipe book|without a recipe))$|^(?:write it yourself|from scratch)[,: ]+")
-# Start words for commands.may_be_command(), so read-ahead never starts on them.
+# The speculative-read gate (PIP-FUNCTIONS 5.2): words that start one of these
+# commands whatever is on screen, so the mind does not start reading the model
+# ahead for them. They are prefixes, because the gate may see a partial
+# transcript ("open the").
+_THING = r"(?:the |your |my |a |that )?(?:body )?(?:terminal|console|shell|command line|command prompt|monitor|clock|timers)\b"
 COMMAND_START = re.compile(
-    r"^(?:(?:open|close|quit|exit|minimi[sz]e|hide|restore|show me|bring (?:up|back)|give me a|pause|hold on|hang on"
-    r"|wait|stop|carry on|continue|keep going|go on|resume|cancel|scrap|throw|undo|run|try|fix|install|uninstall"
-    r"|play|launch|clear the workshop|write a|write me|make a|make me|create a|in the terminal|do the following"
-    r"|what (?:happened|did it|are you doing|can you install)|did it work|are you done|is it done)\b"
-    r"|(?:the )?terminal\b)"
+    r"^(?:(?:open|close|quit|exit|launch|start|bring up|pull up|fire up|load|show(?: me)?|switch to|go back to|restore"
+    rf"|unhide|reopen|minimi[sz]e|hide|put away|tuck away|shrink|get rid of|kill|turn off|shut(?: down)?) {_THING}"
+    r"|(?:open|bring up|pull up|show me|show|start|launch|close|hide)(?: (?:the|your|my|a|that))?\s*$"
+    r"|show me how you(?:'re| are) (?:feeling|doing)|show me your (?:temperature|body|vitals|insides|clock|time)"
+    r"|show me the (?:clock|time)|show (?:me )?my timers"
+    r"|give me a (?:shell|terminal|console)|(?:install|uninstall|download)\b"
+    r"|what (?:can|could) you install|what(?:'s| is) on your shelf|show me your shelf|what (?:programs|games) do you have"
+    r"|(?:clear|empty|wipe) (?:the|your) workshop"
+    r"|in (?:the|your) terminal|on the terminal|using the terminal|do the following|write it yourself|from scratch"
+    r"|(?:write|make|create|code|build)(?: me)? (?:an? )?(?:little |small |quick |tiny |simple )?(?:python |shell )?"
+    r"(?:script|program|app)\b"
+    r"|(?:the |your |my )?(?:terminal|console)\s*$)"
 )
+# Words that are ours only while something is on screen or a job exists
+# ("stop", "wait", "carry on", "how's it going", "show me your face"...).
+# With nothing open they are conversation, and the read-ahead may start.
+CONTEXT_START = re.compile(
+    r"^(?:stop|pause|hold on|hang on|wait|just (?:a|one)|carry on|continue|keep going|keep typing|keep writing|go on"
+    r"|resume|start again|unpause|you can carry on|okay carry on|ok carry on|cancel|scrap|throw|never ?mind the"
+    r"|forget (?:that|the|this) (?:script|program|code|file)|abandon|bin it|undo|put it back|run|try|execute|give it a go"
+    r"|fix|have another go|what (?:happened|did it|does it|are you doing|'s it doing|is it doing)|did it work"
+    r"|are you (?:done|finished)|is it (?:done|finished|ready)|how(?:'s| is) it going|how far|read (?:it|that)"
+    r"|show me your face|(?:go|come) back to your face|put it away|hide it|hide that|minimi[sz]e|close (?:it|that)"
+    r"|show (?:it|that)|bring it back)\b"
+)
+# A job still counts as going on (for the gate and for "how's it going?")
+# while it is active or written and waiting to run; a finished one is history.
+LIVE = ACTIVE + ("waiting",)
+_ANSWER_START = re.compile(r"^(?:yes|yeah|yep|no\b|nope|sure|okay|ok|do it|go ahead|leave it|keep it|close it|forget it all)")
+_SHELF_VERB = re.compile(r"^(?:run|play|start|launch|open|install|get|add|uninstall|remove|delete) (?:me )?(?P<p>[\w' -]+)$")
+_DEFAULT_SHELF = None
 
 
-def may_be_app_command(text, name="pip"):
-    return bool(COMMAND_START.match(normalise(text, name)))
+def may_be_app_command(text, ctx=None, name="pip"):
+    """True if `text` (perhaps only the start of an utterance) may be one of
+    these commands. Without a context, nothing is taken to be open, so a bare
+    "stop", "wait", "continue" or "how's it going" says no; AppBridge passes
+    its own context (AppBridge.may_be_command)."""
+    global _DEFAULT_SHELF
+    said = normalise(text, name)
+    if not said:
+        return False
+    if COMMAND_START.match(said):
+        return True
+    if ctx is None:
+        if _DEFAULT_SHELF is None:
+            _DEFAULT_SHELF = load_shelf()
+        shelf = _DEFAULT_SHELF
+    else:
+        shelf = ctx.shelf
+    match = _SHELF_VERB.match(said)
+    if match and " ".join(match["p"].split()).strip(" .") in shelf:
+        return True
+    if ctx is None:
+        return False
+    if ctx.pending and _ANSWER_START.match(said):
+        return True
+    on_screen = ctx.terminal != "closed" or bool(ctx.small_app) or ctx.job in LIVE
+    if on_screen and CONTEXT_START.match(said) and not _CHECK_IN.match(said):
+        return True
+    # Otherwise only a whole command counts: with a finished script and the
+    # terminal closed, "did it work?" is still ours, "running late" is not.
+    return parse(text, ctx, name) is not None
 
 
 def _task_command(said):
@@ -283,6 +354,7 @@ def parse(text, ctx, name="pip"):
     job_active = ctx.job in ACTIVE
     job_exists = ctx.job is not None
     terminal = ctx.terminal != "closed"
+    small = ctx.small_app
     task = _task_command(said)
     if task is not None:
         return _gate(task, ctx) or task
@@ -296,6 +368,20 @@ def parse(text, ctx, name="pip"):
         if kind in ("open_monitor", "open_clock"):
             command = AppCommand("open", app="monitor" if kind == "open_monitor" else "clock")
             return _gate(command, ctx) or command
+        if kind == "close_small":
+            named = (match["a"] or match["a2"] or "").replace("body ", "")
+            app = {"timers": "clock"}.get(named, named)
+            if not app:  # "close it": whatever is on screen
+                if small:
+                    return AppCommand("close", app=small)
+                if ctx.terminal == "shown":
+                    return AppCommand("close")
+                return None
+            if getattr(ctx, app) == "shown":
+                return AppCommand("close", app=app)
+            if said.startswith("stop"):
+                continue  # "stop the clock" may be about a script's clock
+            return AppCommand("say", say=REPLIES[f"{app}_not_open"])
         if kind == "show_terminal":
             if ctx.terminal == "minimised":
                 return AppCommand("restore")
@@ -303,10 +389,17 @@ def parse(text, ctx, name="pip"):
                 return AppCommand("say", say="Here it is.")
             return _gate(AppCommand("open"), ctx) or AppCommand("open")
         if kind == "minimise":
+            names_terminal = "terminal" in said or "console" in said or "shell" in said
+            if small and not names_terminal:
+                # "Show me your face" with the monitor or clock up: the small
+                # apps close instead of minimising (voice-apps 3.5).
+                return AppCommand("minimise", app=small)
             if said in ("show me your face", "go back to your face", "come back to your face") and not terminal:
                 return None
             if not terminal:
-                return AppCommand("say", say=REPLIES["not_open"]) if "terminal" in said or "console" in said or "shell" in said else None
+                return AppCommand("say", say=REPLIES["not_open"]) if names_terminal else None
+            if ctx.terminal == "minimised" and not small:
+                return AppCommand("say", say=REPLIES["already_hidden"]) if names_terminal else None
             return AppCommand("minimise")
         if kind == "close":
             return AppCommand("close") if terminal else AppCommand("say", say=REPLIES["not_open"])
@@ -324,7 +417,7 @@ def parse(text, ctx, name="pip"):
                 return AppCommand("say", say=REPLIES["nothing"])
             return None  # "continue the story" still works
         if kind == "shelf_list":
-            return AppCommand("shelf_list")
+            return _gate(AppCommand("shelf_list"), ctx) or AppCommand("shelf_list")
         if kind in ("install", "uninstall", "run_app"):
             known = ctx.shelf.get(" ".join(program.split()))
             if known:
@@ -339,8 +432,14 @@ def parse(text, ctx, name="pip"):
         if kind == "read_line":
             return AppCommand("read_line") if job_exists else (AppCommand("say", say=REPLIES["nothing"]) if terminal else None)
         if kind == "report":
+            if _CHECK_IN.match(said) and ctx.job not in LIVE and not terminal:
+                # With no job going on and nothing open, "how's it going?" is
+                # a greeting, not a question about a script finished long ago.
+                return None
             if job_exists:
                 return AppCommand("report")
+            if _CHECK_IN.match(said):
+                return None  # with no job, "how's it going?" is a greeting
             return AppCommand("say", say=REPLIES["nothing"]) if terminal else None
         if kind == "clear_workshop":
             return AppCommand("clear_workshop")
@@ -353,18 +452,26 @@ def parse(text, ctx, name="pip"):
 
 def _gate(command, ctx):
     """The context that turns a request into a fixed reply."""
-    if command.kind not in ("open", "task", "install", "uninstall", "run_app"):
+    if command.kind not in ("open", "task", "install", "uninstall", "run_app", "shelf_list"):
         return None
     if not ctx.enabled:
         return AppCommand("say", say=REPLIES["disabled"])
     if ctx.guest:
+        if command.kind == "open" and command.app in SMALL_APPS:
+            return AppCommand("say", say=REPLIES[f"guest_{command.app}"])
         return AppCommand("say", say=REPLIES["guest"])
+    if command.kind == "shelf_list":
+        return None  # the shelf can be listed with my hands down: it is only words
     if not ctx.hands_up:
+        if command.kind == "open" and command.app in SMALL_APPS:
+            return AppCommand("say", say=REPLIES["no_hands"].replace("the terminal", f"my {command.app}"))
         return AppCommand("say", say=REPLIES["no_hands"])
     if command.kind == "task" or command.kind in ("install", "uninstall", "run_app"):
         if ctx.job in ACTIVE:
             return AppCommand("say", say=REPLIES["busy"])
-    if command.kind == "open" and command.app == "terminal" and ctx.terminal == "shown":
+    if command.kind == "open" and command.app == "terminal" and ctx.terminal == "shown" and not ctx.small_app:
+        return AppCommand("say", say=REPLIES["already_open"])
+    if command.kind == "open" and command.app in SMALL_APPS and getattr(ctx, command.app) == "shown":
         return AppCommand("say", say=REPLIES["already_open"])
     return None
 
@@ -373,6 +480,11 @@ def _gate(command, ctx):
 
 REPLIES = {
     "open": "Here's my terminal.",
+    "open_monitor": "Here's how I'm doing.",
+    "open_clock": "Here's my clock.",
+    "monitor_not_open": "My monitor isn't open.",
+    "clock_not_open": "My clock isn't open.",
+    "already_hidden": "It's already tucked away.",
     "already_open": "It's already open.",
     "open_failed": "My terminal didn't open.",
     "restored": "Here it is.",
@@ -397,6 +509,8 @@ REPLIES = {
     "ran_ok": "It ran without errors.",
     "disabled": "My apps are switched off. You can turn them on in Setup.",
     "guest": "My terminal stays closed while a guest is here.",
+    "guest_clock": "My clock stays closed while a guest is here. It shows your reminders.",
+    "guest_monitor": "My monitor stays closed while a guest is here.",
     "no_hands": "My hands aren't working right now, so I can't open the terminal.",
     "unavailable": "I don't have that app yet. I can open my terminal.",
     "no_download": ("I can't download programs. I'm offline and my system is read-only. "
@@ -605,11 +719,16 @@ class AppBridge:
         return AppContext(
             enabled=bool(self.enabled()), guest=self.guest if guest is None else guest, hands_up=self.hands_up,
             terminal=self.view["terminal"], job=status.get("phase"), job_source=status.get("source") or "",
-            pending=self.pending, shelf=self.shelf,
+            pending=self.pending, shelf=self.shelf, monitor=self.view["monitor"], clock=self.view["clock"],
         )
 
     def parse(self, text, guest=None):
         return parse(text, self.context(guest), self.name)
+
+    def may_be_command(self, text, guest=None):
+        """The speculative-read gate with what is really on screen: a bare
+        "stop" is ours only while the terminal is open or a job exists."""
+        return may_be_app_command(text, self.context(guest), self.name)
 
     @property
     def job_holds_model(self):
@@ -704,13 +823,14 @@ class AppBridge:
         elif kind == "minimise":
             reply = await self._ask("app.minimise", ("app.state", "app.refused"), app=command.app)
             writing = (self.status or {}).get("phase") in GENERATING
-            if reply and reply.get("view") == "minimised":
-                await say(REPLIES["minimised_writing"] if writing else REPLIES["minimised"])
+            small = command.app in SMALL_APPS
+            if reply and (reply.get("view") == "minimised" or (small and reply.get("view") == "closed")):
+                await say(REPLIES["minimised_writing"] if writing and not small else REPLIES["minimised"])
             else:
-                await say(REPLIES["not_open"])
+                await say(REPLIES[f"{command.app}_not_open"] if small else REPLIES["not_open"])
         elif kind == "close":
             reply = await self._ask("app.close", ("app.state", "app.refused"), app=command.app)
-            await self._close_line(reply, say)
+            await self._close_line(reply, say, command.app)
         elif kind == "task":
             fields = dict(kind=command.task, text=command.text, request=command.request, recipe=command.recipe or None,
                           slots=dict(command.slots), force_model=command.force_model)
@@ -760,6 +880,9 @@ class AppBridge:
         if reply is None:
             return REPLIES["open_failed"]
         if reply.get("t") == "app.state" and reply.get("view") == "shown":
+            app = reply.get("app")
+            if app in SMALL_APPS:
+                return REPLIES[f"open_{app}"]
             return REPLIES["restored"] if was == "minimised" else REPLIES["open"]
         return self._refused_line(reply)
 
@@ -770,6 +893,8 @@ class AppBridge:
             if isinstance(low, int) and isinstance(high, int):
                 return f"My recipe for that takes a number from {number_words(low)} to {number_words(high)}."
             return REPLIES["bad_slot"]
+        if reason == "guest" and reply.get("app") in SMALL_APPS:
+            return REPLIES[f"guest_{reply['app']}"]
         return {
             "disabled": REPLIES["disabled"], "guest": REPLIES["guest"], "busy": REPLIES["busy"],
             "unavailable": REPLIES["unavailable"], "lid_closed": REPLIES["lid_closed"],
@@ -777,8 +902,10 @@ class AppBridge:
             "no_session": REPLIES["not_open"],
         }.get(reason, REPLIES["open_failed"])
 
-    async def _close_line(self, reply, say):
-        if reply is None:
+    async def _close_line(self, reply, say, app="terminal"):
+        if reply is not None and reply.get("reason") == "no_session" and app in SMALL_APPS:
+            await say(REPLIES[f"{app}_not_open"])
+        elif reply is None:
             await say(REPLIES["open_failed"].replace("open", "close"))
         elif reply.get("t") == "app.state" and reply.get("view") == "closed":
             await say(REPLIES["closed"])

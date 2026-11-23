@@ -6,7 +6,7 @@ OnFailure=being-trial-reboot.service
 
 [Service]
 EnvironmentFile=/etc/being/env
-Environment=PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/usr/lib/being
 ExecStart=/usr/bin/python3 -m mind.boot_health
 # A healthy boot clears GRUB's count of unconfirmed boots of the confirmed
 # slot (grub.cfg, PIP_UNSEEN), so only three failed boots in a row switch to

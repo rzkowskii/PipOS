@@ -1,4 +1,9 @@
-"""Owner settings for announcements and quiet hours."""
+"""Owner settings for announcements, the morning brief and quiet hours.
+
+The file keeps its version 1 shape. The morning brief is on by default and
+its key is written only when the owner turns it off, so an untouched
+policy reads the same as before the brief existed.
+"""
 
 import json
 import os
@@ -33,10 +38,11 @@ class InitiativePolicy:
     reminders: bool = True
     greetings: bool = False
     quiet_hours: QuietHours | None = None
+    brief: bool = True
 
     def __post_init__(self):
-        if type(self.reminders) is not bool or type(self.greetings) is not bool:
-            raise ValueError("Reminder and greeting choices must be Boolean.")
+        if type(self.reminders) is not bool or type(self.greetings) is not bool or type(self.brief) is not bool:
+            raise ValueError("Reminder, greeting and brief choices must be Boolean.")
         if self.quiet_hours is not None and not isinstance(self.quiet_hours, QuietHours):
             raise ValueError("Use a QuietHours window or None.")
 
@@ -50,8 +56,20 @@ class InitiativePolicy:
             return start <= current < end
         return current >= start or current < end
 
+    def may_announce(self, kind, local_now: datetime) -> bool:
+        """Whether a due item of `kind` may be spoken now.
 
-_DISABLED = InitiativePolicy(reminders=False, greetings=False)
+        An alarm is the one thing said in quiet hours, and it does not
+        depend on the automatic reminders switch: the owner asked for that
+        sound at that time. The lid still has to be open.
+        """
+        if kind == "alarm":
+            return True
+        return self.reminders and not self.is_quiet(local_now)
+
+
+_DISABLED = InitiativePolicy(reminders=False, greetings=False, brief=False)
+_FIELDS = {"version", "reminders", "greetings", "quiet_hours"}
 
 
 def _unique_fields(pairs):
@@ -74,7 +92,7 @@ def load_policy(mind_dir, *, strict=False) -> InitiativePolicy:
         if len(raw) > MAX_POLICY_BYTES:
             raise ValueError("The initiative policy exceeds its allowed size.")
         data = json.loads(raw, object_pairs_hook=_unique_fields)
-        if (not isinstance(data, dict) or data.keys() != {"version", "reminders", "greetings", "quiet_hours"}
+        if (not isinstance(data, dict) or data.keys() not in (_FIELDS, _FIELDS | {"brief"})
                 or type(data["version"]) is not int or data["version"] != VERSION):
             raise ValueError("Invalid initiative policy format.")
         window = data["quiet_hours"]
@@ -82,6 +100,7 @@ def load_policy(mind_dir, *, strict=False) -> InitiativePolicy:
             reminders=data["reminders"],
             greetings=data["greetings"],
             quiet_hours=QuietHours(**window) if window is not None else None,
+            brief=data.get("brief", True),
         )
     except FileNotFoundError:
         if strict:
@@ -102,4 +121,6 @@ def save_policy(mind_dir, policy: InitiativePolicy) -> None:
     if not isinstance(policy, InitiativePolicy):
         raise TypeError("Expected an InitiativePolicy.")
     data = {"version": VERSION, **asdict(policy)}
+    if policy.brief:
+        del data["brief"]  # the default: the file keeps its original shape
     atomic_write(Path(mind_dir) / POLICY_PATH, json.dumps(data, indent=2) + "\n")

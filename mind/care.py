@@ -459,10 +459,26 @@ def parse_local_time(text, zone, *, today=None):
 
 
 def set_clock(mind, timestamp, *, settime=None):
-    """Set the system clock and the battery clock, and tell the memory."""
+    """Set the system clock and the battery clock, and tell the memory.
+
+    Running timers move with the clock, so a ten-minute timer started before
+    the change still rings ten minutes after it started (Reminders.clock_moved).
+    """
+    delta = timestamp - time.time()
     (settime or (lambda value: time.clock_settime(time.CLOCK_REALTIME, value)))(timestamp)
     if shutil.which("hwclock"):
         quiet(["hwclock", "-w", "-u"], timeout=20)
+    if (Path(mind) / "reminders.db").is_file():
+        from .reminders import Reminders
+
+        try:
+            reminders = Reminders(Path(mind))
+            try:
+                reminders.clock_moved(delta)
+            finally:
+                reminders.db.close()
+        except (sqlite3.Error, OSError, ValueError):
+            pass
     database = Path(mind) / "mind.db"
     if database.is_file():
         from .memory import Memory
@@ -932,6 +948,19 @@ def write_backup(mind, *, temporary):
                         "Choose the stick to write the backup to. Only a new folder on it is written.")
     if device is None:
         return
+    # One backup at a time: the mind's voice and night backups take this lock too.
+    try:
+        with backup.backup_lock():
+            result, key_on_stick = write_locked_backup(mind, device, temporary)
+    except backup.Unavailable:
+        ui.note("I'm already backing myself up. Try again in a minute.", "warning")
+        return
+    show_backup(result, key_on_stick)
+
+
+def write_locked_backup(mind, device, temporary):
+    from . import backup, local_menu
+
     try:
         root = local_menu.mount_media(device, writable=True)
         folder = root / BACKUP_FOLDER
@@ -944,10 +973,18 @@ def write_backup(mind, *, temporary):
             view.stage("Saving.")
             result = backup.backup_to_folder(Path(mind), folder, recipient)
             view.stage("Proving.")
+        # "When did you last back up?" is answered from this record.
+        backup.record_backup(Path(mind), "menu")
         key_on_stick = any((folder / name).exists() for name in (KEY_NAME, Path(KEY_NAME).with_suffix(".key").name))
         os.sync()
     finally:
         local_menu.unmount_media()
+    return result, key_on_stick
+
+
+def show_backup(result, key_on_stick):
+    from . import backup
+
     short = backup.fingerprint(result["checkpoint"])
     rows = [ui.mark("success", f"Saved {result['snapshot'].name} in {BACKUP_FOLDER}."),
             ui.mark("accent", f"Checkpoint {short}"),
@@ -1071,7 +1108,8 @@ def summary_rows(mind, temporary):
             ("5", "Dream journal", "What I kept while dreaming"),
             ("6", "Date and time", f"{datetime.now(zone):%a %H:%M}"),
             ("7", "Time zone", zone.key if zone else "Not set"),
-            ("8", "Workshop", "On" if workshop_enabled(mind) else "Off")]
+            ("8", "Workshop", "On" if workshop_enabled(mind) else "Off"),
+            ("H", "Health", "A check-up of my parts")]
     if not temporary:
         rows.append(("9", "Network", "Wi-Fi and wired Ethernet"))
     else:
@@ -1081,6 +1119,22 @@ def summary_rows(mind, temporary):
         if logged is not None:
             rows.append(("D", "Boot diagnostics", "Saved on this stick" if logged else "Off"))
     return rows
+
+
+def health_page(mind, temporary, *, system=None):
+    """The same check-up as "are you okay?", as rows. Battery, heat and
+    hearing come from the running being, so they are asked for by voice."""
+    from . import doctor
+
+    rows = doctor.health_rows(system or doctor.System(), doctor.Facts(state_dir=Path(mind)))
+    lines = [ui.mark(mark, text) for mark, text in rows]
+    lines += ["", "Battery, temperature and hearing: ask me \"are you okay?\"."]
+    if ui.enabled():
+        ui.screen("Health", context="Care")
+        ui.card(lines)
+    else:
+        print("\n".join(ui.plain(text) for text in lines))
+    pause()
 
 
 def diagnostics_page(mind, temporary):
@@ -1105,7 +1159,7 @@ def care_menu(mind=MIND, *, temporary=False):
     mind = Path(mind)
     pages = {"1": camera_page, "2": dreams_page, "3": memory_page, "4": remember_page,
              "5": lambda where, _: journal_page(where), "6": clock_page, "7": zone_page,
-             "8": workshop_page, "9": network_page, "d": diagnostics_page}
+             "8": workshop_page, "9": network_page, "d": diagnostics_page, "h": health_page}
     while True:
         entries = summary_rows(mind, temporary)
         choice = menu("Senses and memory", entries, context="Setup",

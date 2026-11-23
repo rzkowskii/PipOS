@@ -100,7 +100,7 @@ How to read the tables:
 | Wake it | "Hey Pip" (wait for the chirp, then talk) | code (PocketSphinx keyphrase) | always-on spotting, a few percent of one core (estimate) | today |
 | One breath for commands | "Hey Pip, what time is it?" | code | as above | today |
 | Attention key | Press **Space**, or click the trackpad, while the eyes are resting | code | 0 | W2-L10 (face), W2-L6 (brainstem) |
-| Type to Pip | **fn+F2**, then **6** "Talk to Pip by typing" | code; replies shown and spoken | 0 | W2-L1 (port of the hotfix) |
+| Type to Pip | **F2**, then **6** "Talk to Pip by typing" (Try stick; installed: **F2**, then **Y**) | code; replies shown and spoken | 0 | W2-L1 (port of the hotfix) |
 | Pip owns up when it missed you | (automatic) "Sorry, I didn't catch that." Once per wake. The second time in 10 minutes it adds "You can also type to me: press F2, then 6." | code | 0 | W2-L1 |
 | What did you hear? | "What did you hear?", "What did I just say?" | code: "I heard: 'set a timer for five minutes'." Kept in memory only for this wake, never stored | 0 | W2-L4 |
 | Say that again | "Say that again", "Repeat that", "Pardon?", "What did you say?" | code: repeats its last line | 0 | W2-L4 |
@@ -161,7 +161,7 @@ Lists and notes live in their own file on Pip's disk. They survive restarts, go 
 | Sleep | "Go to sleep", "Good night" | code | 0 | today |
 | Switch off and restart | "Shut down", "Switch off", "Restart yourself" ("Shall I switch off? Say yes."), then it saves itself first | code | 0 | W2-L6 |
 | Version and updates | "What version are you?", "Did your update work?" Updates themselves stay on F2 | code | 0 | W2-L6 |
-| Care screen | fn+F2: Care, with Health, Backup, Update, Camera, Dreams, Memory, Network, Workshop and Audio | code | 0 | today; Health page W2-L6 |
+| Care screen | F2: Care, with Health, Backup, Update, Camera, Dreams, Memory, Network, Workshop and Audio | code | 0 | today; Health page W2-L6 |
 | Privacy | Close the lid (eyes, ears and camera stop), M mutes, Esc interrupts | code | 0 | today |
 
 ### 2.4 Workshop and apps
@@ -924,7 +924,7 @@ The speculative-read gate is `commands.may_be_command(text) or app_commands.may_
 - **L10.6 Docs.**
   - Do:
     - User guide "Things you can say", from section 2.
-    - FIRST-BOOT round-2 steps: Try entries `m`, `n` and `b`; typing with fn+F2 then 6; Space to attend.
+    - FIRST-BOOT round-2 steps: Try entries `m`, `n` and `b`; typing with F2 then 6; Space to attend.
     - PROTOCOL.md: the topics in 5.2.
     - STATUS.md: Phase 0 answers from the first boot (CPU i5-3210M, the crocus renderer, CS4206, 22.5 tok/s prompt reading, battery 71 cycles and 81%, 48 °C at idle, no failed units, the clock reset).
   - Accept: `scripts/check-docs.py` passes.

@@ -1,0 +1,29 @@
+{
+  "format": "beingos-model-pack-v2",
+  "role": "dream",
+  "dir": "dream",
+  "model": "Qwen/Qwen3-1.7B",
+  "quantization": "Q4_K_M",
+  "license": "Apache-2.0",
+  "note": "The night model: started only by the night shift (being-dream-cortex.service).",
+  "sources": [
+    {
+      "file": "models/dream/Qwen3-1.7B-Q4_K_M.gguf",
+      "bytes": 1282439264,
+      "sha256": "d2387ca2dbfee2ffabce7120d3770dadca0b293052bc2f0e138fdc940d9bc7b5",
+      "url": "https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF/resolve/daeb8e2d528a760970442092f6bf1e55c3b659eb/Qwen3-1.7B-Q4_K_M.gguf",
+      "path": "dream.gguf"
+    },
+    {
+      "file": "models/dream/LICENSE",
+      "bytes": 11544,
+      "sha256": "5de36594c10839788a8c589443a8ef9d8b8d17c65a1b5807206ae037fc36c6bd",
+      "url": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/90862c4b9d2787eaed51d12237eafdfe7c5f6077/LICENSE",
+      "path": "LICENSE"
+    }
+  ],
+  "files": [
+    {"bytes": 11544, "path": "LICENSE", "sha256": "5de36594c10839788a8c589443a8ef9d8b8d17c65a1b5807206ae037fc36c6bd"},
+    {"bytes": 1282439264, "path": "dream.gguf", "sha256": "d2387ca2dbfee2ffabce7120d3770dadca0b293052bc2f0e138fdc940d9bc7b5"}
+  ]
+}

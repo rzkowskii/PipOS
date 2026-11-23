@@ -468,7 +468,7 @@ It should include all of them, but confirm locally. A possible vision-encode reg
 - https://codebrowser.dev/linux/linux/drivers/hwmon/applesmc.c.html · https://github.com/av-savchenko/hsemotion · https://publications.idiap.ch/attachments/papers/2024/OtroshiShahreza_ICASSP-2_2024.pdf
 
 **Character**
-- https://unsloth.ai/docs/models/qwen3.5/fine-tune · https://www.anthropic.com/research/persona-vectors · https://arxiv.org/abs/2601.10387 · https://arxiv.org/abs/2609.13637 · https://arxiv.org/pdf/2510.04648 · https://arxiv.org/pdf/2511.10277
+- https://unsloth.ai/docs/models/qwen3.5/fine-tune · https://arxiv.org/abs/2507.21509 · https://arxiv.org/abs/2601.10387 · https://arxiv.org/abs/2609.13637 · https://arxiv.org/pdf/2510.04648 · https://arxiv.org/pdf/2511.10277
 - https://randym32.github.io/Anki.Vector.Documentation/guides/Vector%20character%20design%20guide.html · https://openai.com/en-GB/policies/terms-of-use/
 
 **Project files**

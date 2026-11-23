@@ -24,6 +24,8 @@ const SUBS: &[&str] = &[
     "hear.partial",
     "hear.final",
     "hear.cancel",
+    // Words heard but not made out: a short squint (carries no words).
+    "hear.missed",
     "mind.cancel",
     "mind.reply_done",
 ];
@@ -385,6 +387,7 @@ fn apply(ev: &Event, anim: &mut Anim, side: &mut Side) {
             }
         }
         "say.level" => anim.set_level(ev.f64("v").unwrap_or(0.0) as f32),
+        "hear.missed" => anim.missed(),
         "mind.cancel" => anim.end_reply(),
         "mind.reply_done" if ev.bool("spoke") == Some(false) => anim.end_reply(),
         _ => {}
@@ -407,6 +410,19 @@ mod tests {
         apply(&Event::new("face.express").with("name", "concern"), &mut anim, &mut Side::default());
         apply(&Event::new("state.changed").with("state", "attending"), &mut anim, &mut Side::default());
         assert_eq!(anim.target_name(), "concern");
+    }
+
+    #[test]
+    fn a_missed_hearing_squints_and_shows_no_caption() {
+        assert!(SUBS.contains(&"hear.missed"));
+        let mut anim = Anim::new(7);
+        let mut side = Side::default();
+        anim.set_state("attending", false, false);
+        side.captions.toggle();
+        side.captions.take_changed();
+        apply(&Event::new("hear.missed").with("reason", "unclear"), &mut anim, &mut side);
+        assert_eq!(anim.target_name(), "skepticism");
+        assert!(!side.captions.take_changed(), "a miss has no words to caption");
     }
 
     #[test]

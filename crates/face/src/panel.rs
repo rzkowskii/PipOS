@@ -47,6 +47,15 @@
 //! while its renderer's pid is alive. The file appears by rename, so a path
 //! whose inode changed is opened again.
 //!
+//! Switching apps: at most one app is shown, and hands shows the next one
+//! before it hides the last (the terminal, the body monitor and the clock
+//! each have a file). The moment the followed frame turns hidden, or its file
+//! is removed (a closed app), the directory is looked at again in the same
+//! poll, so the face goes straight from one panel to the next with no frame
+//! of full face between them, and a closed app leaves the screen at once.
+//! While the followed frame is hidden the directory is looked at four times a
+//! second, so an app opened over a minimised terminal shows within 250 ms.
+//!
 //! The renderer is unprivileged and parses what caged programs print, so the
 //! face opens only regular files, never through a symlink, never blocking.
 
@@ -65,6 +74,8 @@ pub const STRIP_FRACTION: f32 = 160.0 / 800.0;
 pub const TRANSITION: f32 = 0.45;
 const BEAT_TIMEOUT: Duration = Duration::from_millis(2500);
 const RESCAN: Duration = Duration::from_secs(1);
+/// How often to look for another app while the followed one is hidden.
+const RESCAN_HIDDEN: Duration = Duration::from_millis(250);
 /// Larger than any panel this screen shows; it bounds what a broken or
 /// hostile renderer can make the face allocate (16 MB).
 const MAX_SIDE: u32 = 2048;
@@ -289,11 +300,28 @@ pub struct Panel {
     pub width: u32,
     pub height: u32,
     row: Vec<u8>,
+    /// The followed frame just turned hidden or lost its file: look again now.
+    rescan_now: bool,
 }
 
 impl Panel {
     pub fn new(dir: impl Into<PathBuf>) -> Panel {
-        Panel { dir: dir.into(), source: None, scanned: None, pixels: Vec::new(), width: 0, height: 0, row: Vec::new() }
+        Panel {
+            dir: dir.into(),
+            source: None,
+            scanned: None,
+            pixels: Vec::new(),
+            width: 0,
+            height: 0,
+            row: Vec::new(),
+            rescan_now: false,
+        }
+    }
+
+    /// The followed frame file's path, if any (for tests and the log).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn following(&self) -> Option<&Path> {
+        self.source.as_ref().map(|s| s.path.as_path())
     }
 
     /// The header of the followed frame, if it may be shown: valid, flagged
@@ -341,7 +369,9 @@ impl Panel {
     /// Look for frame files at most once a second; with none, that is all
     /// the panel ever costs.
     fn discover(&mut self, now: Instant) {
-        if self.scanned.is_some_and(|at| now.saturating_duration_since(at) < RESCAN) {
+        let hidden = self.source.as_ref().is_some_and(|s| s.header.as_ref().is_none_or(|h| !h.has(flag::VISIBLE)));
+        let every = if hidden { RESCAN_HIDDEN } else { RESCAN };
+        if self.scanned.is_some_and(|at| now.saturating_duration_since(at) < every) {
             return;
         }
         self.scanned = Some(now);
@@ -399,9 +429,35 @@ impl Panel {
     /// Read whatever is new. Never blocks on anything but a page-cache read.
     pub fn poll(&mut self, now: Instant) -> Update {
         self.discover(now);
+        let update = self.read(now);
+        if !std::mem::take(&mut self.rescan_now) {
+            return update;
+        }
+        // The followed app was hidden or closed: whatever is shown now is
+        // read in this same poll.
+        let before = self.source.as_ref().map(|s| s.id);
+        self.scanned = None;
+        self.discover(now);
+        if self.source.as_ref().map(|s| s.id) == before {
+            return update;
+        }
+        match self.read(now) {
+            Update::Nothing if update == Update::Resized => Update::Resized,
+            next => next,
+        }
+    }
+
+    fn read(&mut self, now: Instant) -> Update {
         let Some(source) = &mut self.source else { return Update::Nothing };
         let mut b = [0u8; HEADER];
         if source.file.read_exact_at(&mut b, 0).is_err() {
+            self.drop_source();
+            return Update::Nothing;
+        }
+        // A closed app's renderer removes its file; a restarted one renames a
+        // new file over it. Either way this one is finished (one fstat).
+        if source.file.metadata().is_ok_and(|m| m.nlink() == 0) {
+            self.rescan_now = true;
             self.drop_source();
             return Update::Nothing;
         }
@@ -412,6 +468,10 @@ impl Panel {
                 return Update::Nothing;
             }
         };
+        let was_visible = source.header.as_ref().is_some_and(|h| h.has(flag::VISIBLE));
+        if was_visible && !header.has(flag::VISIBLE) {
+            self.rescan_now = true;
+        }
         let stale = source.alive.is_none_or(|(pid, _, at)| pid != header.pid || now.saturating_duration_since(at) >= RESCAN);
         if stale {
             source.alive = Some((header.pid, alive(header.pid), now));
@@ -715,7 +775,12 @@ mod tests {
 
         /// Write a whole frame whose every pixel is `value`, in place.
         fn write(&self, h: &Header, value: u8) {
-            let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.dir.join("terminal.frame")).unwrap();
+            self.write_app("terminal", h, value);
+        }
+
+        fn write_app(&self, app: &str, h: &Header, value: u8) {
+            let path = self.dir.join(format!("{app}.frame"));
+            let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(path).unwrap();
             f.write_all(&encode_header(h)).unwrap();
             f.write_all(&vec![value; (h.stride * h.height) as usize]).unwrap();
         }
@@ -853,6 +918,95 @@ mod tests {
         let mut panel = Panel::new(&fake.dir);
         assert_eq!(panel.poll(Instant::now()), Update::Nothing);
         assert!(open_frame(&secret).is_some());
+    }
+
+    fn app_header(seq: u64, flags: u32, title: &str) -> Header {
+        Header { title: title.to_string(), ..header(seq, flags) }
+    }
+
+    #[test]
+    fn opening_the_monitor_over_the_terminal_goes_straight_from_one_panel_to_the_other() {
+        // hands shows the monitor first, then hides the terminal (SIGUSR2).
+        let fake = Fake::new();
+        fake.write_app("terminal", &app_header(2, flag::VISIBLE | flag::FOCUS, "Pip's terminal"), 3);
+        let mut panel = Panel::new(&fake.dir);
+        let t = Instant::now();
+        assert_eq!(panel.poll(t), Update::Resized);
+        assert!(panel.following().is_some_and(|p| p.ends_with("terminal.frame")));
+        fake.write_app("monitor", &app_header(2, flag::VISIBLE, "How I'm feeling"), 7);
+        let t1 = t + Duration::from_millis(1100);
+        panel.poll(t1);
+        assert!(panel.following().is_some_and(|p| p.ends_with("terminal.frame")), "the shown terminal is kept");
+        assert_eq!(panel.shown(t1).map(|h| h.title.as_str()), Some("Pip's terminal"));
+        // The terminal is hidden: the monitor is read in this same poll, well
+        // inside the 1 s rescan, so the face never shows a frame of full face.
+        fake.write_app("terminal", &app_header(4, flag::PIP_TYPING, "Pip's terminal"), 3);
+        let t2 = t1 + Duration::from_millis(16);
+        assert_eq!(panel.poll(t2), Update::Resized);
+        assert_eq!(panel.shown(t2).map(|h| h.title.as_str()), Some("How I'm feeling"));
+        assert!(!panel.shown(t2).unwrap().has(flag::FOCUS), "keys stay with the face for the small apps");
+        assert!(panel.pixels.iter().all(|&p| p == 7));
+        // The clock replaces the monitor the same way.
+        fake.write_app("clock", &app_header(2, flag::VISIBLE, "Pip's clock"), 9);
+        fake.write_app("monitor", &app_header(4, 0, "How I'm feeling"), 7);
+        let t3 = t2 + Duration::from_millis(16);
+        panel.poll(t3);
+        assert_eq!(panel.shown(t3).map(|h| h.title.as_str()), Some("Pip's clock"));
+        assert!(panel.pixels.iter().all(|&p| p == 9));
+    }
+
+    #[test]
+    fn a_closed_app_leaves_the_screen_at_once() {
+        let fake = Fake::new();
+        fake.write_app("terminal", &app_header(2, flag::PIP_TYPING, "Pip's terminal"), 3); // minimised
+        fake.write_app("monitor", &app_header(2, flag::VISIBLE, "How I'm feeling"), 7);
+        let mut panel = Panel::new(&fake.dir);
+        let t = Instant::now();
+        panel.poll(t);
+        assert_eq!(panel.shown(t).map(|h| h.title.as_str()), Some("How I'm feeling"));
+        // "Show me your face": the monitor's renderer ends and removes its file.
+        std::fs::remove_file(fake.dir.join("monitor.frame")).unwrap();
+        let t1 = t + Duration::from_millis(16);
+        panel.poll(t1);
+        assert!(panel.shown(t1).is_none(), "gone at the next frame, not after a rescan or a stale beat");
+        assert!(!panel.pixels.contains(&7), "and its picture with it");
+        assert!(panel.following().is_some_and(|p| p.ends_with("terminal.frame")), "the minimised terminal's flags");
+        assert_eq!(panel.flags(t1), flag::PIP_TYPING);
+    }
+
+    #[test]
+    fn an_app_opened_over_a_minimised_terminal_shows_within_a_quarter_second() {
+        let fake = Fake::new();
+        fake.write_app("terminal", &app_header(2, 0, "Pip's terminal"), 3);
+        let mut panel = Panel::new(&fake.dir);
+        let t = Instant::now();
+        panel.poll(t);
+        assert!(panel.shown(t).is_none());
+        fake.write_app("clock", &app_header(2, flag::VISIBLE, "Pip's clock"), 9);
+        panel.poll(t + Duration::from_millis(100));
+        assert!(panel.shown(t + Duration::from_millis(100)).is_none(), "not looked for yet");
+        let t1 = t + Duration::from_millis(260);
+        assert_eq!(panel.poll(t1), Update::Resized);
+        assert_eq!(panel.shown(t1).map(|h| h.title.as_str()), Some("Pip's clock"));
+    }
+
+    #[test]
+    fn the_small_apps_panel_fills_the_space_below_the_strip() {
+        // hands renders every app at 1280x640 (PANEL_SIZE in mind/hands.py):
+        // exactly the panel rectangle on the 1280x800 screen once the eyes
+        // are in the strip, so the picture is never scaled.
+        let strip = layout(1280, 800, 1.0);
+        assert_eq!((strip.panel.w, strip.panel.h), (1280, 640));
+        assert_eq!(strip.eyes.y, strip.panel.h, "the strip sits right on top of the panel");
+        // The transition is monotonic and eased at both ends.
+        let mut last = layout(1280, 800, 0.0).eyes.h;
+        for step in 1..=45 {
+            let h = layout(1280, 800, step as f32 / 45.0).eyes.h;
+            assert!(h <= last);
+            last = h;
+        }
+        assert!(smoothstep(0.05) < 0.05 && smoothstep(0.95) > 0.95);
+        assert!((TRANSITION - 0.45).abs() < 1e-6);
     }
 
     #[test]

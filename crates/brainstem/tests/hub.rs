@@ -273,6 +273,23 @@ fn organs_cannot_forge_brainstem_topics() {
 }
 
 #[test]
+fn brightness_is_the_minds_to_ask_and_the_brainstems_to_answer() {
+    let stem = Stem::start("bright", "mind");
+    let watcher = stem.join("watcher", &["*"]);
+    wait_for(&watcher, "watcher subscription", |e| e.topic == "body.lid");
+    let mut rogue = stem.join("hands", &[]);
+    rogue.send(&Event::new("being.brightness").with("step", 1)).unwrap();
+    let mut mind = stem.join("mind", &["body.brightness"]);
+    mind.send(&Event::new("being.brightness").with("step", -1)).unwrap();
+    // Off the hardware body there is no panel to change, and it says so.
+    let answer = wait_for(&mind, "the brainstem's answer", |e| e.topic == "body.brightness");
+    assert_eq!((answer.bool("ok"), answer.str("reason")), (Some(false), Some("no_control")));
+    wait_for(&watcher, "the mind's request", |e| e.topic == "body.brightness");
+    // Only the mind's request was ever routed, and only one answer came.
+    assert!(quiet(&watcher, |e| e.topic == "body.brightness" || (e.topic == "being.brightness" && e.data["step"] == 1)));
+}
+
+#[test]
 fn camera_gaze_requires_opt_in_and_current_open_lid() {
     let stem = Stem::start("camera", "");
     let watcher = stem.join("watcher", &["*"]);

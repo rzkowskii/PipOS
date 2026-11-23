@@ -9,7 +9,9 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
-from .reminder_language import ReminderRequest, may_be_reminder, parse_reminder
+from .reminder_language import ReminderRequest, duration_seconds, may_be_reminder, parse_reminder
+
+SNOOZE_MINUTES = 10  # "snooze" on its own
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,9 @@ def _strip(text):
     return text.strip().rstrip(".!?").strip()
 
 
+# Named days only: an exact date ("on 2026-11-19") stays a search of the conversation.
+_DIARY_DAYS = r"(?:yesterday|last week|(?:on |last )?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))"
+
 # Tried in order. Recall comes before remember, so "do you remember X" is a
 # question, not a new memory.
 _PATTERNS = [
@@ -32,7 +37,12 @@ _PATTERNS = [
     ("remember_me", r"do you (?:still )?(?:remember|know) (?:me|who i am)|(?:do you know|remember) who i am"),
     ("about_me", r"what (?:else )?do you (?:remember|know) about me|what have you (?:remembered|learned) about me"
                  r"|what (?:things )?do you remember"),
-    ("talked_about", r"what (?:did we talk|were we talking|have we been talking) about(?: (?:earlier|before|lately|recently))?"),
+    # A past day has its own record (the diary), kept overnight. Today is
+    # still the conversation itself.
+    ("diary", rf"what did (?:we|you and i) do (?P<x>{_DIARY_DAYS})"),
+    ("diary", rf"what (?:did we (?:talk|chat)|were we talking) about (?P<x>{_DIARY_DAYS})"),
+    ("talked_about", r"what (?:did we talk|were we talking|have we been talking) about(?: (?:earlier|before|lately|recently))?"
+                     r"|what (?:did we do|have we done)(?: today)?"),
     ("recall", r"(?:what|anything)(?: else)? do you (?:remember|know) about (?P<x>.+)"),
     ("recall", r"do you remember (?:anything about |what i (?:said|told you) about )?(?P<x>.+)"),
     ("recall", r"(?:can|could) you remember (?:what i (?:said|told you) about |what we talked about )(?P<x>.+)"),
@@ -50,6 +60,12 @@ _PATTERNS = [
     ("remember", r"(?:please )?don'?t forget (?:that )?(?P<x>.+)"),
     ("set_time", r"(?:set|change) (?:the|your) (?:time|clock) to (?P<x>.+)"),
     ("set_time", r"(?:actually[, ]+)?the time is (?:now |actually )?(?P<x>\d.*)"),
+    ("world_time", r"(?:what(?:['’]s| is) the time|what time is it|what time(?:['’]s| is) it|tell me the time)"
+                   r"(?: right now| now)? (?:in|over in) (?P<x>.+?)(?: right now| now| at the moment)?"),
+    ("time_difference", r"what(?:['’]s| is) the time difference (?:to|with|from|for|in|between) (?P<x>.+)"),
+    ("time_difference", r"how (?:many hours|far) (?:ahead|behind|ahead or behind) (?:is|are) (?P<x>.+?)"
+                        r"(?: (?:from|of|than) (?:here|us|me|you))?"),
+    ("time_difference", r"is (?P<x>.+?) ahead (?:of (?:us|me|here) )?or behind(?: (?:us|me|here))?"),
     ("time", r"(?:what(?:['’]s| is) the time|what time is it|tell me the time)(?: now)?"),
     ("date", r"(?:what(?:['’]s| is) (?:the|today['’]s) date|what date is it|tell me the date)(?: today)?"),
     ("day", r"what day(?: of the week)? (?:is it(?: today)?|is today)"),
@@ -58,10 +74,22 @@ _PATTERNS = [
     ("clear_weather_location", r"(?:clear|remove) (?:my|the|your) weather (?:location|city)"),
     ("clock_zone", r"(?:set|change) (?:my|the|your) (?:time zone|timezone) to (?P<x>.+)"),
     ("device_zone", r"use the (?:system|device) (?:time zone|timezone)"),
-    ("skills", r"what can you do|what (?:skills|commands) (?:do you have|can i use)"),
+    ("skills_more", r"what else can you do(?: for me)?|what else (?:can i (?:say|ask)|can you help (?:me )?with|do you do)"
+                    r"|what more can you do"),
+    ("skills_group", r"what (?:can|could) you do (?:with|about|for) (?!me$)(?P<x>.+)"),
+    ("skills_group", r"what can i (?:say|ask(?: you)?) about (?P<x>.+)"),
+    ("skills_group", r"help (?:me )?with (?P<x>.+)"),
+    ("skills", r"what (?:can|could) you do(?: for me)?|what (?:skills|commands) (?:do you have|can i use)"
+               r"|what can i (?:say|ask)(?: you)?|what are you able to do|what can you help (?:me )?with|help(?: me)?"),
+    # A ringing alarm, timer or reminder. Bare "okay" and "thanks" only count
+    # while something rings: see ring_reply.
+    ("snooze", r"snooze(?: (?:it|that|this|the alarm|my alarm|the timer|the reminder))?(?: for (?P<x>.+))?"),
+    ("snooze", r"(?:give me |just )*(?P<x>(?:a few|another|\w+(?:[- ]\w+)?)) more minutes?"),
+    ("ack", r"(?:stop|dismiss|silence|turn off) (?:the|my|that) (?:alarm|timer|reminder)|turn (?:the|my|that) (?:alarm|timer) off"
+            r"|i(?:['’]m| am) (?:up|awake)(?: now)?"),
     ("name", r"what(?:['’]s| is) your name|what (?:should|do) i call you"),
     ("age", r"how old are you|what(?:['’]s| is) your age|when were you born"),
-    ("battery", r"how much (?:charge|battery) do you have(?: left)?|how(?:['’]s| is) your battery(?: doing| health)?"
+    ("battery", r"how much (?:charge|battery) do you have(?: left)?|how(?:['’]s| is) your battery(?: doing)?"
                 r"|what(?:['’]s| is) your battery(?: level| at)?|tell me about your battery|are you charging"
                 r"|how long (?:will|can) your battery last|how much battery (?:is )?left"),
     ("sleep", r"go to sleep|good ?night|sleep now|time to sleep"),
@@ -94,7 +122,11 @@ _COMMAND_START = re.compile(
     r"|(?:can|could) you\b|(?:what (?:did|do|have|were)|when did|anything(?: else)? do)\b"
     r"|(?:that(?:'s| is)|no[, ]+that|go to|good night|sleep now|time to|(?:take a )?look at)\b"
     r"|what(?:'s| is) (?:the (?:time|date|weather)|today's date|tomorrow's date|it like outside)\b"
-    r"|what (?:time|day|date|can you do|skills|commands)\b|tell me (?:the (?:time|date|weather)|about the weather)\b"
+    r"|what (?:time|day|date|can you do|could you do|skills|commands|else can you do|can i say|did we do)\b"
+    r"|tell me (?:the (?:time|date|weather)|about the weather)\b"
+    r"|(?:snooze|dismiss)\b|(?:give me |just )?\w+ more minutes?\b|i(?:'m| am) (?:up|awake)\b"
+    r"|(?:stop|turn off|silence) (?:the|my|that) (?:alarm|timer|reminder)\b|help\b"
+    r"|how (?:many hours|far) (?:ahead|behind)\b|is [\w ]+ ahead or behind\b"
     r"|(?:how(?:'s| is) the weather|weather|(?:what(?:'s| is) the )?forecast)\b"
     r"|(?:what(?:'s| is) )?(?:today|tomorrow)'s (?:weather|forecast)\b"
     r"|(?:look up|give me) (?:the )?(?:(?:today|tomorrow)'s )?(?:weather|forecast)\b"
@@ -256,8 +288,20 @@ def parse(text, name="", *, now=None):
         if match:
             captured = match.groupdict().get("x")
             arg = _strip(captured or "")
-            if captured is not None and len(arg) < (1 if kind in ("set_time", "volume_set") else 2):
+            if captured is not None and len(arg) < (1 if kind in ("set_time", "volume_set", "snooze") else 2):
                 return None
+            if kind == "skills_group":
+                # "Help me with my homework" is conversation: only a group it
+                # really has help for is answered here.
+                from .skills import help_group
+
+                if help_group(arg) is None:
+                    return None
+            if kind == "snooze":
+                minutes = snooze_minutes(arg)
+                if minutes is None:
+                    return None
+                arg = str(minutes)
             if kind == "remember":
                 # "Remember when we went fishing?" is a question, but "remember
                 # that when I'm tired I get grumpy" is a fact introduced as one.
@@ -266,6 +310,48 @@ def parse(text, name="", *, now=None):
                     return None
             return Command(kind, arg)
     return _weather_command(said)
+
+
+def snooze_minutes(arg):
+    """Minutes for "snooze for ten minutes" or "five more minutes"; None if unclear."""
+    said = " ".join(arg.casefold().replace("-", " ").split())
+    said = re.sub(r"^(?:another|just|a further) ", "", said)
+    if not said:
+        return SNOOZE_MINUTES
+    if said in ("a few", "few", "a couple", "a couple of"):
+        return 5
+    if said in ("a minute", "one minute", "a min"):
+        return 1
+    seconds = duration_seconds(re.sub(r"\bmins?\b", "minutes", said))
+    if seconds is None:
+        number = int(said) if said.isdigit() else spoken_number(said)
+        seconds = number * 60 if number is not None else None
+    if not seconds or seconds % 60:
+        return None
+    minutes = seconds // 60
+    return minutes if 1 <= minutes <= 120 else None
+
+
+_RING_ACK = re.compile(
+    r"(?:(?:oh )?(?:ok(?:ay)?|alright|all right|right|thanks|thank you|cheers|got it|stop(?: it)?|enough|i heard(?: you)?"
+    r"|i know|yes|yep|yeah|done|dismiss|that(?:'s| is) fine|fine|i(?:'m| am) (?:up|awake|on it|coming))"
+    r"(?:[, ]+(?:then|thanks|thank you|now))*)",
+    re.I,
+)
+
+
+def ring_reply(text, name=""):
+    """While an alarm, timer or reminder rings: Command("ack"), Command("snooze", minutes), or None.
+
+    Only for that moment. Outside it, "okay" and "thanks" are conversation.
+    """
+    said = _without_address(text, name).replace("’", "'")
+    if name:
+        said = re.sub(rf"[, ]+{re.escape(name)}$", "", said, flags=re.I)
+    command = parse(said)
+    if command is not None and command.kind in ("ack", "snooze"):
+        return command
+    return Command("ack") if _RING_ACK.fullmatch(said) else None
 
 
 def volume_level(arg):
@@ -420,4 +506,9 @@ def splice_correction(fact, value):
     head = subject_of(fact)
     if head is None:
         return None
+    # "It's called Moonleaf" for "my orchid is called Silverleaf": the fact
+    # already has the verb, so only the name goes in ("called called" never).
+    verb = re.match(r"(called|named|known as)\s+(?=\S)", value, re.I)
+    if verb and re.search(rf"\b{re.escape(verb[1])}$", head, re.I):
+        value = value[verb.end():]
     return f"{head} {value}"

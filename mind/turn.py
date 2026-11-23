@@ -8,6 +8,7 @@ Rewriting (compaction) waits until it is idle.
 
 import asyncio
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -20,28 +21,50 @@ from datetime import date, datetime, timedelta
 from datetime import time as clock_time_of_day
 from functools import cached_property
 from pathlib import Path
+from types import SimpleNamespace
 
-from . import commands, consolidation
+from . import app_commands, commands, consolidation, dream_journal
 from .cortex import SLOT_FILE, CortexError
 from .dream_policy import DreamPolicy
-from .dream_store import DreamStore, journal as dream_journal
+from .dream_store import DreamStore
 from .initiative import load_policy as load_initiative_policy
 from .memory import CLOCK_FLOOR, Memory, search_terms
 from .profile import (
     DEFAULT_PERSONALITY, Personality, daily_greeting, first_words, good_night, personality_greetings,
     self_reply, spoken_count, welcome_back,
 )
-from .reminders import Reminder
+from .reminders import RING_GAP, Reminder
 from .retention import SECONDS_PER_DAY, load_policy as load_memory_policy
-from .skills import Skills, find_zone, speakable_time
+from .skills import Skills, find_zone, number_words, speakable_time
 from .speech import GRAMMAR, STRICT_GRAMMAR, ClauseSplitter, EchoGuard, TagParser, ThinkFilter, boilerplate
 from .storage import atomic_write, sync_directory
+
+_OPTIONAL = {}
+
+
+def optional_module(name):
+    """A sibling module that may not be installed yet (everyday skills, the
+    morning brief, the action log), or None. Looked up once per process; a
+    module that fails to import is logged and treated as absent, so one
+    broken skill never stops the mind."""
+    if name not in _OPTIONAL:
+        try:
+            _OPTIONAL[name] = importlib.import_module(f"{__package__}.{name}")
+        except ImportError:
+            _OPTIONAL[name] = None
+        except Exception as exc:  # a broken skill module must not stop the mind
+            log(f"could not load {name}: {exc!r}")
+            _OPTIONAL[name] = None
+    return _OPTIONAL[name]
+
 
 SUBS = [
     "hear.wake",
     "hear.speech_start",
     "hear.partial",
     "hear.final",
+    # Its name was heard and then nothing it could make out (the voice organ).
+    "hear.missed",
     "say.done",
     "state.changed",
     "body.lid",
@@ -57,7 +80,19 @@ SUBS = [
     "stem.shutdown",
     # The voice organ's own report of its loudness, when it has one.
     "voice.volume_state",
+    # Numbers only: the microphone's floor and peaks, for "how well can you hear me".
+    "voice.level",
+    # Bodycare's charge cap and fan readings, for "how's your battery health".
+    "body.care",
+    # The brainstem's answer to being.brightness: the level it now has, or why not.
+    "body.brightness",
+    # The workshop (mind/app_commands.py AppBridge): the hands' replies, and
+    # whether the hands organ is running at all.
+    *app_commands.AppBridge.SUBS,
+    "organ.up",
+    "organ.down",
 ]
+APP_TOPICS = frozenset((*app_commands.AppBridge.SUBS, "organ.up", "organ.down"))
 
 # While a reply is being worked on, tell the brainstem it is still going, so a
 # slow cold read is not mistaken for a hang (docs/PROTOCOL.md, mind.progress).
@@ -107,7 +142,43 @@ _CONTEXT_ERROR = re.compile(r"context|exceed|too long|n_ctx", re.I)
 ADDRESSED = ("attending", "listening", "thinking", "speaking")
 RESTING = ("idle", "drowsy", "asleep")
 ANNOUNCE_IN = ("idle", "drowsy", "attending")
+# Its name was heard but not the words after it: it may say so while it is
+# attending, or just after its attention lapsed back to rest, but not asleep.
+MISSED_IN = ("attending", "listening", "idle", "drowsy")
+# The voice says "Sorry, I didn't catch that." itself (mind/voice.py): the
+# brainstem plays replies only while thinking or speaking, and a miss leaves it
+# attending or resting. The mind only shows it on the face.
+MISSED_EMOTION = "concern"
+MISSED_HOLD = 4.0
 ANNOUNCE_RETRY = 15.0
+# A yes or no question asked by a code skill (Reply.confirm) stays open this
+# long by default, for the person who was asked.
+CONFIRM_SECONDS = 15.0
+# The doctor's quiet pass (mind/doctor.py self_care): organs and hearing only,
+# about every 10 minutes while resting awake with the lid open.
+SELF_CARE_INTERVAL = 600.0
+# After a ring, "okay" or "snooze" answers it for this long past the next repeat
+# (commands.ring_reply decides which words are an answer).
+RING_ACK_SECONDS = RING_GAP + 60.0
+# A story gets a longer reply budget for that one turn (spoken clause by clause).
+_STORY = re.compile(
+    r"\b(?:tell|read|make up|give) (?:me |us )?(?:a |an |another |one more )?(?:\w+ )?(?:story|fairy tale|tale)\b"
+    r"|\b(?:continue|carry on with|go on with|finish) the story\b|^(?:a |another )?(?:short |bedtime )?story\b",
+    re.I)
+STORY_MAX_TOKENS = 160
+# The morning brief: the local day starts at 05:00 (or when quiet hours end).
+DAY_STARTS = 5
+# The identity snapshot: the model's reading of who it is, saved once so a
+# forget, a guest change or an erase does not cost a cold re-read (8.5 s on the
+# laptop). It holds the identity and core prompt only, never conversation.
+IDENTITY_SLOT = "identity.slot"
+IDENTITY_RECORD = "identity-slot.json"
+IDENTITY_SLACK = 8
+# What a snapshot is tied to: the conversation model's file and the build.
+MODEL_FILE = Path("/models/reflex.gguf")
+BUILD_ID_FILE = Path("/etc/being/build-id")
+# How often the cortex is asked whether it is up while it is still loading.
+CORTEX_POLL_LOADING = 0.25
 PRESENCE_SECONDS = 1.5
 # Read-ahead is experimental. Bound both the extension of the verified cache
 # and how long it can occupy the single model slot after a partial transcript.
@@ -123,6 +194,8 @@ LOW_BATTERY = 15
 PRIVACY_COMMANDS = {"guest_start", "guest_end"}
 # How long an offer to forget a whole topic stays open.
 FORGET_CONFIRM_SECONDS = 45.0
+# "Forget everything" erases this many archived sentences between yields.
+ERASE_BATCH = 400
 # Only a plain yes confirms. "Forget it" is how people say "never mind", so it
 # is a no here, never a yes. Anything that is neither keeps everything.
 _YES = re.compile(
@@ -148,6 +221,11 @@ _FORGET_UNSUPPORTED = re.compile(
     r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b)",
     re.I,
 )
+# "Forget everything": every memory, list and note, after a spoken yes.
+_FORGET_ALL = re.compile(
+    r"^(?:everything|all of it|it all|all (?:my|your) memor(?:y|ies)|all of your memories"
+    r"|everything (?:you know|you remember)(?: about me)?|everything about me"
+    r"|everything i(?:'ve| have)? (?:ever )?(?:told|said to) you)$", re.I)
 # Filler left over once the date has been taken out of "forget everything from yesterday".
 _FORGET_FILLER = re.compile(
     r"^(?:everything|all|anything|what|(?:our|the) conversation)?"
@@ -211,7 +289,9 @@ def _uptime():
     except (AttributeError, OSError):
         return time.monotonic()
 
-PRIVATE_CLOCK_COMMANDS = {"time", "date", "date_tomorrow", "day"}
+# Answers that store nothing and tell nothing private, so a guest may ask them.
+PRIVATE_CLOCK_COMMANDS = {"time", "date", "date_tomorrow", "day", "world_time", "time_difference",
+                          "skills", "skills_more", "skills_group"}
 DREAM_INTERVAL = 15.0
 DREAM_YIELD = 0.05
 DREAM_STAGE_BUDGET = 0.25
@@ -263,6 +343,9 @@ class Config:
     battery_second_plea_minutes: float = 10
     battery_critical_percent: float = 5
     battery_critical_minutes: float = 5
+    # The morning brief on the first addressed words of the day (the
+    # initiative policy's "brief" switch can also turn it off).
+    morning_brief: bool = True
 
 
 @dataclass(frozen=True)
@@ -280,11 +363,6 @@ class Subject:
     from_memory: bool = False
 
 
-# Short local exchanges that go into the model's context afterwards (3.8).
-LOCAL_EXCHANGES = {
-    "time", "date", "date_tomorrow", "day", "name", "age", "battery",
-    "self_alive", "self_aware", "self_feel", "self_what", "volume_up", "volume_down", "volume_set", "look",
-}
 # Written by the backup tool after each backup it makes (see backup.py).
 BACKUP_RECORD = "last-backup.json"
 _ORDINALS = ("One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten")
@@ -306,13 +384,49 @@ def log(*parts):
     print("mind:", *parts, file=sys.stderr, flush=True)
 
 
+@dataclass(frozen=True)
+class AppLine:
+    """A line the workshop asked to have said (a finished script, a failure)."""
+    text: str
+
+
 @dataclass
 class Announcement:
-    entry: Reminder | date | str  # "plea": a battery plea or thanks
+    entry: Reminder | date | str | AppLine  # "plea": a battery plea or thanks
     token: str
     deadline: float
     speaking: bool = False
     plea: int | None = None
+
+
+@dataclass
+class Ring:
+    """A reminder, timer or alarm that has been said and may be answered."""
+    entry: Reminder
+    until: float  # monotonic: "okay" and "snooze" answer it until then
+    speaker: str
+
+
+class RewarmJob:
+    """The night shift's last job: read the whole prompt back into the model's
+    cache, so the first words in the morning are answered warm."""
+
+    def __init__(self, mind):
+        self.mind = mind
+
+    async def run_chunk(self, budget_s):
+        return await self.mind._rewarm_chunk(budget_s)
+
+
+def _tagged(line, tag="neutral"):
+    line = (line or "").strip()
+    return line if line.startswith("[") else f"[{tag}] {line}"
+
+
+def _plain(line):
+    """A spoken line without its [emotion] tag."""
+    tags = TagParser()
+    return (tags.feed(line or "") + tags.flush()).strip()
 
 
 def history_excerpt(episode, max_chars):
@@ -326,11 +440,22 @@ def history_excerpt(episode, max_chars):
 
 
 class Mind:
-    def __init__(self, bus, cortex, memory, cfg, state_dir, *, policy=None):
+    def __init__(self, bus, cortex, memory, cfg, state_dir, *, policy=None, apps=None, night_shift=None):
         self.bus = bus
         self.cortex = cortex
         self.cfg = cfg
         self.state_dir = Path(state_dir)
+        # The workshop's side of the bus. Every command it matches is answered
+        # in code; without hands it says so honestly.
+        self.apps = apps if apps is not None else app_commands.AppBridge(bus, name=cfg.name)
+        # Overnight jobs in a fixed order (mind/night_shift.py). Without one,
+        # the night is the rule-based dream journal alone.
+        self.night_shift = night_shift
+        if night_shift is not None:
+            try:
+                night_shift.register("rewarm", RewarmJob(self))
+            except Exception as exc:
+                log(f"could not register the morning re-warm: {exc!r}")
         self.policy = policy if policy is not None else load_memory_policy(self.state_dir)
         self._session_memory = Memory(None) if self.policy.mode == "session-only" else None
         self._primary_memory = self._session_memory if self._session_memory is not None else memory
@@ -420,6 +545,41 @@ class Mind:
         self._announcement = None
         self._announcement_retry = 0.0
         self._presence_at = None
+        # Each wake earns at most one "I didn't catch that".
+        self._missed_owed = False
+        # A yes or no question a code skill asked (Reply.confirm).
+        self._pending_confirm = None
+        # The ring that was last said, while "okay" or "snooze" may answer it.
+        self._ring = None
+        self._lid_open_since = None  # wall clock: when the lid last opened
+        self._lid_shut = None  # (closed, opened) wall clock: the last closure it saw
+        self._lid_closed_at = None  # wall clock: when the lid was seen to close, while it is shut
+        self._ring_woke = None  # the ring it last woke itself for
+        # Lines the workshop asked to have said, oldest first.
+        self._app_lines = []
+        # This wake only, in RAM, never stored: what it last heard and said.
+        self.last_heard = None
+        self.last_said = None
+        self._last_addressed = None  # monotonic time of the last thing said to it
+        # The latest readings, as the handlers' Context shows them.
+        self._body_state = {}
+        self._body_care = {}
+        self._body_brightness = {}
+        self._muted = False  # state.changed "muted": the ears are switched off
+        self._voice_level = {}
+        self._boundary_task = None
+        self._self_care_task = None
+        self._self_care_at = time.monotonic()
+        self._housekeeping_working = False
+        self._slot_empty = False  # erased and not read into since
+        # A server that cannot say what it has cached (no cache_n) cannot
+        # check a snapshot: then none is used again until the mind restarts.
+        self._identity_off = False
+        # The night's re-warm: (prompt key, verified tokens, tokens read so far).
+        self._rewarm = None
+        self._suffix = None  # a clause to add to this turn's next fixed reply
+        self._night_registered = None  # the night tonight's jobs were built for
+        self._power_command = self._run_power_command
 
     # -- small state -----------------------------------------------------
 
@@ -634,6 +794,7 @@ class Mind:
         self.restored = False
         self._last_memory = None
         self._pending_forget = None
+        self._pending_confirm = None
         self._last_partial = None
         self._utterance_senses = None
         self._speculative_text = ""
@@ -643,6 +804,7 @@ class Mind:
         self._slot_generation += 1
         self._saved_slot = None
         self._warmed_prefix = ()
+        self._rewarm = None
         for directory, names in (
             (self.state_dir, ("context.json", "context.tmp")),
             (self.state_dir / "cortex", (SLOT_FILE,)),
@@ -770,7 +932,8 @@ class Mind:
             while True:
                 await self._on_event(await self.bus.recv())
         finally:
-            running = [task for task in (watcher, self._turn) if task is not None and not task.done()]
+            running = [task for task in (watcher, self._turn, self._self_care_task)
+                       if task is not None and not task.done()]
             for task in running:
                 task.cancel()
             try:
@@ -810,20 +973,56 @@ class Mind:
                 self._warmed_prefix = ()
                 self._interrupt_background()
             self.cortex_ok = ok
+            # At once, not on the next tick: on the laptop the first healthy
+            # reply came 15 s before the warm-up started (journal, 23 Nov).
             self._start_warmup()
             decided = ok or time.monotonic() - started >= self.cfg.cortex_wait
             if decided and self.bus.connected.is_set() and self._announced != self.bus.generation:
                 self._announced = self.bus.generation
                 await self.bus.send("mind.ready", cortex=self._model_available)
-            await asyncio.sleep(1.0 if not decided else 5.0)
+            self._maybe_self_care()
+            # While the model is loading it is asked often, so the warm-up can
+            # start the moment it answers; once it answers, every 5 s.
+            await asyncio.sleep(5.0 if ok else CORTEX_POLL_LOADING if not decided else 0.5)
+
+    def _maybe_self_care(self):
+        """Start the doctor's quiet pass when it is due: only on a systemd
+        boot, resting awake with the lid open, between turns. It reads the
+        organs and the voice's levels; any repair is logged and rate-limited
+        inside the doctor, and nothing is said."""
+        now = time.monotonic()
+        if now - self._self_care_at < SELF_CARE_INTERVAL:
+            return
+        if (not self.lid_open or self.state not in ("idle", "drowsy")
+                or (self._turn is not None and not self._turn.done())
+                or (self._self_care_task is not None and not self._self_care_task.done())
+                or not Path("/run/systemd/system").is_dir()):
+            return
+        doctor = optional_module("doctor")
+        if doctor is None or not hasattr(doctor, "self_care"):
+            return
+        self._self_care_at = now
+        self._self_care_task = asyncio.create_task(self._self_care(doctor))
+
+    async def _self_care(self, doctor):
+        try:
+            repairs = await doctor.self_care(self._context(self.cfg.owner, None))
+        except Exception as exc:  # the quiet pass must never stop the mind
+            log(f"self-care failed: {exc!r}")
+            return
+        if repairs:
+            log(f"self-care made {len(repairs)} repair(s)")
 
     def _start_warmup(self):
+        # Housekeeping that is only waiting for things to settle does not hold
+        # the warm-up back; once it is working, the warm-up waits for it.
+        housekeeping = self._housekeeping
         if (
             self._needs_warmup and self.lid_open and self._model_available
             and self.state in ("waking", *RESTING)
             and (self._turn is None or self._turn.done())
             and (self._warm_task is None or self._warm_task.done())
-            and (self._housekeeping is None or self._housekeeping.done())
+            and (housekeeping is None or housekeeping.done() or not self._housekeeping_working)
         ):
             self._warm_task = asyncio.create_task(self._warm())
 
@@ -834,11 +1033,14 @@ class Mind:
         Restore a slot only when its recent conversation was accepted. The
         verified prefix can be prepared while the face and controls wake.
         """
+        cold = False
         if self._erase_required:
             if not await self._clear_live_slot():
                 return
+            cold = True
         elif self._discard_cache:
             await self._erase_cache()
+            cold = True
         elif self._restore_pending:
             self._restore_pending = False
             self._slot_generation += 1
@@ -848,15 +1050,24 @@ class Mind:
                     self._saved_slot = saved
                 self._needs_warmup = False
                 return
+        if cold or self._slot_empty:
+            # An empty slot: the identity snapshot saves re-reading who it is.
+            await self._restore_identity()
         await self._warm_prefix()
         self._needs_warmup = False
 
-    async def _warm_prefix(self):
+    async def _warm_prefix(self, *, full=False):
         self._warmed_prefix = ()
         self._slot_generation += 1
+        self._slot_empty = False
+        # Only the identity (no conversation yet): read all of it, so it can
+        # be kept as a snapshot. Otherwise the first 256 tokens, or with
+        # `full` (after compaction, or the night's re-warm) the whole prompt.
+        identity_only = not self.messages and not self.summary and not self._highlight_sources()
+        limit = None if full or identity_only else WARM_PREFIX_TOKENS
         try:
             self._warmed_prefix = await self.cortex.warm_prefix(
-                self._prompt(), batch_tokens=WARM_BATCH_TOKENS, max_tokens=WARM_PREFIX_TOKENS,
+                self._prompt(), batch_tokens=WARM_BATCH_TOKENS, max_tokens=limit,
             )
         except CortexError as exc:
             log(f"could not warm up: {exc}" if self._durable_context else "could not warm the private prompt")
@@ -865,9 +1076,174 @@ class Mind:
             self._slot_generation += 1
         if self._warmed_prefix:
             log(f"warmed {len(self._warmed_prefix)} verified prompt tokens")
+            if identity_only:
+                await self._save_identity(len(self._warmed_prefix))
+
+    # -- the identity snapshot ----------------------------------------------
+
+    def _identity_key(self):
+        """Which prompt a snapshot belongs to: the owner's identity and core,
+        with nothing from memory. None when no snapshot may be used: guests,
+        private modes, and any prompt that carries remembered words."""
+        if (self._identity_off or not self._durable_context or not self.cortex.llama or self.summary
+                or self._highlight_sources()):
+            return None
+        # The model's reading belongs to one model file and one server build:
+        # a new quant or an update must never be handed an old reading.
+        return hashlib.sha256("\0".join((self.system, self._model_fingerprint())).encode()).hexdigest()[:16]
+
+    def _model_fingerprint(self):
+        """Which model and build a snapshot was read by (empty off the appliance)."""
+        parts = [str(getattr(self.cortex, "model", ""))]
+        try:
+            info = MODEL_FILE.stat()
+            parts += [str(info.st_ino), str(info.st_size), str(info.st_mtime_ns)]
+        except OSError:
+            pass
+        try:
+            parts.append(BUILD_ID_FILE.read_text(encoding="utf-8").strip())
+        except OSError:
+            pass
+        return "|".join(parts)
+
+    def _identity_record(self):
+        try:
+            record = json.loads((self.state_dir / "cortex" / IDENTITY_RECORD).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(record, dict) or type(record.get("tokens")) is not int or record["tokens"] <= 0:
+            return None
+        return record
+
+    def _drop_identity(self, why):
+        log(f"identity snapshot discarded: {why}")
+        for name in (IDENTITY_RECORD, IDENTITY_SLOT):
+            try:
+                (self.state_dir / "cortex" / name).unlink()
+            except OSError:
+                pass
+
+    async def _save_identity(self, tokens):
+        """After a clean warm-up of the identity alone, keep it once."""
+        key = self._identity_key()
+        if key is None or self.messages:
+            return
+        record = self._identity_record()
+        if record is not None and record.get("key") == key and record.get("tokens") == tokens:
+            return
+        if not await self.cortex.slot("save", IDENTITY_SLOT):
+            return
+        try:
+            folder = self.state_dir / "cortex"
+            folder.mkdir(parents=True, exist_ok=True)
+            atomic_write(folder / IDENTITY_RECORD, json.dumps({"key": key, "tokens": tokens}) + "\n")
+            log(f"kept an identity snapshot of {tokens} tokens")
+        except OSError as exc:
+            log("could not keep the identity snapshot:", exc)
+
+    async def _restore_identity(self):
+        """Put the saved identity back into an empty slot. It checks itself:
+        the next read must find at least the identity cached, or the snapshot
+        is thrown away. Returns True when it was restored and verified."""
+        key = self._identity_key()
+        record = self._identity_record()
+        if key is None or record is None:
+            return False
+        if record.get("key") != key:
+            self._drop_identity("the identity changed")
+            return False
+        self._slot_generation += 1
+        if not await self.cortex.slot("restore", IDENTITY_SLOT):
+            return False
+        cached = await self._identity_probe(record["tokens"])
+        if cached is None or cached < record["tokens"] - IDENTITY_SLACK:
+            self._drop_identity(f"cache_n {cached} after restoring {record['tokens']} tokens")
+            if cached is None:
+                # Nothing can check a snapshot on this server: stop saving
+                # and restoring them, rather than churning on every forget.
+                self._identity_off = True
+            # Whatever the restore left is not trusted: start from empty.
+            await self.cortex.slot("erase")
+            return False
+        log(f"restored the identity snapshot ({cached} tokens cached)")
+        return True
+
+    async def _identity_probe(self, tokens):
+        """How many tokens of the identity the slot holds now (llama-server's
+        cache_n for a zero-length read of it), or None if it cannot say.
+
+        Only the identity is read (the system prompt, at most the `tokens` the
+        snapshot holds), never the conversation after it, and only in the
+        conversation's own slot: with two slots an unpinned request could land
+        in the workshop's and report, and evict, the wrong cache."""
+        try:
+            prefix = (await self.cortex.verified_prefix(self._prompt()[:1]))[:tokens]
+            if not prefix:
+                return None
+            reply = await self.cortex._cancellable_request(
+                "POST", "/completion",
+                {"prompt": list(prefix), "n_predict": 0, "cache_prompt": True,
+                 "id_slot": getattr(self.cortex, "slot_id", 0)})
+        except (CortexError, AttributeError):
+            return None
+        # cache_n counts tokens reused from the slot, not the prompt's length.
+        timings = reply.get("timings") if isinstance(reply, dict) else None
+        cached = timings.get("cache_n") if isinstance(timings, dict) else None
+        return cached if type(cached) is int else None
+
+    async def _rewarm_chunk(self, budget_s):
+        """The night shift's re-warm: True once the whole prompt is cached, or
+        when there is nothing it may warm tonight."""
+        if not self._model_available or not self._durable_context or self._erase_required:
+            self._rewarm = None
+            return True
+        if self._turn is not None and not self._turn.done():
+            return False
+        started = time.monotonic()
+        prompt = self._prompt()
+        key = hashlib.sha256(json.dumps(prompt, sort_keys=True).encode()).hexdigest()
+        if self._rewarm is None or self._rewarm[0] != key:
+            try:
+                prefix = tuple(await self.cortex.verified_prefix(prompt))
+            except CortexError as exc:
+                log(f"could not re-warm: {exc}")
+                return True
+            self._rewarm = [key, prefix, 0]
+        state = self._rewarm
+        prefix = state[1]
+        prime = getattr(self.cortex, "_prime_cache", None)
+        if prime is None:
+            # A cortex without batch priming: one bounded warm-up, then done.
+            await self._warm_prefix(full=True)
+            self._rewarm = None
+            return True
+        # Carry on from the last batch read, one 32-token batch at a time. A
+        # batch is never cut off by the budget (on the laptop it takes about
+        # 1.4 s, longer than a chunk), so every chunk moves forward; the night
+        # shift's interrupt still cancels the one in flight.
+        while state[2] < len(prefix):
+            end = min(len(prefix), state[2] + WARM_BATCH_TOKENS)
+            self._slot_empty = False
+            self._slot_generation += 1  # the slot changes: a saved copy is now old
+            try:
+                await prime(list(prefix[:end]))
+            except CortexError as exc:
+                log(f"could not re-warm: {exc}")
+                self._rewarm = None
+                return True
+            state[2] = end
+            if time.monotonic() - started >= budget_s:
+                break
+        if state[2] < len(prefix):
+            return False
+        self._rewarm = None
+        self._warmed_prefix = prefix
+        if not (self._discard_cache or self._restore_pending):
+            self._needs_warmup = False
+        return True
 
     def _interrupt_background(self, *, keep_warmup=False):
-        work = (self._prefill_task, self._housekeeping)
+        work = (self._prefill_task, self._housekeeping, self._boundary_task)
         if not keep_warmup:
             work += (self._warm_task,)
         current = asyncio.current_task()
@@ -881,6 +1257,12 @@ class Mind:
     def _urgent(self, event):
         # Seen the moment it arrives, even in the middle of a reply.
         topic = event["t"]
+        if topic in APP_TOPICS:
+            # The workshop's replies resolve requests a turn is waiting on.
+            try:
+                self.apps.observe(event)
+            except Exception as exc:
+                log(f"workshop event not understood: {exc!r}")
         if topic in DREAM_POLICY_EVENTS:
             self._dream_policy.observe(event)
         if topic in DREAM_INTERRUPTS or (
@@ -897,6 +1279,9 @@ class Mind:
             self._complete_announcement(event["announcement"])
         elif event["t"] == "body.lid":
             if event.get("closed") is not False:
+                if event.get("closed") is True and self._lid_closed_at is None:
+                    # Seen shut: a ring that falls due now is late "because my lid was closed".
+                    self._lid_closed_at = time.time()
                 self._close_lid()
             self._latest_lid = event
         elif topic == "body.presence":
@@ -910,6 +1295,8 @@ class Mind:
     def _close_lid(self):
         # An unanswered offer to forget does not wait for whoever opens the lid.
         self._pending_forget = None
+        self._pending_confirm = None
+        self._forget_wake()
         self.lid_open = False
         self.lid_seq = None
         self._latest_lid = None
@@ -921,6 +1308,11 @@ class Mind:
         self._utterance_senses = None
         self._speculative_text = ""
         return self._interrupt_background()
+
+    def _forget_wake(self):
+        """What it heard and said this wake lives in RAM only. It goes at
+        sleep, when the lid closes and when guest mode changes."""
+        self.last_heard = self.last_said = None
 
     def _connection_lost(self):
         self._close_lid()
@@ -948,12 +1340,34 @@ class Mind:
         topic = event.get("t")
         if topic == "body.lid":
             if event is self._latest_lid and event.get("closed") is False:
+                if not self.lid_open:
+                    self._lid_open_since = time.time()
+                    if self._lid_closed_at is not None:
+                        self._lid_shut = (self._lid_closed_at, self._lid_open_since)
+                    self._lid_closed_at = None
                 self.lid_open = True
                 self.lid_seq = event.get("seq")
                 self._start_warmup()
+        elif topic == "body.care":
+            self._body_care = {key: value for key, value in event.items() if key != "t"}
+        elif topic == "body.brightness":
+            level = event.get("level")
+            reason = event.get("reason")
+            self._body_brightness = {
+                "brightness": level if type(level) in (int, float) else None,
+                "brightness_ok": event.get("ok") is True,
+                "brightness_at_max": event.get("at_max") is True,
+                "brightness_at_min": event.get("at_min") is True,
+                "brightness_reason": reason if isinstance(reason, str) else None,
+            }
+        elif topic == "voice.level":
+            # Numbers only (docs/PROTOCOL.md): never any words.
+            self._voice_level = {key: value for key, value in event.items()
+                                 if key != "t" and (value is None or type(value) in (int, float, bool, str))}
         elif topic == "body.senses":
             self.senses = event.get("line") or ""
         elif topic == "body.state":
+            self._body_state = {key: value for key, value in event.items() if key != "t"}
             hour, minute = event.get("hour"), event.get("minute")
             if isinstance(hour, int) and isinstance(minute, int):
                 self.clock = (hour, minute)
@@ -976,8 +1390,12 @@ class Mind:
                 self._save_volume(level)
         elif topic == "state.changed":
             self.state = event.get("state") or self.state
+            if "muted" in event:
+                self._muted = event.get("muted") is True
             if self._announcement is not None and self._announcement.speaking and self.state not in ("thinking", "speaking"):
                 self._retry_announcement()
+            if self.state == "asleep":
+                self._forget_wake()
             if self.state in RESTING:
                 self._utterance_senses = None
                 self._last_partial = None
@@ -988,8 +1406,14 @@ class Mind:
                     self._housekeeping is None or self._housekeeping.done() or self._housekeeping.cancelling()
                 ):
                     self._housekeeping = asyncio.create_task(self._housekeep())
+                # A forget or a guest change left the slot cold: warm it now.
+                self._start_warmup()
             elif self._housekeeping is not None:
                 self._housekeeping.cancel()
+        elif topic == "hear.wake":
+            self._missed_owed = True
+        elif topic == "hear.missed":
+            await self._on_missed(event.get("reason"))
         elif topic == "hear.partial":
             self._on_partial(event.get("text") or "")
         elif topic == "hear.final":
@@ -1002,7 +1426,13 @@ class Mind:
                 if speaking_announcement and not privacy_change:
                     return
                 greeting = commands.greeting(text, self.cfg.name)
-                if event.get("followup") is True and command is None and greeting is None and not self._addressed(text):
+                certain = command is not None or greeting is not None or self._direct_reply(text)
+                # An everyday skill's cheap gate ("list", "note") also matches
+                # ordinary sentences: such a follow-up is answered only if a
+                # skill really takes it, and is otherwise overheard.
+                maybe = not certain and self._everyday_may_match(text)
+                followup = event.get("followup") is True and not certain and not self._addressed(text)
+                if followup and not maybe:
                     # Heard in the follow-up window with no sign it was meant
                     # for the being: maybe the room, maybe a television. It is
                     # not answered and never written to memory.
@@ -1012,9 +1442,7 @@ class Mind:
                 # Cancellation closes each in-flight HTTP connection. Wait for
                 # local cancellation before submitting anything to the slot.
                 # Direct replies can speak while the model warms.
-                background = self._interrupt_background(
-                    keep_warmup=not privacy_change and (command is not None or greeting is not None)
-                )
+                background = self._interrupt_background(keep_warmup=not privacy_change and certain)
                 if background:
                     await asyncio.gather(*background, return_exceptions=True)
                 if self._turn is not None and not self._turn.done():
@@ -1022,7 +1450,8 @@ class Mind:
                     await asyncio.wait([self._turn])
                 if self.lid_open:
                     speaker = event.get("speaker") or self.cfg.owner
-                    self._turn = asyncio.create_task(self._run_turn(text, speaker, greeting, command=command))
+                    self._turn = asyncio.create_task(
+                        self._run_turn(text, speaker, greeting, command=command, followup=followup))
         elif topic == "say.done" and event.get("final"):
             if not event.get("announcement"):
                 self._said_all.set()
@@ -1030,12 +1459,89 @@ class Mind:
             await self._publish_clock()
             if self._turn is None or self._turn.done():
                 await self._check_expiry()
+            self._collect_app_lines()
             await self._offer_announcement()
             self._start_dream()
         elif topic == "stem.announce_ready":
             await self._speak_announcement(event.get("announcement"))
         elif topic == "life.woke":
             self._on_woke(event)
+
+    def _direct_reply(self, text):
+        """True when code will answer this (a workshop command, or the answer
+        to a question it just asked), so a warm-up need not stop and a
+        follow-up is plainly meant for it."""
+        if self._pending_confirm is not None or self._pending_forget is not None or self._ring_open():
+            return True
+        try:
+            return self.apps.parse(text, self._guest_memory is not None) is not None
+        except Exception as exc:
+            log(f"workshop parse failed: {exc!r}")
+            return False
+
+    def _everyday_may_match(self, text):
+        everyday = optional_module("everyday")
+        try:
+            return bool(everyday is not None and everyday.may_match(text))
+        except Exception as exc:
+            log(f"everyday gate failed: {exc!r}")
+            return False
+
+    def _may_be_code(self, text):
+        """The speculative-read gate: nothing is read ahead while what is
+        being said may still turn out to be a command answered in code."""
+        if commands.may_be_command(text, self.cfg.name) or commands.greeting(text, self.cfg.name):
+            return True
+        try:
+            check = getattr(self.apps, "may_be_command", None)
+            if check(text) if check is not None else app_commands.may_be_app_command(text, name=self.cfg.name):
+                return True
+        except Exception:
+            return True  # unsure: do not read ahead
+        everyday = optional_module("everyday")
+        try:
+            return bool(everyday is not None and everyday.may_match(text))
+        except Exception:
+            return True  # unsure: do not read ahead
+
+    async def _on_missed(self, reason=None):
+        """Its name was heard and then nothing it could make out. The voice says
+        sorry aloud; the mind logs it and shows concern, once per wake, and
+        sends nothing to be spoken. Nothing was heard, so nothing is kept."""
+        if not self._missed_owed or not self.lid_open or self.state not in MISSED_IN:
+            return
+        if self._announcement is not None and self._announcement.speaking:
+            return
+        if self._turn is not None and not self._turn.done():
+            return
+        self._missed_owed = False
+        log(f"missed what followed the wake phrase ({reason if isinstance(reason, str) else 'unclear'}); "
+            "the voice asks for it again")
+        fields = {"name": MISSED_EMOTION, "hold": MISSED_HOLD}
+        if self.lid_seq is not None:
+            fields["lid_seq"] = self.lid_seq
+        await self.bus.send("mind.emotion", **fields)
+
+    def _collect_app_lines(self):
+        """Lines the workshop wants said, and the one-line memory of a script
+        it wrote (recorded once, so "forget that script" can take it back)."""
+        try:
+            while (line := self.apps.announcement()) is not None:
+                if self._guest_memory is None and line:
+                    self._app_lines = self._app_lines[-4:] + [line]
+            episode = self.apps.episode()
+        except Exception as exc:
+            log(f"workshop announcement failed: {exc!r}")
+            return
+        if episode is not None and self._owner_services and self._archive_enabled:
+            text, meta = episode
+            try:
+                episode_id = self._record("said", text, self.cfg.name, workshop=True,
+                                          **{key: value for key, value in meta.items() if key in ("file", "job")})
+            except sqlite3.Error as exc:
+                log("could not write down the workshop's work:", exc)
+                return
+            self.apps.note_episode(episode_id, meta)
 
     def _retry_announcement(self):
         if self._announcement is not None:
@@ -1068,27 +1574,45 @@ class Mind:
                 self._announcement = Announcement("plea", token, now + 2.0)
                 await self.bus.send("mind.announce", announcement=token, lid_seq=self.lid_seq, idle_only=False)
             return
-        if not self._owner_services or self.state not in ANNOUNCE_IN:
+        if self._app_lines and self.state in ANNOUNCE_IN and self._guest_memory is None:
+            # The workshop's news is an answer to something the owner asked
+            # for. In quiet hours it waits, unless they were just talking.
+            recent = self._last_addressed is not None and now - self._last_addressed < 600
+            try:
+                quiet = load_initiative_policy(self.state_dir).is_quiet(self.skills.now())
+            except (OSError, ValueError):
+                quiet = False
+            if recent or not quiet:
+                token = uuid.uuid4().hex
+                self._announcement = Announcement(AppLine(self._app_lines[0]), token, now + 2.0)
+                await self.bus.send("mind.announce", announcement=token, lid_seq=self.lid_seq, idle_only=False)
+                return
+        if not self._owner_services or self.state not in (*ANNOUNCE_IN, "asleep"):
             return
         try:
-            entry = self.skills.reminders.due()
-            if isinstance(entry, Reminder) and self._clock_doubt() is not None:
-                # A reminder is only as right as the clock: held until it is believed.
-                entry = None
-            greeting_possible = self.state == "idle" and self._has_fresh_presence(now)
-            if entry is None and not greeting_possible:
-                return
             policy = load_initiative_policy(self.state_dir)
             local_now = self.skills.now()
-            if policy.is_quiet(local_now):
+            entry = self._ringable(policy, local_now)
+            if self.state == "asleep":
+                # Asleep with the lid open: a timer, reminder or alarm that may
+                # ring wakes it first (an alarm is for waking someone), once
+                # for each ring.
+                if entry is not None:
+                    rung = self.skills.reminders.delivery(entry.id)
+                    key = (entry.id, entry.due_at, rung.rings if rung is not None else 0)
+                    if self._ring_woke != key:
+                        self._ring_woke = key
+                        self._announcement_retry = now + 5.0
+                        await self.bus.send("being.wake")
                 return
-            if entry is None or not policy.reminders:
-                if not (policy.greetings and greeting_possible):
+            greeting_possible = self.state == "idle" and self._has_fresh_presence(now)
+            if entry is None:
+                if not greeting_possible or not policy.greetings or policy.is_quiet(local_now):
                     return
                 entry = local_now.date()
                 if self.skills.reminders.greeted_on(entry):
                     return
-        except (OSError, sqlite3.Error) as exc:
+        except (OSError, sqlite3.Error, ValueError) as exc:
             log("could not check announcements:", exc)
             self._announcement_retry = now + ANNOUNCE_RETRY
             return
@@ -1118,11 +1642,27 @@ class Mind:
             self._cancelled = False
             await self._say(line, keep=False, announcement=token)
             return
+        if (pending is not None and isinstance(pending.entry, AppLine) and pending.token == token
+                and not pending.speaking):
+            if (not self.lid_open or self._guest_memory is not None
+                    or (self._turn is not None and not self._turn.done())):
+                # A guest never hears the owner's workshop news.
+                self._announcement = None
+                if self._guest_memory is not None:
+                    self._app_lines.clear()
+                    if self.lid_open and (self._turn is None or self._turn.done()):
+                        await self.bus.send("mind.reply_done", spoke=False, lid_seq=self.lid_seq)
+                return
+            pending.speaking = True
+            self._cancelled = False
+            await self._say(_tagged(pending.entry.text), keep=False, announcement=token)
+            return
         if (not self._owner_services or pending is None or pending.token != token or pending.speaking
                 or not self.lid_open):
             return
         # A yes said to a reminder must not answer an offer to forget.
         self._pending_forget = None
+        self._pending_confirm = None
         if self._turn is not None and not self._turn.done():
             self._announcement = None
             return
@@ -1130,25 +1670,82 @@ class Mind:
         policy = load_initiative_policy(self.state_dir)
         local_now = self.skills.now()
         if isinstance(entry, Reminder):
-            allowed = policy.reminders
-            reply = f"Timer {entry.id} is up." if entry.kind == "timer" else f"Reminder {entry.id}. {entry.text}"
+            allowed = self._may_ring(policy, entry.kind, local_now)
+            reply = self._ring_line(entry)
         else:
-            allowed = policy.greetings and entry == local_now.date() and self._has_fresh_presence(time.monotonic())
-        if not allowed or policy.is_quiet(local_now):
+            allowed = (policy.greetings and entry == local_now.date() and self._has_fresh_presence(time.monotonic())
+                       and not policy.is_quiet(local_now))
+        if not allowed:
             self._announcement = None
             await self.bus.send("mind.reply_done", spoke=False, lid_seq=self.lid_seq)
             return
+        chirp = None
         if isinstance(entry, Reminder):
-            line = f"[neutral] {reply}"
+            # A bell first, then the words: it rings like a person would.
+            line, chirp = _tagged(reply), "bell"
         else:
             line = self._greeting_line()
         pending.speaking = True
         self._cancelled = False
-        await self._say(line, keep=False, announcement=token)
+        await self._say(line, keep=False, announcement=token, chirp=chirp)
 
     def _local_now(self):
         """The owner's local time, or None while their time zone is unknown."""
         return self.skills.now() if self.skills.zone is not None else None
+
+    def _owner_name(self):
+        """The owner's name to call them by, or "" while it is unknown."""
+        owner = (self.cfg.owner or "").strip()
+        return "" if owner.casefold() in ("", "friend", "owner", "unknown") else owner
+
+    def _ring_line(self, entry):
+        """A timer, reminder or alarm said like a person would, and honest
+        about lateness: "Richard, your ten-minute timer is done.\""""
+        delivery = self.skills.reminders.delivery(entry.id)
+        rings = delivery.rings if delivery is not None else 0
+        # Late because the lid was shut when it fell due: only a closure it
+        # saw. Switched off, or a mind that has just started, is not that.
+        shut = self._lid_shut
+        slept = shut is not None and shut[0] <= entry.due_at < shut[1]
+        try:
+            return self.skills.announcement(entry, self._owner_name(), rings=rings, slept=slept)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            log("could not word a reminder:", exc)
+            return "Your timer is done." if entry.kind == "timer" else f"You asked me to remind you: {entry.text}."
+
+    @staticmethod
+    def _may_ring(policy, kind, local_now):
+        """Quiet hours and the reminders switch hold timers and reminders, but
+        never an alarm the owner set (initiative.InitiativePolicy.may_announce)."""
+        check = getattr(policy, "may_announce", None)
+        if callable(check):
+            return check(kind, local_now)
+        return policy.reminders and not policy.is_quiet(local_now)
+
+    def _ringable(self, policy, local_now):
+        """The due timer, reminder or alarm that may ring now, or None.
+
+        While the clock is doubted only timers are due: they count elapsed
+        seconds, and the rest need the right wall-clock time. An alarm rings
+        even when an older reminder is being held for the end of quiet hours."""
+        trusted = self._clock_doubt() is None
+        reminders = self.skills.reminders
+        entry = reminders.due(clock_trusted=trusted)
+        if entry is None or self._may_ring(policy, entry.kind, local_now):
+            return entry
+        if not trusted or not self._may_ring(policy, "alarm", local_now):
+            return None
+        now = time.time()
+        row = reminders.db.execute(
+            "SELECT id FROM reminders WHERE kind = 'alarm' AND due_at <= ? AND (next_at IS NULL OR next_at <= ?) "
+            "ORDER BY due_at, id LIMIT 1", (now, now)).fetchone()
+        return reminders.get(row[0]) if row is not None else None
+
+    def _ring_open(self):
+        ring = self._ring
+        if ring is not None and time.monotonic() > ring.until:
+            self._ring = ring = None
+        return ring is not None
 
     def _greeting_line(self):
         if self._newborn and self._guest_memory is None:
@@ -1164,12 +1761,23 @@ class Mind:
             elif self._plea_due == pending.plea:
                 self._plea_due = None
             return
+        if (pending is not None and isinstance(pending.entry, AppLine) and pending.token == token
+                and pending.speaking):
+            # Said: never again, whatever the memory mode (a session-only
+            # being has workshop news too, and must not repeat it forever).
+            self._announcement = None
+            if self._app_lines and self._app_lines[0] == pending.entry.text:
+                self._app_lines.pop(0)
+            return
         if (not self._owner_services or pending is None or pending.token != token or not pending.speaking
                 or not self.lid_open):
             return
         try:
             if isinstance(pending.entry, Reminder):
-                self.skills.reminders.complete(pending.entry.id)
+                # Said once more; it comes back after RING_GAP until it is
+                # answered or has rung MAX_RINGS times.
+                self.skills.reminders.rang(pending.entry.id)
+                self._ring = Ring(pending.entry, time.monotonic() + RING_ACK_SECONDS, self.cfg.owner)
             else:
                 self.skills.reminders.record_greeting(pending.entry)
                 self._newborn = False
@@ -1221,7 +1829,7 @@ class Mind:
         previous, self._last_partial = self._last_partial, text
         words = text.split()
         attempted = self._speculative_text.split()
-        local_reply = commands.may_be_command(text, self.cfg.name) or commands.greeting(text, self.cfg.name)
+        local_reply = self._may_be_code(text)
         if attempted:
             if local_reply or words[:len(attempted)] != attempted:
                 self._prefill_task.cancel()
@@ -1243,6 +1851,7 @@ class Mind:
 
     async def _prefill(self, prompt, prefix):
         self._slot_generation += 1
+        self._slot_empty = False
         try:
             async with asyncio.timeout(READ_AHEAD_SECONDS):
                 await self.cortex.prefill(prompt, prefix=prefix, max_new_tokens=READ_AHEAD_TOKENS)
@@ -1253,7 +1862,12 @@ class Mind:
 
     # -- a turn ----------------------------------------------------------
 
-    async def _run_turn(self, text, speaker, greeting=None, *, command=None):
+    async def _run_turn(self, text, speaker, greeting=None, *, command=None, followup=False):
+        """Route one addressed utterance (docs/PIP-FUNCTIONS.md 5.2).
+
+        `followup`: heard in the follow-up window with no sign it was meant
+        for the being except an everyday skill's gate. It is answered only if
+        a skill takes it; otherwise it is overheard, never kept or sent on."""
         if not self.lid_open:
             return
         self._cancelled = False
@@ -1264,39 +1878,72 @@ class Mind:
         self._utterance_senses = None
         self._last_partial = None
         self._speculative_text = ""
+        self._suffix = None
+        # A turn changes what the slot holds: a night's re-warm starts afresh.
+        self._rewarm = None
+        heard_before = self.last_heard
+        addressed_before, self._last_addressed = self._last_addressed, time.monotonic()
+        overheard = False
+        guest_before = self._guest_memory is not None
         try:
             await self._check_expiry()
             if self._discard_reply:
                 return
             if command is None:
                 command = commands.parse(text, self.cfg.name, now=self.skills.now())
-            pending, self._pending_forget = self._pending_forget, None
-            if (pending is not None and _uptime() <= pending["until"] and speaker == pending["speaker"]
-                    and not (command is not None and command.kind in PRIVACY_COMMANDS)):
-                answer = re.sub(r"^(?:hey |ok(?:ay)? )?" + re.escape(self.cfg.name) + r"[, ]+", "", text.strip(), flags=re.I)
-                answer = " ".join(answer.rstrip(".!?").replace(",", ", ").split())
-                if _YES.match(answer):
-                    await self._forget_confirmed(pending)
-                    self.save_context()
-                    return
-                # A no, and anything else said while the offer is open, keeps
-                # everything, and says so: nothing is deleted by a guess.
-                kept = "I'll keep both." if pending.get("replace") else "I've kept everything."
-                await self._say(f"[neutral] Okay. {kept}", canned=True)
-                self.save_context()
+            privacy = command is not None and command.kind in PRIVACY_COMMANDS
+            # 1. Questions it asked and is waiting on: an offer to forget, a
+            #    skill's yes or no, and a ring that may be answered.
+            if not privacy and await self._answer_pending(text, speaker, command):
                 return
+            if command is not None and command.kind == "ack":
+                command = None  # "stop the alarm" with nothing ringing is conversation
+            # Not on a guest mode change: the brief is for the owner's own day.
+            brief = None if privacy or followup else self._brief_due(speaker)
+            if brief is not None:
+                # The first addressed words of the local day: once, whatever they are.
+                self._mark_brief(brief)
+            app = None if privacy else self._app_command(text)
+            everyday = None
             if command is not None and command.kind == "correct" and not self._can_correct(speaker):
                 # Nothing from its memory was just talked about. "That's
                 # wrong, it's Canberra" answers the model, and goes to it.
                 command = None
-            if command is None:
+            if app is None and command is None and not privacy:
+                everyday = await self._everyday(text, speaker, heard_before)
+                if everyday is None:
+                    greeting = greeting or commands.greeting(text, self.cfg.name)
+                else:
+                    greeting = None
+            if followup and app is None and command is None and everyday is None and not privacy:
+                # Not for it after all: nothing is said, kept or sent to the model.
+                overheard = True
+                self._last_addressed = addressed_before
+                self._overhear(text)
+                await self._send_reply("mind.reply_done", spoke=False)
+                return
+            if command is None and app is None:
                 # "Forget that" must mean this utterance. If this turn ends
                 # without recording it, there is nothing for it to mean.
                 self._last_memory = None
-            if command is not None:
+            if brief is not None and (app is not None or command is not None or everyday is not None):
+                # A command first: its answer, then at most one clause about today.
+                self._suffix = self._brief_clause(brief)
+            if privacy:
+                # 2. Guest mode on and off.
                 await self._command(command, text, speaker)
-            elif greeting := greeting or commands.greeting(text, self.cfg.name):
-                await self._greet(greeting, text, speaker)
+            elif app is not None:
+                # 3. The workshop.
+                await self._app_turn(app)
+            elif command is not None:
+                # 4. Memory, time, reminders, self-talk, volume.
+                await self._command(command, text, speaker)
+            elif everyday is not None:
+                # 5. Everyday skills: sums, lists, notes, body, device.
+                await self._speak_reply(everyday, text, speaker)
+            elif greeting:
+                # 6. A greeting or check-in, or the morning brief.
+                await self._greet(greeting, text, speaker, brief=brief)
             elif not self._model_available:
                 episode = self._record("heard", text, speaker)
                 self._subject("episode", episode, speaker)
@@ -1306,11 +1953,375 @@ class Mind:
             elif self._erase_required and not await self._clear_live_slot():
                 await self._say("[concern] I'm waiting for my conversation cache to clear.", keep=False)
             else:
+                # 7. The model. A warm-up kept for what looked like a code
+                # answer must not share the slot with this reply.
+                warm = self._warm_task
+                if warm is not None and not warm.done():
+                    warm.cancel()
+                    await asyncio.gather(warm, return_exceptions=True)
                 await self._converse(text, speaker, senses)
         except Exception as exc:  # a turn must always end, whatever went wrong
             log(f"turn failed: {exc!r}" if self._durable_context and not self._erase_required else "private turn failed")
             await self._send_reply("mind.reply_done", spoke=False)
-        self.save_context()
+        finally:
+            self._suffix = None
+            if not overheard and (self._guest_memory is not None) == guest_before and self.lid_open:
+                # RAM only, for "what did you hear?" on a later turn.
+                self.last_heard = text
+            self.save_context()
+
+    def _bare_answer(self, text):
+        """ "Pip, yes please." -> "yes please", for matching a yes or a no."""
+        answer = re.sub(r"^(?:hey |ok(?:ay)? )?" + re.escape(self.cfg.name) + r"[, ]+", "", text.strip(), flags=re.I)
+        return " ".join(answer.rstrip(".!?").replace(",", ", ").split())
+
+    async def _answer_pending(self, text, speaker, command):
+        """Step 1 of routing. True when this utterance answered something."""
+        pending, self._pending_forget = self._pending_forget, None
+        if pending is not None and _uptime() <= pending["until"] and speaker == pending["speaker"]:
+            if _YES.match(self._bare_answer(text)):
+                await self._forget_confirmed(pending)
+                return True
+            # A no, and anything else said while the offer is open, keeps
+            # everything, and says so: nothing is deleted by a guess.
+            kept = "I'll keep both." if pending.get("replace") else "I've kept everything."
+            await self._say(f"[neutral] Okay. {kept}", canned=True)
+            return True
+        confirm, self._pending_confirm = self._pending_confirm, None
+        if confirm is not None and _uptime() <= confirm["until"] and speaker == confirm["speaker"]:
+            answer = self._bare_answer(text)
+            if _YES.match(answer):
+                try:
+                    reply = await confirm["confirm"].on_yes()
+                except Exception as exc:
+                    log(f"a confirmed action failed: {exc!r}")
+                    reply = SimpleNamespace(line="[concern] Sorry, I couldn't do that.", keep=False,
+                                            confirm=None, action=None, logged=None)
+                await self._speak_reply(reply, text, speaker, confirmed=True)
+                return True
+            if _NO.match(answer):
+                await self._speak_reply(confirm["confirm"].on_no, text, speaker)
+                return True
+            # Neither: the question lapses unanswered, and nothing is done.
+            # What was said is handled as if no question had been asked.
+        if self._ring_open() and speaker in (self._ring.speaker, self.cfg.owner):
+            answer = commands.ring_reply(text, self.cfg.name) if hasattr(commands, "ring_reply") else None
+            if answer is None and command is not None and command.kind in ("ack", "snooze"):
+                answer = command
+            if answer is not None:
+                await self._answer_ring(answer)
+                return True
+        if command is not None and command.kind == "snooze":
+            await self._say("[neutral] Nothing is ringing right now.", keep=False)
+            return True
+        return False
+
+    async def _answer_ring(self, answer):
+        ring, self._ring = self._ring, None
+        reminders = self.skills.reminders
+        try:
+            if answer.kind == "snooze":
+                minutes = int(answer.arg) if str(answer.arg).isdigit() else 5
+                moved = reminders.snooze(ring.entry.id, minutes)
+                if moved is None:
+                    # Its last ring already finished it: set it again, the same kind.
+                    delivery_entry = ring.entry
+                    reminders.add(delivery_entry.text, time.time() + minutes * 60, kind=delivery_entry.kind)
+                when = "one minute" if minutes == 1 else f"{number_words(minutes)} minutes"
+                await self._say(f"[neutral] Okay. I'll ring again in {when}.", keep=False)
+            else:
+                reminders.acknowledge(ring.entry.id)
+                await self._say("[joy] Okay.", keep=False)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            log("could not answer a ring:", exc)
+            await self._say("[concern] I couldn't change that reminder.", keep=False)
+
+    # -- code skills (docs/PIP-FUNCTIONS.md 5.2) -----------------------------
+
+    def _context(self, speaker, heard_before):
+        """What every code handler may know about this moment."""
+        reply = optional_module("reply")
+        guest = self._guest_memory is not None
+        fields = dict(
+            now=self._local_now(),
+            clock_trusted=self._clock_doubt() is None,
+            speaker="guest" if guest else speaker,
+            guest=guest,
+            state_dir=self.state_dir,
+            owner=self.cfg.owner,
+            last_heard=heard_before,
+            last_said=self.last_said,
+            body=self._body_facts(),
+            voice=dict(self._voice_level),
+            send=self._send_for_skill,
+        )
+        if reply is not None and hasattr(reply, "Context"):
+            try:
+                return reply.Context(**fields, name=self.cfg.name)
+            except TypeError:
+                return reply.Context(**fields)
+        return SimpleNamespace(**fields, name=self.cfg.name)
+
+    def _body_facts(self):
+        """The body as a handler sees it: the latest body.state and body.care,
+        the brainstem's last brightness answer, and whether the ears are
+        meant to be silent (muted, or the lid shut) or the cortex is in use."""
+        return {
+            **self._body_state, **self._body_care, **self._body_brightness,
+            "muted": self._muted,
+            "lid_closed": not self.lid_open,
+            "cortex_busy": self._cortex_busy(),
+        }
+
+    def _cortex_busy(self):
+        """A model reply, a warm-up or a workshop job is using the cortex now:
+        the doctor never restarts it then."""
+        if self._stream is not None:
+            return True
+        if any(task is not None and not task.done()
+               for task in (self._warm_task, self._prefill_task, self._boundary_task)):
+            return True
+        status = getattr(self.apps, "status", None)
+        return isinstance(status, dict) and status.get("phase") in app_commands.ACTIVE
+
+    async def _send_for_skill(self, topic, **fields):
+        """A skill's bus message (brightness, a voice level request). Never
+        while the lid is closed."""
+        if self.lid_open:
+            await self.bus.send(topic, **fields)
+
+    async def _everyday(self, text, speaker, heard_before):
+        """Step 5: the first everyday skill that answers, or None."""
+        everyday = optional_module("everyday")
+        if everyday is None:
+            return None
+        try:
+            return await everyday.handle(text, self._context(speaker, heard_before))
+        except Exception as exc:
+            log(f"everyday skills failed: {exc!r}")
+            return None
+
+    async def _speak_reply(self, reply, text, speaker, *, confirmed=False):
+        """Say a code skill's Reply, then do what it asks: wait for a yes,
+        log the action, or switch off once everything is saved.
+
+        Switching off or restarting is destructive, so it is only ever done as
+        the answer to a spoken yes (`confirmed`), whatever a skill returns."""
+        line = _tagged(getattr(reply, "line", "") or "")
+        logged = getattr(reply, "logged", None)
+        if getattr(reply, "keep", False) and self._archive_enabled:
+            episode = self._record("heard", text, speaker, command=True)
+            self._subject("episode", episode, speaker)
+            await self._say(line, reply_to=episode, episodes=[episode] if episode is not None else [])
+        else:
+            self._last_memory = None
+            await self._say(line, keep=False)
+        if self._cancelled:
+            return
+        refused = getattr(reply, "action", None) in ("poweroff", "reboot") and not confirmed
+        if logged and not refused:
+            self._log_action(logged)
+        confirm = getattr(reply, "confirm", None)
+        if confirm is not None and self.lid_open:
+            seconds = getattr(confirm, "seconds", CONFIRM_SECONDS)
+            self._pending_confirm = {
+                "confirm": confirm, "speaker": speaker,
+                "until": _uptime() + (seconds if type(seconds) in (int, float) and seconds > 0 else CONFIRM_SECONDS),
+            }
+        action = getattr(reply, "action", None)
+        if action in ("poweroff", "reboot") and not confirmed:
+            log(f"a skill asked to {action} without a confirmed yes; not done")
+        elif action in ("poweroff", "reboot"):
+            if not logged:
+                self._log_action("shutdown" if action == "poweroff" else "reboot")
+            await self._power_action(action)
+
+    def _log_action(self, kind, count=1):
+        """One line in the action log: a kind and a count, never words."""
+        if self.policy.mode == "session-only":
+            return
+        module = optional_module("action_log")
+        if module is None:
+            return
+        try:
+            module.record(self.state_dir, kind, count)
+        except Exception as exc:  # the log must never fail a turn
+            log(f"could not log an action: {exc!r}")
+
+    async def _power_action(self, action):
+        """Switch off or restart, by request: let the goodbye finish, save
+        everything as for a battery power-off, then ask systemd."""
+        try:
+            await asyncio.wait_for(self._said_all.wait(), 8.0)
+        except asyncio.TimeoutError:
+            pass
+        self._shutdown = action
+        try:
+            await self._prepare_shutdown(action, SHUTDOWN_GRACE)
+        finally:
+            self._shutdown = None
+        if not await asyncio.to_thread(self._power_command, action):
+            # Still here and still awake: it must keep answering, not act as
+            # if its lid were shut (off the appliance this is the usual case).
+            log(f"could not {action}: not on the appliance, or systemctl refused")
+            return
+        # Going: nothing new starts on the model or the disk before systemd
+        # stops the mind (which then saves once more on its way out).
+        background = self._close_lid()
+        dream = self._interrupt_dream()
+        if dream is not None:
+            background.append(dream)
+        if background:
+            await asyncio.gather(*background, return_exceptions=True)
+
+    @staticmethod
+    def _run_power_command(action):
+        """systemctl poweroff or reboot, only on the appliance itself as root."""
+        if not Path("/etc/being").is_dir() or os.geteuid() != 0:
+            return False
+        import subprocess
+
+        try:
+            result = subprocess.run(["systemctl", "--no-block", action], timeout=10, check=False,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0
+
+    # -- the workshop ---------------------------------------------------------
+
+    def _app_command(self, text):
+        """Step 3: a workshop command (open, minimise, write, run...), or None."""
+        try:
+            return self.apps.parse(text, self._guest_memory is not None)
+        except Exception as exc:
+            log(f"workshop parse failed: {exc!r}")
+            return None
+
+    async def _app_turn(self, command):
+        self._last_memory = None
+
+        async def say(line):
+            await self._say(_tagged(line), keep=False)
+
+        try:
+            await self.apps.handle(command, say)
+        except Exception as exc:
+            log(f"workshop command failed: {exc!r}")
+            await self._say("[concern] My workshop didn't answer.", keep=False)
+        if command.kind == "open" and self.apps.view.get(command.app) == "shown":
+            self._log_action("workshop.open")
+        elif (command.kind == "control" and command.action == "run") or command.kind == "run_app":
+            if (self.apps.status or {}).get("phase") == "running" or command.kind == "run_app":
+                self._log_action("workshop.run")
+        # "Forget that script", confirmed: the one-line memory of it goes too.
+        try:
+            forgotten = self.apps.forgotten_episodes()
+        except Exception:
+            forgotten = []
+        if forgotten:
+            change = self.memory.edit(episode_ids=forgotten)
+            if change:
+                await self._scrub(change)
+                self._log_action("forget", len(change.episode_ids) or len(forgotten))
+
+    # -- the morning brief ------------------------------------------------------
+
+    def _brief_due(self, speaker):
+        """The owner's local time if this is their first addressed turn of the
+        local day and the brief may be given; otherwise None."""
+        if not self.cfg.morning_brief or self._guest_memory is not None or not self._owner_services:
+            return None
+        if speaker != self.cfg.owner or self.skills.zone is None or self._clock_doubt() is not None:
+            return None
+        now = self.skills.now()
+        if now.hour < DAY_STARTS:
+            return None
+        try:
+            policy = load_initiative_policy(self.state_dir)
+            if not getattr(policy, "brief", True) or policy.is_quiet(now):
+                return None
+            if self.skills.reminders.greeted_on(now.date()):
+                return None
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            log("could not check the morning brief:", exc)
+            return None
+        return now
+
+    def _mark_brief(self, now):
+        try:
+            self.skills.reminders.record_greeting(now.date())
+        except (OSError, sqlite3.Error) as exc:
+            log("could not note the morning brief:", exc)
+
+    def _reminders_today(self, now):
+        # The rest of the owner's day: from now until local midnight.
+        end = datetime.combine(now.date() + timedelta(days=1), clock_time_of_day.min, tzinfo=now.tzinfo)
+        reminders = self.skills.reminders
+        try:
+            if hasattr(reminders, "between"):
+                found = reminders.between(now.timestamp(), end.timestamp())
+            else:
+                found = [entry for entry in reminders.upcoming()
+                         if now.timestamp() <= entry.due_at < end.timestamp()
+                         and entry.kind != "timer"]
+        except (OSError, sqlite3.Error) as exc:
+            log("could not read today's reminders:", exc)
+            return []
+        return list(found)
+
+    def _brief_clause(self, now):
+        """At most one clause about today's reminders, after a command."""
+        found = self._reminders_today(now)
+        if not found:
+            return None
+        brief = optional_module("brief")
+        if brief is not None and hasattr(brief, "reminder_clause"):
+            try:
+                return brief.reminder_clause(now, found, most=1)
+            except Exception as exc:
+                log(f"could not word today's reminders: {exc!r}")
+        first = datetime.fromtimestamp(found[0].due_at, self.skills.zone)
+        at = speakable_time(first.hour, first.minute)
+        if len(found) == 1:
+            return f"You have one reminder today, at {at}."
+        return f"You have {number_words(len(found))} reminders today. The first is at {at}."
+
+    def _morning_brief(self, now, speaker):
+        """The brief for a greeting, or None when there is nothing to tell
+        (then the ordinary greeting is said, word for word as always)."""
+        brief = optional_module("brief")
+        body = {**self._body_state, **self._body_care}
+        reminders = self._reminders_today(now)
+        if brief is not None and hasattr(brief, "body_clause"):
+            body_note = brief.body_clause(body)
+        else:
+            body_note = self._check_in_line()
+        remark = None
+        if self._durable_context and self._dream_consent.is_file():
+            try:
+                remark = dream_journal.morning_remark(self.memory.db, speaker, now=time.time())
+            except (sqlite3.Error, ValueError, AttributeError):
+                remark = None
+        days_away = None
+        try:
+            last = self.memory.last_heard(speaker)
+        except sqlite3.Error:
+            last = None
+        if last is not None and self.memory.now() - last >= WELCOME_BACK_SECONDS:
+            days_away = int((self.memory.now() - last) // 86_400)
+        if not reminders and body_note is None and remark is None and days_away is None:
+            return None
+        line = None
+        if brief is not None:
+            try:
+                line = brief.compose(now, reminders, body, remark, days_away)
+            except Exception as exc:
+                log(f"could not compose the morning brief: {exc!r}")
+        if not line:
+            parts = [daily_greeting(now), body_note or self._brief_clause(now), remark]
+            line = " ".join(_plain(part) for part in parts if part)
+        return _tagged(line, "joy")
 
     def _addressed(self, text):
         """Signs that a follow-up was meant for the being: its name, a
@@ -1319,6 +2330,8 @@ class Mind:
             return True
         if text.rstrip().endswith("?") or commands.QUESTION.match(text.strip()):
             return True
+        if self.last_said is not None:
+            return self.last_said.rstrip(" —").endswith("?")
         last = next((m for m in reversed(self.messages) if m["role"] == "assistant"), None)
         return last is not None and last["content"].rstrip(" —").endswith("?")
 
@@ -1339,7 +2352,20 @@ class Mind:
             return "[concern] I'm running hot. I'll keep my answers short for a while."
         return None
 
-    async def _greet(self, greeting, text, speaker):
+    async def _greet(self, greeting, text, speaker, *, brief=None):
+        first = greeting in ("hello", "presence") and self._newborn and self._guest_memory is None
+        line = self._morning_brief(brief, speaker) if brief is not None and not first else None
+        if line is not None:
+            # Marked like any greeting, so "what did we talk about?" is not a list of hellos.
+            episode = self._record("heard", text, speaker, greeting=True)
+            self._subject("episode", episode, speaker)
+            # The brief is not archived: it only repeats what is stored
+            # elsewhere (reminders, a dream remark quoting the owner), and a
+            # copy here would outlive a cancelled reminder or a forget.
+            await self._say(line, keep=False)
+            if not self._cancelled:
+                self._newborn = False
+            return
         gap = None
         if self._durable_context and self._guest_memory is None:
             last = self.memory.last_heard(speaker)
@@ -1361,34 +2387,24 @@ class Mind:
             line = replies[index]
         if greeting == "hello" and gap is not None and gap >= WELCOME_BACK_SECONDS and self._clock_doubt() is None:
             line = welcome_back(gap)
+        # Kept out of the model's history: a stock reply read back on every
+        # later turn costs prompt time and teaches it nothing.
         await self._say(line, reply_to=episode, episodes=[episode], canned=True)
-        self._remember_exchange(text, line, episode)
 
-    def _remember_exchange(self, text, line, episode):
-        """Keep a short local exchange in the model's context, so a follow-up
-        about it makes sense. Appended only, after its own reply."""
-        if self._cancelled or not self._model_available:
-            return
-        tags = TagParser()
-        spoken = (tags.feed(line) + tags.flush()).strip()
-        if not spoken:
-            return
-        user = {"role": "user", "content": text}
-        if episode is not None:
-            user["episode_id"] = episode
-        self.messages.append(user)
-        self.messages.append({"role": "assistant", "content": f"[{tags.emotion or 'neutral'}] {spoken}",
-                              "local": True, **({"episodes": [episode]} if episode is not None else {})})
-        self._make_room()
-
-    async def _say(self, reply, *, keep=True, announcement=None, **sources):
+    async def _say(self, reply, *, keep=True, announcement=None, chirp=None, **sources):
         """Speak a fixed reply. It starts with an [emotion] tag like the model's.
 
         The reply is finished on the bus before anything is written down: a
-        busy database must never leave the voice waiting.
+        busy database must never leave the voice waiting. `chirp` names a
+        sound the voice plays before the first clause (a ring's bell).
         """
         if self._cancelled:
             return
+        suffix = None
+        if self._suffix and announcement is None:
+            # The morning brief's one clause, after a command's own answer.
+            suffix, self._suffix = self._suffix, None
+            reply = f"{reply.rstrip()} {suffix}"
         self._last_local_line = reply
         tags = TagParser()
         text = tags.feed(reply) + tags.flush()
@@ -1397,19 +2413,26 @@ class Mind:
         rest = splitter.flush()
         if rest:
             clauses.append(rest)
+        if clauses:
+            self.last_said = " ".join(clauses)
         self._said_all.clear()
         if tags.emotion:
             await self._send_reply("mind.emotion", name=tags.emotion, hold=30.0)
         for i, clause in enumerate(clauses, 1):
-            await self._send_reply("say.request", text=clause, seq=i, last=False)
+            extra = {"chirp": chirp} if chirp and i == 1 else {}
+            await self._send_reply("say.request", text=clause, seq=i, last=False, **extra)
         if clauses:
             marker = {"announcement": announcement} if announcement is not None else {}
             await self._send_reply("say.request", text="", seq=len(clauses) + 1, last=True, **marker)
         await self._send_reply("mind.reply_done", spoke=bool(clauses))
         if keep and not self._cancelled:
             sources.setdefault("canned", True)
+            said = " ".join(clauses)
+            if suffix:
+                # Today's reminders are not copied into the archive with it.
+                said = said.removesuffix(_plain(suffix)).rstrip()
             try:
-                self._record("said", " ".join(clauses), self.cfg.name, emotion=tags.emotion or "neutral", **sources)
+                self._record("said", said, self.cfg.name, emotion=tags.emotion or "neutral", **sources)
             except sqlite3.Error as exc:
                 log("could not write down a reply:", exc)
 
@@ -1519,9 +2542,11 @@ class Mind:
             return []
         if not lookup and len(terms) < 2:
             return []
+        # An ordinary sentence keeps only matches sharing two or more words,
+        # so the search by meaning (tens of ms on the laptop) is skipped.
         matches = self.memory.recall_history(
             topic, limit=6, start=start, end=end, include_fact_sources=False,
-            kind="heard", speaker=self.cfg.owner,
+            kind="heard", speaker=self.cfg.owner, meaning=lookup,
         )
         found = [episode for episode in matches if episode.id not in active_ids]
         if not lookup:
@@ -1564,6 +2589,13 @@ class Mind:
         elif not self._archive_enabled:
             self._subject("live", 0, speaker)
         body = "" if senses is None else self._senses_note(senses, text)
+        try:
+            # While a script is being written, the model is told so.
+            workshop = self.apps.model_note().strip().strip("()").strip()
+        except Exception:
+            workshop = ""
+        if workshop:
+            note = f"{note}; {workshop}" if note else workshop
         message = {
             "role": "user",
             "content": self._user_content(text, body, note),
@@ -1585,7 +2617,28 @@ class Mind:
         )
         episodes.update(m["episode_id"] for m in self.messages if m["role"] == "user" and m.get("episode_id") is not None)
         sources["episodes"] = sorted(episodes)
+        self._said_all.clear()
+        grammar = STRICT_GRAMMAR if self.cfg.reply_shape == "strict" else GRAMMAR
+        # A story is told at length, clause by clause, for this turn only.
+        max_tokens = max(self.cfg.max_tokens, STORY_MAX_TOKENS) if _STORY.search(text) else self.cfg.max_tokens
+        overflowed = False
+        # A script being written with the model is parked for this turn: the
+        # conversation always has the model first.
+        try:
+            await self.apps.lease()
+        except Exception as exc:
+            log(f"could not park the workshop: {exc!r}")
+        try:
+            await self._converse_stream(text, speaker, message, episode_id, sources, grammar, max_tokens,
+                                        body, overflowed)
+        finally:
+            try:
+                await self.apps.unlease()
+            except Exception as exc:
+                log(f"could not resume the workshop: {exc!r}")
 
+    async def _converse_stream(self, text, speaker, message, episode_id, sources, grammar, max_tokens,
+                               body, overflowed):
         spoken = []
         raw = []
         emotion_sent = False
@@ -1596,6 +2649,7 @@ class Mind:
         first_clause = None
         retries = 0
         stream = None
+        echoed = False
 
         async def out(visible):
             nonlocal emotion_sent, parroted, first_clause
@@ -1613,9 +2667,6 @@ class Mind:
                     first_clause = time.monotonic() - started
                 await self._send_reply("say.request", text=clause, seq=len(spoken), last=False)
 
-        self._said_all.clear()
-        grammar = STRICT_GRAMMAR if self.cfg.reply_shape == "strict" else GRAMMAR
-        overflowed = False
         # A very small model sometimes answers a question by repeating it, or
         # with assistant boilerplate. The first clause is checked before it is
         # spoken: such a reply is never said, and is asked for once more, a
@@ -1629,7 +2680,8 @@ class Mind:
             parroted = False
             raw.clear()
             self._slot_generation += 1
-            stream = self.cortex.stream(self._prompt(), grammar=grammar, max_tokens=self.cfg.max_tokens,
+            self._slot_empty = False
+            stream = self.cortex.stream(self._prompt(), grammar=grammar, max_tokens=max_tokens,
                                         temperature=temperature, **self._sampler())
             self._stream = stream
             progress = asyncio.create_task(self._report_progress(stream))
@@ -1640,6 +2692,7 @@ class Mind:
                     await out(guard.feed(think.feed(delta)))
                     if guard.stopped or parroted:
                         # Reciting its own notes ends the reply; a parrot ends this try.
+                        echoed = echoed or guard.stopped
                         stream.cancel()
                         break
             except CortexError as exc:
@@ -1713,14 +2766,48 @@ class Mind:
         # The voice and the brainstem hear the end first; then it is written down.
         await self._send_reply("say.request", text="", seq=len(spoken) + 1, last=True)
         await self._send_reply("mind.reply_done", spoke=True)
+        self.last_said = said
         # The prompt keeps the reply as the model wrote it, so the next turn's
         # cache still matches; the archive keeps the cleaned, spoken words.
-        generated = "".join(raw).strip()
+        # The cortex's own record of the generated text (think-filtered,
+        # byte for byte) is preferred, when a whole reply came out of one try.
+        exact = getattr(stream, "raw", None)
+        if isinstance(exact, str) and exact.strip() and failed is None and not echoed and retries == 0:
+            generated = exact
+        else:
+            generated = "".join(raw).strip()
         content = generated if failed is None and generated and tags.emotion is not None else f"[{emotion}] {said}"
         self.messages.append({"role": "assistant", "content": content, **sources})
         reply_id = self._safe_record("said", said, self.cfg.name, emotion=emotion, reply_to=episode_id, **sources)
         if reply_id is not None:
             self.messages[-1]["episode_id"] = reply_id
+        self._start_boundary()
+
+    def _start_boundary(self):
+        """While it speaks, have the model read the end of its turn and the
+        start of the next one (Cortex.prime_boundary), so the next turn
+        reads only the new words."""
+        prime = getattr(self.cortex, "prime_boundary", None)
+        if prime is None or not self._model_available or self._cancelled or self._erase_required:
+            return
+        if self._boundary_task is not None and not self._boundary_task.done():
+            return
+        prompt = self._prompt()
+
+        async def boundary():
+            self._slot_generation += 1
+            generation = self._slot_generation
+            try:
+                primed = await prime(prompt)
+                if primed and generation == self._slot_generation and not self._erase_required:
+                    # The primed tokens are a verified prefix a read-ahead may extend.
+                    self._warmed_prefix = tuple(primed)
+            except (CortexError, ValueError, TypeError) as exc:
+                log(f"could not prime the turn boundary: {exc!r}")
+            finally:
+                self._slot_generation += 1
+
+        self._boundary_task = asyncio.create_task(boundary())
 
     def _sampler(self):
         return {key: value for key, value in (
@@ -1771,6 +2858,12 @@ class Mind:
         line["ok"] = failed is None
         self.last_timing = line
         log("turn timing " + json.dumps(line, sort_keys=True))
+        doctor = optional_module("doctor") if failed is None else None
+        if doctor is not None and hasattr(doctor, "note_turn"):
+            prompt_n = line.get("prompt_n")
+            doctor.note_turn(prompt_tps=line.get("prompt_per_second"),
+                             decode_tps=line.get("predicted_per_second"),
+                             prompt_n=prompt_n if type(prompt_n) is int else None)
 
     # -- commands --------------------------------------------------------
 
@@ -1790,6 +2883,15 @@ class Mind:
         self._presence_at = None
         self._greeting_counts.clear()
         self._clear_working_memory()
+        self._forget_wake()
+        self._ring = None
+        self._app_lines.clear()
+        try:
+            # The workshop closes its session and clears itself either way.
+            await self.apps.privacy(entering)
+        except Exception as exc:
+            log(f"could not tell the workshop about guest mode: {exc!r}")
+        self._log_action("guest.start" if entering else "guest.end")
         if entering:
             self._guest_memory = self.memory = Memory(None)
             reply = "Guest mode is on. I'll keep this conversation only for this guest session."
@@ -1822,6 +2924,7 @@ class Mind:
             if subject is None or subject.speaker != speaker:
                 await self._say("[concern] I'm not sure what to forget. Tell me what it was about.")
             elif await self._edit_last():
+                self._log_action("forget")
                 await self._say("[neutral] Okay. That's forgotten." + self._backup_note())
             else:
                 await self._say("[concern] I'm not sure what to forget. Tell me what it was about.")
@@ -1879,6 +2982,8 @@ class Mind:
         elif kind in ("remember_me", "about_me", "talked_about"):
             self._record("command", text, speaker)
             await self._memory_question(kind, speaker)
+        elif kind == "diary":
+            await self._diary_command(text, arg, speaker)
         elif not self._owner_services and kind not in PRIVATE_CLOCK_COMMANDS:
             await self._say("[neutral] I can tell you the time, date, or battery level in a private conversation.",
                             keep=False)
@@ -1895,13 +3000,27 @@ class Mind:
             await self._say(f"[neutral] {reply}", keep=False)
         else:
             try:
-                reply = await self.skills.reply(command)
+                reply = await self.skills.reply(command, clock_trusted=self._clock_doubt() is None)
             except (OSError, sqlite3.Error) as exc:
                 log("local skill failed:", exc)
                 reply = "I couldn't access my local settings or reminders."
             await self._say(f"[neutral] {reply}", keep=False)
-        if kind in LOCAL_EXCHANGES and not self._cancelled and self._guest_memory is None:
-            self._remember_exchange(text, self._last_local_line, None)
+
+    async def _diary_command(self, text, arg, speaker):
+        """"What did we do yesterday?": the day record built in code each
+        night (mind/diary.py); without one, the owner's own words that day."""
+        diary = optional_module("diary")
+        reply = None
+        if diary is not None and hasattr(diary, "handle"):
+            try:
+                reply = await diary.handle(text, self._context(speaker, self.last_heard))
+            except Exception as exc:
+                log(f"the diary failed: {exc!r}")
+        if reply is not None:
+            await self._speak_reply(reply, text, speaker)
+            return
+        self._record("command", "recall", speaker)
+        await self._recall_command(arg, speaker)
 
     async def _remember_command(self, arg, text, speaker):
         episode = self._record("heard", text, speaker, command=True)
@@ -1942,6 +3061,12 @@ class Mind:
         # there is no clear place for it, ask for the whole sentence rather
         # than store words the owner never said.
         fact = self.memory.fact(subject.key) if subject.kind == "fact" else None
+        if fact is not None:
+            # "It's called Moonleaf" after "my orchid is called Silverleaf":
+            # the fact already says "called", so only the name is new.
+            verb = re.match(r"(called|named|known as)\s+(?=\S)", value, re.I)
+            if verb and re.search(rf"\b{re.escape(verb[1])}\b", fact.text, re.I):
+                value = value[verb.end():]
         corrected = commands.splice_correction(fact.text, value) if fact is not None else None
         if corrected is None:
             await self._say("[concern] Tell me the whole thing again, so I get it right. "
@@ -1959,6 +3084,9 @@ class Mind:
         if _FORGET_UNSUPPORTED.search(arg):
             await self._say("[neutral] I can only forget a topic or a single day, like yesterday. "
                             "Tell me one of those.")
+            return
+        if _FORGET_ALL.match(arg.strip().rstrip(".!?")):
+            await self._offer_forget_everything(speaker)
             return
         topic, start, end = commands.history_query(arg, zone=self.skills.zone)
         if start is not None and _FORGET_FILLER.match(topic.strip()):
@@ -1991,6 +3119,86 @@ class Mind:
                     "speaker": speaker,
                     "until": _uptime() + FORGET_CONFIRM_SECONDS,
                 }
+
+    async def _offer_forget_everything(self, speaker):
+        if self._guest_memory is not None:
+            await self._say("[neutral] I'm not keeping anything from this guest session anyway.", keep=False)
+            return
+        if not self._owner_services or speaker != self.cfg.owner:
+            await self._say("[neutral] Only the person I live with can ask me to forget everything.", keep=False)
+            return
+
+        async def forget():
+            return await self._forget_everything()
+
+        await self._speak_reply(SimpleNamespace(
+            line="[concern] Forget everything? Every memory, list and note, for good. Say yes, and it can't be undone.",
+            keep=False, action=None, logged=None,
+            confirm=SimpleNamespace(on_yes=forget, on_no=SimpleNamespace(
+                line="[neutral] Okay. I've kept everything.", keep=False, confirm=None, action=None, logged=None),
+                seconds=CONFIRM_SECONDS)), "", speaker)
+
+    async def _erase_everything(self):
+        """Every fact and archived sentence, a batch at a time; the stored day
+        records (counts only, but counts of conversations no longer
+        remembered); then the lists and notes, the told-jokes record, the
+        action log, the backups' erase mark and the model's cache."""
+        memory = self.memory
+        # Nothing in the prompt or the model's cache survives this, so it is
+        # dropped first instead of being scrubbed batch by batch.
+        work = self._interrupt_background()
+        if work:
+            await asyncio.gather(*work, return_exceptions=True)
+        self._clear_working_memory()
+        fact_ids = [fact.id for fact in memory.facts()]
+        if fact_ids:
+            memory.edit(fact_ids=fact_ids)
+        after = 0
+        while True:
+            batch = [row[0] for row in memory.db.execute(
+                "SELECT id FROM episodes WHERE id > ? AND text NOT IN ('', '[forgotten]') ORDER BY id LIMIT ?",
+                (after, ERASE_BATCH))]
+            if not batch:
+                break
+            after = batch[-1]
+            memory.edit(episode_ids=batch)
+            await asyncio.sleep(0)
+        if self._durable_context and self.policy.expiry_days is not None:
+            self._expiry_revision = memory.revision
+        try:
+            with memory.db:
+                memory.db.execute("DELETE FROM diary_days")
+        except sqlite3.OperationalError:
+            pass  # no day records in this build
+        self._clear_working_memory()
+        self._forget_wake()
+        for name in ("lists", "play", "action_log"):
+            module = optional_module(name)
+            try:
+                if module is not None and hasattr(module, "erase_all"):
+                    module.erase_all(self.state_dir)
+            except Exception as exc:
+                log(f"could not erase {name}: {exc!r}")
+        backup = optional_module("backup")
+        try:
+            if backup is not None and hasattr(backup, "note_erase"):
+                # Older backups must not bring the lists or the log back.
+                backup.note_erase(self.state_dir)
+        except Exception as exc:
+            log(f"could not note the erase for backups: {exc!r}")
+        if self._model_available:
+            await self._clear_live_slot()
+        self._log_action("forget.all")
+
+    async def _forget_everything(self):
+        """The erase path: every fact and episode (and what was derived from
+        them), the lists and notes, the told-jokes record and the action log."""
+        # The owner said yes: it runs to the end even if the turn is cut off,
+        # and in batches, so years of memories never stall the event loop
+        # (the face's link, the bus and the watchdog ping all live on it).
+        await asyncio.shield(asyncio.ensure_future(self._erase_everything()))
+        return SimpleNamespace(line="[neutral] Okay. I've forgotten everything." + self._backup_note(),
+                               keep=False, confirm=None, action=None, logged=None)
 
     async def _recall_command(self, query, speaker, episode_kind=None):
         topic, start, end = commands.history_query(query, zone=self.skills.zone)
@@ -2079,6 +3287,7 @@ class Mind:
             # Count what was actually taken, not what was offered.
             taken = len(change.fact_ids) + len(set(pending["episodes"]).intersection(change.episode_ids))
             count = "That's" if taken <= 1 else "Those are"
+            self._log_action("forget", max(1, taken))
             await self._say(f"[neutral] Okay. {count} forgotten." + self._backup_note())
         else:
             await self._say("[neutral] There was nothing left to forget.")
@@ -2269,17 +3478,27 @@ class Mind:
             await self._say("[concern] My date is wrong too, so I can't set the clock by voice. "
                             "The setup screen can set the date and time.")
             return
-        target = self._nearest_wall_time(hour, minute, time.time())
+        # Only the time of day is said. If the clock was in doubt before (a
+        # lost battery clock that still reads a plausible date), the date is
+        # as unsure afterwards, whatever the memory then believes.
+        doubted = self._clock_doubt() is not None
+        before = time.time()
+        target = self._nearest_wall_time(hour, minute, before)
         if not await asyncio.to_thread(self._set_system_clock, target):
             await self._say("[concern] I couldn't change my clock myself. The setup screen can set it.")
             return
+        try:
+            # A running timer counts real time, not the clock's jump.
+            self.skills.reminders.clock_moved(target - before)
+        except (AttributeError, sqlite3.Error, ValueError) as exc:
+            log("could not move the timers with the clock:", exc)
         try:
             # The memory's own idea of the time follows a clock set by hand.
             self._primary_memory.owner_set_clock(target)
         except (sqlite3.Error, ValueError):
             pass
         reply = f"[joy] Thanks. My clock says {speakable_time(hour, minute)} now."
-        if self._clock_doubt() is not None:
+        if doubted or self._clock_doubt() is not None:
             # Only the time of day can be set by voice; the date may still be off.
             reply += " My date may still be wrong, though. The setup screen can set it."
         await self._say(reply)
@@ -2348,20 +3567,16 @@ class Mind:
 
     def _dream_line(self, speaker):
         """What it dreamt, from the journal only: never an invented dream."""
-        if not self._dream_consent.is_file():
-            return "[neutral] I don't dream yet. Dreaming is switched off for me."
         if not self._durable_context:
             return "[neutral] I can't look at my dreams in this conversation."
+        enabled = self._dream_consent.is_file()
         try:
-            entries = dream_journal(self.memory.db, speaker, limit=3)
-        except (sqlite3.Error, ValueError):
-            entries = []
-        recent = [entry for entry in entries if time.time() - entry.published_at < 36 * 3600]
-        if not recent:
-            return "[neutral] I didn't dream last night. Nothing new came up while I slept."
-        thought = history_excerpt(recent[0].source, 80).rstrip(".!?")
-        return ("[curiosity] While I slept, I went back over a few things you'd said. "
-                f"One was: {commands.reflect(thought)}. I don't dream in pictures, as far as I know.")
+            line, sources = dream_journal.dream_report(
+                self.memory.db, speaker, now=time.time(), zone=self.skills.zone, enabled=enabled)
+        except (sqlite3.Error, ValueError, TypeError) as exc:
+            log("could not read the dream journal:", exc)
+            line, sources = "I can't look at my dream journal right now.", ()
+        return _tagged(line, "curiosity" if sources else "neutral")
 
     def _life_days(self):
         if self._life is None:
@@ -2422,6 +3637,7 @@ class Mind:
 
     async def _erase_cache(self):
         self._discard_cache = True
+        self._rewarm = None
         self._slot_generation += 1
         self._saved_slot = None
         self._restore_pending = False
@@ -2433,6 +3649,8 @@ class Mind:
             # after the first unlink. Erase runs after any pending write.
             saved.unlink(missing_ok=True)
             self._discard_cache = False
+            # Empty now: the next rest warms it again, from the identity snapshot.
+            self._slot_empty = self._needs_warmup = True
             return True
         return False
 
@@ -2443,7 +3661,18 @@ class Mind:
         return DreamStore(self.memory)
 
     def _interrupt_dream(self):
+        """Stop the night's work at once: the lid opened, its name was heard,
+        a key was pressed, or the night stopped being eligible."""
         task = self._dream_task
+        if self.night_shift is not None:
+            try:
+                # The chunk in flight is cancelled and commits nothing; the
+                # step then returns and keeps every job's place for later.
+                self.night_shift.interrupt()
+            except Exception as exc:
+                log(f"could not interrupt the night shift: {exc!r}")
+            else:
+                return task if task is not None and not task.done() else None
         if task is not None and not task.done():
             if not task.cancelling():
                 task.cancel()
@@ -2471,6 +3700,9 @@ class Mind:
         self._dream_task = asyncio.create_task(self._dream_batch(night))
 
     async def _dream_batch(self, night):
+        if self.night_shift is not None:
+            await self._night_step(night)
+            return
         started = time.monotonic()
         if self._eligible_night() != night:
             return
@@ -2489,6 +3721,60 @@ class Mind:
                     await self.bus.send("mind.dream_committed", lid_seq=lid["seq"])
         except sqlite3.Error as exc:
             log("could not update the overnight journal:", exc)
+
+    def _night_jobs(self, night):
+        """Tonight's own jobs (memory upkeep, the journal, the day record and
+        the dream), registered once per night: they are built for that night."""
+        if self._night_registered == night:
+            return
+        self._night_registered = night
+        shift, memory, owner = self.night_shift, self.memory, self.cfg.owner
+        module = optional_module("night_shift")
+        jobs = []
+        if module is not None and hasattr(module, "standard_jobs"):
+            # Expiry stays the mind's own (it runs whenever the clock is believed).
+            jobs.append(lambda: module.standard_jobs(shift, memory, owner=owner, night=night, cutoff=None))
+        diary = optional_module("diary")
+        if diary is not None and hasattr(diary, "DiaryJob"):
+            jobs.append(lambda: shift.register("diary", diary.DiaryJob(
+                memory, owner, today=lambda: self.skills.now().date(), zone=self.skills.zone,
+                state_dir=self.state_dir)))
+        dream = optional_module("dream_model")
+        if dream is not None and hasattr(dream, "DreamJob") and Path("/etc/being").is_dir():
+            # The dream model runs only on the appliance, where its service exists.
+            jobs.append(lambda: shift.register("dream", dream.DreamJob(
+                memory, owner, self.cfg.name, night, zone=self.skills.zone)))
+        for register in jobs:
+            try:
+                register()
+            except Exception as exc:
+                log(f"a night job was not registered: {exc!r}")
+
+    async def _night_step(self, night):
+        """One step of the night shift's fixed list of jobs (mind/night_shift.py).
+        It asks before every chunk whether the night is still eligible."""
+        if self._eligible_night() != night:
+            return
+        shift = self.night_shift
+        self._night_jobs(night)
+        journal = getattr(shift, "jobs", {}).get("journal")
+        published = getattr(journal, "published", 0)
+        try:
+            await shift.step(lambda: self._eligible_night() == night, night=night)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log(f"the night shift failed: {exc!r}")
+            return
+        lid = self._latest_lid
+        if (getattr(journal, "published", 0) > published and lid and lid.get("closed") is True
+                and type(lid.get("seq")) is int):
+            # Only a receipt for the current lid closure crosses the bus.
+            await self.bus.send("mind.dream_committed", lid_seq=lid["seq"])
+        done = getattr(shift, "done_tonight", None)
+        if callable(done) and set(getattr(shift, "jobs", {})) <= set(done()):
+            # Every job is finished for tonight: nothing more until tomorrow night.
+            self._dream_idle_night = night
 
     # -- keeping the context in bounds -------------------------------------
 
@@ -2519,12 +3805,22 @@ class Mind:
         await asyncio.sleep(self.cfg.settle)
         if not self.lid_open or self.state not in RESTING or (self._turn is not None and not self._turn.done()):
             return
-        await self._check_expiry()
-        if self._tokens() > 0.6 * self.cfg.ctx_tokens:
-            await self._compact()
-        self.save_context()
-        if self.state == "asleep":
-            await self._save_slot()
+        warm = self._warm_task
+        if warm is not None and not warm.done():
+            # A warm-up started while this was settling: let it finish first.
+            await asyncio.gather(warm, return_exceptions=True)
+            if not self.lid_open or self.state not in RESTING:
+                return
+        self._housekeeping_working = True
+        try:
+            await self._check_expiry()
+            if self._tokens() > 0.6 * self.cfg.ctx_tokens:
+                await self._compact()
+            self.save_context()
+            if self.state == "asleep":
+                await self._save_slot()
+        finally:
+            self._housekeeping_working = False
 
     async def _compact(self):
         """Carry a few exact owner excerpts forward before releasing old turns."""
@@ -2551,4 +3847,6 @@ class Mind:
         self.messages = recent
         log(f"compacted {len(old)} messages with {len(self.highlights)} archive sources")
         if self.cortex_ok:
-            await self._warm_prefix()
+            # The whole new prompt, in interruptible 32-token batches, so the
+            # next turn reads only its own words (not 300-500 cold tokens).
+            await self._warm_prefix(full=True)

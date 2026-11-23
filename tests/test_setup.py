@@ -218,6 +218,18 @@ class SystemEntries(unittest.TestCase):
         update.assert_called_once_with(try_boot=False)
         backup.assert_called_once_with(self.mind_dir, temporary=False)
 
+    def test_installed_setup_offers_typing_and_the_voice_hint_names_its_key(self):
+        from mind import type_chat
+
+        with patch.object(type_chat, "main", return_value=0) as chat:
+            code, text = self.run_setup(["y", "q"])
+        self.assertEqual(code, 0)
+        self.assertIn(f"{setup.TYPE_CHAT_KEY}  Talk to ", text)
+        chat.assert_called_once_with(mind_dir=self.mind_dir)
+        self.assertEqual(type_chat.typing_hint(try_boot=False),
+                         f"You can also type to me: press F2, then {setup.TYPE_CHAT_KEY}.")
+        self.assertEqual(type_chat.typing_hint(try_boot=True), "You can also type to me: press F2, then 6.")
+
     def test_try_setup_has_care_but_no_update_or_backup_entries(self):
         with patch.object(setup.care, "care_menu") as care_menu:
             code, text = self.run_setup(["c", "q"], try_boot=True)
@@ -264,3 +276,98 @@ class SystemEntries(unittest.TestCase):
               patch("mind.network_enforce.UNIT_DIRS", (units,))):
             asyncio.run(setup.restart_try_organs())
         self.assertEqual(calls, [("systemctl", "try-restart", "being-mind.service", "being-voice.service")])
+
+
+class VoicePageTests(unittest.TestCase):
+    """The natural (Piper) or original (Flite) voice page."""
+
+    def setUp(self):
+        from mind import voice_engines
+        from tests.test_voice_engines import FakePiper
+
+        self.voice_engines = voice_engines
+        work = self.enterContext(tempfile.TemporaryDirectory())
+        self.mind_dir = Path(work) / "mind"
+        self.mind_dir.mkdir()
+        self.args = ["--config", str(Path(__file__).resolve().parents[1] / "config"), "--mind-dir", str(self.mind_dir)]
+        self.piper = FakePiper()
+        self.enterContext(patch.object(voice_engines, "_piper", return_value=self.piper))
+        self.enterContext(patch.object(voice_engines, "build_id", return_value="b1"))
+
+    def run_setup(self, keys, *args, appliance=False):
+        with (patch("sys.stdin.isatty", return_value=True), patch("builtins.input", side_effect=keys),
+              patch.object(setup, "available_voices", return_value={"slt"}),
+              patch.object(setup, "APPLIANCE_MIND", self.mind_dir.resolve() if appliance else Path("/mind")),
+              patch.object(setup, "is_try_boot", return_value=False),
+              redirect_stdout(io.StringIO()) as output):
+            return setup.main(self.args + list(args)), output.getvalue()
+
+    def test_page_lists_both_voices_and_saves_the_natural_one(self):
+        code, text = self.run_setup(["n", "2", "q", "q"])
+        self.assertEqual(code, 0)
+        for label in ("N  Natural or original voice", "1  Automatic", "2  Natural (Alba)", "3  Original",
+                      "Not measured on this laptop yet", "Play the natural voice"):
+            self.assertIn(label, text)
+        self.assertEqual(self.voice_engines.load_preference(self.mind_dir), "piper")
+
+    def test_measured_speed_and_automatic_choice_are_shown(self):
+        self.voice_engines.record(self.mind_dir, "tts", self.voice_engines.tts_key("b1", self.piper),
+                                  {"rtf": 0.28, "runs": [0.28, 0.27, 0.3]})
+        code, text = self.run_setup(["q"], "--voice")
+        self.assertEqual(code, 0)
+        self.assertIn("0.28 of real time (fast enough)", text)
+        self.assertIn("Automatic, by measured speed", text)
+        self.assertIn("Speaking with", text)
+        self.assertIn("Natural (Alba)", text)
+
+    def test_dry_run_does_not_save(self):
+        code, _ = self.run_setup(["n", "3", "q", "q"], "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertFalse((self.mind_dir / self.voice_engines.VOICE_SETTINGS).exists())
+
+    def test_natural_voice_cannot_be_chosen_when_not_installed(self):
+        self.piper.installed = False
+        code, text = self.run_setup(["2", "q"], "--voice")
+        self.assertIn("Not installed in this image", text)
+        self.assertNotIn("Play the natural voice", text)
+        self.assertFalse((self.mind_dir / self.voice_engines.VOICE_SETTINGS).exists())
+
+    def test_appliance_restarts_the_voice_to_apply_it(self):
+        with (patch.object(setup, "installed", return_value=["being-voice.service"]),
+              patch.object(setup.subprocess, "run") as run):
+            run.return_value.returncode = 0
+            self.run_setup(["3", "q"], "--voice", appliance=True)
+        self.assertEqual(run.call_args.args[0], ["systemctl", "try-restart", "being-voice.service"])
+        self.assertEqual(self.voice_engines.load_preference(self.mind_dir), "flite")
+
+    def test_samples_and_measuring(self):
+        with (patch.object(setup, "engine_sample", return_value="I'm Pip.") as sample_call,
+              patch.object(setup, "play_preview", new=AsyncMock(return_value=True)),
+              patch.object(setup, "measure_natural_voice") as measure):
+            self.run_setup(["n", "o", "m", "q"], "--voice")
+        self.assertEqual([call.args[1] for call in sample_call.call_args_list], ["piper", "flite"])
+        measure.assert_called_once_with(self.mind_dir)
+
+    def test_a_voice_that_fails_does_not_end_setup(self):
+        with patch.object(setup, "engine_sample", side_effect=RuntimeError("no voice")):
+            code, text = self.run_setup(["n", "q"], "--voice")
+        self.assertEqual(code, 0)
+        self.assertIn("Could not play that voice: no voice", text)
+
+    def test_measuring_records_the_result(self):
+        class Piper:
+            def __init__(self, *args, **kwargs):
+                self.voice_dir = Path("/models/voice/piper/default")
+
+            def label(self):
+                return "Alba"
+
+            def close(self):
+                pass
+
+        with (patch("mind.tts_sherpa.PiperEngine", Piper),
+              patch.object(self.voice_engines, "measure_tts", return_value={"rtf": 0.3, "runs": [0.3] * 3}),
+              redirect_stdout(io.StringIO())):
+            entry = setup.measure_natural_voice(self.mind_dir)
+        self.assertEqual(entry["rtf"], 0.3)
+        self.assertIsNotNone(self.voice_engines.cached(self.mind_dir, "tts", "b1|piper:default:alba"))

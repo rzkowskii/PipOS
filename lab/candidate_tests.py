@@ -16,7 +16,7 @@ from unittest.mock import patch
 from lab import candidate_manifest
 
 ROOT = Path(__file__).resolve().parent.parent
-SUITES = ("l0", "l1", "l2", "l3", "l4", "l5", "l6", "model_pack", "installer", "try", "setup",
+SUITES = ("l0", "l1", "l2", "l3", "l4", "l5", "l6", "apps", "model_pack", "installer", "try", "setup",
           "face_usb", "local_screen", "install_apply", "hardware", "hardware_image", "b43_firmware",
           "hardware_ssh", "network_modes", "wifi", "laptop_smoke", "iso")
 # Suites whose media no candidate seals yet: run them by hand (lab/make-iso.sh, then

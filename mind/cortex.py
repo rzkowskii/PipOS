@@ -7,6 +7,7 @@ machine is the whole of "assisted mode"; nothing else here changes.
 import asyncio
 import http.client
 import json
+import re
 import socket
 import threading
 from urllib.parse import urlparse
@@ -15,12 +16,22 @@ from urllib.parse import urlparse
 # The file the model server saves its cached state to, under its
 # --slot-save-path directory.
 SLOT_FILE = "being.slot"
+# The identity snapshot: the cache right after a clean identity warm-up,
+# restored after a forget, a guest change or an erase.
+IDENTITY_SLOT = "identity.slot"
+# being-cortex.service runs two slots: 0 is the conversation, 1 the
+# workshop's code writing (mind/hands.py). Every request here is pinned to
+# slot 0, so a code job never lands on, or evicts, the conversation's cache.
+CONVERSATION_SLOT = 0
 CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
 SAMPLER_KEYS = ("top_k", "top_p", "min_p", "presence_penalty", "repeat_penalty")
 
 
 class CortexError(Exception):
     pass
+
+
+_THINK = re.compile(r"<think>.*?(?:</think>|\Z)", re.S)
 
 
 def _shared_prefix(left, right):
@@ -66,6 +77,8 @@ class Stream:
         # The server's own numbers for the finished reply (llama-server's
         # "timings": prompt_n, cache_n, predicted_n and their rates).
         self.timings = None
+        # Every content piece, in order, exactly as the server sent it.
+        self._pieces = []
         thread = threading.Thread(target=self._run, args=(cortex, payload), daemon=True)
         thread.start()
 
@@ -105,6 +118,7 @@ class Stream:
                 if text:
                     phase, tokens = self.progress
                     self.progress = ("decode", tokens + 1 if phase == "decode" else 1)
+                    self._pieces.append(text)
                     self._put(text)
         except Exception as exc:  # the thread must always hand back an ending
             if not self._disconnect.cancelled:
@@ -149,9 +163,21 @@ class Stream:
         """Stop the reply. Closing the connection also stops the server generating."""
         self._disconnect.cancel()
 
+    @property
+    def raw(self):
+        """What the model wrote so far, exactly, with any <think> block removed.
+
+        Nothing is trimmed or cleaned. Kept in the prompt as the assistant
+        turn, it renders (config/chat-template.jinja) byte for byte as it was
+        generated, so the next turn reads only the new words. An unfinished
+        thinking block is dropped.
+        """
+        return _THINK.sub("", "".join(self._pieces))
+
 
 class Cortex:
-    def __init__(self, base_url="http://127.0.0.1:8080", model="default", llama=True, timeout=180.0):
+    def __init__(self, base_url="http://127.0.0.1:8080", model="default", llama=True, timeout=180.0,
+                 slot_id=CONVERSATION_SLOT):
         url = urlparse(base_url)
         if url.scheme != "http" or not url.hostname:
             raise ValueError(f"cortex URL must be http://host:port, got {base_url!r}")
@@ -163,6 +189,9 @@ class Cortex:
         # OpenAI-compatible server may reject.
         self.llama = llama
         self.timeout = timeout
+        if type(slot_id) is not int or slot_id < 0:
+            raise ValueError("slot_id must be a non-negative integer")
+        self.slot_id = slot_id
 
     def _connection(self):
         return http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
@@ -180,6 +209,7 @@ class Cortex:
                 payload[key] = value
         if self.llama:
             payload["cache_prompt"] = True
+            payload["id_slot"] = self.slot_id
             if stream:
                 # Prompt-reading progress in the stream, so a long cold read
                 # can be told from a hang; the server's timings come at the end.
@@ -273,7 +303,8 @@ class Cortex:
 
     async def _prime_cache(self, prompt):
         await self._cancellable_request(
-            "POST", "/completion", {"prompt": prompt, "n_predict": 0, "cache_prompt": True}
+            "POST", "/completion",
+            {"prompt": prompt, "n_predict": 0, "cache_prompt": True, "id_slot": self.slot_id},
         )
         return True
 
@@ -322,6 +353,28 @@ class Cortex:
                 await self._prime_cache(list(prefix[:start + step]))
         return prefix
 
+    async def prime_boundary(self, messages, *, max_tokens=None):
+        """Read the turn boundary after a reply, while the reply is spoken.
+
+        `messages` is the prompt with the reply just given as its last
+        (assistant) message. The verified tokens up to where the next user
+        message will start are primed: the end-of-turn marker and the next
+        user header, a handful of tokens, so the next turn starts with less to
+        read. Nothing is generated. Returns the primed token IDs (empty if
+        nothing was primed); they are also a valid `prefix` for prefill().
+
+        The prompt must end with an assistant message, or nothing is done.
+        """
+        if not self.llama or not messages or messages[-1].get("role") != "assistant":
+            return ()
+        if max_tokens is not None and (type(max_tokens) is not int or max_tokens <= 0):
+            raise ValueError("max_tokens must be a positive integer")
+        prefix = await self.verified_prefix(messages)
+        if not prefix or (max_tokens is not None and len(prefix) > max_tokens):
+            return ()
+        await self._prime_cache(list(prefix))
+        return prefix
+
     async def prefill(self, messages, *, prefix=None, max_new_tokens=None):
         """Have the model read a prompt without answering, so the read is cached.
 
@@ -358,14 +411,31 @@ class Cortex:
         return await self._prime_cache(prompt)
 
     async def slot(self, action, filename=SLOT_FILE):
-        """Save, restore or erase the model's cached state (llama-server
-        --slot-save-path)."""
-        if not self.llama:
+        """Save, restore or erase the conversation slot's cached state
+        (llama-server --slot-save-path). `filename` is SLOT_FILE or
+        IDENTITY_SLOT: a bare name inside that folder."""
+        if not self.llama or action not in ("save", "restore", "erase"):
+            return False
+        if not isinstance(filename, str) or not filename or "/" in filename or filename.startswith("."):
             return False
         try:
             await self._cancellable_request(
-                "POST", f"/slots/0?action={action}", {"filename": filename}
+                "POST", f"/slots/{self.slot_id}?action={action}", {"filename": filename}
             )
             return True
         except CortexError:
             return False
+
+    async def slot_info(self):
+        """The server's /slots entry for this slot (n_ctx, is_processing ...),
+        or None when the server does not say."""
+        try:
+            slots = await self._cancellable_request("GET", "/slots", None)
+        except CortexError:
+            return None
+        if not isinstance(slots, list):
+            return None
+        for entry in slots:
+            if isinstance(entry, dict) and entry.get("id") == self.slot_id:
+                return entry
+        return None

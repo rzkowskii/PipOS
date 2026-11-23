@@ -318,11 +318,21 @@ def power_info(sys_root):
             if current is not None and voltage is not None:
                 watts = round(abs(current) * voltage / 1_000_000_000_000, 3)
         status = read_field(path / "status", 64)
-        batteries.append({
+        battery = {
             "charge_percent": measure(path / "capacity", upper=100),
             "status": status if status in {"Charging", "Discharging", "Full", "Not charging"} else None,
             "watts": watts,
-        })
+        }
+        # Wear, when the battery reports it: full now over full when new, and cycles.
+        for kind in ("charge", "energy"):
+            full, design = measure(path / f"{kind}_full", lower=1), measure(path / f"{kind}_full_design", lower=1)
+            if full is not None and design is not None:
+                battery["health_percent"] = min(100, round(full * 100 / design))
+                break
+        cycles = measure(path / "cycle_count", lower=1, upper=99_999)
+        if cycles is not None:
+            battery["cycles"] = cycles
+        batteries.append(battery)
     return {"mains_online": True if 1 in mains else False if mains == {0} else None,
             "batteries": batteries, "packages": packages}
 

@@ -1,0 +1,9 @@
+# Upstream release digests, as published by GitHub for the v2.0.3 and v2.0.2
+# releases and re-checked against the downloads in out/voice/DOWNLOADS.json.
+sha256  615b1bf0140bf09051c15fde6579e48543696352ebd477217d2e69b49d9aec13  sherpa-onnx-v2.0.3-linux-x64-shared.tar.bz2
+sha256  e7f65778bfb891ec98db56c2cfc37b968d7f56e57271986a8dd2cd0c21d002c9  sherpa-onnx-v2.0.2-linux-x64-shared.tar.bz2
+# Licence texts shipped in this package folder (computed locally)
+sha256  0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594  LICENSE-sherpa-onnx-Apache-2.0
+sha256  2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c  LICENSE-onnxruntime-MIT
+sha256  3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986  COPYING-espeak-ng-GPL-3.0
+sha256  a1a94e6d16ecc19772acb5cd678ec595828dc57019d8df660cbb29e6abb68a54  LICENSES.md

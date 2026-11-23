@@ -1,3 +1,4 @@
 #!/bin/sh
-export PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1
+# The image ships compiled modules (being.mk), so nothing is compiled here.
+export PYTHONPATH=/usr/lib/being
 exec /usr/bin/python3 -m mind.dream_journal "$@"

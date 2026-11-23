@@ -39,6 +39,8 @@ RestartSec=300ms
 RestartSteps=6
 RestartMaxDelaySec=30s
 WatchdogSec=10s
+# The hub of every event: first claim on the CPU, with the face and voice.
+CPUWeight=1000
 TimeoutAbortSec=5s
 NotifyAccess=main
 # The hub reads the body (sysfs, input devices) and owns the bus socket. It

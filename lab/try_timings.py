@@ -7,8 +7,11 @@
 For each boot it prints the CPU, the GL renderer, failed units and restarts,
 the brainstem's state changes with their journal times, the gaps that matter
 (end of speech to first word), and per model request: prompt tokens, cached
-tokens, and prompt and decode speed. Bench results (bench-*.json written by
-`being.bench=1`) are summarised too.
+tokens, and prompt and decode speed. The voice's and the mind's own timing
+lines ("voice timing {...}", "turn timing {...}") give medians and the
+laptop gates of docs/PIP-FUNCTIONS.md 4.2: end of speech to first audio
+<= 3.0 s for a warm model turn and <= 1.2 s for a code answer. Bench results
+(bench-*.json written by `being.bench=1`) are summarised too.
 
 Python standard library only. It never writes to the stick. The journal can
 hold what was said to the being: this script prints no transcript text.
@@ -33,6 +36,18 @@ RESTORED = re.compile(r"restored (\d+) context checkpoint")
 FAILED = re.compile(r"(\S+\.service): (?:Failed with result|Main process exited, code=(?:killed|dumped)|"
                     r"Start request repeated too quickly)")
 RESTART = re.compile(r"(\S+\.service): Scheduled restart job, restart counter is at (\d+)")
+# One line of numbers per reply (mind/voice.py) and per model turn (mind/turn.py).
+TIMING = re.compile(r"\b(voice|turn) timing (\{.*\})\s*$")
+VOICE_KEYS = ("eos_to_final_s", "final_to_audio_s", "eos_to_audio_s")
+TURN_KEYS = ("prompt_n", "cache_n", "prompt_per_second", "predicted_n", "predicted_per_second", "first_clause_s")
+MODEL_GATE_S = 3.0
+CODE_GATE_S = 1.2
+# A turn's timing line is written when its reply has been generated, so its
+# voice line (the reply's first audio) comes up to PAIR_S before it, or a
+# moment after it for a reply that finished generating before its first
+# clause was heard. A later line is the next utterance, not this reply.
+PAIR_S = 60.0
+PAIR_AFTER_S = 5.0
 SUMMARY_FIELDS = ("Machine", "Firmware", "CPU", "GPU", "GL renderer", "Displays", "Audio", "Audio codecs",
                   "Lid switch", "Battery", "Charger", "applesmc", "Camera", "Wi-Fi chip", "Memory",
                   "Failed units")
@@ -64,8 +79,21 @@ def journal_entries(text):
             yield float(match[1]), match[3], match[4]
 
 
+def timing_fields(text):
+    """The numbers in a timing line's JSON; words never pass."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {key: value for key, value in data.items()
+            if isinstance(key, str) and (type(value) in (int, float, bool) or value is None)}
+
+
 def parse_journal(text):
     states, requests, failed, restarts, renderer = [], [], [], {}, None
+    timings = {"voice": [], "turn": []}
     open_tasks = {}
     checkpoints_restored = None
     for stamp, ident, message in journal_entries(text):
@@ -77,6 +105,10 @@ def parse_journal(text):
             failed.append({"t": stamp, "unit": match[1], "line": message.strip()[:160]})
         elif (match := RESTART.search(message)):
             restarts[match[1]] = max(restarts.get(match[1], 0), int(match[2]))
+        if (match := TIMING.search(message)):
+            fields = timing_fields(match[2])
+            if fields is not None:
+                timings[match[1]].append({"t": stamp, **fields})
         if (match := RESTORED.search(message)):
             checkpoints_restored = int(match[1])
         if "print_timing" in message or "stop processing" in message:
@@ -104,7 +136,47 @@ def parse_journal(text):
             requests.append(entry)
     requests.sort(key=lambda entry: entry["t"])
     return {"states": states, "requests": requests, "failed": failed, "restarts": restarts,
-            "renderer": renderer, "checkpoints_restored": checkpoints_restored}
+            "renderer": renderer, "checkpoints_restored": checkpoints_restored, "timings": timings}
+
+
+def classify(timings):
+    """Split voice timing lines into model turns and code answers.
+
+    Each turn timing line claims the nearest unclaimed voice line from
+    PAIR_S seconds before it to PAIR_AFTER_S after it; a warm turn is one
+    that found its prompt in the cache and did not fail. Voice lines no turn
+    claims were code answers (no model call).
+    """
+    voice = list(timings.get("voice", []))
+    claimed = {}
+    for turn in timings.get("turn", []):
+        best = None
+        for index, line in enumerate(voice):
+            offset = line["t"] - turn["t"]
+            gap = abs(offset)
+            if (index not in claimed and -PAIR_S <= offset <= PAIR_AFTER_S
+                    and (best is None or gap < best[0])):
+                best = (gap, index)
+        if best is not None:
+            claimed[best[1]] = turn
+    model = [dict(line, turn=claimed[index]) for index, line in enumerate(voice) if index in claimed]
+    warm = [line for line in model
+            if (line["turn"].get("cache_n") or 0) > 0 and line["turn"].get("ok") is not False]
+    code = [line for index, line in enumerate(voice) if index not in claimed]
+    return {"model": model, "warm": warm, "code": code}
+
+
+def timing_summary(timings):
+    """Medians of every timing field, and the two laptop gates."""
+    groups = classify(timings)
+    summary = {"voice_lines": len(timings.get("voice", [])), "turn_lines": len(timings.get("turn", []))}
+    summary["voice"] = {key: median(line.get(key) for line in timings.get("voice", [])) for key in VOICE_KEYS}
+    summary["turn"] = {key: median(line.get(key) for line in timings.get("turn", [])) for key in TURN_KEYS}
+    for name, lines, gate in (("warm_model", groups["warm"], MODEL_GATE_S), ("code", groups["code"], CODE_GATE_S)):
+        value = median(line.get("eos_to_audio_s") for line in lines)
+        summary[name] = {"count": len(lines), "median_eos_to_audio_s": value, "gate_s": gate,
+                         "passes": None if value is None else value <= gate}
+    return summary
 
 
 def turns(states):
@@ -171,6 +243,8 @@ def read_boot(folder):
         "turns": turns(journal["states"]),
         "requests": journal["requests"],
         "checkpoints_restored": journal["checkpoints_restored"],
+        "timing_lines": journal["timings"],
+        "timing": timing_summary(journal["timings"]),
         "bench": bench_summaries(folder),
         "missing": [name for name in ("summary.txt", "journal.txt") if not (folder / name).is_file()],
     }
@@ -194,7 +268,7 @@ def boots_txt(path):
 
 
 def median(values):
-    values = sorted(v for v in values if v is not None)
+    values = sorted(v for v in values if type(v) in (int, float))
     if not values:
         return None
     middle = len(values) // 2
@@ -248,6 +322,24 @@ def render(data):
                     f"no speech (went {turn.get('ended_in')})"
                 out.append(f"    {number:2}. at {turn['end_of_speech']:9.1f}  {result}")
             out.append(f"    median {fmt(median(t['seconds'] for t in boot['turns']), ' s', 2)}")
+        timing = boot.get("timing") or {}
+        if timing.get("voice_lines") or timing.get("turn_lines"):
+            out.append(f"  Timing lines: {timing['voice_lines']} voice, {timing['turn_lines']} turn")
+            voice = timing["voice"]
+            out.append("    voice medians: end of speech to final words "
+                       f"{fmt(voice['eos_to_final_s'], ' s', 2)}, final words to audio "
+                       f"{fmt(voice['final_to_audio_s'], ' s', 2)}, end of speech to audio "
+                       f"{fmt(voice['eos_to_audio_s'], ' s', 2)}")
+            turn = timing["turn"]
+            out.append(f"    turn medians: prompt {fmt(turn['prompt_n'], '', 0)} new, cached "
+                       f"{fmt(turn['cache_n'], '', 0)}, prompt {fmt(turn['prompt_per_second'])} tok/s, "
+                       f"decode {fmt(turn['predicted_per_second'])} tok/s, first clause "
+                       f"{fmt(turn['first_clause_s'], ' s', 2)}")
+            for name, label in (("warm_model", "warm model turns"), ("code", "code answers")):
+                gate = timing[name]
+                verdict = "no data" if gate["passes"] is None else ("PASS" if gate["passes"] else "FAIL")
+                out.append(f"    {label}: {gate['count']}, median end of speech to audio "
+                           f"{fmt(gate['median_eos_to_audio_s'], ' s', 2)} (gate <= {gate['gate_s']} s: {verdict})")
         if boot["checkpoints_restored"] is not None:
             out.append(f"  Slot restore: {boot['checkpoints_restored']} context checkpoints restored")
         if boot["requests"]:

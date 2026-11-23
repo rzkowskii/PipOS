@@ -68,10 +68,19 @@ class InstalledGeneratorTests(unittest.TestCase):
                 early, stderr = self.generate(installed_args(slot))
                 self.assertFalse(stderr)
                 requires = early / "local-fs.target.requires"
-                for mount, field in (("bootstate", "esp"), ("models", "models"), ("mind", "mind")):
+                wants = early / "local-fs.target.wants"
+                # The mind is required: without it there is no being. Boot
+                # state and models are wanted with nofail, so a damaged ESP or
+                # model volume still leaves a face and a mind that can talk.
+                for mount, field, link in (("bootstate", "esp", wants), ("models", "models", wants),
+                                           ("mind", "mind", requires)):
                     unit = (early / f"{mount}.mount").read_text()
                     self.assertIn(f"What=/dev/disk/by-partuuid/{GUIDS[field]}\nWhere=/{mount}\n", unit)
-                    self.assertEqual((requires / f"{mount}.mount").resolve(), early / f"{mount}.mount")
+                    self.assertEqual((link / f"{mount}.mount").resolve(), early / f"{mount}.mount")
+                    other = requires if link is wants else wants
+                    self.assertFalse(os.path.lexists(other / f"{mount}.mount"), mount)
+                    options = next(line for line in unit.splitlines() if line.startswith("Options="))
+                    self.assertEqual("nofail" in options.split("=", 1)[1].split(","), link is wants, mount)
                 self.assertIn("Requires=being-installed-bind.service systemd-fsck@target.service",
                               (early / "mind.mount").read_text())
                 for mount in ("bootstate", "models", "mind"):

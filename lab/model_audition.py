@@ -77,8 +77,8 @@ class AuditionCortex(Cortex):
         self.seed = SEEDS[0]
         self.requests = []
 
-    def _payload(self, messages, max_tokens, temperature, grammar=None, stream=False):
-        payload = super()._payload(messages, max_tokens, temperature, grammar, stream)
+    def _payload(self, messages, max_tokens, temperature, grammar=None, stream=False, sampler=None):
+        payload = super()._payload(messages, max_tokens, temperature, grammar, stream, sampler)
         if stream:
             payload.update(self.settings, seed=self.seed)
         return payload
@@ -97,13 +97,21 @@ class TimedBus:
         self.events.append({"topic": topic, "ms": ms(time.monotonic() - self.start), **fields})
 
 
-def config(profile, identity_path):
+def config(profile, identity_path, reply_shape="open"):
     defaults = json.loads((ROOT / "config/being.json").read_text())
     identity = identity_path.read_text().strip().replace("{name}", "Pip").replace("{owner}", "Alex")
     if not identity:
         raise ValueError("the identity prompt is empty")
     return Config(name="Pip", owner="Alex", identity=identity, ctx_tokens=defaults["ctx_tokens"],
-                  max_tokens=defaults["max_tokens"], temperature=PROFILES[profile]["temperature"])
+                  max_tokens=defaults["max_tokens"], temperature=PROFILES[profile]["temperature"],
+                  reply_shape=reply_shape)
+
+
+def complete_rate(rows):
+    """Replies that finished in the model's own time (not cut off by max_tokens), as a fraction."""
+    finished = [row for row in rows if row.get("completed")]
+    return {"complete": len(finished), "trials": len(rows),
+            "rate": round(len(finished) / len(rows), 3) if rows else None}
 
 
 def prepare(root, cortex, cfg, senses):
@@ -227,9 +235,13 @@ def main():
     parser.add_argument("--holdout", action="store_true", help="use alternate prompts to check a changed identity")
     parser.add_argument("--senses", default=SENSES, help="synthetic body telemetry (empty to omit)")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--reply-shape", choices=("open", "strict"), default="open",
+                        help="the reply grammar; strict is adopted only if it does not lower the complete rate")
+    parser.add_argument("--model-template", action="store_true",
+                        help="use the GGUF's own chat template instead of config/chat-template.jinja")
     args = parser.parse_args()
     model = args.model.resolve(strict=True)
-    cfg = config(args.profile, args.identity)
+    cfg = config(args.profile, args.identity, args.reply_shape)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -240,6 +252,8 @@ def main():
         command = [str(args.server.resolve(strict=True)), "--model", str(model), "--host", "127.0.0.1",
                    "--port", str(port), "--ctx-size", str(cfg.ctx_tokens), "--parallel", "1", "--threads", "2",
                    "--reasoning-budget", "0", "--slot-save-path", slot_dir, "--no-webui", "--n-gpu-layers", "0"]
+        if not args.model_template:
+            command += ["--chat-template-file", str(ROOT / "config/chat-template.jinja")]
         with subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT) as server:
             try:
                 results = asyncio.run(audition(cortex, cfg, server, model, HOLDOUT if args.holdout else CASES,
@@ -251,6 +265,8 @@ def main():
                         server.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         server.kill()
+    results.update(reply_shape=cfg.reply_shape, complete_replies=complete_rate(results["cases"]),
+                   chat_template="model" if args.model_template else "config/chat-template.jinja")
     results.update(model=model.name, profile=args.profile, generation=PROFILES[args.profile], max_tokens=cfg.max_tokens,
                    identity=cfg.identity, senses=args.senses, suite="holdout" if args.holdout else "original",
                    scope="Mac CPU, two threads. Final transcript to speakable clauses through production Mind.")

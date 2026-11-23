@@ -1,0 +1,39 @@
+[Unit]
+Description=Being: bench mode (measure speed; being.bench=1)
+# Only when asked for: the Try menu's "measure speed" entry, or every entry of
+# a bench stick (BEING_TRY_BENCH=1). 50-being.preset keeps it disabled
+# otherwise, and the condition holds even if it is enabled by mistake.
+ConditionKernelCommandLine=being.bench=1
+RequiresMountsFor=/models
+# Results go to this boot's PIPLOGS folder when the Try stick has one.
+After=being-usb-logs.service being-cortex.service being-dream-cortex.service
+Wants=being-usb-logs.service
+
+[Service]
+Type=oneshot
+Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1
+# The bench runs its own model servers on a private port, so the waking and
+# dream models are stopped first, and the waking one is started again after.
+ExecStartPre=-/usr/bin/systemctl stop being-cortex.service being-dream-cortex.service
+ExecStart=/usr/bin/python3 -m mind.bench
+ExecStopPost=-/usr/bin/systemctl --no-block start being-cortex.service
+# A full run, thread sweep and dream model included, takes tens of minutes;
+# a soak (being.bench.soak=MINUTES) adds three steps of that length.
+TimeoutStartSec=6h
+# Power caps it changes are restored on SIGTERM too.
+KillMode=mixed
+TimeoutStopSec=60
+CPUWeight=100
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

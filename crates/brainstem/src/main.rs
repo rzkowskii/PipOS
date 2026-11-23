@@ -3,6 +3,7 @@
 
 mod battery;
 mod body;
+mod brightness;
 mod camera;
 mod life;
 #[cfg(target_os = "linux")]
@@ -96,10 +97,21 @@ fn reserved(topic: &str, from: &str) -> bool {
 
 /// May this organ send this topic at all? Key presses come from the face
 /// (the panel or the console screen) on a hardware body; in the lab and in
-/// simulation the typed console stands in for the keyboard.
+/// simulation the typed console stands in for the keyboard. That includes
+/// `key.attend` (Space, Return or a click while the eyes rest).
 fn allowed_from(topic: &str, from: &str, hardware_body: bool) -> bool {
     if reserved(topic, from) {
         return false;
+    }
+    // "Stop listening" is the owner's words, so the mind may press mute; it
+    // can only turn the microphone off (see `mind_may_press`), never back on.
+    if topic == "key.mute" && from == "mind" {
+        return true;
+    }
+    // Typing over Pip from the local menu's typing chat stops it speaking, as
+    // Esc does; that is the only key the typing chat may press.
+    if topic == "key.interrupt" && from == "keyboard" {
+        return true;
     }
     if topic_matches("key.*", topic) && hardware_body && from != "face" {
         return false;
@@ -107,13 +119,25 @@ fn allowed_from(topic: &str, from: &str, hardware_body: bool) -> bool {
     match topic {
         "mind.progress" | "mind.shutdown_ready" | "mind.announce" | "mind.clock" | "mind.dream_committed"
         | "mind.dreaming" => from == "mind",
+        // "Brighter" and "dimmer" are the owner's, through the mind.
+        "being.brightness" => from == "mind",
         // The owner's "louder" or "no chirps" reaches the voice through the
-        // mind; the voice answers with what it really set.
-        "voice.volume" | "voice.chirps" => from == "mind",
-        "voice.volume_state" => from == "voice",
+        // mind; the voice answers with what it really set. "Which voice"
+        // and "how well can you hear me" ask the voice the same way.
+        "voice.volume" | "voice.chirps" | "voice.level_request" | "voice.engine" => from == "mind",
+        // Measured levels, numbers only, from the voice alone.
+        "voice.volume_state" | "voice.level" => from == "voice",
         topic if topic_matches("voice.*", topic) => false,
         _ => true,
     }
+}
+
+/// On the laptop the mind's `key.mute` must say `on: true`. Letting the
+/// microphone listen again stays a key press (M) or the menu, so no reply
+/// can reopen the ears. In the lab and the simulator any organ stands in for
+/// the keyboard, as `allowed_from` says.
+fn mind_may_press(ev: &Event, from: &str, hardware_body: bool) -> bool {
+    !hardware_body || ev.topic != "key.mute" || from != "mind" || ev.bool("on") == Some(true)
 }
 
 fn next_input(rx: &mpsc::Receiver<Input>, next_tick: Instant) -> Option<Input> {
@@ -505,12 +529,25 @@ fn main() {
     let mut last_beat = 0.0f64;
     let mut last_state = machine.state();
     let mut watchdog = bus::notify::Notifier::from_env();
+    // The panel's brightness is the hardware body's; elsewhere there is none.
+    let mut brightness = if hardware_body {
+        brightness::Brightness::discover(Path::new("/"))
+    } else {
+        brightness::Brightness::none()
+    };
+    if let Some(name) = brightness.name() {
+        let level = brightness.level().map_or("unknown".to_string(), |l| format!("{l}%"));
+        eprintln!("brainstem: brightness through {name}, now {level}");
+    }
     let mut next_tick = started + TICK_INTERVAL;
 
     while let Some(input) = next_input(&rx, next_tick) {
         let now = started.elapsed().as_secs_f64();
         if STOP.load(Ordering::SeqCst) {
             watchdog.stopping();
+            if let Err(e) = brightness.restore() {
+                eprintln!("brainstem: could not put the brightness back: {e}");
+            }
             // Going to sleep properly: the next wake will know it was not a power cut.
             if let Some(life) = &life {
                 if let Err(e) = life.sleep(life::unix_now()) {
@@ -585,7 +622,7 @@ fn main() {
                     // Nothing is routed for a connection that has not said hello.
                     let from_face = from == "face";
                     let seq = body.lid_seq();
-                    if allowed_from(&ev.topic, &from, hardware_body) {
+                    if allowed_from(&ev.topic, &from, hardware_body) && mind_may_press(&ev, &from, hardware_body) {
                         match ev.topic.as_str() {
                             "panel.ready" => {
                                 if from_face {
@@ -611,6 +648,7 @@ fn main() {
                                 body.set_utc_offset(ev.data.get("utc_offset").and_then(Value::as_i64));
                             }
                             "mind.shutdown_ready" => body.mind_saved(),
+                            "being.brightness" => pending.push((brightness.request(&ev), None)),
                             "mind.dream_committed" => {
                                 if body.lid_confirmed_closed()
                                     && machine.state() == machine::State::Asleep
@@ -837,6 +875,38 @@ fn the_voice_takes_orders_only_from_whoever_owns_each_one() {
     assert!(!allowed_from("voice.anything_new", "mind", true));
     assert!(allowed_from("body.care", "bodycare", true) && !allowed_from("body.care", "mind", true));
     assert!(!allowed_from("key.mute", "voice", true) && allowed_from("key.mute", "voice", false));
+}
+
+#[cfg(test)]
+#[test]
+fn wave_two_topics_are_allowed_only_from_their_owners() {
+    for hardware in [true, false] {
+        assert!(allowed_from("voice.level", "voice", hardware));
+        assert!(!allowed_from("voice.level", "mind", hardware), "levels are measured by the voice");
+        for topic in ["voice.level_request", "voice.engine"] {
+            assert!(allowed_from(topic, "mind", hardware), "{topic}");
+            assert!(!allowed_from(topic, "voice", hardware) && !allowed_from(topic, "hands", hardware), "{topic}");
+        }
+        assert!(allowed_from("being.brightness", "mind", hardware));
+        assert!(!allowed_from("being.brightness", "face", hardware) && !allowed_from("being.brightness", "hands", hardware));
+        assert!(allowed_from("key.attend", "face", hardware));
+        assert!(!allowed_from("body.brightness", "mind", hardware), "body.* is the brainstem's");
+        assert!(!allowed_from("body.state", "bodycare", hardware));
+    }
+    assert!(!allowed_from("key.attend", "mind", true), "on the laptop only the face presses keys");
+    assert!(allowed_from("key.mute", "mind", true), "\"stop listening\"");
+    let mute = |on: Option<bool>| match on {
+        Some(on) => Event::new("key.mute").with("on", on),
+        None => Event::new("key.mute"),
+    };
+    assert!(mind_may_press(&mute(Some(true)), "mind", true));
+    assert!(!mind_may_press(&mute(Some(false)), "mind", true), "the mind never reopens the ears");
+    assert!(!mind_may_press(&mute(None), "mind", true), "nor toggles them");
+    assert!(mind_may_press(&mute(None), "face", true), "the M key still toggles");
+    assert!(mind_may_press(&mute(None), "mind", false), "the lab's console stands in for the keyboard");
+    assert!(allowed_from("key.attend", "console", false), "the lab's typed console stands in");
+    assert!(allowed_from("key.interrupt", "keyboard", true), "typing over Pip stops it, as Esc does");
+    assert!(!allowed_from("key.mute", "keyboard", true) && !allowed_from("key.attend", "keyboard", true));
 }
 
 #[cfg(test)]

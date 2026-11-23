@@ -1,0 +1,43 @@
+{
+  "format": "beingos-model-pack-v2",
+  "role": "embeddings",
+  "dir": "embeddings/blink-8M",
+  "model": "minishlab/blink-8M (static, 256-d)",
+  "license": "MIT",
+  "sources": [
+    {
+      "file": "models/embeddings/blink-8M/model.safetensors",
+      "bytes": 30720088,
+      "sha256": "e10d60e7e4b2cbaafaf3282f1eec108b597047f8013088f77178aa2ef0055866",
+      "url": "https://huggingface.co/minishlab/blink-8M/resolve/593ed556e9a417e80b3b251a28ba8f412bed026e/model.safetensors",
+      "path": "model.safetensors"
+    },
+    {
+      "file": "models/embeddings/blink-8M/tokenizer.json",
+      "bytes": 688359,
+      "sha256": "87dc695b5052b2bddc9dbe396fa4e3bbe28c557f2c8c7374476f183f54f9edfc",
+      "url": "https://huggingface.co/minishlab/blink-8M/resolve/593ed556e9a417e80b3b251a28ba8f412bed026e/tokenizer.json",
+      "path": "tokenizer.json"
+    },
+    {
+      "file": "models/embeddings/blink-8M/config.json",
+      "bytes": 198,
+      "sha256": "4d7662f22964970b03cdd355dfdcd7f36028625fc34c32194dc5f1902f87dde0",
+      "url": "https://huggingface.co/minishlab/blink-8M/resolve/593ed556e9a417e80b3b251a28ba8f412bed026e/config.json",
+      "path": "config.json"
+    },
+    {
+      "file": "models/embeddings/blink-8M/README.md",
+      "bytes": 24905,
+      "sha256": "5028a15913c93ad594133583ec2e43f985a87af86d13b74a4785e2bbde1aa151",
+      "url": "https://huggingface.co/minishlab/blink-8M/resolve/593ed556e9a417e80b3b251a28ba8f412bed026e/README.md",
+      "path": "README.md"
+    }
+  ],
+  "files": [
+    {"bytes": 24905, "path": "README.md", "sha256": "5028a15913c93ad594133583ec2e43f985a87af86d13b74a4785e2bbde1aa151"},
+    {"bytes": 198, "path": "config.json", "sha256": "4d7662f22964970b03cdd355dfdcd7f36028625fc34c32194dc5f1902f87dde0"},
+    {"bytes": 30720088, "path": "model.safetensors", "sha256": "e10d60e7e4b2cbaafaf3282f1eec108b597047f8013088f77178aa2ef0055866"},
+    {"bytes": 688359, "path": "tokenizer.json", "sha256": "87dc695b5052b2bddc9dbe396fa4e3bbe28c557f2c8c7374476f183f54f9edfc"}
+  ]
+}

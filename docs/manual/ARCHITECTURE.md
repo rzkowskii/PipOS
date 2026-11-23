@@ -214,6 +214,10 @@ later goes unknown stays dark until **F9** forces recovery.
   | F9 | `key.panel_recover` |
   | F2 | Starts the local setup screen |
   | Click or touch | `key.touch`: a brief downward glance |
+  | Space, Return, or a click, while the eyes rest and no panel has focus | `key.attend`: the brainstem treats it like hearing its name |
+
+  `hear.missed` (heard, but nothing made out) shows `skepticism` for
+  about a second.
 - **Preview.** These flags help with review:
 
   | Flag | Effect |
@@ -537,6 +541,8 @@ yet.
 |---|---|
 | systemd restarts | Each organ restarts on its own: `Restart=always`, except the eyes, which use `Restart=on-failure`. The brainstem backs off from 0.3 s to 30 s. The others retry after a fixed delay |
 | Brainstem watchdog | The brainstem pings the systemd watchdog (`WatchdogSec=10s`). After 8 or more failures in 10 minutes, once uptime exceeds 300 s, the machine reboots. Try and verbose boots are exempt |
+| Mind watchdog | The mind pings the systemd watchdog every 5 s from its event loop (`WatchdogSec=30s`), so a stuck loop is restarted while a busy one is not |
+| Face watchdog | The face pings the systemd watchdog from its frame loop, which runs at least 5 times a second even while dark (`WatchdogSec=5s`). A frame loop stuck for 5 s is restarted |
 | Hardware watchdog | systemd feeds it with `RuntimeWatchdogSec=30s`, `RebootWatchdogSec=2min` |
 | Kernel | `panic=10 oops=panic` |
 

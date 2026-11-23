@@ -1,7 +1,10 @@
 """PocketSphinx keyword and streaming speech recognition for 16 kHz mono PCM."""
 
+from array import array
 from collections import deque
 import ctypes as c
+import math
+import operator
 from pathlib import Path
 
 RATE = 16000
@@ -27,6 +30,97 @@ WAKE_HISTORY_FRAMES = int((WAKE_DECODE_CAP_SECONDS + ONESHOT_AFTER_SECONDS) / FR
 # Longest utterance, in frames, before dictation closes it.
 MAX_UTTERANCE_FRAMES = 600
 SKIP = "skip"
+
+FULL_SCALE = 32768
+SILENT_DBFS = -120.0
+# Software microphone gain. The environment value is clamped to this range.
+MIN_MIC_GAIN = 0.1
+MAX_MIC_GAIN = 16.0
+# A floor at or below this is digital silence: a muted mixer or a digital source.
+# No analog microphone is that quiet, so it is never lifted.
+DIGITAL_SILENCE_DBFS = -90.0
+# Lift a quiet analog floor towards this level so the endpointer can hear speech.
+TARGET_FLOOR_DBFS = -60.0
+MAX_AUTO_GAIN = 8.0
+# Keep recent peaks below this level after gain.
+HEADROOM_DBFS = -3.0
+# Per-frame smoothing of the floor estimate: fall quickly, rise slowly.
+FLOOR_FALL = 0.1
+FLOOR_RISE = 0.005
+PEAK_DECAY_DB = 0.02
+AUTO_GAIN_RAISE = 1.01
+
+
+_sumprod = getattr(math, "sumprod", None) or (lambda a, b: sum(map(operator.mul, a, b)))
+
+
+def dbfs(value):
+    """A linear sample magnitude in dB relative to full scale."""
+    return 20 * math.log10(value / FULL_SCALE) if value > 0 else SILENT_DBFS
+
+
+def pcm(frame):
+    samples = array("h")
+    samples.frombytes(frame)
+    return samples
+
+
+def levels(samples):
+    """Peak magnitude and root mean square of signed 16-bit samples."""
+    if not samples:
+        return 0, 0.0
+    return max(max(samples), -min(samples)), math.sqrt(_sumprod(samples, samples) / len(samples))
+
+
+def amplify(samples, gain):
+    """Scale signed 16-bit samples, clipping at full scale."""
+    top, bottom = FULL_SCALE - 1, -FULL_SCALE
+    return array("h", [bottom if value < bottom else top if value > top else value
+                       for value in (round(sample * gain) for sample in samples)]).tobytes()
+
+
+class MicLevel:
+    """Software gain before recognition.
+
+    The owner's gain is fixed. On top of it, a quiet analog noise floor is
+    lifted towards TARGET_FLOOR_DBFS, at most MAX_AUTO_GAIN times, so the
+    endpointer's internal speech threshold still triggers on a quiet built-in
+    microphone. The lift drops at once when a peak would clip and rises slowly
+    and only between speech segments.
+    """
+
+    def __init__(self, manual=1.0, auto=True):
+        self.manual = manual
+        self.auto = auto
+        self.lift = 1.0
+        self.floor = None
+        self.recent_peak = SILENT_DBFS
+
+    @property
+    def gain(self):
+        return self.manual * self.lift
+
+    def observe(self, peak, rms, in_speech):
+        """Take one raw frame's levels and update the gain for the next frame."""
+        peak_db, rms_db = dbfs(peak), dbfs(rms)
+        if not in_speech:
+            if self.floor is None:
+                self.floor = rms_db
+            else:
+                self.floor += (FLOOR_FALL if rms_db < self.floor else FLOOR_RISE) * (rms_db - self.floor)
+        self.recent_peak = max(peak_db, self.recent_peak - PEAK_DECAY_DB)
+        if not self.auto:
+            return
+        manual_db = 20 * math.log10(self.manual)
+        wanted = 1.0
+        if self.floor is not None and DIGITAL_SILENCE_DBFS < self.floor:
+            wanted = min(MAX_AUTO_GAIN, 10 ** ((TARGET_FLOOR_DBFS - self.floor - manual_db) / 20))
+            wanted = min(wanted, 10 ** ((HEADROOM_DBFS - self.recent_peak - manual_db) / 20))
+        wanted = max(1.0, wanted)
+        if wanted < self.lift:
+            self.lift = wanted
+        elif not in_speech:
+            self.lift = min(wanted, self.lift * AUTO_GAIN_RAISE)
 
 
 class RecognizerEngine:
@@ -89,7 +183,9 @@ def engine_choice(name, root=SHERPA_ROOT, library=SHERPA_LIBRARY):
         missing = sherpa_onnx_missing(root, library)
         if missing:
             return "pocketsphinx", f"sherpa-onnx is not installed ({len(missing)} files missing). Using PocketSphinx."
-        return "pocketsphinx", "The sherpa-onnx recognizer is not built yet. Using PocketSphinx."
+        # The files are there: voice_engines.choose_asr decides whether Moonshine
+        # transcribes after the wake; PocketSphinx always keeps the wake phrase.
+        return "pocketsphinx", None
     if name != "pocketsphinx":
         return "pocketsphinx", f"Unknown speech recognizer {name!r}. Using PocketSphinx."
     return "pocketsphinx", None
@@ -128,6 +224,12 @@ class Recognizer(RecognizerEngine):
             function = getattr(self.lib, name)
             function.restype = result
             function.argtypes = args
+        # Confidence is diagnostic only. An older library without these still decodes.
+        self._get_prob = self._optional("ps_get_prob", c.c_int32, pointer)
+        self._get_logmath = self._optional("ps_get_logmath", pointer, pointer)
+        self._logmath_exp = self._optional("logmath_exp", c.c_double, pointer, c.c_int32)
+        int_ptr = c.POINTER(c.c_int32)
+        self._seg_prob = self._optional("ps_seg_prob", c.c_int32, pointer, int_ptr, int_ptr, int_ptr)
 
         config = self.lib.ps_config_init(None)
         if not config:
@@ -150,6 +252,7 @@ class Recognizer(RecognizerEngine):
         if self.lib.ps_add_keyphrase(self.decoder, b"wake", wake_word.lower().encode()) < 0:
             self.lib.ps_free(self.decoder)
             raise ValueError(f"the speech dictionary does not contain {wake_word!r}")
+        self.wake_phrase = wake_word
         self.endpoint = None
         self.mode = None
         self.frames = 0
@@ -157,14 +260,64 @@ class Recognizer(RecognizerEngine):
         self.wake_end = None
         self.wake_preroll = deque(maxlen=WAKE_PREROLL_FRAMES + 1)
         self.wake_track_from = 0
+        self.in_speech = False
+        self.wake_score = None
+
+    def _optional(self, name, result, *args):
+        try:
+            function = getattr(self.lib, name)
+        except AttributeError:
+            return None
+        function.restype = result
+        function.argtypes = args
+        return function
+
+    def segment_score(self, segment):
+        """The keyword spotter's detection score for one segment, if the library reports it.
+
+        The keyphrase search's own hypothesis score is always 0, so the score
+        comes from the detected segment instead (log domain; higher is surer)."""
+        seg_prob = getattr(self, "_seg_prob", None)
+        if seg_prob is None:
+            return None
+        ascr, lscr, lback = c.c_int32(), c.c_int32(), c.c_int32()
+        try:
+            value = seg_prob(segment, c.byref(ascr), c.byref(lscr), c.byref(lback))
+        except (c.ArgumentError, OSError):
+            return None
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    def confidence(self):
+        """Posterior probability of the last dictation, 0 to 1, if the library reports it."""
+        get_prob = getattr(self, "_get_prob", None)
+        get_logmath = getattr(self, "_get_logmath", None)
+        logmath_exp = getattr(self, "_logmath_exp", None)
+        if get_prob is None or get_logmath is None or logmath_exp is None:
+            return None
+        try:
+            logmath = get_logmath(self.decoder)
+            if not logmath:
+                return None
+            raw = get_prob(self.decoder)
+            # The library reports 0 (probability 1) when it computed no posterior.
+            if not isinstance(raw, int) or isinstance(raw, bool) or raw == 0:
+                return None
+            value = logmath_exp(logmath, raw)
+        except (c.ArgumentError, OSError):
+            return None
+        return value if isinstance(value, float) and 0.0 <= value <= 1.0 else None
 
     # Read-only fallbacks for instances built without __init__ in tests.
     oneshot = False
     oneshot_queue = ()
     wake_history = ()
+    in_speech = False
+    wake_score = None
+    wake_candidate_score = None
 
     def start_capture(self):
         self.capture_frames = 0
+        self.in_speech = False
         self.endpoint = self.lib.ps_endpointer_init(0.36, 0.75, 2, RATE, 0.03)
         if not self.endpoint:
             raise RuntimeError("could not initialize speech endpointing")
@@ -198,6 +351,7 @@ class Recognizer(RecognizerEngine):
         self.frames = 0
         self.last_partial = ""
         self.wake_end = None
+        self.wake_candidate_score = None
 
     def decode(self, samples):
         if self.lib.ps_process_raw(self.decoder, samples, FRAME_SAMPLES, 0, 0) < 0:
@@ -218,6 +372,7 @@ class Recognizer(RecognizerEngine):
                 keyword_end = self.search_start + end.value / 100
                 if self.wake_end is None or keyword_end > self.wake_end:
                     self.wake_end = keyword_end
+                    self.wake_candidate_score = self.segment_score(segment)
             segment = self.lib.ps_seg_next(segment)
 
     def decoded_until(self):
@@ -262,6 +417,7 @@ class Recognizer(RecognizerEngine):
             if was_speech and self.wake_end is not None:
                 tail = self.lib.ps_endpointer_speech_end(self.endpoint) - self.wake_end
                 if tail <= WAKE_TAIL_SECONDS:
+                    self.wake_score = getattr(self, "wake_candidate_score", None)
                     return [("hear.wake", {})]
             return []
 
@@ -289,6 +445,7 @@ class Recognizer(RecognizerEngine):
         replay.extend(self.wake_preroll)
         self.wake_preroll.clear()
         self.wake_history = ()
+        self.wake_score = getattr(self, "wake_candidate_score", None)
         self.end_search()
         self.begin(self.dictation)
         self.oneshot = True
@@ -320,6 +477,7 @@ class Recognizer(RecognizerEngine):
         was_speech = bool(self.lib.ps_endpointer_in_speech(self.endpoint))
         speech = self.lib.ps_endpointer_process(self.endpoint, samples)
         in_speech = bool(self.lib.ps_endpointer_in_speech(self.endpoint))
+        self.in_speech = in_speech
         if self.oneshot:
             return self.continue_oneshot(samples, in_speech)
         events = []

@@ -1,4 +1,4 @@
-"""Summarise bench-*.json files written by bench mode (lab/bench_guest.py) on the laptop.
+"""Summarise bench-*.json files written by bench mode (mind/bench.py) on the laptop.
 
     python3 lab/bench_report.py /Volumes/PIPLOGS            # every bench file on the stick
     python3 lab/bench_report.py out/hardware-try/round1/boot-0004-*/bench-*.json
@@ -23,6 +23,36 @@ def _median(values):
         return None
     middle = len(values) // 2
     return values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
+
+
+def _voice(result):
+    """One line from either voice result: mind/voice_bench.py's (idle and busy
+    per engine, decode slowdown, verdict) or the Flite and PocketSphinx one."""
+    parts = []
+    for key, value in sorted(result.items()):
+        if not isinstance(value, dict) or key in ("busy", "verdict", "errors", "limits"):
+            continue
+        if "rtf" in value or "error" in value:
+            parts.append(f"{key.upper() if len(key) <= 4 else key} RTF "
+                         + (_num(value.get("rtf"), 2) if "rtf" in value else str(value.get("error", "-"))))
+        elif any(isinstance(value.get(phase), dict) for phase in ("idle", "busy")):
+            phases = []
+            for phase in ("idle", "busy"):
+                row = value.get(phase)
+                if isinstance(row, dict):
+                    number = row.get("rtf", row.get("ms_per_window"))
+                    phases.append(f"{phase} {_num(number, 2)}")
+            parts.append(f"{key} " + "/".join(phases))
+    slowdown = (result.get("busy") or {}).get("decode_slowdown_pct")
+    if slowdown is not None:
+        parts.append(f"decode slowed {_num(slowdown, 1)}%")
+    verdict = result.get("verdict") or {}
+    if verdict:
+        parts.append("verdict " + ", ".join(f"{k}={'pass' if v else 'FAIL'}" for k, v in sorted(verdict.items())))
+    errors = result.get("errors") or {}
+    if errors:
+        parts.append("not measured: " + ", ".join(sorted(errors)))
+    return ", ".join(parts) or "-"
 
 
 def summarise(data):
@@ -68,13 +98,31 @@ def summarise(data):
                                        f"save {_num(slot.get('save_s'), 2, ' s')}, restore "
                                        f"{_num(slot.get('restore_s'), 2, ' s')}, cache_n after restore "
                                        f"{slot.get('cache_n_after_restore')}"))
+        isolation = model.get("slot_isolation") or {}
+        if isolation:
+            summary["slot0_kept_after_slot1_job"] = isolation.get("kept")
+            lines.append("  slot 1 code job: " + (f"ERROR {isolation['error']}" if "error" in isolation else
+                                                 f"slot 0 cache_n {isolation.get('cache_n_before')} -> "
+                                                 f"{isolation.get('cache_n_after')} "
+                                                 f"({'kept' if isolation.get('kept') else 'LOST'})"))
+        sweep = model.get("sweep") or []
+        if sweep:
+            summary["sweep"] = []
+            for row in sweep:
+                setting_row = row.get("setting", {})
+                prefill_row = (row.get("prefill") or [{}])[0]
+                decode_row = (row.get("decode") or {}).get("predicted_tps")
+                summary["sweep"].append({"threads": setting_row.get("threads"),
+                                         "threads_batch": setting_row.get("threads_batch"),
+                                         "prefill_tps": prefill_row.get("prompt_tps"), "decode_tps": decode_row})
+                lines.append(f"  threads {setting_row.get('threads')}/{setting_row.get('threads_batch')}: "
+                             + (f"ERROR {row['error']}" if row.get("error") else
+                                f"prefill {_num(prefill_row.get('prompt_tps'))}, decode {_num(decode_row)} tok/s"))
         if "cancel_to_release_s" in model:
             lines.append(f"  cancel to release: {_num(model.get('cancel_to_release_s'), 2, ' s')}")
-        speech = model.get("speech_with_model_busy") or {}
+        speech = model.get("voice") or model.get("speech_with_model_busy") or {}
         if speech:
-            tts, asr = speech.get("tts") or {}, speech.get("asr") or {}
-            lines.append(f"  speech with model busy: TTS RTF {_num(tts.get('rtf'), 2)}, "
-                         f"ASR RTF {_num(asr.get('rtf'), 2) if 'rtf' in asr else asr.get('error', '-')}")
+            lines.append(f"  voice ({speech.get('engine', 'flite+pocketsphinx')}, model busy): " + _voice(speech))
         for row in model.get("soak", []) or []:
             if "cap" in row:
                 lines.append(f"  soak {row['cap']}: {_num(row.get('tokens_per_s'), 2)} tok/s, "
@@ -85,6 +133,19 @@ def summarise(data):
                 lines.append(f"  soak skipped: {row['skipped']}")
             elif "restore_errors" in row:
                 lines.append(f"  soak RESTORE ERRORS: {row['restore_errors']}")
+    dream = data.get("dream") or {}
+    if dream:
+        prefill_rows = {row.get("tokens"): row.get("prompt_tps") for row in dream.get("prefill", [])}
+        lines.append(f"dream {dream.get('file')}: " + (f"ERROR {dream['error']}" if dream.get("error") else
+                     "prefill " + ", ".join(f"{k}:{_num(v)}" for k, v in sorted(prefill_rows.items()))
+                     + f" tok/s, decode {_num((dream.get('decode') or {}).get('predicted_tps'))} tok/s"))
+    checked = data.get("bench_pack")
+    if checked:
+        lines.append("bench pack: " + (f"verified, {checked.get('files')} files" if checked.get("ok")
+                                       else f"NOT VERIFIED: {checked.get('error')}"))
+    idle = data.get("voice") or data.get("speech_idle") or {}
+    if idle:
+        lines.append(f"voice ({idle.get('engine', 'flite+pocketsphinx')}): " + _voice(idle))
     if data.get("restore_errors"):
         lines.append(f"POWER SETTINGS NOT RESTORED: {data['restore_errors']}")
     return {"finished": bool(data.get("finished")), "models": models, "lines": lines}

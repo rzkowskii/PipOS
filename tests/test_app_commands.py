@@ -208,10 +208,93 @@ class OwnerPhrasesTest(unittest.TestCase):
         self.assertEqual(match_recipe("sorts my socks"), (None, ()))
 
     def test_command_start_for_read_ahead(self):
-        for text in ("Hey Pip, open the", "write a script", "in the terminal", "carry on", "install"):
+        for text in ("Hey Pip, open the", "write a script", "in the terminal", "install", "open the monitor",
+                     "show me how you're feeling", "show my timers", "play snake", "run life", "make me a program"):
             self.assertTrue(may_be_app_command(text), text)
-        for text in ("how was your day", "tell me a story"):
+        for text in ("how was your day", "tell me a story", "write a poem", "write me a song", "make a cup of tea",
+                     "start guest mode", "play a game", "show me a picture of a cat"):
             self.assertFalse(may_be_app_command(text), text)
+
+    def test_bare_words_fall_through_with_nothing_open(self):
+        # L9.1: with no terminal and no job these are conversation (or the
+        # owner's notes), never ours: parse says None and the gate says no,
+        # so the model's read-ahead may start.
+        bare = ("make a note: the plumber comes Thursday", "make a note that the key is in the blue pot", "stop",
+                "wait", "continue", "carry on", "how's it going", "what are you doing", "continue the story",
+                "hold on", "keep going", "what happened", "did it work", "show me your face", "close it")
+        for text in bare:
+            self.assertIsNone(parse(text, CLOSED), text)
+            self.assertFalse(may_be_app_command(text), text)
+            self.assertFalse(may_be_app_command(text, CLOSED), text)
+        # A shown clock or monitor is not a job: the same words still fall
+        # through, except the ones that close it.
+        clock = ctx(clock="shown")
+        for text in ("stop", "wait", "continue", "how's it going", "make a note: buy milk"):
+            self.assertIsNone(parse(text, clock), text)
+        # "Make a note" is a durable note even with the terminal open; only
+        # "in the terminal, make a note..." is the terminal's recipe.
+        self.assertIsNone(parse("make a note: buy milk", SHOWN))
+        self.assertIsNone(parse("make a note: buy milk", WRITING))
+        self.assertEqual(parse("in the terminal, make a note: buy milk", SHOWN).recipe, "note")
+        # With no job, "how's it going" is a greeting even with the terminal open.
+        self.assertIsNone(parse("how's it going", SHOWN))
+        self.assertEqual(parse("how's it going", WRITING).kind, "report")
+
+    def test_the_gate_follows_the_context(self):
+        for text in ("stop", "carry on", "how's it going", "run it", "hold on a sec"):
+            self.assertTrue(may_be_app_command(text, WRITING), text)
+            self.assertFalse(may_be_app_command(text, CLOSED), text)
+        self.assertTrue(may_be_app_command("show me your face", ctx(monitor="shown")))
+        self.assertTrue(may_be_app_command("yes", ctx(terminal="shown", job="running", pending="close")))
+        self.assertFalse(may_be_app_command("yes", RUNNING), "no question open: a yes is conversation")
+        self.assertFalse(may_be_app_command("tell me a story", WRITING))
+        # Whole words only: "running late" is conversation even with the terminal open.
+        for text in ("running late today", "trying to sleep", "stopped by the shop", "fixing the bike"):
+            self.assertFalse(may_be_app_command(text, SHOWN), text)
+        # A script finished long ago, with the terminal closed, is history:
+        # "how's it going" is a greeting and "running late" goes to the model,
+        # but "did it work?" is still answered from what hands reported.
+        old = ctx(job="done")
+        for text in ("how's it going", "what are you doing", "running late today", "stop", "carry on"):
+            self.assertFalse(may_be_app_command(text, old), text)
+        self.assertIsNone(parse("how's it going", old))
+        self.assertIsNone(parse("what are you doing", old))
+        self.assertTrue(may_be_app_command("did it work", old))
+        self.assertEqual(parse("did it work", old).kind, "report")
+        self.assertEqual(parse("run it again", old).kind, "control")
+        # Written and waiting to run still counts as going on.
+        self.assertEqual(parse("how's it going", ctx(job="waiting")).kind, "report")
+        self.assertTrue(may_be_app_command("run it", ctx(job="waiting")))
+
+    def test_monitor_and_clock(self):
+        for text in ("show me how you're feeling", "open the monitor", "open the body monitor",
+                     "show me how you are doing", "show me your vitals"):
+            self.assertEqual(self.kind(text), ("open", "monitor"), text)
+        for text in ("show me the clock", "show my timers", "show me my timers", "open the clock", "show me the time"):
+            self.assertEqual(self.kind(text), ("open", "clock"), text)
+        monitor = ctx(monitor="shown", terminal="minimised")
+        self.assertEqual(parse("open the monitor", monitor).say, REPLIES["already_open"])
+        # Opening the terminal over a small app is an open, not "already open".
+        self.assertEqual(self.kind("open the terminal", ctx(monitor="shown")), ("open", "terminal"))
+        for text in ("show me your face", "hide it", "minimise", "put it away"):
+            self.assertEqual(self.kind(text, monitor), ("minimise", "monitor"), text)
+        for text in ("close the monitor", "hide the monitor", "close it"):
+            self.assertEqual(self.kind(text, monitor), ("close", "monitor"), text)
+        self.assertEqual(self.kind("bring back the terminal", monitor), ("restore", "terminal"))
+        clock = ctx(clock="shown")
+        self.assertEqual(self.kind("put the clock away", clock), ("close", "clock"))
+        self.assertEqual(self.kind("close my timers", clock), ("close", "clock"))
+        self.assertEqual(parse("close the clock", CLOSED).say, REPLIES["clock_not_open"])
+        self.assertIsNone(parse("stop the clock", CLOSED), "may be a script's clock: not ours")
+        self.assertIsNone(parse("close it", CLOSED))
+        self.assertEqual(self.kind("close it", SHOWN), ("close", "terminal"))
+        self.assertEqual(parse("minimise the terminal", MINIMISED).say, REPLIES["already_hidden"])
+        # Guests and switched-off apps: the same refusals as the terminal.
+        self.assertEqual(parse("show me the clock", ctx(guest=True)).say, REPLIES["guest_clock"])
+        self.assertEqual(parse("open the monitor", ctx(guest=True)).say, REPLIES["guest_monitor"])
+        self.assertEqual(parse("open the terminal", ctx(guest=True)).say, REPLIES["guest"])
+        self.assertEqual(parse("open the monitor", ctx(enabled=False)).say, REPLIES["disabled"])
+        self.assertEqual(parse("show my timers", ctx(hands_up=False)).say, "My hands aren't working right now, so I can't open my clock.")
 
     def test_app_phrases_do_not_become_memory_forgets_when_routed_first(self):
         # mind/commands.py alone reads "forget that script" as a memory forget;
@@ -281,6 +364,28 @@ class BridgeTest(unittest.IsolatedAsyncioTestCase):
         await self.bridge.handle(parse("open the terminal", CLOSED), self.say)
         self.assertEqual(self.said, ["Here's my terminal."])
         self.assertEqual(self.bridge.view["terminal"], "shown")
+
+    def answer_with(self, **fields):
+        async def answer():
+            await asyncio.sleep(0.01)
+            self.bridge.observe({"req": self.bus.sent[-1]["req"], **fields})
+        asyncio.get_running_loop().create_task(answer())
+
+    async def test_small_apps_say_what_they_are(self):
+        self.answer_with(t="app.state", app="monitor", view="shown")
+        await self.bridge.handle(parse("show me how you're feeling", CLOSED), self.say)
+        self.assertEqual((self.said[-1], self.bus.sent[-1]["app"]), ("Here's how I'm doing.", "monitor"))
+        self.assertEqual(self.bridge.context().small_app, "monitor")
+        self.assertTrue(self.bridge.may_be_command("show me your face"))
+        self.answer_with(t="app.state", app="monitor", view="closed")
+        await self.bridge.handle(self.bridge.parse("show me your face"), self.say)
+        self.assertEqual((self.said[-1], self.bus.sent[-1]["t"]), ("Okay.", "app.minimise"))
+        self.answer_with(t="app.state", app="clock", view="shown")
+        await self.bridge.handle(parse("show my timers", CLOSED), self.say)
+        self.assertEqual(self.said[-1], "Here's my clock.")
+        self.answer_with(t="app.refused", reason="no_session", app="clock")
+        await self.bridge.handle(parse("close the clock", ctx(clock="shown")), self.say)
+        self.assertEqual(self.said[-1], REPLIES["clock_not_open"])
 
     async def test_refusal_is_reported(self):
         async def answer():
@@ -389,3 +494,16 @@ class BridgeTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HandsDownNamesTheApp(unittest.TestCase):
+    def test_a_small_app_with_the_hands_down_is_named_not_called_the_terminal(self):
+        from mind.app_commands import AppBridge
+
+        bridge = AppBridge(None)
+        self.assertEqual(bridge.parse("show me the clock", False).say,
+                         "My hands aren't working right now, so I can't open my clock.")
+        self.assertEqual(bridge.parse("open the monitor", False).say,
+                         "My hands aren't working right now, so I can't open my monitor.")
+        self.assertEqual(bridge.parse("open the terminal", False).say,
+                         "My hands aren't working right now, so I can't open the terminal.")

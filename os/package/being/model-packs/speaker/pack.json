@@ -1,0 +1,20 @@
+{
+  "format": "beingos-model-pack-v2",
+  "role": "speaker",
+  "dir": "speaker",
+  "model": "3D-Speaker CAM++ English (VoxCeleb), 16 kHz",
+  "license": "Apache-2.0",
+  "note": "Staged only; speaker identity is not used yet.",
+  "sources": [
+    {
+      "file": "voice/speaker/campplus-en-voxceleb/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
+      "bytes": 29596979,
+      "sha256": "98daf9bcf1c8abf3db374fec4c27a5eda7c58705bb3f180d057b085a72a88bb5",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
+      "path": "campplus.onnx"
+    }
+  ],
+  "files": [
+    {"bytes": 29596979, "path": "campplus.onnx", "sha256": "98daf9bcf1c8abf3db374fec4c27a5eda7c58705bb3f180d057b085a72a88bb5"}
+  ]
+}

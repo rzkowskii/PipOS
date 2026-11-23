@@ -15,7 +15,7 @@ class InitiativeTest(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         self.path = self.root / POLICY_PATH
-        self.disabled = InitiativePolicy(reminders=False)
+        self.disabled = InitiativePolicy(reminders=False, brief=False)
 
     def test_missing_policy_keeps_reminders_enabled_without_creating_a_file(self):
         self.assertEqual(load_policy(self.root), InitiativePolicy(True, False, None))
@@ -36,6 +36,31 @@ class InitiativeTest(unittest.TestCase):
         save_policy(self.root, InitiativePolicy())
         self.assertEqual(load_policy(self.root), InitiativePolicy())
         self.assertIsNone(json.loads(self.path.read_text())["quiet_hours"])
+
+    def test_the_brief_is_on_by_default_and_only_written_when_off(self):
+        self.assertTrue(InitiativePolicy().brief)
+        save_policy(self.root, InitiativePolicy(greetings=True))
+        self.assertNotIn("brief", json.loads(self.path.read_text()), "an untouched policy keeps its original shape")
+        save_policy(self.root, InitiativePolicy(brief=False))
+        self.assertIs(json.loads(self.path.read_text())["brief"], False)
+        self.assertEqual(load_policy(self.root), InitiativePolicy(brief=False))
+        self.path.write_text(json.dumps({"version": 1, "reminders": True, "greetings": False, "quiet_hours": None,
+                                         "brief": "yes"}))
+        self.path.chmod(0o600)
+        self.assertEqual(load_policy(self.root), self.disabled)
+        with self.assertRaises(ValueError):
+            InitiativePolicy(brief=1)
+
+    def test_only_alarms_speak_in_quiet_hours_or_with_reminders_off(self):
+        night = datetime(2026, 11, 21, 23, 0, tzinfo=timezone(timedelta(hours=11)))
+        quiet = InitiativePolicy(quiet_hours=QuietHours("22:00", "07:00"))
+        self.assertTrue(quiet.may_announce("alarm", night))
+        self.assertFalse(quiet.may_announce("reminder", night))
+        self.assertFalse(quiet.may_announce("timer", night))
+        off = InitiativePolicy(reminders=False)
+        self.assertTrue(off.may_announce("alarm", night))
+        self.assertFalse(off.may_announce("timer", night))
+        self.assertTrue(InitiativePolicy().may_announce("timer", night))
 
     def test_quiet_hours_use_local_time_with_an_exclusive_end(self):
         overnight = InitiativePolicy(quiet_hours=QuietHours("22:00", "07:00"))
@@ -106,3 +131,18 @@ class InitiativeTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             save_policy(self.root, {"greetings": False})
         self.assertEqual(load_policy(self.root), policy)
+
+
+class SetupMenuTest(unittest.TestCase):
+    def test_the_morning_brief_can_be_switched_off_in_setup(self):
+        import io
+        from contextlib import redirect_stdout
+
+        from mind.initiative_setup import configure_initiative, describe_policy
+
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.assertIn("Morning brief                    On", describe_policy(InitiativePolicy()))
+        with patch("builtins.input", side_effect=["5", "k"]), redirect_stdout(io.StringIO()) as shown:
+            self.assertEqual(configure_initiative(root), 0)
+        self.assertIn("5  Toggle morning brief", shown.getvalue())
+        self.assertEqual(load_policy(root), InitiativePolicy(brief=False))

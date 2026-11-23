@@ -259,6 +259,27 @@ class PanelTest(unittest.TestCase):
                                     stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 1)
 
+    def test_the_monitor_and_the_clock_draw_in_place_without_focus(self):
+        # As hands draws them: a title, focus off (keys stay with the face),
+        # then whole frames of positioned rows that never scroll.
+        from mind import app_clock, app_monitor, hands
+        for app, frame in (("monitor", preview.sample_monitor_frame()), ("clock", preview.sample_clock_frame())):
+            with self.subTest(app=app):
+                session = self.session(name=app)
+                session.send(hands.osc_flags(title=hands.SMALL_TITLES[app], status="Live · once a second", focus=0,
+                                             pip="idle", job="idle"))
+                for _ in range(3):  # a frame a second: the same rows again
+                    session.send(frame.encode())
+                header, pixels = wait_for(lambda: (lambda h: h if h[0]["cursor"] == (-1, -1) else None)(session.read()))
+                self.assertEqual(header["title"], hands.SMALL_TITLES[app])
+                self.assertEqual(header["flags"], {"visible"}, "no focus, never scrolled")
+                self.assertEqual((header["columns"], header["rows"]), (app_monitor.COLUMNS, app_monitor.ROWS))
+                self.assertEqual((header["columns"], header["rows"]), (app_clock.COLUMNS, app_clock.ROWS))
+                lit = sum(1 for value in pixels[0::4 * 61] if value > 128)
+                self.assertGreater(lit, 50, "something is drawn")
+                session.close()
+                self.assertFalse(session.frame.exists(), "closing removes the picture")
+
 
 if __name__ == "__main__":
     unittest.main()

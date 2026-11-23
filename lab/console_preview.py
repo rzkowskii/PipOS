@@ -21,6 +21,13 @@ script relays its output to `being-console --panel` the way hands does
 the frame file it writes is read back under its seqlock and saved as a PNG.
 The frame file and its format are described in being-console-panel.h.
 
+    python3 -m lab.console_preview app monitor|clock [--out app.png]
+
+The body monitor or the clock (mind/app_monitor.py, mind/app_clock.py) as
+hands draws them: a sample frame of the app's ANSI, with its title, sent to
+`being-console --panel NAME` and read back as a PNG. The monitor's numbers
+are a fixed sample like the laptop's, so the picture is the same on a Mac.
+
     python3 -m lab.console_preview font WOFF_DIRECTORY
 
 Regenerates os/package/being/being-console-font.h from JetBrains Mono (SIL Open
@@ -749,10 +756,68 @@ def panel_main(argv):
     return 0
 
 
+SAMPLE_BODY = {"battery": 81, "charging": False, "on_ac": False, "minutes_left": 190, "health_pct": 81,
+               "cycles": 71, "temp": 48.0}
+
+
+def sample_monitor_frame():
+    """The monitor drawn from a fixed reading: four logical CPUs, the
+    MacBookPro9,2's sensors, 16 GB of memory and a 238 GB disk."""
+    from mind import app_monitor
+    before = {"cpus": [(1000, 10000), (500, 10000), (800, 10000), (200, 10000)]}
+    after = {"cpus": [(1038, 10100), (509, 10100), (860, 10100), (204, 10100)],
+             "memory": {"total_kib": 16337000, "available_kib": 13500000}, "uptime_s": 11520.0,
+             "fans": [(2003, 6200)], "cores_c": [("Core 0", 47.0), ("Core 1", 46.0)], "package_c": 48.0,
+             "disk": (238_000_000_000, 201_000_000_000)}
+    return app_monitor.render(after, before, SAMPLE_BODY, {"state": "idle", "tok_s": 8.4})
+
+
+def sample_clock_frame():
+    from mind import app_clock
+    now = time.time()
+    entries = [{"kind": "timer", "text": "Timer", "due_at": now + 252, "created_at": now - 348, "duration": 600},
+               {"kind": "reminder", "text": "call Mum", "due_at": now + 14 * 3600, "created_at": None,
+                "duration": None}]
+    return app_clock.render(now, {"entries": entries, "zone": None, "zone_known": True})
+
+
+def app_frame_png(app, out, size=(1280, 640), build_dir=None):
+    """Draw one app frame through being-console --panel, as hands does, and
+    save it as a PNG. Returns the frame header."""
+    from mind import hands
+    frame = sample_monitor_frame() if app == "monitor" else sample_clock_frame()
+    with PanelSession(None, size, name=app, build_dir=build_dir) as session:
+        session.send(hands.osc_flags(title=hands.SMALL_TITLES[app], status="Live · once a second", focus=0,
+                                     pip="idle", job="idle"))
+        session.send(frame.encode())
+        time.sleep(0.4)
+        header, rgba = session.read()
+        session.close()
+    from lab.vm import png
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(out).write_bytes(png(*rgba_to_rgb(header["width"], header["height"], rgba)))
+    return header
+
+
+def app_main(argv):
+    parser = argparse.ArgumentParser(prog="python3 -m lab.console_preview app")
+    parser.add_argument("app", choices=("monitor", "clock"))
+    parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument("--build-dir", type=Path, default=None)
+    options = parser.parse_args(argv)
+    out = options.out or Path(f"{options.app}-preview.png")
+    header = app_frame_png(options.app, out, build_dir=options.build_dir)
+    print(out)
+    print(f"{header['columns']}x{header['rows']} cells, flags {sorted(header['flags'])}, title {header['title']!r}")
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["panel"]:
         return panel_main(argv[1:])
+    if argv[:1] == ["app"]:
+        return app_main(argv[1:])
     if argv[:1] == ["font"]:
         if len(argv) != 2:
             raise SystemExit("usage: python3 -m lab.console_preview font WOFF_DIRECTORY")

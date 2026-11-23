@@ -1,0 +1,27 @@
+[Unit]
+Description=Being: sound card levels for the ears and voice
+# The root is read-only, so alsactl has no saved state to restore: set working
+# levels on every boot, after alsactl has had its go and before anything listens.
+After=alsa-restore.service alsa-state.service sound.target
+# The owner's kept levels live in the mind (/mind/audio/asound.state). Without
+# the mind the defaults are set, so the mount is waited for, never required.
+After=local-fs.target
+Before=being-voice.service
+# being.audio=keep on the kernel command line leaves the mixer as it is; the
+# script itself checks it and logs that it did.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/being/env
+ExecStart=/usr/libexec/being/being-audio-init
+# Never holds the voice back for long, and never fails the boot.
+TimeoutStartSec=30
+SuccessExitStatus=0 1 2
+# It only talks to the sound card and writes under /run (and the mixer state
+# under /var/lib/alsa when that is writable).
+PrivateNetwork=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

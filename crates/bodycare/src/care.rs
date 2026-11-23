@@ -241,25 +241,56 @@ impl Care {
                     None => self.once("no-charge", || "charge limit wanted but no control exists (task 2.7); nothing done".into()),
                 }
             }
-            // Is it honoured? On AC, well over the limit and still charging.
-            let over = r.on_ac == Some(true)
-                && r.percent.is_some_and(|p| p >= limit as f64 + cfg.honour_margin)
-                && r.status.as_deref() == Some("Charging");
-            if over {
-                let since = *self.over_since.get_or_insert(now);
-                if now - since >= cfg.honour_after && self.honoured != Some(false) {
-                    self.honoured = Some(false);
-                    self.notes.push(format!("the charge limit of {limit}% is not being honoured: still charging at {:?}%", r.percent));
-                }
-            } else {
-                self.over_since = None;
-                let resting = matches!(r.status.as_deref(), Some("Not charging" | "Full"));
-                if r.on_ac == Some(true) && resting && r.percent.is_some_and(|p| p >= limit as f64 - cfg.honour_margin) {
-                    self.honoured = Some(true);
-                }
-            }
+            self.judge_cap(limit, &r, now);
         }
         self.reading = r;
+    }
+
+    /// Is the cap honoured? Judged only while the control really reads the
+    /// limit (in act mode once it is written; in observe mode only if the
+    /// firmware already holds it), so a cap that was never set is unknown,
+    /// never "ignored". On AC, well over the limit and still charging for
+    /// `honour_after` means not honoured; resting at the cap means honoured.
+    fn judge_cap(&mut self, limit: i64, r: &Reading, now: f64) {
+        let in_force = self.hw.charge.is_some() && r.charge_limit == Some(limit);
+        if !in_force {
+            if self.honoured.is_some() {
+                self.notes.push(format!("the charge limit reads {:?}, not {limit}; whether it holds is unknown", r.charge_limit));
+            }
+            self.honoured = None;
+            self.over_since = None;
+            return;
+        }
+        let margin = self.cfg.honour_margin;
+        let over = r.on_ac == Some(true)
+            && r.percent.is_some_and(|p| p >= limit as f64 + margin)
+            && r.status.as_deref() == Some("Charging");
+        if over {
+            let since = *self.over_since.get_or_insert(now);
+            if now - since >= self.cfg.honour_after && self.honoured != Some(false) {
+                self.honoured = Some(false);
+                self.notes.push(format!(
+                    "the charge limit of {limit}% is not being honoured: still charging at {:?}% ({} mode)",
+                    r.percent,
+                    self.mode.name()
+                ));
+            }
+        } else {
+            self.over_since = None;
+            let resting = matches!(r.status.as_deref(), Some("Not charging" | "Full"));
+            if r.on_ac == Some(true) && resting && r.percent.is_some_and(|p| (p - limit as f64).abs() <= margin) {
+                if self.honoured != Some(true) {
+                    self.notes.push(format!("the charge limit of {limit}% is holding"));
+                }
+                self.honoured = Some(true);
+            }
+        }
+    }
+
+    /// Whether the cap holds: Some(true) resting at it, Some(false) charging
+    /// past it, None when unknown (no cap chosen, no control, not in force).
+    pub fn cap_honoured(&self) -> Option<bool> {
+        self.cfg.charge_limit.and(self.honoured)
     }
 
     /// Dreams may run (not paused by battery heat).
@@ -285,10 +316,13 @@ impl Care {
             .with("fan_rpm", r.fan_rpm)
             .with("fan_floor", self.fan_floor)
             .with("fan_target", self.fan_target)
-            .with("fan_factory_min", self.factory_fan_min);
-        if let Some(limit) = self.cfg.charge_limit {
+            .with("fan_factory_min", self.factory_fan_min)
+            // Always present, so "how's your battery health" never guesses:
+            // the owner's chosen cap (null: none) and whether it holds.
+            .with("charge_limit", self.cfg.charge_limit)
+            .with("cap_honoured", self.cap_honoured());
+        if self.cfg.charge_limit.is_some() {
             ev = ev
-                .with("charge_limit", limit)
                 .with("charge_limit_reads", r.charge_limit)
                 .with("charge_limit_control", self.hw.charge.as_ref().map(|(_, k)| k.name()))
                 .with("charge_limit_honoured", self.honoured);
@@ -520,12 +554,76 @@ mod tests {
         t.file("sys/class/power_supply/BAT0/capacity", "81\n");
         care.step(&being("idle", false), 99_999.0);
         assert_eq!(care.report().bool("charge_limit_honoured"), Some(true));
-        // No limit chosen: never touched.
+        assert_eq!(care.report().bool("cap_honoured"), Some(true));
+        assert_eq!(care.report().data["charge_limit"].as_i64(), Some(80));
+        // An SMC reset puts it back to 100: unknown again until re-asserted.
+        t.file(&format!("{SMC}/battery_charge_limit"), "100\n");
+        care.step(&being("idle", false), 100_000.0);
+        assert!(care.report().data["cap_honoured"].is_null());
+        // No limit chosen: never touched, and nothing claimed.
         let t = macbook("charge-none");
         let mut care = act(&t, Config::default());
         care.step(&being("idle", false), 0.0);
         assert_eq!(t.get(&format!("{SMC}/battery_charge_limit")), "100");
-        assert!(care.report().data.get("charge_limit").is_none());
+        let report = care.report();
+        assert!(report.data["charge_limit"].is_null() && report.data["cap_honoured"].is_null());
+        assert!(report.data.get("charge_limit_reads").is_none());
+    }
+
+    #[test]
+    fn observe_mode_notices_a_cap_the_firmware_holds_but_ignores() {
+        // Observe mode writes nothing, so a control at 100 is a cap never
+        // set: charging to 95% is not "ignoring" it.
+        let t = macbook("observe-cap");
+        t.file("sys/class/power_supply/BAT0/capacity", "95\n");
+        let cfg = Config { charge_limit: Some(80), ..Config::default() };
+        let mut care = Care::new(&t.0, &t.journal(), cfg.clone(), Mode::Observe);
+        for m in 0..=130 {
+            care.step(&being("idle", false), f64::from(m) * 60.0);
+        }
+        assert!(care.report().data["cap_honoured"].is_null(), "never set, so unknown");
+        assert!(!care.notes.iter().any(|n| n.contains("not being honoured")));
+        assert_eq!(t.get(&format!("{SMC}/battery_charge_limit")), "100", "observe writes nothing");
+
+        // The SMC already holds 80 (set before), yet it keeps charging: noticed and published.
+        t.file(&format!("{SMC}/battery_charge_limit"), "80\n");
+        let mut care = Care::new(&t.0, &t.journal(), cfg.clone(), Mode::Observe);
+        for m in 0..=110 {
+            care.step(&being("idle", false), f64::from(m) * 60.0);
+        }
+        assert!(care.report().data["cap_honoured"].is_null(), "two hours are needed, not 110 minutes");
+        for m in 111..=125 {
+            care.step(&being("idle", false), f64::from(m) * 60.0);
+        }
+        let report = care.report();
+        assert_eq!(report.bool("cap_honoured"), Some(false));
+        assert_eq!(report.bool("charge_limit_honoured"), Some(false), "the older field agrees");
+        assert!(care.notes.iter().any(|n| n.contains("not being honoured") && n.contains("observe mode")), "{:?}", care.notes);
+        // A dip under the margin restarts the clock but does not clear the verdict.
+        t.file("sys/class/power_supply/BAT0/capacity", "83\n");
+        care.step(&being("idle", false), 126.0 * 60.0);
+        assert_eq!(care.report().bool("cap_honoured"), Some(false));
+        // Off AC it proves nothing either way.
+        t.file("sys/class/power_supply/ADP1/online", "0\n");
+        t.file("sys/class/power_supply/BAT0/status", "Discharging\n");
+        care.step(&being("idle", false), 127.0 * 60.0);
+        assert_eq!(care.report().bool("cap_honoured"), Some(false));
+        // Back on AC and resting at 80: it holds after all.
+        t.file("sys/class/power_supply/ADP1/online", "1\n");
+        t.file("sys/class/power_supply/BAT0/status", "Not charging\n");
+        t.file("sys/class/power_supply/BAT0/capacity", "80\n");
+        care.step(&being("idle", false), 128.0 * 60.0);
+        assert_eq!(care.report().bool("cap_honoured"), Some(true));
+        assert!(care.notes.iter().any(|n| n.contains("is holding")));
+
+        // No control at all: unknown, whatever the battery does.
+        let t = macbook("observe-nocontrol");
+        std::fs::remove_file(t.0.join(format!("{SMC}/battery_charge_limit"))).unwrap();
+        t.file("sys/class/power_supply/BAT0/status", "Not charging\n");
+        t.file("sys/class/power_supply/BAT0/capacity", "80\n");
+        let mut care = Care::new(&t.0, &t.journal(), cfg, Mode::Observe);
+        care.step(&being("idle", false), 0.0);
+        assert!(care.report().data["cap_honoured"].is_null());
     }
 
     #[test]

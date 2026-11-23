@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .dream_store import MAX_JOURNAL_LIMIT, journal
+from .memory import _HISTORY
 from .profile import FACTORY_CONFIG, default_mind_dir, load_profile
 from .retention import load_policy
 from .skills import Skills
@@ -29,17 +30,49 @@ def quote(text, limit=12):
     return " ".join(words[:limit]) + ("…" if len(words) > limit else "")
 
 
+def checked_quotes(db, owner, *, now=None, window_hours=18, limit=10):
+    """The dream model's checked items from the last night: (episode id,
+    exact quote) pairs, newest first. Only items that passed dream_verify are
+    ever stored, and only those whose sentences still exist are returned."""
+    now = time.time() if now is None else now
+    try:
+        rows = db.execute(
+            "SELECT s.episode_id, s.quote FROM candidate_facts c "
+            "JOIN candidate_sources s ON s.candidate_id = c.id "
+            f"JOIN episodes e ON e.id = s.episode_id WHERE {_HISTORY} AND e.kind = 'heard' "
+            "AND e.speaker = c.owner AND c.owner = ? AND c.created >= ? "
+            "ORDER BY c.created DESC, c.id DESC, s.episode_id DESC LIMIT ?",
+            (owner, now - window_hours * 3600, limit)).fetchall()
+    except sqlite3.Error:
+        return []
+    return [(episode_id, quote_text) for episode_id, quote_text in rows if quote_text in _text_of(db, episode_id)]
+
+
+def _text_of(db, episode_id):
+    row = db.execute("SELECT text FROM episodes WHERE id = ?", (episode_id,)).fetchone()
+    return row[0] if row else ""
+
+
 def dream_report(db, owner, *, now=None, zone=None, enabled=True, window_hours=18):
-    """The answer to "What did you dream about?", built only from the journal.
+    """The answer to "What did you dream about?", built only from the journal
+    and the dream model's checked quotes.
 
     Returns (line, source_ids). A dream that did not happen is said plainly;
-    nothing is ever invented to fill the gap.
+    nothing is ever invented to fill the gap, and nothing the model wrote in
+    its own words is said: only the owner's own words that code checked.
     """
     now = time.time() if now is None else now
     if not enabled:
         return ("I didn't dream. Dreaming is switched off; you can turn it on in Setup, "
                 "under Senses and memory."), ()
     entries = [entry for entry in journal(db, owner, limit=20) if now - entry.published_at <= window_hours * 3600]
+    checked = checked_quotes(db, owner, now=now, window_hours=window_hours)
+    if not entries and checked:
+        count = len({episode for episode, _ in checked})
+        moments = "one moment" if count == 1 else f"{count} moments"
+        line = (f"I went back over {moments} from our conversations. "
+                f"One was when you said: \"{quote(checked[0][1])}\"")
+        return line, tuple(dict.fromkeys(episode for episode, _ in checked))
     if not entries:
         if dreamt_recently(db, owner, now=now, zone=zone):
             # It did dream; it just kept nothing. Never claim it did not.
@@ -74,8 +107,14 @@ def dreamt_recently(db, owner, *, now=None, zone=None):
 
 
 def morning_remark(db, owner, *, now=None, window_hours=12):
-    """One tentative remark after a dream night, or None. Said at most once."""
+    """One tentative remark after a dream night, or None. Said at most once.
+
+    A quote the dream model found and code checked comes first; otherwise
+    the rule-based journal's newest owner sentence."""
     now = time.time() if now is None else now
+    checked = checked_quotes(db, owner, now=now, window_hours=window_hours, limit=1)
+    if checked:
+        return f"I was thinking about when you said \"{quote(checked[0][1], 8)}\". I might have that wrong."
     entries = [entry for entry in journal(db, owner, limit=5) if now - entry.published_at <= window_hours * 3600]
     if not entries:
         return None

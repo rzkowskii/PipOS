@@ -8,11 +8,18 @@ StartLimitIntervalSec=0
 
 [Service]
 EnvironmentFile=/etc/being/env
-Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 -m mind.voice
 Restart=always
 RestartSec=1
 TimeoutStopSec=5
+# The ears and voice come first for the CPU, with the face and the brainstem:
+# a busy model must never make them stutter.
+CPUWeight=1000
+# The voice pings from its own event loop (mind/sd_notify.py), so an ear that
+# hangs is restarted rather than left deaf.
+WatchdogSec=30s
+NotifyAccess=main
 # The ears and voice need the sound card and the bus, and no network.
 # The QEMU lab also gives them a virtio serial microphone port
 # (mind/mic_port.py) and has them load snd-aloop (mind/voice.py), so the

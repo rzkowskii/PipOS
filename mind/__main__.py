@@ -2,17 +2,20 @@
 
 import argparse
 import asyncio
+import inspect
 import os
 import re
 import signal
 from pathlib import Path
 
+from . import sd_notify
+from .app_commands import AppBridge
 from .bus import Bus
 from .cortex import Cortex
 from .memory import Memory
 from .profile import DEFAULT_PERSONALITY, DEFAULT_TEMPERAMENT, default_mind_dir, load_profile, read_factory, temperament
 from .retention import load_policy
-from .turn import SUBS, Config, Mind, log
+from .turn import SUBS, Config, Mind, log, optional_module
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -21,7 +24,7 @@ def load_config(config_dir, mind_dir, *, include_core=True):
     settings = read_factory(config_dir)
     profile = load_profile(config_dir, mind_dir, settings=settings, strict=False)
     cfg = Config(name=profile.name, owner=profile.owner, personality=profile.personality)
-    for key in ("ctx_tokens", "max_tokens", "temperature", "prefill"):
+    for key in ("ctx_tokens", "max_tokens", "temperature", "prefill", "morning_brief"):
         if key in settings:
             setattr(cfg, key, settings[key])
     identity = (config_dir / "identity.md").read_text(encoding="utf-8")
@@ -38,6 +41,37 @@ def load_config(config_dir, mind_dir, *, include_core=True):
     core = mind_dir / "core.md"
     cfg.core = core.read_text() if include_core and core.exists() else ""
     return cfg, settings
+
+
+def build_night_shift(mind_dir, memory, cfg):
+    """The night shift (mind/night_shift.py) with the other organs' jobs, or
+    None when it is not part of this image: then the night is the rule-based
+    dream journal alone. The mind registers its own morning re-warm."""
+    module = optional_module("night_shift")
+    shift_class = getattr(module, "NightShift", None)
+    if shift_class is None:
+        return None
+    offered = {"state_dir": mind_dir, "mind_dir": mind_dir, "memory": memory, "owner": cfg.owner, "name": cfg.name}
+    try:
+        parameters = inspect.signature(shift_class).parameters
+        shift = shift_class(**{key: value for key, value in offered.items() if key in parameters})
+    except (TypeError, ValueError) as exc:
+        log(f"night shift not started: {exc}")
+        return None
+    jobs = []
+    backup = optional_module("backup")
+    if backup is not None and hasattr(backup, "auto_backup_job"):
+        jobs.append(("backup", lambda: backup.auto_backup_job(mind_dir)))
+    packs = optional_module("model_pack")
+    rehash = getattr(packs, "rehash_job", None) or getattr(packs, "RehashJob", None)
+    if rehash is not None:
+        jobs.append(("rehash", rehash))
+    for name, make in jobs:
+        try:
+            shift.register(name, make())
+        except Exception as exc:
+            log(f"night shift job {name} not registered: {exc!r}")
+    return shift
 
 
 async def main():
@@ -63,10 +97,19 @@ async def main():
     cortex = Cortex(url, model=args.model or settings.get("model", "default"), llama=not args.plain_openai)
     memory = Memory(mind_dir) if policy.mode != "session-only" else None
     bus = Bus("mind", SUBS, path=args.bus)
-    mind = Mind(bus, cortex, memory, cfg, mind_dir, policy=policy)
+    apps = AppBridge(bus, name=cfg.name)
+    night_shift = build_night_shift(mind_dir, memory, cfg) if memory is not None else None
+    mind = Mind(bus, cortex, memory, cfg, mind_dir, policy=policy, apps=apps, night_shift=night_shift)
+    everyday = optional_module("everyday")
+    if everyday is not None and hasattr(everyday, "preload"):
+        # Every skill is imported now, not on the first thing said.
+        everyday.preload()
     log(f"{cfg.name} | {policy.mode} memory | cortex at {url}")
 
     task = asyncio.create_task(mind.run())
+    # READY once the bus is up (code commands answer from then on, with or
+    # without the model), then a watchdog ping every 5 s from this loop.
+    alive = asyncio.create_task(sd_notify.keep_alive(ready_when=bus.connected))
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, task.cancel)
@@ -75,6 +118,8 @@ async def main():
     except asyncio.CancelledError:
         pass
     finally:
+        alive.cancel()
+        await asyncio.gather(alive, return_exceptions=True)
         await bus.stop()
         if memory is not None:
             memory.close()

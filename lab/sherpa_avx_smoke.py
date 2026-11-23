@@ -1,32 +1,108 @@
-"""Exercise pinned sherpa-onnx streaming-model graphs on an Ivy Bridge guest."""
+"""Run the voice's sherpa-onnx engines on an Ivy Bridge guest and check for SIGILL.
+
+The laptop's CPU has AVX but no AVX2, FMA or BMI. This boots a disposable
+overlay of the lab image under QEMU `-cpu IvyBridge`, checks the guest's CPU
+flags, and then, through the same ctypes bindings the voice uses
+(mind/sherpa.py), runs each engine in its own Python process:
+
+1. Silero VAD over the Moonshine test recording (at least one segment);
+2. a Moonshine v2 tiny decode of `test_wavs/0.wav` (non-empty text);
+3. one sentence in the Piper voice (a WAV of positive length).
+
+A stage killed by SIGILL (exit status 132) is named in the report. The
+assets are the downloads in out/voice, checked against
+lab/sherpa_avx_assets.json and out/voice/DOWNLOADS.json; nothing is fetched.
+QEMU's speed says nothing about the laptop's: timings are recorded only as
+"emulated".
+
+    python3 -m lab.sherpa_avx_smoke --prepare-only /tmp/media   # stage and check, no VM
+    python3 -m lab.sherpa_avx_smoke                             # boot and run
+"""
 
 import argparse
 import hashlib
 import json
 import posixpath
-import re
-import shlex
 import shutil
 import signal
-import subprocess
 import tarfile
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from lab.vm import ROOT, VM
 
-
-ASSETS = ROOT / "out/sherpa-avx"
+ASSETS = ROOT / "out/voice"
 MANIFEST = Path(__file__).with_name("sherpa_avx_assets.json")
+BINDINGS = ROOT / "mind/sherpa.py"
 GUEST_MEDIA = "/mnt/updates"
-RELEASE = "sherpa-onnx-v2.0.2-linux-x64-shared-no-tts"
-MODELS = {"fp32": "", "int8-encoder-joiner": ".int8"}
 REQUIRED = {"avx", "f16c", "sse4_2"}
 EXCLUDED = {"avx2", "fma", "bmi1", "bmi2", "avx512f"}
+STAGES = ("vad", "moonshine", "piper")
+SIGILL_STATUS = 128 + signal.SIGILL
+SENTENCE = "Hello. I am Pip, and this is my natural voice."
+MARK = "SMOKE "
+
+# Runs inside the guest, from the read-only media: python3 guest.py <media> <stage>.
+GUEST_SCRIPT = r'''
+import json, sys, time
+from mind import sherpa
+
+media, stage = sys.argv[1], sys.argv[2]
+library = media + "/runtime/libsherpa-onnx-c-api.so"
+models = media + "/models"
+
+
+def recording():
+    # The Moonshine pack's test_wavs/0.wav is 24 kHz mono: the recognizer takes
+    # it at its own rate, and Silero gets it resampled to 16 kHz.
+    return sherpa.read_wav(media + "/fixtures/0.wav")
+
+
+def runtime_paths():
+    with open("/proc/self/maps") as maps:
+        return sorted({line.split()[-1] for line in maps if "libonnxruntime" in line or "libsherpa" in line})
+
+
+report = {"stage": stage, "versions": sherpa.version(library)}
+start = time.perf_counter()
+if stage == "vad":
+    samples, rate = recording()
+    samples = sherpa.resample(samples, rate, 16000)
+    vad = sherpa.Vad(models + "/silero_vad.onnx", library=library)
+    segments = []
+    for index in range(0, len(samples) - 511, 512):
+        vad.accept(samples[index:index + 512])
+        segments += vad.pop_segments()
+    vad.flush()
+    segments += vad.pop_segments()
+    report.update(segments=len(segments), speech_seconds=round(sum(len(s) for _, s in segments) / 16000, 3),
+                  audio_seconds=round(len(samples) / 16000, 3))
+elif stage == "moonshine":
+    samples, rate = recording()
+    folder = models + "/moonshine-tiny/"
+    recognizer = sherpa.OfflineRecognizer(folder + "encoder_model.ort", folder + "decoder_model_merged.ort",
+                                          folder + "tokens.txt", library=library)
+    loaded = time.perf_counter()
+    report.update(text=recognizer.transcribe(samples, rate), load_s_emulated=round(loaded - start, 3),
+                  audio_seconds=round(len(samples) / rate, 3), sample_rate=rate)
+    start = loaded
+elif stage == "piper":
+    folder = models + "/piper/"
+    tts = sherpa.OfflineTts(folder + "en_GB-alba-medium.onnx", folder + "tokens.txt", folder + "espeak-ng-data",
+                            library=library)
+    loaded = time.perf_counter()
+    seconds = tts.write(sys.argv[3], "/tmp/being-piper-smoke.wav", length_scale=1.0)
+    report.update(audio_seconds=round(seconds, 3), sample_rate=tts.sample_rate,
+                  load_s_emulated=round(loaded - start, 3))
+    start = loaded
+report["compute_s_emulated"] = round(time.perf_counter() - start, 3)
+report["runtime_paths"] = runtime_paths()
+print("SMOKE " + json.dumps(report), flush=True)
+'''
 
 
 def file_sha256(path):
-    with path.open("rb") as stream:
+    with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
@@ -34,46 +110,101 @@ def verified(path, entry):
     return path.is_file() and path.stat().st_size == entry["bytes"] and file_sha256(path) == entry["sha256"]
 
 
-def fetch_assets(assets, manifest):
+def check_manifest(manifest, downloads=None):
+    """Every asset's pin must match the download record, when there is one."""
+    if downloads is None or not downloads.is_file():
+        return
+    recorded = {item["name"]: item for item in json.loads(downloads.read_text())["files"]}
     for entry in manifest["assets"]:
-        path = assets / entry["path"]
-        if verified(path, entry):
-            continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as download:
-            partial = Path(download.name)
-        try:
-            subprocess.run(["curl", "--fail", "--location", "--silent", "--show-error", "--max-time", "120",
-                            "--output", partial, entry["url"]], check=True)
-            if not verified(partial, entry):
-                raise ValueError(f"unverified download for {path}")
-            partial.replace(path)
-        finally:
-            partial.unlink(missing_ok=True)
+        item = recorded.get(entry["path"])
+        if item is None or (item["sha256"], item["size_bytes"]) != (entry["sha256"], entry["bytes"]):
+            raise ValueError(f"{entry['path']} is not pinned the same as in {downloads}")
+
+
+def _safe(relative):
+    path = PurePosixPath(relative)
+    if path.is_absolute() or ".." in path.parts or not path.parts:
+        raise ValueError(f"unsafe path {relative!r}")
+    return Path(*path.parts)
+
+
+def _copy_member(archive, member, destination):
+    if not member.isfile():
+        raise ValueError(f"expected a regular file for {member.name}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with archive.extractfile(member) as source, destination.open("wb") as target:
+        shutil.copyfileobj(source, target)
 
 
 def prepare_media(assets, media, manifest):
-    archive_name = RELEASE + ".tar.bz2"
+    """Stage the verified runtime, models and recording into `media`."""
+    assets, media = Path(assets), Path(media)
     for entry in manifest["assets"]:
-        relative = Path(entry["path"])
-        source = assets / relative
+        source = assets / _safe(entry["path"])
         if not verified(source, entry):
-            raise ValueError(f"unverified fixture {relative}")
-        if str(relative) != archive_name:
-            destination = media / relative
+            raise ValueError(f"missing or unverified asset {entry['path']}")
+        if "copy" in entry:
+            destination = media / _safe(entry["copy"])
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, destination)
+            continue
+        prefix = entry["prefix"]
+        with tarfile.open(source, "r:bz2") as archive:
+            members = {member.name: member for member in archive.getmembers()}
+            for inner, target in entry.get("extract", {}).items():
+                member = members.get(posixpath.join(prefix, inner))
+                if member is None:
+                    raise ValueError(f"{entry['path']} has no {inner}")
+                _copy_member(archive, member, media / _safe(target))
+            for inner, target in entry.get("extract_tree", {}).items():
+                root = posixpath.join(prefix, inner) + "/"
+                found = False
+                for name, member in members.items():
+                    if not name.startswith(root):
+                        continue
+                    found = True
+                    relative = _safe(name[len(root):])
+                    if member.isdir():
+                        (media / _safe(target) / relative).mkdir(parents=True, exist_ok=True)
+                    elif member.isfile():
+                        _copy_member(archive, member, media / _safe(target) / relative)
+                    else:
+                        raise ValueError(f"{name} is neither a file nor a folder")
+                if not found:
+                    raise ValueError(f"{entry['path']} has no {inner}/")
+    package = media / "py/mind"
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "__init__.py").write_text("")
+    shutil.copyfile(BINDINGS, package / "sherpa.py")
+    (media / "py/guest.py").write_text(GUEST_SCRIPT)
+    return media
 
-    with tarfile.open(assets / archive_name, "r:bz2") as archive:
-        for relative in ("bin/sherpa-onnx", "lib/libonnxruntime.so"):
-            member = archive.getmember(f"{RELEASE}/{relative}")
-            if not member.isfile():
-                raise ValueError(f"expected a regular file for {relative}")
-            destination = media / "runtime" / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with archive.extractfile(member) as source, destination.open("wb") as target:
-                shutil.copyfileobj(source, target)
-            destination.chmod(0o755)
+
+def guest_command(stage):
+    command = (f"cd /tmp && PYTHONPATH={GUEST_MEDIA}/py PYTHONDONTWRITEBYTECODE=1 "
+               f"python3 {GUEST_MEDIA}/py/guest.py {GUEST_MEDIA} {stage}")
+    return command + (f" '{SENTENCE}'" if stage == "piper" else "")
+
+
+def judge(stage, status, output):
+    """The stage's verdict from its exit status and SMOKE line."""
+    result = {"stage": stage, "status": status, "sigill": status == SIGILL_STATUS}
+    lines = [line[len(MARK):] for line in output.splitlines() if line.startswith(MARK)]
+    if status or len(lines) != 1:
+        result.update(passed=False, log=output[-4000:])
+        return result
+    report = json.loads(lines[0])
+    result.update(report)
+    expected = f"{GUEST_MEDIA}/runtime/"
+    paths = report.get("runtime_paths", [])
+    loaded_here = bool(paths) and all(posixpath.normpath(path).startswith(expected) for path in paths)
+    ok = {"vad": lambda: report.get("segments", 0) >= 1,
+          "moonshine": lambda: bool(report.get("text", "").strip()),
+          "piper": lambda: report.get("audio_seconds", 0) > 0}[stage]()
+    result["passed"] = bool(ok and loaded_here)
+    if not loaded_here:
+        result["error"] = "the guest loaded a different sherpa-onnx or ONNX Runtime"
+    return result
 
 
 def output(vm, command, timeout=30):
@@ -92,33 +223,6 @@ def check_cpu(vm):
     return {"arch": arch, "flags": sorted(flags)}
 
 
-def recognize(vm, mode, timeout):
-    suffix = MODELS[mode]
-    runtime = f"{GUEST_MEDIA}/runtime"
-    model_dir = f"{GUEST_MEDIA}/models"
-    command = ["env", f"LD_LIBRARY_PATH={runtime}/lib", f"{runtime}/bin/sherpa-onnx",
-               "--num-threads=1", "--provider=cpu", "--enable-endpoint=false",
-               f"--tokens={model_dir}/tokens.txt",
-               f"--encoder={model_dir}/encoder-epoch-99-avg-1{suffix}.onnx",
-               f"--decoder={model_dir}/decoder-epoch-99-avg-1.onnx",
-               f"--joiner={model_dir}/joiner-epoch-99-avg-1{suffix}.onnx",
-               f"{GUEST_MEDIA}/fixtures/0.wav"]
-    log = output(vm, shlex.join(command), timeout=timeout)
-    load = re.search(r"Recognizer created in ([\d.]+) s", log)
-    texts = []
-    for line in log.splitlines():
-        if line.strip().startswith("{"):
-            try:
-                result = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(result, dict) and isinstance(result.get("text"), str):
-                texts.append(result["text"])
-    if load is None or len(texts) != 1 or "yellow lamps" not in texts[0].casefold():
-        raise RuntimeError(f"{mode}: missing recognizer initialization or expected decoded speech\n{log}")
-    return {"configuration": mode, "load_s_emulated": float(load[1]), "transcript": texts[0], "log": log}
-
-
 def checkpoint(path, report):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".part")
@@ -135,29 +239,38 @@ def terminated(_signum, _frame):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--assets", type=Path, default=ASSETS)
     parser.add_argument("--image", type=Path, default=ROOT / "out/images/beingos-ivybridge.img")
-    parser.add_argument("--output", type=Path, default=ASSETS / "ivybridge-smoke.json")
-    parser.add_argument("--budget", type=int, default=420)
-    parser.add_argument("--decode-timeout", type=int, default=135)
-    parser.add_argument("--fetch-only", action="store_true", help="stage and verify the pinned public assets")
+    parser.add_argument("--output", type=Path, default=ROOT / "out/sherpa-avx/ivybridge-smoke.json")
+    parser.add_argument("--budget", type=int, default=1200)
+    parser.add_argument("--stage-timeout", type=int, default=420)
+    parser.add_argument("--prepare-only", type=Path, metavar="DIR",
+                        help="stage and verify the media into DIR without booting a VM")
+    parser.add_argument("--fetch-only", action="store_true",
+                        help="verify the pinned assets in out/voice (nothing is downloaded)")
     args = parser.parse_args()
     manifest = json.loads(MANIFEST.read_text())
+    check_manifest(manifest, args.assets / "DOWNLOADS.json")
     if args.fetch_only:
-        fetch_assets(args.assets, manifest)
+        bad = [entry["path"] for entry in manifest["assets"] if not verified(args.assets / entry["path"], entry)]
+        if bad:
+            raise SystemExit("missing or unverified: " + ", ".join(bad))
+        print("All pinned speech assets are present and verified.")
         return
-    if args.budget < 1 or args.decode_timeout < 1 or not args.image.is_file():
+    if args.prepare_only:
+        prepare_media(args.assets, args.prepare_only, manifest)
+        print(f"Staged the speech smoke media in {args.prepare_only}")
+        return
+    if args.budget < 1 or args.stage_timeout < 1 or not args.image.is_file():
         parser.error("an existing image and positive time limits are required")
-    report = {"scope": "Ivy Bridge TCG compatibility, CPU-only upstream WAV CLI, no audio capture",
-              "image": str(args.image.resolve()), "image_sha256": file_sha256(args.image),
-              "provenance": manifest, "qemu_cpu": "IvyBridge", "tests": [], "passed": False}
+    report = {"scope": manifest["scope"], "image": str(args.image.resolve()),
+              "image_sha256": file_sha256(args.image), "provenance": manifest, "qemu_cpu": "IvyBridge",
+              "stages": [], "passed": False}
     with tempfile.TemporaryDirectory(prefix="being-sherpa-media-", dir="/tmp") as folder:
-        media = Path(folder)
-        prepare_media(args.assets, media, manifest)
-        runtime = media / "runtime"
-        report["elf_sha256"] = {str(path.relative_to(runtime)): file_sha256(path)
-                                 for path in (runtime / "bin/sherpa-onnx", runtime / "lib/libonnxruntime.so")}
+        media = prepare_media(args.assets, Path(folder), manifest)
+        report["runtime_sha256"] = {name: file_sha256(media / "runtime" / name)
+                                    for name in ("libsherpa-onnx-c-api.so", "libonnxruntime.so")}
         vm = VM(image=args.image, update_media=f"fat:ro:{media}", memory="2G", threads="single")
         signal.signal(signal.SIGALRM, expired)
         signal.signal(signal.SIGTERM, terminated)
@@ -167,30 +280,24 @@ def main():
             vm.login(timeout=120)
             output(vm, '(for device in /sys/class/net/*; do iface=${device##*/}; '
                    '[ "$iface" = lo ] || ip link set "$iface" down || exit 1; done)')
-            output(vm, "systemctl stop --no-block being-mind being-cortex")
+            output(vm, "systemctl stop --no-block being-mind being-cortex being-voice")
             report["guest_cpu"] = check_cpu(vm)
             output(vm, f"mount -t vfat -o ro /dev/vda1 {GUEST_MEDIA}")
-            report["guest_elf_sha256"] = output(
-                vm, f"cd {GUEST_MEDIA}/runtime && sha256sum bin/sherpa-onnx lib/libonnxruntime.so", timeout=50
-            ).splitlines()
-            if {path: digest for digest, path in (line.split() for line in report["guest_elf_sha256"])} != report["elf_sha256"]:
-                raise RuntimeError("guest loaded different executable or ONNX Runtime bytes")
-            report["loader"] = output(
-                vm, f"LD_LIBRARY_PATH={GUEST_MEDIA}/runtime/lib /lib64/ld-linux-x86-64.so.2 "
-                    f"--list {GUEST_MEDIA}/runtime/bin/sherpa-onnx"
-            )
-            library = re.search(r"^\s*libonnxruntime\.so\s*=>\s*(/\S+)", report["loader"], re.MULTILINE)
-            expected = f"{GUEST_MEDIA}/runtime/lib/libonnxruntime.so"
-            if library is None or posixpath.normpath(library[1]) != expected:
-                raise RuntimeError("loader did not select the pinned ONNX Runtime library")
+            guest = output(vm, f"cd {GUEST_MEDIA}/runtime && sha256sum libsherpa-onnx-c-api.so libonnxruntime.so",
+                           timeout=60).splitlines()
+            if {name: digest for digest, name in (line.split() for line in guest)} != report["runtime_sha256"]:
+                raise RuntimeError("the guest sees different sherpa-onnx or ONNX Runtime bytes")
             checkpoint(args.output, report)
-            print("Verified Ivy Bridge flags, exact executable, and loaded ONNX Runtime", flush=True)
-            for mode in MODELS:
-                result = recognize(vm, mode, args.decode_timeout)
-                report["tests"].append(result)
+            print("Verified Ivy Bridge flags and the exact runtime bytes", flush=True)
+            for stage in STAGES:
+                status, log = vm.run(guest_command(stage), args.stage_timeout)
+                result = judge(stage, status, log)
+                report["stages"].append(result)
                 checkpoint(args.output, report)
-                print(f"{mode}: {result['transcript']}", flush=True)
-            report["passed"] = True
+                verdict = "SIGILL" if result["sigill"] else "passed" if result["passed"] else "failed"
+                print(f"{stage}: {verdict}" + (f" ({result['text']!r})" if result.get("text") else ""), flush=True)
+            report["sigill"] = any(stage["sigill"] for stage in report["stages"])
+            report["passed"] = all(stage["passed"] for stage in report["stages"])
         except Exception as error:
             report["error"] = str(error)
             raise
@@ -198,6 +305,8 @@ def main():
             signal.setitimer(signal.ITIMER_REAL, 0)
             vm.destroy()
             checkpoint(args.output, report)
+    if not report["passed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

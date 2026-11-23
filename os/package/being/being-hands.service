@@ -11,7 +11,10 @@ StartLimitIntervalSec=0
 
 [Service]
 EnvironmentFile=/etc/being/env
-Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+# The image ships precompiled bytecode (unchecked-hash .pyc), so Python loads
+# it instead of compiling every module at each start; /usr is read-only, so
+# nothing is ever written back.
+Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 -m mind.hands --bus ${BEING_BUS}
 # Renderer frames, owned by being-panel; hands' own key socket, root only.
 RuntimeDirectory=being-hands being-panel
@@ -21,8 +24,10 @@ ExecStartPre=/bin/chmod 0750 /run/being-panel
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=5
-# Typing and relaying must never take the CPU from the face or the voice.
+# Typing and relaying must never take the CPU from the face or the voice
+# (face, voice and brainstem have CPUWeight=1000, the cortex 100).
 Nice=10
+CPUWeight=20
 MemoryHigh=96M
 MemoryMax=128M
 # hands starts the caged shells as transient units (systemd-run), reaches

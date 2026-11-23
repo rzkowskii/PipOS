@@ -44,7 +44,7 @@ class VerifiedWarmup(unittest.IsolatedAsyncioTestCase):
         rendered = (await self.respond("POST", "/apply-template", final))["prompt"]
         self.assertEqual(cached, tuple(token_ids(USER_HEADER)[:-1]))
         self.assertEqual(list(cached), token_ids(rendered)[:len(cached)])
-        self.assertEqual(self.primes(), [{"prompt": list(cached), "n_predict": 0, "cache_prompt": True}])
+        self.assertEqual(self.primes(), [{"prompt": list(cached), "n_predict": 0, "cache_prompt": True, "id_slot": 0}])
 
     async def test_ambiguous_template_boundary_skips_warmup(self):
         async def duplicate_marker(method, path, body):
@@ -82,3 +82,39 @@ class VerifiedWarmup(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "max_tokens must be a positive integer"):
             await self.cortex.warm_prefix(IDENTITY, max_tokens=-1)
         self.requests.assert_not_awaited()
+
+    async def test_prime_boundary_reads_only_up_to_the_next_user_header(self):
+        reply = {"role": "assistant", "content": "[joy] Hello."}
+
+        async def with_reply(method, path, body):
+            if path == "/apply-template":
+                self.assertEqual(body["messages"][:-1], [*IDENTITY, reply])
+                content = body["messages"][-1]["content"]
+                return {"prompt": USER_HEADER + "[joy] Hello.<|end|>\n<|user|>\n" + content + "<|end|>\n<|assistant|>\n"}
+            return await self.respond(method, path, body)
+
+        self.requests.side_effect = with_reply
+        primed = await self.cortex.prime_boundary([*IDENTITY, reply])
+        boundary = USER_HEADER + "[joy] Hello.<|end|>\n<|user|>\n"
+        self.assertEqual(primed, tuple(token_ids(boundary)[:-1]))
+        self.assertEqual(self.primes(), [{"prompt": list(primed), "n_predict": 0, "cache_prompt": True, "id_slot": 0}])
+
+    async def test_prime_boundary_needs_a_reply_last_and_respects_its_limit(self):
+        self.assertEqual(await self.cortex.prime_boundary(IDENTITY), ())
+        self.requests.assert_not_awaited()
+        reply = [*IDENTITY, {"role": "assistant", "content": "[joy] Hi."}]
+
+        async def with_reply(method, path, body):
+            if path == "/apply-template":
+                content = body["messages"][-1]["content"]
+                return {"prompt": USER_HEADER + "[joy] Hi.<|end|>\n<|user|>\n" + content + "<|end|>\n"}
+            return await self.respond(method, path, body)
+
+        self.requests.side_effect = with_reply
+        self.assertEqual(await self.cortex.prime_boundary(reply, max_tokens=4), ())
+        self.assertEqual(self.primes(), [])
+        with self.assertRaises(ValueError):
+            await self.cortex.prime_boundary(reply, max_tokens=0)
+        self.cortex.llama = False
+        self.assertEqual(await self.cortex.prime_boundary(reply), ())
+

@@ -13,10 +13,22 @@ EnvironmentFile=/etc/being/env
 # Draw straight to the screen: there is no window system.
 Environment=SDL_VIDEODRIVER=kmsdrm
 Environment=BEING_LOCAL_SETUP=1
+# A writable shader cache (ProtectHome hides /root/.cache), kept in RAM across
+# face restarts so a restarted face does not compile its shaders again.
+Environment=MESA_SHADER_CACHE_DIR=/run/being/mesa MESA_SHADER_CACHE_MAX_SIZE=16M
+RuntimeDirectory=being/mesa
+RuntimeDirectoryPreserve=yes
 ExecCondition=/usr/libexec/being-screen-mode face
 ExecStart=/usr/bin/being-face --fullscreen --bus ${BEING_BUS}
 Restart=always
 RestartSec=300ms
+# Every frame tells systemd the face is alive (at least 5 frames a second,
+# even dark); a frame loop stuck for 5 s is restarted.
+WatchdogSec=5s
+NotifyAccess=main
+TimeoutAbortSec=2s
+# The eyes never wait for the model or the night's work.
+CPUWeight=1000
 # Only limits that cannot stop the eyes: the face is the KMS master and its
 # F2 menu runs Setup, which needs the network and the disks.
 NoNewPrivileges=yes

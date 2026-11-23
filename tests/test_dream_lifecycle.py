@@ -27,6 +27,11 @@ class DreamLifecycle(test_mind.MindCase):
         self.bus.push("body.lid", closed=False, seq=3)
         self.bus.push("state.changed", state="waking")
 
+    def subject(self):
+        """What "forget that" would act on, as (kind, key)."""
+        subject = self.mind._last_memory
+        return None if subject is None else (subject.kind, subject.key)
+
     def entries(self):
         return journal(self.memory.db, "Richard")
 
@@ -134,19 +139,19 @@ class DreamLifecycle(test_mind.MindCase):
 
         request = "What did I mention about the amber trail?"
         await self.hear(request, 1)
-        self.assertEqual(self.mind._last_memory, ("episode", partial))
+        self.assertEqual(self.subject(), ("episode", partial))
 
         self.consent.touch()
         await self.overnight_pass()
         self.open_lid()
         self.bus.sent.clear()
         await self.hear(request, 1)
-        self.assertEqual(self.mind._last_memory, ("episode", archive))
+        self.assertEqual(self.subject(), ("episode", archive))
         self.assertIn("cedar shelf", test_mind.said(self.bus))
 
         self.consent.unlink()
         await self.hear(request, 2)
-        self.assertEqual(self.mind._last_memory, ("episode", partial))
+        self.assertEqual(self.subject(), ("episode", partial))
         self.assertEqual(self.bus.of("mind.dream_committed"), [])
 
     async def test_empty_journal_and_rejected_commit_do_not_signal_a_dream(self):

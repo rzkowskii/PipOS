@@ -6,8 +6,11 @@ RequiresMountsFor=/mind
 
 [Service]
 EnvironmentFile=/etc/being/env
-Environment=SDL_VIDEODRIVER=kmsdrm PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+Environment=SDL_VIDEODRIVER=kmsdrm PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1
 Environment=BEING_SCREEN_DIR=/run/being-screen
+# The Try menu draws with the GPU too. It shares the face's shader cache (the
+# two never run at once); without it Mesa warns that /root/.cache is read-only.
+Environment=MESA_SHADER_CACHE_DIR=/run/being/mesa MESA_SHADER_CACHE_MAX_SIZE=16M
 RuntimeDirectory=being-screen
 RuntimeDirectoryMode=0700
 ExecStart=/usr/bin/being-console /usr/bin/python3 -m mind.local_screen

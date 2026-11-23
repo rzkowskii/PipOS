@@ -7,7 +7,7 @@ After=being-brainstem.service
 
 [Service]
 EnvironmentFile=/etc/being/env
-Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 /usr/lib/being/sim/body.py --silent --bus ${BEING_BUS} --config /etc/being
 StandardInput=tty
 StandardOutput=tty

@@ -1,9 +1,14 @@
 # First boot on the MacBook
 
-One page for the first PipOS boot on the 13-inch MacBook Pro (mid-2012,
-MacBookPro9,2). It writes the frozen Try stick, boots it, runs a short script
-and brings the logs back. **Nothing is written to the Mac's internal disk.**
-Do not pick "Install PipOS" on this round.
+One page for the first PipOS boots on the 13-inch MacBook Pro (mid-2012,
+MacBookPro9,2). It writes a Try stick, boots it, runs a short script and
+brings the logs back. **Nothing is written to the Mac's internal disk.**
+Do not pick "Install PipOS" on these rounds.
+
+Round 1 (sections 1 to 7) ran on 23 November 2026 with the frozen stick: Pip
+heard "Hey Pip" but could not make out the words after it. Round 2
+([section 8](#8-round-2-hearing-typing-and-speed)) needs a new stick built
+from the current source, and tests the fixes.
 
 ## 1. The file to write
 
@@ -61,12 +66,15 @@ does not unmount before its read-back: if it reports MISMATCH, run the
 | Try PipOS (safe graphics) | **s** | If the boot-messages entry shows graphics (i915) errors or a garbled screen |
 
 3. The Try menu says Hello. Press **1** (Try PipOS) to meet the being. **F2**
-   (hold **fn**) brings the menu back later; **Q** leaves it.
+   (on the first stick, hold **fn**) brings the menu back later; **Q** leaves it.
 4. **Talking.** Say **"Hey Pip"**, pause until the eyes brighten, *then* talk.
    "Say hello" alone does nothing on this image.
-5. **Keys.** The top row sends media keys unless you hold **fn**: fn+F2 is the
-   menu, fn+F10 or **M** mutes, **Esc** interrupts a reply, fn+F9 recovers a
-   face that has no lid reading.
+5. **Keys.** On the first stick the top row sent media keys unless you held
+   **fn**: fn+F2 was the menu, fn+F10 or **M** muted, fn+F9 recovered a face
+   with no lid reading. Every Try entry on a round-2 stick boots with
+   `hid_apple.fnmode=2`, so the top row sends F1-F12 itself: **F2** is the
+   menu, **F10** or **M** mutes, **F9** recovers the face. **Esc** interrupts
+   a reply on both.
 6. **Shutting down.** A short press of the power button. Holding it (a hard
    power-off) loses the last few seconds of the log.
 
@@ -124,3 +132,69 @@ prompt and decode speeds.
 
 `journal.txt` may hold what you said to Pip and nearby Wi-Fi names, so keep
 the folder private.
+
+## 8. Round 2: hearing, typing and speed
+
+Round 2 uses a new Try stick built from the current source. Its file name,
+size and SHA-256 come with it, in `SHA256SUMS` beside the image. Write and
+check it exactly as in sections 1 and 2, on a spare stick. The frozen round-1
+stick stays as it is.
+
+### What is new on this stick
+
+- **The top row sends F-keys.** Press **F2** on its own for the menu, and
+  **F10** to mute. Hold **fn** only for brightness and volume. If F2 changes
+  the brightness instead, hold fn and tell us.
+- **Typing to Pip.** F2, then **6** "Talk to Pip by typing". What you type is
+  answered on screen and out loud. **Esc** leaves it.
+- **Space to attend.** While the eyes rest, press **Space** or **Return**, or
+  click the trackpad, and Pip listens as if you had said "Hey Pip". This does
+  nothing while the terminal panel has the keyboard or while Pip is muted.
+- **Pip owns up.** If it hears you but cannot make out the words, it says
+  "Sorry, I didn't catch that." and squints for a moment. The second time
+  within 10 minutes it adds how to type to it.
+- **The microphone is set up at start.** Capture level and boost are set
+  before the ears start, and a quiet microphone gets a software lift.
+
+### The GRUB menu
+
+GRUB shows six entries for 5 seconds. The keys are lower-case letters.
+
+| Entry | Key | When |
+|---|---|---|
+| Try PipOS | Return, or wait | First, always |
+| Try PipOS (show boot messages) | **v** | The screen stays black or the eyes never come |
+| Try PipOS (safe graphics) | **s** | The boot messages show i915 errors or a garbled screen |
+| Try PipOS (alternative microphone) | **m** | The first microphone set-up (codec fixup `mbp81`, and Pip picks the better channel) |
+| Try PipOS (alternative microphone 2) | **n** | The second microphone set-up (codec fixup `mbp101`, for the digital microphone pins) |
+| Try PipOS (measure speed) | **b** | Bench mode: Pip measures its models and voices on this laptop and saves the numbers with its logs |
+
+### The round-2 script (about 45 minutes)
+
+On AC, lid open, in a quiet room. Sit about 1 metre from the laptop. Keep the
+stopwatch and photograph anything odd.
+
+| # | Boot | Do | Note down |
+|---|---|---|---|
+| 1 | Return (default) | Wait until the eyes settle (about a minute) | Time from power button to the eyes |
+| 2 | default | "Hey Pip", wait for the chirp, then "What time is it?" | Was the answer right? Did it say "Sorry, I didn't catch that."? |
+| 3 | default | Do step 2 five times, then five times from 2 metres | How many of the ten worked |
+| 4 | default | Press **Space**, then say "What time is it?" without "Hey Pip" | Did the eyes brighten? Was it answered? |
+| 5 | default | F2, **6**, type `what time is it`, Return; then `remember that my cat is called Tom`; then `what do you remember about my cat`; then Esc | The replies, on screen and spoken |
+| 6 | default | "Hey Pip … how well can you hear me?" | The exact reply |
+| 7 | default | Short press of the power button | Time until it is off |
+| 8 | **m** | Steps 2, 3 and 6 again | Count and replies |
+| 9 | **n** | Steps 2, 3 and 6 again | Count and replies |
+| 10 | **b** | Leave it alone with the lid open and the charger in, until the PIPLOGS stick has a bench file in that boot's folder (or 30 minutes have passed), then press the power button briefly | Anything odd: fan, eyes, how long it took |
+
+Boot each entry by powering on with **Option** held, picking **EFI Boot** and
+pressing its key at the GRUB menu. Shut down with a short press of the power
+button between boots.
+
+### Bringing the logs back
+
+As in sections 6 and 7, but copy the `PIPLOGS` folder to
+`~/Developer/BeingOS/out/hardware-try/round2/`. Each boot has its own folder,
+so the microphone entries can be compared side by side. Keep the folder
+private: `journal.txt` may hold what you said and typed.
+
