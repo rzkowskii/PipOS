@@ -1,7 +1,7 @@
 <p align="center">
-  <img src="reference/mockup-face.webp" alt="Concept art: a 2012 MacBook Pro whose whole screen is a pair of glowing cyan eyes" width="720">
+  <img src="docs/pip-awake.webp" alt="A 2012 MacBook Pro whose whole screen is a pair of glowing cyan eyes that blink, glance and change expression" width="720">
   <br>
-  <sub>Concept art, from the original design. Pip first woke on the real laptop on 23 November 2026.</sub>
+  <sub>The eyes are Pip's real face, drawn by PipOS's own face program. The laptop around them is concept art. Pip first woke on the real one on 23 November 2026.</sub>
 </p>
 
 <h1 align="center">PipOS</h1>

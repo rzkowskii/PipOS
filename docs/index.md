@@ -1,7 +1,7 @@
 # PipOS documentation
 
 <p align="center">
-  <img src="expressions.png" alt="Six of Pip's expressions" width="640">
+  <img src="pip-awake.webp" alt="A laptop whose screen is Pip's animated eyes" width="640">
 </p>
 
 **PipOS** is the Persistent Intelligence Platform Operating System: an
