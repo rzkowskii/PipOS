@@ -517,7 +517,10 @@ case "$cmd" in
         check_space
         refresh_python_ssl
         refresh_stale
-        br_make being-rebuild all
+        # Two steps: with per-package directories a parallel "being-rebuild all"
+        # can assemble the image before the rebuild has installed.
+        br_make being-rebuild
+        br_make all
         mkdir -p out/images
         screen=${BEING_TRY_SCREEN:-0}
         if [ "$cmd" = try-screen ]; then
@@ -548,7 +551,10 @@ case "$cmd" in
         # The being package is a local source tree: rebuild it so the image
         # always holds the files that were tested.
         if [ "$#" -eq 0 ]; then
-            br_make being-rebuild all
+            # Two steps: with per-package directories a parallel "being-rebuild all"
+            # can assemble the image before the rebuild has installed.
+            br_make being-rebuild
+            br_make all
         else
             br_make "$@"
         fi
@@ -564,7 +570,10 @@ case "$cmd" in
         check_space
         refresh_python_ssl
         refresh_stale
-        br_make being-rebuild all
+        # Two steps: with per-package directories a parallel "being-rebuild all"
+        # can assemble the image before the rebuild has installed.
+        br_make being-rebuild
+        br_make all
         laptop_verify
         mkdir -p out/images
         # The laptop has no serial line, so its Try media always has the screen menu.
