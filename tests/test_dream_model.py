@@ -469,5 +469,45 @@ class Unit(unittest.TestCase):
         self.assertNotIn("WantedBy", self.text)
 
 
+class FixtureDays(unittest.TestCase):
+    """lab/bench_dream_days.py, the real-model run, scored against a fake server."""
+
+    def test_a_good_item_counts_towards_the_yield_and_an_invented_quote_is_caught(self):
+        from lab import bench_dream_days
+
+        def answer(body):
+            text = body["messages"][1]["content"]
+            found = re.search(r"\[E(\d+)\|owner\|[^\]]*\] (My sister Hannah is flying in from Perth on Saturday\.)",
+                              text)
+            items = [{"kind": "fact", "claim": "The owner owns a yacht.", "quote": "I own a yacht",
+                      "episode_id": "E1", "speaker": "owner", "modality": "stated", "time_ref": ""}]
+            if found:
+                items.append({"kind": "plan", "claim": "Hannah is flying in from Perth on Saturday.",
+                              "quote": found[2], "episode_id": f"E{found[1]}", "speaker": "owner",
+                              "modality": "stated", "time_ref": "Saturday"})
+            return json.dumps({"items": items})
+
+        server = FakeServer(answer)
+        try:
+            report = asyncio.run(bench_dream_days.run(server.port, ["2026-11-18"]))
+        finally:
+            server.close()
+        total = report["total"]
+        self.assertEqual(total["accepted"], 1)
+        self.assertEqual(total["gold_facts_found"], 1)
+        self.assertEqual(total["invented_quotes_after_verification"], 0)
+        self.assertEqual(total["invented_quotes_before_verification"], total["chunks"])
+        self.assertEqual(total["trap_items_accepted"], 0)
+        self.assertEqual(report["days"]["2026-11-18"]["candidates_saved"], 1)
+
+    def test_every_fixture_day_has_facts_and_traps(self):
+        from lab import bench_dream_days
+        self.assertEqual(len(bench_dream_days.DAYS), 3)
+        for lines in bench_dream_days.DAYS.values():
+            labels = [label for _, _, label in lines]
+            self.assertGreaterEqual(labels.count("fact"), 8)
+            self.assertGreaterEqual(labels.count("trap"), 4)
+
+
 if __name__ == "__main__":
     unittest.main()

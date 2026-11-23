@@ -154,6 +154,13 @@ ANNOUNCE_RETRY = 15.0
 # A yes or no question asked by a code skill (Reply.confirm) stays open this
 # long by default, for the person who was asked.
 CONFIRM_SECONDS = 15.0
+# How long a brightness command waits for the brainstem's answer before it
+# speaks. The brainstem writes sysfs and answers within milliseconds.
+BRIGHTNESS_ANSWER_S = 0.5
+# The embedding pack's check (model_pack.trusted) is tried this many times,
+# this far apart, before recall settles on words only until the next start.
+EMBED_CHECKS = 3
+EMBED_RECHECK_S = 610.0
 # The doctor's quiet pass (mind/doctor.py self_care): organs and hearing only,
 # about every 10 minutes while resting awake with the lid open.
 SELF_CARE_INTERVAL = 600.0
@@ -352,7 +359,9 @@ class Config:
     top_p: float | None = None
     presence_penalty: float | None = None
     # "open": any words after the tag. "strict": one or two bounded sentences
-    # (speech.STRICT_GRAMMAR). Measure with lab/model_audition.py first.
+    # (speech.STRICT_GRAMMAR); stories keep the open shape. config/being.json
+    # ships "strict" (lab/results/real-model-2026-11-24.json: 18/18 complete
+    # long answers against 16/18 open).
     reply_shape: str = "open"
     # Battery pleas: time to empty first, then percentage (being.json).
     battery_plea_percent: float = 15
@@ -595,6 +604,7 @@ class Mind:
         self._body_state = {}
         self._body_care = {}
         self._body_brightness = {}
+        self._brightness_answer = None  # a future while a brightness command waits
         self._muted = False  # state.changed "muted": the ears are switched off
         self._voice_level = {}
         self._boundary_task = None
@@ -610,6 +620,9 @@ class Mind:
         self._suffix = None  # a clause to add to this turn's next fixed reply
         self._night_registered = None  # the night tonight's jobs were built for
         self._power_command = self._run_power_command
+        # The embedding pack's check (model_pack.trusted): None while it runs.
+        self._embedder_ok = True
+        self._embed_check = None
 
     # -- small state -----------------------------------------------------
 
@@ -957,12 +970,13 @@ class Mind:
                     # A previous Mind may have stopped during a volatile session.
                     # Only accept an existing prefix with matching saved context.
                     self._erase_required = self._discard_cache = True
+            self._hold_embedder()
             await self.bus.start()
             watcher = asyncio.create_task(self._watch_cortex())
             while True:
                 await self._on_event(await self.bus.recv())
         finally:
-            running = [task for task in (watcher, self._turn, self._self_care_task)
+            running = [task for task in (watcher, self._turn, self._self_care_task, self._embed_check)
                        if task is not None and not task.done()]
             for task in running:
                 task.cancel()
@@ -975,6 +989,70 @@ class Mind:
                     self._guest_memory.close()
                 if self._session_memory is not None:
                     self._session_memory.close()
+
+    # -- the embedding pack ----------------------------------------------
+
+    def _embedding_files(self):
+        """The embedding model's files, when the embedder in use came from
+        the installed pack's place; None for no embedder or a development
+        copy elsewhere (the host tests, BEING_EMBED_DIR)."""
+        embed, packs = optional_module("embed"), optional_module("model_pack")
+        if embed is None or packs is None or not hasattr(packs, "trusted"):
+            return None
+        try:
+            directory = embed.model_dir()
+        except Exception:
+            return None
+        if directory is None:
+            return None
+        files = [Path(directory) / "model.safetensors", Path(directory) / "tokenizer.json"]
+        on_models = getattr(packs, "on_models", None)
+        return files if not callable(on_models) or on_models(files) else None
+
+    def _hold_embedder(self):
+        """Set the embedder aside until its pack verifies (model_pack.trusted),
+        in a worker thread: until then, and for good if it fails, recall
+        uses words only. The bus and the first turn never wait for it."""
+        memory = self._primary_memory
+        embedder = getattr(memory, "embedder", None)
+        if embedder is None:
+            return
+        files = self._embedding_files()
+        if files is None:
+            self._embedder_ok = True
+            return
+        self._embedder_ok = None
+        memory.embedder = None
+        self._embed_check = asyncio.create_task(self._verify_embedder(memory, embedder, files))
+
+    async def _verify_embedder(self, memory, embedder, files):
+        packs = optional_module("model_pack")
+        for attempt in range(EMBED_CHECKS):
+            if attempt:
+                # A check that failed once (openssl slow while the boot is
+                # busy) is tried again later; the pack keeps its own pause.
+                await asyncio.sleep(EMBED_RECHECK_S)
+            try:
+                ok, reason = await asyncio.to_thread(packs.trusted, "embeddings", files)
+            except Exception as exc:
+                ok, reason = False, repr(exc)
+            self._embedder_ok = ok is True
+            if ok is True:
+                break
+            if attempt == 0 or attempt == EMBED_CHECKS - 1:
+                log(f"the embedding model pack did not verify ({reason}); recall uses words only")
+        else:
+            return
+        if memory.embedder is None:
+            memory.embedder = embedder
+        if self._guest_memory is not None and self._guest_memory.embedder is None:
+            self._guest_memory.embedder = embedder
+
+    def _guest_embedder(self, memory):
+        """A new guest archive uses the embedder only once its pack is verified."""
+        if self._embedder_ok is not True and getattr(memory, "embedder", None) is not None:
+            memory.embedder = None
+        return memory
 
     async def shutdown(self):
         background = self._close_lid()
@@ -1293,6 +1371,11 @@ class Mind:
                 self.apps.observe(event)
             except Exception as exc:
                 log(f"workshop event not understood: {exc!r}")
+        if topic == "body.brightness":
+            # The answer a brightness command is waiting on, before it speaks.
+            waiting = self._brightness_answer
+            if waiting is not None and not waiting.done():
+                waiting.set_result({key: value for key, value in event.items() if key != "t"})
         if topic in DREAM_POLICY_EVENTS:
             self._dream_policy.observe(event)
         if topic in DREAM_INTERRUPTS or (
@@ -2176,9 +2259,29 @@ class Mind:
 
     async def _send_for_skill(self, topic, **fields):
         """A skill's bus message (brightness, a voice level request). Never
-        while the lid is closed."""
-        if self.lid_open:
+        while the lid is closed.
+
+        `being.brightness` waits up to BRIGHTNESS_ANSWER_S for the
+        brainstem's `body.brightness` and returns its fields (or None
+        without one), so the spoken reply says what really happened: at the
+        top, "That's as bright as I go." The face and the voice never wait:
+        only this turn does, for a fraction of a second."""
+        if not self.lid_open:
+            return None
+        if topic != "being.brightness":
             await self.bus.send(topic, **fields)
+            return None
+        answer = self._brightness_answer = asyncio.get_running_loop().create_future()
+        try:
+            await self.bus.send(topic, **fields)
+            async with asyncio.timeout(BRIGHTNESS_ANSWER_S):
+                return await asyncio.shield(answer)
+        except TimeoutError:
+            log("the brainstem did not answer about brightness in time")
+            return None
+        finally:
+            if self._brightness_answer is answer:
+                self._brightness_answer = None
 
     async def _everyday(self, text, speaker, heard_before):
         """Step 5: the first everyday skill that answers, or None."""
@@ -2712,9 +2815,11 @@ class Mind:
         episodes.update(m["episode_id"] for m in self.messages if m["role"] == "user" and m.get("episode_id") is not None)
         sources["episodes"] = sorted(episodes)
         self._said_all.clear()
-        grammar = STRICT_GRAMMAR if self.cfg.reply_shape == "strict" else GRAMMAR
-        # A story is told at length, clause by clause, for this turn only.
-        max_tokens = max(self.cfg.max_tokens, STORY_MAX_TOKENS) if _STORY.search(text) else self.cfg.max_tokens
+        # A story is told at length, clause by clause, for this turn only, so
+        # it keeps the open shape even when replies are held to two sentences.
+        story = bool(_STORY.search(text))
+        grammar = STRICT_GRAMMAR if self.cfg.reply_shape == "strict" and not story else GRAMMAR
+        max_tokens = max(self.cfg.max_tokens, STORY_MAX_TOKENS) if story else self.cfg.max_tokens
         overflowed = False
         # A script being written with the model is parked for this turn: the
         # conversation always has the model first.
@@ -2869,13 +2974,18 @@ class Mind:
         # The prompt keeps the reply as the model wrote it, so the next turn's
         # cache still matches; the archive keeps the cleaned, spoken words.
         # The cortex's own record of the generated text (think-filtered,
-        # byte for byte) is preferred, when a whole reply came out of one try.
+        # byte for byte) is kept whenever the whole reply was said: the stable
+        # chat template renders it exactly as generated, so the next turn's
+        # prompt shares its prefix with the cache (L7.2, L3.8). `stream` is
+        # the last try's, which is the one that was said. Only a reply cut
+        # short (an error, or the echo guard) keeps the words that were said.
         exact = getattr(stream, "raw", None)
-        if isinstance(exact, str) and exact.strip() and failed is None and not echoed and retries == 0:
-            generated = exact
+        if isinstance(exact, str) and exact.strip() and failed is None and not echoed:
+            content = exact
         else:
             generated = "".join(raw).strip()
-        content = generated if failed is None and generated and tags.emotion is not None else f"[{emotion}] {said}"
+            content = (generated if failed is None and generated and tags.emotion is not None
+                       else f"[{emotion}] {said}")
         self.messages.append({"role": "assistant", "content": content, **sources})
         reply_id = self._safe_record("said", said, self.cfg.name, emotion=emotion, reply_to=episode_id, **sources)
         if reply_id is not None:
@@ -2992,7 +3102,7 @@ class Mind:
             log(f"could not tell the workshop about guest mode: {exc!r}")
         self._log_action("guest.start" if entering else "guest.end")
         if entering:
-            self._guest_memory = self.memory = Memory(None)
+            self._guest_memory = self.memory = self._guest_embedder(Memory(None))
             reply = "Guest mode is on. I'll keep this conversation only for this guest session."
         else:
             self._guest_memory.close()
@@ -3832,12 +3942,20 @@ class Mind:
         return None
 
     def _eligible_night(self):
+        """Tonight's date while the night's work may run (asleep, lid shut,
+        on mains, cool enough, in the window), else None. Upkeep needs only
+        this; dreaming also needs the owner's consent (`_dreams_allowed`)."""
         if not self._durable_context:
             return None
         local_time = self.skills.now()
-        if self._dream_policy.eligible(local_time=local_time) and self._dream_consent.is_file():
+        if self._dream_policy.eligible(local_time=local_time):
             return local_time.date().isoformat()
         return None
+
+    def _dreams_allowed(self):
+        """The owner's dream consent (Care, Dreams): the journal and the
+        dream model run only with it, the night's upkeep without it too."""
+        return self._dream_consent.is_file()
 
     def _start_dream(self):
         now = time.monotonic()
@@ -3846,24 +3964,32 @@ class Mind:
                 or (self._turn is not None and not self._turn.done())):
             return
         night = self._eligible_night()
-        if night is None or night == self._dream_idle_night:
+        if night is None or (night, self._dreams_allowed()) == self._dream_idle_night:
+            return
+        if self.night_shift is None and not self._dreams_allowed():
+            # Without a night shift the night is the journal alone: a dream.
             return
         self._dream_next_at = now + DREAM_INTERVAL
         self._dream_task = asyncio.create_task(self._dream_batch(night))
 
     async def _dream_batch(self, night):
-        """One batch of the night's work, bracketed by mind.dreaming, so
-        bodycare can give "dreaming" as the reason it holds the package."""
+        """One batch of the night's work. With dream consent it is bracketed
+        by mind.dreaming, so bodycare can give "dreaming" as the reason it
+        holds the package; upkeep alone is "night" to bodycare, never a
+        dream that did not happen."""
         if self._eligible_night() != night:
             return
+        dreaming = self._dreams_allowed()
         try:
-            await self._send_dreaming(True)
+            if dreaming:
+                await self._send_dreaming(True)
             if self.night_shift is not None:
                 await self._night_step(night)
-            else:
+            elif dreaming:
                 await self._journal_batch(night)
         finally:
-            await self._send_dreaming(False)
+            if dreaming:
+                await self._send_dreaming(False)
 
     async def _send_dreaming(self, active):
         try:
@@ -3874,16 +4000,17 @@ class Mind:
     async def _journal_batch(self, night):
         """Without a night shift: the rule-based dream journal alone."""
         started = time.monotonic()
-        if self._eligible_night() != night:
+        if self._eligible_night() != night or not self._dreams_allowed():
             return
         try:
             batch = self._dreams.stage(self.cfg.owner, night=night)
             if batch is None:
-                self._dream_idle_night = night
+                self._dream_idle_night = (night, True)
                 return
             # Give the bus a chance to deliver wake, power, or lid events before committing.
             await asyncio.sleep(DREAM_YIELD)
-            if time.monotonic() - started <= DREAM_STAGE_BUDGET and self._eligible_night() == night:
+            if (time.monotonic() - started <= DREAM_STAGE_BUDGET and self._eligible_night() == night
+                    and self._dreams_allowed()):
                 published = self._dreams.publish(batch)
                 lid = self._latest_lid
                 if published and batch.sources and lid and lid.get("closed") is True and type(lid.get("seq")) is int:
@@ -3925,12 +4052,32 @@ class Mind:
         It asks before every chunk whether the night is still eligible."""
         if self._eligible_night() != night:
             return
+        if self._embedder_ok is None:
+            # The embedding pack's first check is still running (a start in
+            # the night): the vectors job would find no embedder and count
+            # itself done. The next batch, seconds later, carries on.
+            return
         shift = self.night_shift
         self._night_jobs(night)
         journal = getattr(shift, "jobs", {}).get("journal")
         published = getattr(journal, "published", 0)
+        module = optional_module("night_shift")
+        upkeep_only = getattr(module, "upkeep_only", None)
+        consented = self._dreams_allowed()
+
+        def eligible():
+            # Asked again before every chunk: the lid, the power, the window
+            # and the owner's consent can all change mid-night.
+            if self._eligible_night() != night:
+                return False
+            if self._dreams_allowed():
+                return True
+            # No consent: upkeep only. Without the gate type, nothing at all
+            # (a night shift that cannot tell dreams from upkeep never dreams).
+            return upkeep_only() if callable(upkeep_only) else False
+
         try:
-            await shift.step(lambda: self._eligible_night() == night, night=night)
+            await shift.step(eligible, night=night)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -3941,10 +4088,20 @@ class Mind:
                 and type(lid.get("seq")) is int):
             # Only a receipt for the current lid closure crosses the bus.
             await self.bus.send("mind.dream_committed", lid_seq=lid["seq"])
+        if consented != self._dreams_allowed():
+            return  # the consent changed mid-step: look again next time
+        settled = getattr(shift, "settled", None)
         done = getattr(shift, "done_tonight", None)
-        if callable(done) and set(getattr(shift, "jobs", {})) <= set(done()):
-            # Every job is finished for tonight: nothing more until tomorrow night.
-            self._dream_idle_night = night
+        if callable(settled):
+            finished = settled(dreams=consented)
+        else:
+            dreaming = getattr(module, "DREAMING", frozenset({"journal", "dream"}))
+            left = set(getattr(shift, "jobs", {})) - (set() if consented else set(dreaming))
+            finished = callable(done) and left <= set(done())
+        if finished:
+            # Every job it may run is finished for tonight: nothing more until
+            # tomorrow night, or until the owner's dream consent changes.
+            self._dream_idle_night = (night, consented)
 
     # -- keeping the context in bounds -------------------------------------
 

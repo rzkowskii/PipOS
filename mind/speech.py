@@ -17,7 +17,9 @@ GRAMMAR = (
 # The tighter reply shape (task 4.6): the tag, then one or two sentences of
 # bounded length that end in . ! or ?, with no new lines, brackets or markup.
 # A full stop inside a sentence is allowed only before a digit ("3.5").
-# Measure with lab/model_audition.py before making it the default.
+# The default since the audition of 24 November 2026 (config/being.json):
+# it never lowered the complete-reply rate, and it ended long answers at a
+# sentence where the open shape was cut off mid-word.
 SENTENCE_CHARS = 160
 STRICT_GRAMMAR = (
     'root ::= "[" emotion "] " sentence (" " sentence)?\n'

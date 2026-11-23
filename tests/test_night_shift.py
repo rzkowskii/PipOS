@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from mind.memory import Memory
-from mind.night_shift import ORDER, Gate, NightShift, VectorJob, standard_jobs
+from mind.night_shift import DREAMING, ORDER, Gate, NightShift, VectorJob, standard_jobs, upkeep_only
 
 OPEN = Gate(night=True, on_ac=True, body_ok=True)
 
@@ -104,6 +104,44 @@ class Gating(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await shift.step(gate), {"vectors": "waiting"})
         self.assertEqual(len(log), 3)
+
+    async def test_without_dream_consent_the_upkeep_runs_and_only_dreaming_waits(self):
+        log = []
+        shift = NightShift()
+        for name in ORDER:
+            shift.register(name, Recorder(name, log))
+        results = await shift.step(upkeep_only(), night="2026-11-24")
+        self.assertEqual(log, [name for name in ORDER if name not in DREAMING])
+        self.assertEqual({name for name, result in results.items() if result == "waiting"}, set(DREAMING))
+        self.assertEqual(DREAMING, {"journal", "dream"}, "the database check, vectors, backup and re-warm never wait")
+        self.assertTrue(shift.settled(dreams=False))
+        self.assertFalse(shift.settled(dreams=True), "consent given later: the dreams are still owed tonight")
+        # The owner says yes the same night: only the dreams are left to run.
+        await shift.step(OPEN, night="2026-11-24")
+        self.assertEqual(log[-2:], ["journal", "dream"])
+        self.assertTrue(shift.settled(dreams=True))
+
+    async def test_a_gate_without_consent_refuses_only_the_dreaming_jobs(self):
+        gate = Gate(night=True, on_ac=True, body_ok=True, dreams=False)
+        self.assertEqual([name for name in ORDER if not gate.allows(name)], ["journal", "dream"])
+        self.assertTrue(OPEN.allows("dream"), "a gate that does not mention consent keeps its old meaning")
+        self.assertFalse(upkeep_only(False).allows("checkpoint"))
+
+    async def test_consent_withdrawn_mid_night_stops_a_dream_at_the_next_chunk(self):
+        log = []
+        shift = NightShift()
+        shift.register("journal", Recorder("journal", log, chunks=5))
+        shift.register("rewarm", Recorder("rewarm", log))
+        asked = []
+
+        def gate():
+            asked.append(1)
+            return OPEN if len(asked) <= 2 else upkeep_only()
+
+        results = await shift.step(gate, night="2026-11-24")
+        self.assertEqual(results, {"journal": "waiting", "rewarm": "done"})
+        self.assertEqual(log, ["journal", "journal", "rewarm"])
+        self.assertTrue(shift.jobs["journal"].stopped, "a paused dream lets go of what it holds")
 
 
 class Interrupt(unittest.IsolatedAsyncioTestCase):

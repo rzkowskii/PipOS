@@ -9,10 +9,13 @@ autonomous AI Linux OS, in the making, that turns an old laptop into **Pip**, a 
 being with a face, a voice and a memory of its own. Everything runs on
 the machine.
 
-PipOS is a work in progress. It first booted on a real 2012 MacBook Pro
-on 23 November 2026, from a USB stick, and it is developed and tested in
-an emulated copy of that laptop. These
-pages describe what the code does now.
+PipOS is a work in progress. It is aiming for a being with a life of its
+own; nothing here claims or proves that Pip is sentient. It first booted
+on a real 2012 MacBook Pro on 23 November 2026, from a USB stick, where
+it heard its name but not yet the words after it. It is developed and
+tested in an emulated copy of that laptop and on the development Mac.
+[STATUS.md](../STATUS.md) says where it stands. These pages describe what
+the code does now.
 
 ## Start here
 

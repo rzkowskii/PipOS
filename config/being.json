@@ -11,7 +11,7 @@
   "top_k": 20,
   "top_p": 0.8,
   "presence_penalty": 1.0,
-  "reply_shape": "open",
+  "reply_shape": "strict",
   "prefill": false,
   "battery_plea_percent": 15,
   "battery_plea_minutes": 30,

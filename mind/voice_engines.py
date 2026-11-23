@@ -231,6 +231,21 @@ def _piper(voice_dir=None, library=None):
     return PiperEngine(voice_dir or DEFAULT_VOICE, library=library)
 
 
+def verified(engine):
+    """(ok, reason) from an engine's signed-pack check (mind/model_pack.py),
+    or (True, None) for an engine without one. Blocking the first time."""
+    check = getattr(engine, "verified", None)
+    if not callable(check):
+        return True, None
+    try:
+        result = check()
+    except Exception as error:  # a check that cannot run refuses the pack
+        return False, f"the check failed: {error!r}"
+    if isinstance(result, tuple) and len(result) == 2:
+        return result[0] is True, result[1]
+    return result is True, None
+
+
 def tts_key(build, engine):
     return key(build, f"piper:{engine.voice_dir.name}:{engine.label().lower()}")
 
@@ -253,6 +268,11 @@ def choose_tts(preference=None, *, state_dir, build=None, voice_dir=None, engine
     owned = engine is None
     if not piper.available():
         return _flite(), "The natural voice is not installed. Using the original voice."
+    trusted, reason = verified(piper)
+    if not trusted:
+        if owned:
+            _unload(piper)
+        return _flite(), f"The natural voice's model pack did not verify ({reason}). Using the original voice."
     if preference == "piper":
         return piper, None
     build = build or build_id()
@@ -311,6 +331,11 @@ async def refresh_tts(current, preference=None, *, state_dir, build=None, voice_
         return None
     piper = engine or (current if getattr(current, "name", None) == "piper" else _piper(voice_dir, library))
     if not piper.available():
+        return None
+    # The pack check may hash the voice the first time: never on the event loop.
+    if not (await asyncio.to_thread(verified, piper))[0]:
+        if piper is not current:
+            _unload(piper)
         return None
     build = build or build_id()
     record_key = tts_key(build, piper)

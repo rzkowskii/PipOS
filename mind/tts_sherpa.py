@@ -13,6 +13,7 @@ that clause with Flite instead.
 import asyncio
 import json
 import re
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -86,6 +87,18 @@ class PiperEngine:
     def available(self):
         return not self.missing()
 
+    def verified(self):
+        """(ok, reason): the voice's files belong to its signed pack
+        (mind/model_pack.py), when they are on /models. Blocking the first
+        time (it may hash the pack), so it runs on a worker thread."""
+        try:
+            from . import model_pack
+        except ImportError:  # an image without pack checks loads what it has
+            return True, None
+        files = self.files()
+        paths = [files[name] for name in ("model", "card", "tokens", "data") if files[name] is not None]
+        return model_pack.trusted("tts", paths or [self.voice_dir])
+
     def label(self):
         """'Alba' for the bundled voice, from its model card when it can be read."""
         card = self.files()["card"]
@@ -104,6 +117,12 @@ class PiperEngine:
         files = self.files()
         if files["model"] is None:
             raise sherpa.Unavailable(f"no single Piper voice in {self.voice_dir}")
+        ok, reason = self.verified()
+        if not ok:
+            # Nothing unverified is ever loaded: the voice organ speaks with Flite.
+            print(f"voice: the natural voice's model pack did not verify ({reason}); using Flite",
+                  file=sys.stderr, flush=True)
+            raise sherpa.Unavailable(f"its model pack did not verify ({reason})")
         return sherpa.OfflineTts(files["model"], files["tokens"], files["data"], threads=self.threads,
                                  library=self.library)
 

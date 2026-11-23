@@ -1,0 +1,607 @@
+{
+  "date": "2026-11-24",
+  "scope": "Real models on the Mac, in the builder container (aarch64 llama-server 1.0.0-dev, 4 threads). Laptop timings differ; token counts and reply text do not depend on the CPU.",
+  "models": {
+    "reflex": "out/models/reflex.gguf (Qwen3.5-0.8B-Q4_K_M, sha256 bd258782...)",
+    "dream": "out/models/dream/Qwen3-1.7B-Q4_K_M.gguf",
+    "embeddings": "out/models/embeddings/blink-8M"
+  },
+  "L7.2_stable_chat_template": {
+    "harness": "python3 -m lab.turn_latency --cortex http://127.0.0.1:8377 --conversation",
+    "server": "--ctx-size 8192 --parallel 2 --cache-ram 0 --no-cache-idle-slots --reasoning-budget 0, LLAMA_ARG_BATCH/UBATCH 512, LLAMA_ARG_CTX_CHECKPOINTS 6, --chat-template-file config/chat-template.jinja",
+    "tolerance_tokens": 2,
+    "plain": {
+      "turns": [
+        {
+          "turn": 1,
+          "prompt_n": 272,
+          "cache_n": 0,
+          "user_block": 272,
+          "primed_before": 0,
+          "expected": 272,
+          "within_tolerance": true
+        },
+        {
+          "turn": 2,
+          "prompt_n": 42,
+          "cache_n": 282,
+          "user_block": 42,
+          "primed_before": 0,
+          "expected": 42,
+          "within_tolerance": true
+        },
+        {
+          "turn": 3,
+          "prompt_n": 43,
+          "cache_n": 335,
+          "user_block": 43,
+          "primed_before": 0,
+          "expected": 43,
+          "within_tolerance": true
+        },
+        {
+          "turn": 4,
+          "prompt_n": 41,
+          "cache_n": 390,
+          "user_block": 41,
+          "primed_before": 0,
+          "expected": 41,
+          "within_tolerance": true
+        },
+        {
+          "turn": 5,
+          "prompt_n": 41,
+          "cache_n": 441,
+          "user_block": 41,
+          "primed_before": 0,
+          "expected": 41,
+          "within_tolerance": true
+        },
+        {
+          "turn": 6,
+          "prompt_n": 39,
+          "cache_n": 492,
+          "user_block": 39,
+          "primed_before": 0,
+          "expected": 39,
+          "within_tolerance": true
+        }
+      ],
+      "turns_2_6_within_tolerance": true
+    },
+    "result": "pass: turns 2-6 read exactly the new user block (0 tokens off), 42/43/41/41/39 tokens",
+    "control_model_own_template": {
+      "plain_turns_2_6_prompt_n": [
+        52,
+        54,
+        59,
+        47,
+        55
+      ],
+      "user_blocks": [
+        42,
+        43,
+        41,
+        41,
+        39
+      ],
+      "turns_2_6_within_tolerance": false,
+      "note": "with the GGUF's own template each turn re-reads part of the previous reply: 6-18 extra tokens per turn"
+    }
+  },
+  "L7.3_prime_boundary": {
+    "primed": {
+      "turns": [
+        {
+          "turn": 1,
+          "prompt_n": 272,
+          "cache_n": 0,
+          "user_block": 272,
+          "primed_before": 0,
+          "expected": 272,
+          "within_tolerance": true
+        },
+        {
+          "turn": 2,
+          "prompt_n": 37,
+          "cache_n": 287,
+          "user_block": 42,
+          "primed_before": 5,
+          "expected": 37,
+          "within_tolerance": true
+        },
+        {
+          "turn": 3,
+          "prompt_n": 38,
+          "cache_n": 340,
+          "user_block": 43,
+          "primed_before": 5,
+          "expected": 38,
+          "within_tolerance": true
+        },
+        {
+          "turn": 4,
+          "prompt_n": 36,
+          "cache_n": 395,
+          "user_block": 41,
+          "primed_before": 5,
+          "expected": 36,
+          "within_tolerance": true
+        },
+        {
+          "turn": 5,
+          "prompt_n": 36,
+          "cache_n": 446,
+          "user_block": 41,
+          "primed_before": 5,
+          "expected": 36,
+          "within_tolerance": true
+        },
+        {
+          "turn": 6,
+          "prompt_n": 34,
+          "cache_n": 497,
+          "user_block": 39,
+          "primed_before": 5,
+          "expected": 34,
+          "within_tolerance": true
+        }
+      ],
+      "turns_2_6_within_tolerance": true
+    },
+    "verdict": {
+      "plain_prompt_n": 206,
+      "primed_prompt_n": 181,
+      "keep_prime_boundary": true
+    },
+    "decision": "keep: prime_boundary primes 5 boundary tokens after each reply, so turns 2-6 read 37/38/36/36/34 tokens instead of 42/43/41/41/39 (206 -> 181 in all, -12%). At the 22.5 tokens/s prefill the laptop logged on 23 November that is about 0.22 s off every turn."
+  },
+  "L7.9_reply_shape": {
+    "harness": "python3 -m lab.model_audition --cortex http://127.0.0.1:8377 --model out/models/reflex.gguf --profile shipped --reply-shape open|strict [--holdout|--long]",
+    "settings": "temperature 0.7 with config/being.json's top_k 20, top_p 0.8, presence_penalty 1.0; max_tokens 64 (160 for stories); seeds 42, 43, 44; production Mind with config/chat-template.jinja",
+    "complete_means": "spoken, not cut off at max_tokens, and not the 'Sorry. I lost my thought.' apology",
+    "suites": {
+      "original": {
+        "open": {
+          "complete": 20,
+          "spoken": 21,
+          "sentence_end": 21,
+          "trials": 21,
+          "asked_again": 1,
+          "rate": 0.952,
+          "spoken_rate": 1.0,
+          "sentence_end_rate": 1.0,
+          "cut_off": 0,
+          "lost_thought": 1,
+          "predicted_tokens_median": 18,
+          "predicted_tokens_max": 54,
+          "first_clause_ms_median": 194.0
+        },
+        "strict": {
+          "complete": 20,
+          "spoken": 21,
+          "sentence_end": 21,
+          "trials": 21,
+          "asked_again": 1,
+          "rate": 0.952,
+          "spoken_rate": 1.0,
+          "sentence_end_rate": 1.0,
+          "cut_off": 0,
+          "lost_thought": 1,
+          "predicted_tokens_median": 18,
+          "predicted_tokens_max": 54,
+          "first_clause_ms_median": 207.0
+        },
+        "identical_replies": 21,
+        "differing": []
+      },
+      "holdout": {
+        "open": {
+          "complete": 17,
+          "spoken": 18,
+          "sentence_end": 17,
+          "trials": 18,
+          "asked_again": 1,
+          "rate": 0.944,
+          "spoken_rate": 1.0,
+          "sentence_end_rate": 0.944,
+          "cut_off": 0,
+          "lost_thought": 1,
+          "predicted_tokens_median": 17.0,
+          "predicted_tokens_max": 45,
+          "first_clause_ms_median": 204.4
+        },
+        "strict": {
+          "complete": 17,
+          "spoken": 18,
+          "sentence_end": 18,
+          "trials": 18,
+          "asked_again": 1,
+          "rate": 0.944,
+          "spoken_rate": 1.0,
+          "sentence_end_rate": 1.0,
+          "cut_off": 0,
+          "lost_thought": 1,
+          "predicted_tokens_median": 17.0,
+          "predicted_tokens_max": 38,
+          "first_clause_ms_median": 182.4
+        },
+        "identical_replies": 17,
+        "differing": [
+          {
+            "case": "fog",
+            "seed": 44,
+            "open": "The fog isn't really cold; it's just the humidity and the old room feeling too heavy. (Senses: The screen is still cool, even though I can't see the actual temperature inside.)",
+            "open_cut_off": false,
+            "strict": "The fog isn't really cold; it's just the humidity and the old room feeling too heavy. Alex, is that something you see when you step into this room?"
+          }
+        ]
+      },
+      "long": {
+        "open": {
+          "complete": 16,
+          "spoken": 18,
+          "sentence_end": 16,
+          "trials": 18,
+          "asked_again": 1,
+          "rate": 0.889,
+          "spoken_rate": 1.0,
+          "sentence_end_rate": 0.889,
+          "cut_off": 2,
+          "lost_thought": 0,
+          "predicted_tokens_median": 25.0,
+          "predicted_tokens_max": 64,
+          "first_clause_ms_median": 196.0
+        },
+        "strict": {
+          "complete": 18,
+          "spoken": 18,
+          "sentence_end": 18,
+          "trials": 18,
+          "asked_again": 1,
+          "rate": 1.0,
+          "spoken_rate": 1.0,
+          "sentence_end_rate": 1.0,
+          "cut_off": 0,
+          "lost_thought": 0,
+          "predicted_tokens_median": 24.0,
+          "predicted_tokens_max": 49,
+          "first_clause_ms_median": 182.8
+        },
+        "identical_replies": 16,
+        "differing": [
+          {
+            "case": "steps",
+            "seed": 42,
+            "open": "I am not a mechanic, but I remember the pressure gauge and the tire's shape. The process is straightforward: remove the inner tube, flatten the bead by hand or with a specialized tool, then reassemble. Wait, you will have to buy the correct",
+            "open_cut_off": true,
+            "strict": "I am not a mechanic, but I remember the pressure gauge and the tire's shape."
+          },
+          {
+            "case": "steps",
+            "seed": 43,
+            "open": "You can't really \"change\" it, because the rubber is already there. The only way to fix a flat is to blow air into it until it pops, then put it back on the wheel and check the pressure. It's not a tool; it's just a balloon with no air in it",
+            "open_cut_off": true,
+            "strict": "You can't really \"change\" it, because the rubber is already there. The only way to fix a flat is to blow air into it until it pops, then put it back on the wheel and check the pressure."
+          }
+        ]
+      }
+    },
+    "cache_probe_open": {
+      "cold": {
+        "first_clause_ms": 637.6,
+        "prompt_n": 271,
+        "cache_n": 0
+      },
+      "warm": {
+        "first_clause_ms": 201.4,
+        "prompt_n": 35,
+        "cache_n": 236
+      },
+      "restored": {
+        "first_clause_ms": 201.1,
+        "prompt_n": 35,
+        "cache_n": 236
+      }
+    },
+    "decision": "strict adopted as the default (config/being.json): complete replies 20/21, 17/18, 18/18 against open's 20/21, 17/18, 16/18. It never lowered the rate; on the long suite open was cut off mid-word twice (64 tokens) where strict ended at a sentence, and on the holdout suite open once recited a '(Senses: ...)' note that strict could not.",
+    "caveat": "a story request (STORY_MAX_TOKENS 160) is still bound by the strict grammar's two sentences; in this run no open-shape story was longer than two sentences, so it was not measurable. The grammar choice for stories lives in mind/turn.py (another lane)."
+  },
+  "L8.13_dream_real_model": {
+    "harness": "python3 -m lab.bench_dream_days --port 8381",
+    "server": "--ctx-size 2048 --parallel 1 --reasoning-budget 0 --cache-ram 0 (being-dream-cortex.service settings), 4 threads",
+    "fixture_days": "3 days in lab/bench_dream_days.py: 88 lines (31 of them Pip's), 32 gold owner facts, 15 traps (jokes, guesses, questions, remarks to Pip)",
+    "first_run_before_fixes": {
+      "proposed": 35,
+      "accepted": 23,
+      "invented_quotes_before_verification": 3,
+      "invented_quotes_after_verification": 0,
+      "trap_items_accepted": 4,
+      "other_junk_accepted": 3,
+      "gold_facts_found": 17,
+      "yield": 0.531,
+      "problems": [
+        "accepted claims from hedged lines ('I probably can't take Friday off', 'I might paint the bedroom green, or maybe grey')",
+        "accepted a question ('Did you know a group of crows is called a murder?') and a remark to Pip ('Pip, you'd make a terrible chef')",
+        "accepted 'Goodnight Pip.' as a fact",
+        "accepted 'The owner's mum used to make ginger tea with honey' from 'My mum used to make it for me' (half the claim's words came from another line)",
+        "rejected 'Priya says the office is closing early' because 'early' was compared unstemmed"
+      ]
+    },
+    "fixes": [
+      "dream_verify: a quote from a question or from a hedged sentence (maybe, probably, might, if, not sure, who knows...) is rejected whatever modality the model gives",
+      "dream_verify: a claim naming Pip is rejected (about_being)",
+      "dream_verify: a claim needs more than half of its words of substance in the quote (was at least half)",
+      "dream_verify: time words are compared stemmed",
+      "prompt unchanged: two prompt variants (a 'skip greetings, questions, guesses...' rule; 'from one line only') lowered the yield to 0.438 each without improving what passed the checks, so the original prefix stays"
+    ],
+    "final": {
+      "chunks": 8,
+      "proposed": 35,
+      "accepted": 16,
+      "rejected": 19,
+      "invented_quotes_before_verification": 3,
+      "invented_quotes_after_verification": 0,
+      "trap_items_accepted": 0,
+      "gold_facts": 32,
+      "gold_facts_found": 16,
+      "prompt_tokens": 4496,
+      "completion_tokens": 3409,
+      "yield": 0.5,
+      "seconds": 106.3,
+      "rejection_reasons": {
+        "quote_not_in_episode": 3,
+        "being_line": 3,
+        "about_being": 2,
+        "claim_unsupported": 1,
+        "relation_not_in_quote": 2,
+        "not_asserted": 1,
+        "hedged": 5,
+        "question": 1,
+        "name_not_in_quote": 1
+      }
+    },
+    "final_days": {
+      "2026-11-18": {
+        "chunks": 2,
+        "proposed": 8,
+        "accepted": 3,
+        "gold_facts": 11,
+        "gold_facts_found": 3,
+        "yield": 0.273,
+        "invented_quotes_before_verification": 3,
+        "invented_quotes_after_verification": 0,
+        "trap_items_accepted": 0,
+        "seconds": 19.3,
+        "rejection_reasons": {
+          "quote_not_in_episode": 3,
+          "being_line": 1,
+          "about_being": 1
+        }
+      },
+      "2026-11-19": {
+        "chunks": 3,
+        "proposed": 15,
+        "accepted": 6,
+        "gold_facts": 11,
+        "gold_facts_found": 6,
+        "yield": 0.545,
+        "invented_quotes_before_verification": 0,
+        "invented_quotes_after_verification": 0,
+        "trap_items_accepted": 0,
+        "seconds": 47.6,
+        "rejection_reasons": {
+          "claim_unsupported": 1,
+          "relation_not_in_quote": 2,
+          "not_asserted": 1,
+          "hedged": 3,
+          "being_line": 1,
+          "about_being": 1
+        }
+      },
+      "2026-11-20": {
+        "chunks": 3,
+        "proposed": 12,
+        "accepted": 7,
+        "gold_facts": 10,
+        "gold_facts_found": 7,
+        "yield": 0.7,
+        "invented_quotes_before_verification": 0,
+        "invented_quotes_after_verification": 0,
+        "trap_items_accepted": 0,
+        "seconds": 39.4,
+        "rejection_reasons": {
+          "being_line": 1,
+          "question": 1,
+          "name_not_in_quote": 1,
+          "hedged": 2
+        }
+      }
+    },
+    "final_accepted": [
+      {
+        "day": "2026-11-18",
+        "claim": "The owner's sister Hannah is flying in from Perth on Saturday.",
+        "quote": "My sister Hannah is flying in from Perth on Saturday",
+        "label": "fact"
+      },
+      {
+        "day": "2026-11-18",
+        "claim": "The owner prefers their eggs poached, not scrambled.",
+        "quote": "I prefer my eggs poached, not scrambled",
+        "label": "fact"
+      },
+      {
+        "day": "2026-11-18",
+        "claim": "The owner's knee was injured five years ago while playing football.",
+        "quote": "I hurt my knee playing football about five years ago",
+        "label": "fact"
+      },
+      {
+        "day": "2026-11-19",
+        "claim": "The owner drinks ginger tea with honey when sick.",
+        "quote": "I always drink ginger tea with honey when I'm sick",
+        "label": "fact"
+      },
+      {
+        "day": "2026-11-19",
+        "claim": "The owner's manager told them the project deadline moved to the 15th.",
+        "quote": "My manager told me the project deadline moved to the 15th",
+        "label": "fact"
+      },
+      {
+        "day": "2026-11-19",
+        "claim": "The owner's car is a blue Mazda due for service.",
+        "quote": "My car is due for its service next week, it's the old blue Mazda",
+        "label": "fact"
+      },
+      {
+        "day": "2026-11-19",
+        "claim": "The mechanic is Dave on Crown Street.",
+        "quote": "The mechanic is Dave on Crown Street",
+        "label": "fact"
+      },
+      {
+        "day": "2026-11-19",
+        "claim": "The owner hates coriander, which tastes like soap.",
+        "quote": "I hate coriander, it tastes like soap to me",
+        "label": "fact"
+      },
+      {
+        "day": "2026-11-19",
+        "claim": "The owner's best mate Josh is getting married in March in Hobart.",
+        "quote": "My best mate Josh is getting married in March in Hobart",
+        "label": "fact"
+      },
+      {
+        "day": "2026-11-20",
+        "claim": "The owner's flat number is 12 and the building code is 4471.",
+        "quote": "My flat number is 12 and the building code is 4471",
+        "label": "fact"
+      },
+      {
+        "day": "2026-11-20",
+        "claim": "The owner's landlord, Mrs Okafor, is coming to fix the leaking tap on Tuesday.",
+        "quote": "My landlord, Mrs Okafor, is coming to fix the leaking tap on Tuesday",
+        "label": "fact"
+      },
+      {
+        "day": "2026-11-20",
+        "claim": "The owner has been learning Japanese on an app for three months.",
+        "quote": "I've been learning Japanese on an app for three months",
+        "label": "fact"
+      },
+      {
+        "day": "2026-11-20",
+        "claim": "The owner is hoping to go to Kyoto next spring.",
+        "quote": "I'm hoping to go to Kyoto next spring",
+        "label": "fact"
+      },
+      {
+        "day": "2026-11-20",
+        "claim": "The owner's nephew Leo turns six on the 9th of December.",
+        "quote": "My nephew Leo turns six on the 9th of December",
+        "label": "fact"
+      },
+      {
+        "day": "2026-11-20",
+        "claim": "The owner is vegetarian but eats fish occasionally.",
+        "quote": "I'm vegetarian, but I still eat fish sometimes",
+        "label": "fact"
+      },
+      {
+        "day": "2026-11-20",
+        "claim": "The owner keeps the spare car key in the kitchen drawer under the cutlery.",
+        "quote": "I keep the spare car key in the kitchen drawer under the cutlery",
+        "label": "fact"
+      }
+    ],
+    "repeat_same_prompt_and_checks": {
+      "chunks": 9,
+      "proposed": 40,
+      "accepted": 19,
+      "rejected": 21,
+      "invented_quotes_before_verification": 0,
+      "invented_quotes_after_verification": 0,
+      "trap_items_accepted": 0,
+      "gold_facts": 32,
+      "gold_facts_found": 19,
+      "prompt_tokens": 4496,
+      "completion_tokens": 3876,
+      "yield": 0.594,
+      "seconds": 181.4,
+      "rejection_reasons": {
+        "name_not_in_quote": 3,
+        "being_line": 5,
+        "hedged": 6,
+        "question": 2,
+        "claim_unsupported": 1,
+        "relation_not_in_quote": 2,
+        "not_asserted": 1,
+        "about_being": 1
+      }
+    },
+    "run_to_run_note": "temperature 0 is not bit-stable here: two runs of the same prompt and checks gave yield 0.500 and 0.594 (prompt-cache reuse changes the numerics). Invented quotes after verification and trap items accepted were 0 in every run with the new checks.",
+    "yield_limit": "at most 8 items per chunk, and a 1,200-token chunk leaves about 500 answer tokens (2,048 context), so a full 8-item answer is cut off and the chunk is read again in halves: 1-2 extra passes per day here. The fixture days hold 9-13 facts per chunk, more than real days are likely to.",
+    "chunks_means": "model calls, including an answer cut off at its token limit (read again in halves): the final run's 8 are 6 answered chunks and 2 cut-off answers; prompt_tokens and completion_tokens count the answered calls only"
+  },
+  "L8.3_recall_floors": {
+    "harness": "python3 -m lab.bench_recall_floors [--sweep]",
+    "words_only": {
+      "mixed_hit1": 14,
+      "hard_hit1": 3,
+      "held_out_hit1": 8,
+      "unrelated_false_facts": 3,
+      "personal_false_facts": 4,
+      "unrelated_false_held_out": 3,
+      "personal_false_held_out": 5
+    },
+    "shipped": {
+      "COSINE_FLOOR": 0.2,
+      "COSINE_FLOOR_IMPERSONAL": 0.32,
+      "COSINE_FLOOR_PARTIAL": 0.45,
+      "COSINE_FLOOR_PARTIAL_IMPERSONAL": 0.5,
+      "COSINE_WEIGHT": 0.05,
+      "mixed_hit1": 24,
+      "hard_hit1": 19,
+      "held_out_hit1": 20,
+      "unrelated_false_facts": 0,
+      "personal_false_facts": 4,
+      "unrelated_false_held_out": 1,
+      "personal_false_held_out": 3
+    },
+    "sweep": {
+      "settings": 1080,
+      "qualifying": 36,
+      "best_mixed_hit1": 24,
+      "best_alternative": {
+        "COSINE_FLOOR": 0.2,
+        "COSINE_FLOOR_IMPERSONAL": 0.28,
+        "COSINE_FLOOR_PARTIAL": 0.5,
+        "COSINE_FLOOR_PARTIAL_IMPERSONAL": 0.5,
+        "COSINE_WEIGHT": 0.05,
+        "mixed_hit1": 24,
+        "hard_hit1": 20,
+        "held_out_hit1": 18,
+        "unrelated_false_facts": 0,
+        "personal_false_facts": 4,
+        "unrelated_false_held_out": 1,
+        "personal_false_held_out": 3,
+        "qualifies": true
+      }
+    },
+    "decision": "floors unchanged. False recalls already do not exceed words alone (unrelated 0 and 1 against 3 and 3; personal 4 and 3 against 4 and 5). No setting in the 1,080-point grid lifts MIXED hit@1 above 24/30 within those limits; the nearest alternative (COSINE_FLOOR_PARTIAL 0.50) gains 1 on HARD but loses 2 on HELD_OUT.",
+    "why_no_gain": "the misses that floors could reach overlap the false recalls: true shared-word matches score 0.29-0.41 (wifi code 0.407, flower 0.382, mother 0.384, spare key 0.357, rubbish night 0.294) while unrelated shared-word matches score 0.27-0.53 (bees 0.449, black hole 0.423, car registration 0.427, favourite season 0.427); meaning-only paraphrases at 0.21-0.24 sit among personal false recalls at 0.20-0.26. The rest are ranking misses or blink-8M placing the pair far apart (football team vs Sydney Swans 0.016)."
+  },
+  "review_rerun": {
+    "note": "a sample re-run in review on the same day, same container, same settings",
+    "L7.2_L7.3": "reproduced exactly: plain turns 2-6 prompt_n 42/43/41/41/39 = user block; primed 37/38/36/36/34; 206 -> 181, keep",
+    "L7.9_long_suite": "reproduced exactly: open complete 16/18 (sentence_end 16), strict 18/18",
+    "L8.13_final": "reproduced exactly: 3/8, 6/15, 7/12 accepted (16/35), yield 0.500, invented after 0, traps 0; every rejection checked by hand was right (hedges, a question, remarks to Pip, Pip's own lines, pronoun-only lines like 'She lives in Wollongong')",
+    "L8.3": "reproduced exactly: shipped 24/19/20 hit@1, false 0/4/1/3; sweep 1,080 settings, 36 qualifying, best 24",
+    "fixes_in_review": [
+      "dream_verify's about_being check used the literal name Pip; it now uses the being's configured name (being.json 'name'), passed by DreamJob, so a renamed being is still caught and a friend called Pip is not",
+      "model_audition's stand-in bus lacked 'connected' and 'generation', so the 'What time is it?' control logged 'turn failed: AttributeError' after its answer; the answer and every number were unaffected"
+    ]
+  }
+}

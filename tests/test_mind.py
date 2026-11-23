@@ -1017,6 +1017,20 @@ class BrokenReplies(MindCase):
         self.assertEqual(self.mind.messages, [], "a failed turn leaves nothing in the context")
 
 
+class StrictShape(MindCase):
+    cfg = {"reply_shape": "strict"}
+
+    async def test_replies_are_held_to_two_sentences_but_stories_are_not(self):
+        from mind.speech import GRAMMAR, STRICT_GRAMMAR
+        await self.hear(GREET_WITH_TOPIC, 1)
+        self.bus.push("say.done", final=True)
+        await self.hear("Pip, tell me a story about a kite", 2)
+        first, story = self.cortex_server.chats[0], self.cortex_server.chats[-1]
+        self.assertEqual(first["grammar"], STRICT_GRAMMAR)
+        self.assertEqual(story["grammar"], GRAMMAR)
+        self.assertGreaterEqual(story["max_tokens"], mind.turn.STORY_MAX_TOKENS)
+
+
 class Thinker(MindCase):
     reply = staticmethod(lambda messages: "<think>They greeted me. I should greet back.</think>[joy] Hi! **Nice** to see you \U0001F600.")
 

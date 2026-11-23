@@ -11,9 +11,13 @@ a stick for the Mac. The first hardware boot is described in
 
 ## What it needs
 
-Already on this Mac: QEMU, Colima and Docker. Nothing else is installed on
-macOS. The build lives in one Colima profile, `beingos` (12 CPUs, 24 GB RAM,
-100 GB sparse disk), which mounts only this project folder.
+QEMU, Colima and Docker, plus the smaller tools listed in the
+[developer guide](manual/DEVELOPER-GUIDE.md#1-prerequisites-on-the-mac)
+(Python 3, cargo, ffmpeg, `say`, 7-Zip, curl). The build itself installs
+nothing on macOS. It lives in one Colima profile, `beingos` (14 CPUs,
+48 GB RAM and a 100 GB sparse disk by default; `BEING_BUILDER_CPUS` and
+`BEING_BUILDER_MEMORY` change the first two when the VM is created), which
+mounts only this project folder.
 
 To stop the lab:
 

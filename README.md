@@ -36,16 +36,20 @@ the battery its energy, and the SSD its memory. Its name is **Pip**.
 Everything happens on the machine. No account, no cloud, no subscription.
 The network is off until you turn it on.
 
-Pip is not sentient and does not claim to be. It is a small, honest
-program: it keeps true facts about its body and its memory, says when it
-does not know, and stays the same individual from one wake to the next
-by keeping a record of its own life.
+PipOS is aiming for a being with a life of its own, one that might one
+day count as sentient. It is not there, and nothing here proves it is:
+asked, Pip says so itself. Today it is a small, honest program. It keeps
+true facts about its body and its memory, says when it does not know,
+and stays the same individual from one wake to the next by keeping a
+record of its own life.
 
-> **Status: alive on real hardware, and still a work in progress.** On
+> **Status: awake on real hardware, and still a work in progress.** On
 > 23 November 2026 PipOS booted for the first time on the real 2012
-> MacBook Pro, from a USB stick, and Pip woke up on it and works. Every
-> feature below is also tested in a faithfully emulated copy of that
-> laptop. It does not live on the laptop's own disk yet, and proper
+> MacBook Pro, from a USB stick. Pip woke up, drew its face on the
+> laptop's GPU and heard its name, but could not make out the words after
+> it, so it never answered. The fixes, and a day's worth of new skills,
+> are built and tested on the development Mac and are on their way to a
+> second stick. It does not live on the laptop's own disk yet, and proper
 > measurements of speed, heat and battery are still to come.
 > [What works today](#what-works-today) says exactly where the line is.
 
@@ -71,7 +75,7 @@ on two CPU cores from 2012, it can feel alive anywhere.
 
 ![Six of Pip's expressions, as the face renders them](docs/expressions.png)
 
-Pip has no mouth and no head, only two shapes of light on black. Sixteen
+Pip has no mouth and no head, only two shapes of light on black. Seventeen
 poses, spring physics, blinks, glances, breathing and a wake-up gesture
 carry everything it feels. The face is one shader drawn straight to the
 screen, and it never waits for the language model. If the model is slow,
@@ -93,29 +97,33 @@ Things you can say today:
 
 ## What works today
 
-All of this is built and tested in a virtual laptop that emulates the
-target machine's Ivy Bridge CPU. On 23 November 2026 the same system
-booted on the real 2012 MacBook Pro, and Pip woke up on it.
+The first rows are built and tested in a virtual laptop that emulates
+the target machine's Ivy Bridge CPU, and an earlier build of them booted
+on the real 2012 MacBook Pro on 23 November 2026. The work of 24 November
+(marked *new*) has so far been tested only on the development Mac.
 
 | | State |
 |---|---|
 | **A real, bootable OS** | A custom Buildroot Linux image (kernel 6.18) that boots straight to the face. Read-only A/B system slots, signed updates with automatic rollback, and watchdog recovery. |
-| **Conversation** | The "Hey Pip" wake phrase, streaming speech recognition (PocketSphinx), a local language model through llama.cpp built for the laptop's CPU, and spoken replies (Flite). Esc interrupts. One key mutes. |
+| **Conversation** | The "Hey Pip" wake phrase (PocketSphinx), speech recognition, a local language model through llama.cpp built for the laptop's CPU, and spoken replies (Flite). Esc interrupts. One key mutes. *New:* a natural voice (Piper) and better hearing (Moonshine), each used only if it measures fast enough on the laptop; an honest "Sorry, I didn't catch that."; typing to Pip; chirps. |
 | **Memory with guarantees** | Conversations and facts in SQLite on Pip's own partition. Recall, correction, confirmed forgetting, retention modes, a guest mode and encrypted backups. Forgetting is checked on the raw virtual disk. |
-| **Everyday skills** | Clock, calendar, time zones, reminders, timers, quiet hours, and weather behind explicit consent. |
-| **A body** | Lid, battery and charger, temperature, room light, and a life record that knows about power loss and about waking up in a new body. |
+| **Everyday skills** | Clock, calendar, time zones, reminders, timers, quiet hours, and weather behind explicit consent. *New:* alarms, repeats and snooze, sums, unit conversions, lists and notes, jokes and games, the time elsewhere, a morning brief, all in code. |
+| **A body** | Lid, battery and charger, temperature, room light, and a life record that knows about power loss and about waking up in a new body. *New:* it asks to be plugged in, saves itself and switches off before the battery dies, checks its own health, and sets its brightness. |
+| **Nights** *(new)* | After midnight, while the lid is closed on power: memory upkeep, a day record, a backup to a labelled stick and, if you opt in, dreaming with a second model whose every suggestion code checks against your own words. |
+| **A workshop** *(new)* | "Open the terminal": a small, caged terminal beside the eyes where Pip writes and runs little programs when you say so. |
 | **Eyes that see** | Opt-in camera presence: Pip's gaze follows your face. Capture stops when the lid closes or you opt out. |
 | **Install from USB** | A *Try* mode that runs in RAM and leaves the laptop's disks byte-for-byte untouched, and an installer with a typed confirmation before anything is erased. |
-| **Tests** | About 500 Python and 100 Rust tests on the host, plus 21 suites that boot the image in QEMU: power cuts, rollbacks, reinstall, raw-disk forgetting. |
+| **Tests** | About 2,000 Python and 245 Rust tests on the host, plus 23 suites that boot the image in QEMU: power cuts, rollbacks, reinstall, raw-disk forgetting. |
 
 Not there yet, and said plainly:
 
 - **It cannot hear you on the MacBook yet.** On the first boot Pip heard
   "Hey Pip", then could not make out the words after it: the microphone
   came up too quiet, and it never said so. The next stick sets the
-  microphone up at start, says "Sorry, I didn't catch that.", lets you
-  type to it (F2, then 6) and listens when you press Space. That has not
-  been tried on the laptop yet.
+  microphone up at start, offers two other microphone set-ups at boot,
+  says "Sorry, I didn't catch that.", lets you type to it (F2, then 6)
+  and listens when you press Space. That has not been tried on the
+  laptop yet.
 - **Not measured yet.** Pip runs on the real MacBook, but speed, speech
   delay, heat and battery life have not been measured there properly.
   Treat the speed figures in the design as estimates until they are.
@@ -126,13 +134,18 @@ Not there yet, and said plainly:
   unreliable. That is why facts never come from it. The real model is
   chosen by benchmark on the laptop.
 - **Not ready to live on the internal disk.** The first hardware step is
-  the *Try* stick, which changes nothing on the laptop. A permanent
-  install waits until the laptop image can back up and update itself.
-- **No dreaming yet.** At night Pip writes a simple rule-based journal.
-  A second model that consolidates memories while the lid is closed is
-  designed, not built.
-- **No apps.** Today Pip is the only thing on the machine. There is no
-  desktop, browser or terminal for it to drive.
+  the *Try* stick, which changes nothing on the laptop. Backups and
+  updates from the menu now exist, but a permanent install waits until
+  they have been checked on the laptop and an owner-held update key
+  exists.
+- **Dreaming is untested.** The second, night-time model is built, but
+  it has never run on the laptop, so its speed and heat there are
+  unknown.
+- **No real apps.** Apart from its own small workshop terminal, Pip is
+  the only thing on the machine. There is no desktop or browser for it
+  to drive.
+- **It cannot tell voices apart.** Whoever speaks is treated as its
+  owner, unless guest mode is on.
 - **One body.** The only supported target is the MacBookPro9,2. The
   [project assessment](docs/manual/ASSESSMENT.md) lists every known risk
   and gap, ranked.
@@ -153,8 +166,8 @@ Other machines are the goal, not the present. See
 
 ## How it works
 
-Six small processes, called organs, talk over a tiny local message bus.
-Each one can fail without taking the others down.
+Eight small processes, called organs, talk over a tiny local message
+bus. Each one can fail without taking the others down.
 
 | Organ | What it does |
 |---|---|
@@ -164,6 +177,8 @@ Each one can fail without taking the others down.
 | **cortex** | llama.cpp's server, unmodified. The language model, on loopback only. |
 | **voice** | Hears the wake phrase, transcribes speech, speaks replies. |
 | **eyes** | Reads the opt-in camera and reports only where a face is. |
+| **hands** | The workshop terminal, caged, with no network. |
+| **bodycare** (Rust) | Charge limit, fan and CPU caps (it only observes for now). |
 
 Four ideas hold it together:
 
@@ -306,7 +321,7 @@ outputs and are not part of this repository.
 ## Repository layout
 
 ```
-crates/     the Rust organs: bus, brainstem, face
+crates/     the Rust organs: bus, brainstem, face, bodycare
 mind/       the mind (Python, standard library only)
 os/         the OS image definition (a Buildroot external tree)
 lab/        the builder, the virtual laptop, and the image's tests

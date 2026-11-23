@@ -9,6 +9,10 @@ one), and every file is a regular file with the right size and digest.
 
     verify(role)  -> the pack's descriptor, or ValueError
     root(role)    -> its directory on /models
+    trusted(role, paths) -> (ok, reason): may an organ load these files?
+                     The voice, the ears and the embedder ask before loading
+                     a pack; a refused pack means Flite, PocketSphinx or
+                     words-only recall, with a log line.
 
 Hashing 0.5-1.3 GB on every boot is slow on the laptop. A verdict cache
 (/mind/cortex/pack-verdict.json) records, for each file that hashed correctly,
@@ -34,6 +38,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -441,6 +446,79 @@ def verify(role="conversation", *, models=MODELS, certificate=None, descriptor="
     _, pack = verify_envelope(models, root(role, models) / envelope_name(role), certificate, descriptor, role,
                               verdicts=verdicts, build_id=build_id, hashed=hashed)
     return pack
+
+
+# --- the organs' check before loading a pack ------------------------------------
+
+# One verdict per role per process: (descriptor, None, when) or (None, reason,
+# when). A later load in the same process does not hash a verified pack again;
+# the night's re-hash (RehashJob) is what notices a file changing under a
+# running organ. A refusal is checked again after TRUST_RETRY_S, so one
+# failed check (openssl slow under the boot's load) does not keep Flite,
+# PocketSphinx or words-only recall until the organ restarts.
+TRUST_RETRY_S = 600.0
+_trust = {}
+_trust_lock = threading.Lock()
+
+
+def _within(path, base):
+    return path == base or base in path.parents
+
+
+def on_models(paths, models=None):
+    """True when any of `paths` is on the models partition, so `trusted`
+    has a pack to check (and may hash it). Quick: no file is read."""
+    models = Path(os.path.abspath(MODELS if models is None else models))
+    return any(_within(Path(os.path.abspath(path)), models) for path in paths)
+
+
+def trusted(role, paths, *, models=None, verifier=None):
+    """May an organ load `paths` (files or folders) for `role`? (ok, reason).
+
+    Anything on `models` must belong to the role's pack: under its folder,
+    listed in its signed descriptor (a folder: holding listed files), and
+    the pack must pass `verify(role)`. Paths elsewhere are a development
+    copy no pack describes (the host tests, a lab override): those are
+    allowed. Blocking, since the first check may hash the pack: call it off
+    the event loop. Never raises: a pack that cannot be checked is refused.
+    """
+    check_role(role)
+    models = Path(os.path.abspath(MODELS if models is None else models))
+    base = Path(os.path.abspath(root(role, models)))
+    inside = []
+    for path in paths:
+        path = Path(os.path.abspath(path))
+        if not _within(path, models):
+            continue
+        if not _within(path, base):
+            return False, f"{path} is not part of the {role} pack"
+        inside.append(path.relative_to(base).as_posix())
+    if not inside:
+        return True, None
+    key = (role, str(models))
+    with _trust_lock:  # one check at a time: two loads never hash a pack twice
+        found = _trust.get(key)
+        if found is None or (found[0] is None and time.monotonic() - found[2] >= TRUST_RETRY_S):
+            try:
+                _trust[key] = ((verifier or verify)(role, models=models), None, time.monotonic())
+            except Exception as error:  # openssl missing or slow, a bad file, a bad descriptor
+                if isinstance(error, OSError) and error.errno == errno.ENOENT:
+                    error = f"missing {error.filename}"
+                _trust[key] = (None, str(error)[:200] or type(error).__name__, time.monotonic())
+        pack, reason, _ = _trust[key]
+    if pack is None:
+        return False, reason
+    listed = {name for name, _, _ in files_of(pack)}
+    for relative in inside:
+        if relative != "." and relative not in listed and not any(name.startswith(relative + "/") for name in listed):
+            return False, f"{relative} is not in the signed {role} pack"
+    return True, None
+
+
+def forget_trust():
+    """Check every pack again on its next load (tests; a pack replaced in place)."""
+    with _trust_lock:
+        _trust.clear()
 
 
 def provision(models, envelope):

@@ -78,6 +78,23 @@ def test_wav(root=ROOT, size="tiny"):
     return next((folder / name for name in TEST_WAVS if (folder / name).is_file()), None)
 
 
+def verified(root=ROOT, size="tiny"):
+    """(ok, reason): Silero (the "vad" pack) and Moonshine (the "asr" pack)
+    belong to their signed packs (mind/model_pack.py), when they are on
+    /models. Blocking the first time (it may hash them): never on the event
+    loop. Moonshine base ships in no pack, so on /models it is refused."""
+    try:
+        from . import model_pack
+    except ImportError:  # an image without pack checks loads what it has
+        return True, None
+    folder = moonshine_dir(root, size)
+    for role, paths in (("vad", [Path(root) / VAD_FILE]), ("asr", [folder / name for name in MOONSHINE_FILES])):
+        ok, reason = model_pack.trusted(role, paths)
+        if not ok:
+            return False, reason
+    return True, None
+
+
 def load_vad(root=ROOT, library=None):
     return sherpa.Vad(Path(root) / VAD_FILE, threshold=THRESHOLD, min_silence=MIN_SILENCE,
                       min_speech=MIN_SPEECH, max_speech=MAX_SPEECH, window=WINDOW, library=library)
@@ -126,6 +143,11 @@ class SherpaRecognizer(RecognizerEngine):
         absent = missing(root, size, library)
         if absent:
             raise sherpa.Unavailable(f"{len(absent)} speech files are missing ({', '.join(absent)})")
+        ok, reason = verified(root, size)
+        if not ok:
+            # Nothing unverified is ever loaded: PocketSphinx keeps the words.
+            log(f"asr: the Moonshine model packs did not verify ({reason}); keeping PocketSphinx")
+            raise sherpa.Unavailable(f"its model pack did not verify ({reason})")
         vad = load_vad(root, library)
         try:
             recognizer = load_moonshine(root, size, library, threads)
