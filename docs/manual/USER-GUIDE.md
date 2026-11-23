@@ -15,12 +15,13 @@ This guide is for the person who looks after Pip. It explains what Pip
 does today. Features still in progress are marked *not yet*. The
 [reference](REFERENCE.md) lists every phrase, key and setting.
 
-> **Where PipOS is today (23 November 2026).** PipOS runs in a virtual
-> laptop on the development Mac and has passed its automated tests there.
-> It has **not yet booted on a real MacBook**. The first physical step
-> will be a USB stick that boots in *Try* mode and changes nothing on the
-> laptop. Treat everything below about real hardware as the intended
-> behaviour until that step is done.
+> **Where PipOS is today (23 November 2026).** PipOS has passed its
+> automated tests in a virtual laptop, and it has now **booted on a real
+> MacBook Pro** from a USB stick in *Try* mode, which changes nothing on
+> the laptop. It is not installed on the laptop's own disk yet, and most
+> of what follows has been checked in the virtual laptop only. Treat
+> details about real hardware as the intended behaviour until they have
+> been checked there too.
 
 ---
 
@@ -501,8 +502,10 @@ Moving these controls into the F2 menu is planned work.
 
 ## Known limitations
 
-- **No physical hardware results yet.** Speeds, microphone quality,
-  speakers, Wi-Fi and heat on the real MacBook are all unmeasured.
+- **Few physical hardware results yet.** Pip has booted on the real
+  MacBook from a USB stick. Speeds, microphone quality, speakers and
+  heat there are not measured yet, and Wi-Fi does not work until the
+  Broadcom firmware is packaged.
 - **Small model.** Qwen3.5-0.8B is a placeholder until benchmarks on the
   laptop choose the real model. It can invent things and sometimes
   ignores a memory it was given.

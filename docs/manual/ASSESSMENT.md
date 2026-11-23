@@ -13,8 +13,8 @@ Update it at each milestone. Keep earlier verdicts in
 
 ## Verdict
 
-**The software is architecturally sound, unusually well tested, and close
-to its first physical boot. It has three serious project risks: no
+**The software is architecturally sound, unusually well tested, and has
+now booted on the real laptop. It has three serious project risks: thin
 hardware evidence, a young history kept by a single maintainer, and
 process overhead that now rivals the product.**
 
@@ -25,7 +25,7 @@ process overhead that now rivals the product.**
 | Implementation quality | Good | About 8k lines of Rust and 12.6k of Python (standard library only). There are atomic writes, fsyncs, revision-aware deletion and a believed clock. A full review found 0 critical and 9 high findings, and all 9 high ones are fixed. 49 medium findings are untouched |
 | Testing | Very strong for a solo project | Mac suites pass: 500 Python (16 skipped) and 103 Rust. There are 21 QEMU guest suites, power-cut, rollback and raw-disk forgetting tests, and sealed candidate manifests. The latest sealed candidate (0053) has been superseded by later source changes. Only L0, L1 and local-screen were rerun on the rebuilt image |
 | Product completeness | Partial | The core loop works in QEMU. Vision, sound cues, volume, many body sensors, a memory inspector and on-screen access to several settings are missing |
-| Hardware readiness | Image built, not booted | The laptop Try USB image was built on 23 November 2026. It has not yet booted on a real MacBook, and no hardware measurements exist |
+| Hardware readiness | First boot done | The laptop Try USB image booted on the real MacBookPro9,2 on 23 November 2026. The boot log shows the HD 4000 drawing the face, the model server running on the CPU, and the sound codec, lid, battery, charger, SMC sensors, camera, keyboard, trackpad and Ethernet all found, with no failed services. The Broadcom Wi-Fi has no firmware, so there is no wireless. Nothing is installed internally, and no systematic measurements exist |
 | Project hygiene | Improving | The source is under git and published on GitHub under GPL-3.0 with a documentation site (23 November 2026). The history is young. 66 GB of `out/` evidence stays local and unpublished. The design document is 127 KB. Documentation was scattered and process-oriented before this manual |
 
 ## What exists
@@ -88,8 +88,8 @@ Ranked by consequence.
 | # | Risk | Why it matters | Recommendation |
 |---|---|---|---|
 | 1 | **Young history, single maintainer, local-only evidence.** The source is now under git and public, but the history starts in November 2026, and the logs, images and sealed candidates under `out/` exist on one machine | The earlier development is not recoverable from the repository. A disk failure loses the evidence that the test claims rest on. Nobody else has built the tree from a clean clone | Commit at every checkpoint. Keep `out/`, `target/` and keys out of the repository. Back up the evidence that current claims depend on to a second disk, and confirm that a clean clone builds |
-| 2 | **Zero hardware evidence** | Every latency, audio, thermal, Wi-Fi and firmware assumption is unverified. The design's core bet, that two Ivy Bridge cores can hold a conversation, is untested | Do the first Option-key Try boot from the built `laptop-try` USB image before adding any feature |
-| 3 | **A failed physical boot can't be diagnosed** | GRUB and kernel output go to serial, the journal is volatile, and the face is dark without a brainstem | The laptop Try image adds on-panel GRUB entries, "show boot messages" and `PIPLOGS`, and it is now built, but none of this has run on real hardware. Verify these first on the real machine |
+| 2 | **Thin hardware evidence** | One Try boot on the real MacBook has succeeded. Latency, audio quality, thermals and battery life are still unmeasured there, and the design's core bet, that two Ivy Bridge cores can hold a comfortable conversation, has no numbers behind it yet | Run the Phase 1 benchmarks on the laptop before adding features |
+| 3 | **A failed physical boot can't be diagnosed** | GRUB and kernel output go to serial, the journal is volatile, and the face is dark without a brainstem | The laptop Try image adds on-panel GRUB entries, "show boot messages" and `PIPLOGS`, and the first real boot brought a `PIPLOGS` record back. The boot-messages and safe-graphics entries are still unexercised on real hardware |
 | 4 | **Process overhead** | The project log runs to about 6,000 lines, the work was split across nine work areas, and there are 383 log files and 66 GB of evidence. Coordination cost now competes with building, and intent is hard to recover | Keep this manual as the single current-state description. Keep the project log as a log, not a specification. Prune or archive superseded candidates and images |
 | 5 | **Model quality** | Qwen3.5-0.8B invents things and ignores memories it was given. A parrot guard was needed. The real model choice waits for hardware | Benchmark the Phase 1 shortlist on the laptop. Keep the "facts from code" rule |
 | 6 | **Settings only reachable from a shell that the laptop image removes** | Camera, retention, journal consent, Wi-Fi, backup and update have no F2 entry, and the laptop build has no login | Add F2 entries before the first owner install, or ship the maintenance build for the first physical phase |
@@ -145,9 +145,10 @@ In this order:
 1. **Keep the public repository current.** Commit at every checkpoint,
    and back up the local `out/` evidence to a second disk.
 2. **Rerun the L2–L6 guest suites** on the rebuilt lab image.
-3. **Do the first physical Try boot.** Capture `PIPLOGS`, the hardware
-   inventory, a spoken turn, the lid, the camera and thermals. Record the
-   results in this assessment.
+3. **Follow up the first physical Try boot** (done 23 November 2026).
+   Record a spoken turn, the lid, the camera and thermals on the real
+   machine, and package the Broadcom Wi-Fi firmware or document Ethernet
+   as the supported path.
 4. **Run the Phase 1 benchmarks on the laptop.** Choose the conversation
    model and speech stack, and verify the 3-second first-word target.
 5. **Close the owner gaps:**
@@ -167,3 +168,4 @@ In this order:
 |---|---|
 | 2026-11-23 | First assessment (this document). Software is QEMU-verified through L6, and the L7 candidate is superseded. No hardware evidence and no commits. Hardware readiness was rated not started and project hygiene weak, with missing version control as the top risk |
 | 2026-11-23 | Update, same day. The source is under git and published on GitHub under GPL-3.0 with a documentation site, and the laptop Try USB image is built. It has not yet booted on a real MacBook, and no hardware measurements exist. The version-control risk is replaced by a young, single-maintainer history with local-only evidence. The software verdict is unchanged |
+| 2026-11-23 | First hardware boot. The laptop Try USB image booted on the real MacBookPro9,2 and Pip woke on it. Graphics, sound, lid, battery, sensors, camera and Ethernet were found, with no failed services; Wi-Fi lacks firmware. Hardware readiness moves from "image built, not booted" to "first boot done". Measurements and the internal install remain |

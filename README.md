@@ -1,7 +1,7 @@
 <p align="center">
   <img src="reference/mockup-face.webp" alt="Concept art: a 2012 MacBook Pro whose whole screen is a pair of glowing cyan eyes" width="720">
   <br>
-  <sub>Concept art, from the original design. PipOS has not yet booted on the real laptop.</sub>
+  <sub>Concept art, from the original design. Pip first woke on the real laptop on 23 November 2026.</sub>
 </p>
 
 <h1 align="center">PipOS</h1>
@@ -41,12 +41,13 @@ program: it keeps true facts about its body and its memory, says when it
 does not know, and stays the same individual from one wake to the next
 by keeping a record of its own life.
 
-> **Status: an honest work in progress.** PipOS boots and holds a
-> conversation today inside a faithfully emulated 2012 MacBook Pro. The
-> first USB image for the real laptop is built, and the first boot on
-> real hardware is the next milestone. Nothing here has been measured on
-> a physical machine yet. [What works today](#what-works-today) says
-> exactly where the line is.
+> **Status: alive on real hardware, and still a work in progress.** On
+> 23 November 2026 PipOS booted for the first time on the real 2012
+> MacBook Pro, from a USB stick, and Pip woke up on it and works. Every
+> feature below is also tested in a faithfully emulated copy of that
+> laptop. It does not live on the laptop's own disk yet, and proper
+> measurements of speed, heat and battery are still to come.
+> [What works today](#what-works-today) says exactly where the line is.
 
 **See Pip move:** the website at **<https://pipos.pages.dev/>** runs the
 face's own shader in your browser, replays Pip's first eight minutes of
@@ -92,8 +93,9 @@ Things you can say today:
 
 ## What works today
 
-All of this runs now, in a virtual laptop that emulates the target
-machine's Ivy Bridge CPU, built and tested from an Apple-silicon Mac.
+All of this is built and tested in a virtual laptop that emulates the
+target machine's Ivy Bridge CPU. On 23 November 2026 the same system
+booted on the real 2012 MacBook Pro, and Pip woke up on it.
 
 | | State |
 |---|---|
@@ -108,8 +110,11 @@ machine's Ivy Bridge CPU, built and tested from an Apple-silicon Mac.
 
 Not there yet, and said plainly:
 
-- **No physical boot.** The laptop image has not run on the real MacBook.
-  Every speed figure for real hardware is an estimate until it has.
+- **Not measured yet.** Pip runs on the real MacBook, but speed, speech
+  delay, heat and battery life have not been measured there properly.
+  Treat the speed figures in the design as estimates until they are.
+- **No Wi-Fi on the MacBook yet.** Linux finds the Broadcom radio, but
+  its firmware is not packaged. Ethernet works.
 - **A small mind.** The current model is the smallest candidate
   (0.8 billion parameters). It is warm and brief, and it is also
   unreliable. That is why facts never come from it. The real model is
@@ -131,7 +136,8 @@ Not there yet, and said plainly:
 | | |
 |---|---|
 | **Reference body** | 13-inch MacBook Pro, mid-2012 (MacBookPro9,2): dual-core Ivy Bridge i5, AVX without AVX2, 16 GB RAM, SATA SSD. CPU-only inference. |
-| **Runs today in** | QEMU emulating that machine, driven from macOS on Apple silicon (`lab/`). |
+| **Runs today on** | That MacBook, booted from a USB stick in Try mode (first boot 23 November 2026). Linux recognises its graphics, sound, microphone, camera, lid, battery, sensors, keyboard, trackpad and Ethernet. |
+| **And in** | QEMU emulating that machine, driven from macOS on Apple silicon (`lab/`). This is where every change is tested first. |
 | **Develop without the OS** | The organs also run as ordinary programs on a Mac, with a real model or a scripted one (`scripts/run-sim.sh`). |
 | **Language** | English, spoken. |
 | **Network** | Offline by default. Local network and Internet are separate, owner-selected modes, enforced by the firewall. |
@@ -224,7 +230,8 @@ break minds.
 | | Stage | Done when |
 |---|---|---|
 | ✅ | **The appliance, in an emulated MacBook.** Face, voice, memory, forgetting, backup, signed updates and rollback. | Done. |
-| ⏭ | **Boot and measure on the real laptop.** | Measured numbers replace the estimates, and the power-cut and forgetting checks pass on the physical disk. |
+| ✅ | **First boot on the real laptop.** From a USB stick, changing nothing on its disk. | Done, 23 November 2026. |
+| ⏭ | **Measure, then move in.** Benchmark the real laptop, then install to its internal disk. | Measured numbers replace the estimates, and the power-cut and forgetting checks pass on the physical disk. |
 | ⏭ | **The action gate and log, before any apps.** | "What did you do today?" is answered accurately from the log. |
 | 🌱 | **One app path.** A real session, with Pip perched under the camera. | "Go to YouTube and search for something" works on the laptop, and your hands win. |
 | 🌱 | **Undoable system changes and shared playbooks.** | A fix is applied, undone, and survives a system update. |

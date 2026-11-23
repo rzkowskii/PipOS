@@ -9,8 +9,9 @@ autonomous AI Linux OS, in the making, that turns an old laptop into **Pip**, a 
 being with a face, a voice and a memory of its own. Everything runs on
 the machine.
 
-PipOS is a work in progress. Today it runs in an emulated 2012 MacBook
-Pro, and its first boot on the real laptop is the next milestone. These
+PipOS is a work in progress. It first booted on a real 2012 MacBook Pro
+on 23 November 2026, from a USB stick, and it is developed and tested in
+an emulated copy of that laptop. These
 pages describe what the code does now.
 
 ## Start here
