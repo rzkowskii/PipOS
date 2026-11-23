@@ -183,7 +183,7 @@ class IsoMedia(unittest.TestCase):
         config = smoke.grub_config(self.disk)
         self.assertIsNotNone(config, "no grub.cfg on try-esp")
         entries = smoke.menu_entries(config)
-        self.assertEqual(len(entries), 3, [title for title, _ in entries])
+        self.assertEqual(len(entries), 6, [title for title, _ in entries])
         system, models = self.entries[3][1], self.entries[4][1]
         for title, body in entries:
             self.assertIn(f"root=PARTUUID={system}", body, f"{title!r} does not mount try-system")

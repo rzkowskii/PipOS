@@ -54,7 +54,9 @@ LAPTOP_TRY_IMAGE = Path(os.environ.get(
     "BEING_LAPTOP_TRY_IMAGE", ROOT / "out/images/beingos-laptop-try.img")).resolve()
 PATIENCE = float(os.environ.get("BEING_LAPTOP_PATIENCE", "1") or 1)
 SHOTS = LAB_OUTPUT
-TARGET_BYTES = 8 << 30
+# Sparse, so it costs nothing: large enough for the installer's model reserve
+# (24 GiB) plus every staged pack, as on the MacBook's 256 GB SSD.
+TARGET_BYTES = 64 << 30
 TARGET_MODEL = "BEINGOS LAPTOP SSD"
 LOG_LABEL = "PIPLOGS"
 SECTOR = 512

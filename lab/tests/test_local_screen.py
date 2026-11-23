@@ -14,7 +14,9 @@ from lab.vm import LAB_OUTPUT, ROOT, VM, eyes, machine_args, png
 
 SCREEN_IMAGE = Path(os.environ.get("BEING_SCREEN_IMAGE", ROOT / "out/images/beingos-try-screen.img")).resolve()
 SHOTS = LAB_OUTPUT
-TARGET_BYTES = 8 << 30
+# Sparse, so it costs nothing: large enough for the installer's model reserve
+# (24 GiB) plus every staged pack, as on the MacBook's 256 GB SSD.
+TARGET_BYTES = 64 << 30
 CONSOLE_FONT = ROOT / "os/package/being/being-console-font.h"
 # being-console's geometry (os/package/being/being-console-draw.h and measure()
 # in being-console.c): per face the cell (width, height, cursor band under the

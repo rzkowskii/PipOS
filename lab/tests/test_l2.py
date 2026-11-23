@@ -122,7 +122,9 @@ class Thinking(unittest.TestCase):
 
     def test_6_it_tells_the_time_from_its_own_clock(self):
         reply = self.vm.converse("What time is it?", 300)
-        hour, minute = (int(x) for x in self.sh("date +%H:%M").split(":"))
+        # Pip answers in the owner's time zone (config/being.json), not UTC.
+        zone = json.loads((ROOT / "config/being.json").read_text())["time_zone"]
+        hour, minute = (int(x) for x in self.sh(f"TZ={zone} date +%H:%M").split(":"))
         minutes = [f"{(hour % 12) or 12}:{m % 60:02d}" for m in (minute - 1, minute, minute + 1)]
         self.assertTrue(any(f"It's {m} " in reply for m in minutes), f"{reply!r} is not the machine's time {hour}:{minute:02d}")
 
