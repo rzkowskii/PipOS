@@ -16,7 +16,10 @@ conversation:
 - most of the claim's words of substance must be in the quote, and a "not"
   on one side needs a "not" on the other;
 - only things stated (or reported) as true are facts: not jokes, guesses or
-  "what if"s.
+  "what if"s. Whatever the model calls it, a quote from a question, or from a
+  sentence that hedges ("maybe", "probably", "if", "not sure"), is not one;
+- a claim about Pip (by whatever name the being has been given) is not a
+  fact about the owner's life.
 
 An item that fails any check is rejected. It is never repaired: a nearly
 right item is a wrong item.
@@ -69,6 +72,12 @@ _RELATIONS = frozenset(
 )
 _TIME_QUALIFIERS = frozenset("next last every ago before after early late".split())
 _NEGATION = re.compile(r"\b(?:not|no|never|nothing|none|nobody|neither|nor|cannot|without)\b|n't\b")
+# A sentence that says this is a guess, a wish or a "what if".
+_HEDGE = re.compile(
+    r"\b(?:probably|maybe|perhaps|possibly|might|hopefully|if|imagine|suppose|supposing|unless|"
+    r"i\s+guess|not\s+sure|who\s+knows|i\s+don't\s+know|i\s+dunno)\b"
+)
+_SENTENCE = re.compile(r"[^.!?]*[.!?]+[\"')\]]*|[^.!?]+$")
 _WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)*")
 _NUMBER = re.compile(r"\d+(?:[.,:]\d+)*")
 
@@ -144,6 +153,15 @@ def _find_span(line_text, quote):
             return line_text[origin[at]:origin[at + len(target) - 1] + 1]
         at = flat.find(target, at + 1)
     return None
+
+
+def _sentences(line_text, span):
+    """The sentences of the stored line that the quoted span touches."""
+    at = line_text.find(span)
+    if at < 0:
+        return [line_text]
+    end = at + len(span)
+    return [m.group(0) for m in _SENTENCE.finditer(line_text) if m.start() < end and m.end() > at] or [line_text]
 
 
 def _numbers(text):
@@ -230,12 +248,13 @@ def _content(text):
     return {_stem(word) for word in _WORD.findall(text) if word.casefold() not in _GENERIC and len(word) > 1}
 
 
-def check(item, lines):
+def check(item, lines, being="Pip"):
     """Check one proposed item against the lines of its chunk.
 
-    `lines` maps episode id to Line. Returns a Verdict; only `ok` verdicts
-    carry an item, and the item's fields are the model's own, unchanged,
-    except that the quote is replaced by the stored words it matched.
+    `lines` maps episode id to Line; `being` is the being's configured name.
+    Returns a Verdict; only `ok` verdicts carry an item, and the item's
+    fields are the model's own, unchanged, except that the quote is replaced
+    by the stored words it matched.
     """
     if not isinstance(item, dict):
         return Verdict(False, "not_an_object")
@@ -275,6 +294,13 @@ def check(item, lines):
     span = _find_span(line.text, quote)
     if span is None:
         return Verdict(False, "quote_not_in_episode")
+    sentences = _sentences(line.text, span)
+    if any(sentence.rstrip(" \"')]").endswith("?") for sentence in sentences):
+        return Verdict(False, "question")
+    if any(_HEDGE.search(fold(sentence)) for sentence in sentences):
+        return Verdict(False, "hedged")
+    if _has_word(fold(claim), fold(being or "Pip")):
+        return Verdict(False, "about_being")
     claim_numbers, quote_numbers = _numbers(claim), _numbers(span)
     if not claim_numbers <= quote_numbers:
         return Verdict(False, "number_not_in_quote")
@@ -286,28 +312,31 @@ def check(item, lines):
             return Verdict(False, "name_not_in_quote")
     if bool(_NEGATION.search(fold(claim))) != bool(_NEGATION.search(folded_quote)):
         return Verdict(False, "negation_mismatch")
-    content = _content(claim)
-    if content:
-        supported = sum(1 for word in content if word in quote_words
-                        or any(other.startswith(word[:5]) for other in quote_words if len(word) >= 5))
-        if supported * 2 < len(content):
-            return Verdict(False, "claim_unsupported")
     for word in _WORD.findall(fold(claim)):
         bare = word[:-2] if word.endswith("'s") else word
         if (bare in _RELATIONS or _stem(bare) in _RELATIONS) and _stem(bare) not in quote_words:
             return Verdict(False, "relation_not_in_quote")
-        if bare in _TIME_QUALIFIERS and bare not in quote_words:
+        # Compared stemmed, as the quote's words are: "early" stems to "ear".
+        if bare in _TIME_QUALIFIERS and _stem(bare) not in quote_words:
             return Verdict(False, "time_not_in_quote")
+    content = _content(claim)
+    if content:
+        supported = sum(1 for word in content if word in quote_words
+                        or any(other.startswith(word[:5]) for other in quote_words if len(word) >= 5))
+        # More than half: "The owner's mum made ginger tea" does not rest
+        # on "My mum used to make it for me".
+        if supported * 2 <= len(content):
+            return Verdict(False, "claim_unsupported")
     return Verdict(True, "ok", Checked(kind, claim, span, episode_id, speaker, modality, time_ref))
 
 
-def check_all(items, lines):
+def check_all(items, lines, being="Pip"):
     """(accepted items, rejection reasons): never more than the schema's 8 items are read."""
     accepted, rejected = [], []
     if not isinstance(items, list):
         return [], ["not_a_list"]
     for item in items[:8]:
-        verdict = check(item, lines)
+        verdict = check(item, lines, being)
         if verdict.ok:
             accepted.append(verdict.item)
         else:

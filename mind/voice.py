@@ -1312,8 +1312,12 @@ class Voice:
         switch, the lid and mute still decide whether the bell plays."""
         if not (self.chirps_on and self.chirp_bank is not None and self.lid_open and not self.muted):
             return False
+        # Never two sounds at once: a purr or an ears cue still playing stops.
+        await self.stop_chirp()
         try:
             path = await asyncio.to_thread(self.chirp_bank.path, "bell", self.gain)
+            if not (self.chirps_on and self.lid_open and not self.muted):
+                return False  # muted, switched off or shut while the bell was made
             return await self.play_chirp(path)
         except asyncio.CancelledError:
             raise

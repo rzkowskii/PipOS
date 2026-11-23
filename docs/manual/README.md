@@ -1,14 +1,16 @@
 <!--
 doc: index
-verified: 2026-11-23T22:20
+verified: 2026-11-24T04:50
 sources:
 -->
 
 # The PipOS manual
 
-PipOS turns a 2012 MacBook Pro into **Pip**, a small offline AI being with
-a face, a voice and a memory. This folder is the maintained documentation.
-It describes what the code does now, and it grows as PipOS grows.
+PipOS turns a 2012 MacBook Pro into **Pip**, a small offline being with a
+face, a voice and a memory. The project is aiming for a being with a life
+of its own; it does not claim that Pip is sentient. This folder is the
+maintained documentation. It describes what the code does now, and it
+grows as PipOS grows.
 
 | Document | For | What it covers |
 |---|---|---|
@@ -22,10 +24,14 @@ The other documents keep their roles:
 
 | Document | Role |
 |---|---|
-| [DESIGN-AND-PLAN.md](../../DESIGN-AND-PLAN.md) | The original design and phased plan: the *why* |
+| [STATUS.md](../../STATUS.md) | Where PipOS stands: evidence per milestone, blockers, what needs the laptop |
+| [PIP-FUNCTIONS.md](../PIP-FUNCTIONS.md) | What Pip can do: the function spec and the wave 2 plan |
+| [DESIGN.md](../DESIGN.md), [DECISIONS.md](../DECISIONS.md), [DECISIONS-OWNER.md](../DECISIONS-OWNER.md) | The current design, the decisions taken, and those left to the owner |
+| [IMPROVEMENT-PLAN.md](../IMPROVEMENT-PLAN.md) | The phased plan |
+| [DESIGN-AND-PLAN.md](../../DESIGN-AND-PLAN.md) | The original design and phased plan: the *why* (historical) |
 | [PROTOCOL.md](../PROTOCOL.md) | The bus topics: the normative message reference |
-| [LAB.md](../LAB.md), [HARDWARE.md](../HARDWARE.md) | Detailed lab and hardware procedures |
-| [USB-READINESS.md](../USB-READINESS.md), [DESIGN-COVERAGE.md](../DESIGN-COVERAGE.md) | Release coordination and evidence |
+| [LAB.md](../LAB.md), [HARDWARE.md](../HARDWARE.md), [FIRST-BOOT.md](../FIRST-BOOT.md), [ISO.md](../ISO.md) | Detailed lab, hardware, first-boot and ISO procedures |
+| [USB-READINESS.md](../USB-READINESS.md), [DESIGN-COVERAGE.md](../DESIGN-COVERAGE.md) | Superseded release records of 21–22 November, kept for history |
 
 ## Naming
 
@@ -42,7 +48,7 @@ Each page starts with a comment header:
 ```
 <!--
 doc: user-guide
-verified: 2026-11-23T22:20
+verified: 2026-11-24T04:50
 sources: mind/commands.py mind/turn.py …
 -->
 ```
@@ -62,12 +68,13 @@ python3 scripts/check-docs.py
 The checker does three things:
 
 1. It lists every page whose source files changed after its `verified`
-   date.
+   time (the commit time for a committed, unchanged file, otherwise the
+   file's modification time).
 2. It reports source paths that no longer exist.
-3. It reports broken relative links between documents.
+3. It reports broken relative links and `#anchors` between documents.
 
 It exits non-zero when it finds a problem, so it can run in a pre-commit
-hook or a test.
+hook or a test. `scripts/check fast` runs it as an advisory step.
 
 When a feature lands:
 
@@ -79,33 +86,13 @@ When a feature lands:
 4. At milestones (first physical boot, internal install, model choice),
    add a dated row to the assessment history and revise its verdict.
 
-## Baseline and pending work
+## Baseline
 
-The manual was written and checked by independent reviewers on
-23 November 2026, against the source as it stood at about 22:20:
-
-- commit `b1fbeea`, the source of the first laptop Try image;
-- a few later changes that the second review round picked up: the
-  `ERASE MACOS` / `ERASE BEING` confirmation, the hidden boot menu on
-  installed disks, the `being-wifi scan` and `ethernet` commands, and the
-  `mind.progress` think timeout.
-
-Other sessions were landing a large change set at the same time. As of
-22:40 on 23 November, these changes are **not yet documented**:
-
-- **The `hands` organ** (`mind/hands.py`, designed in
-  `docs/design/voice-apps.md`). This is a voice-driven "workshop
-  terminal". It runs as an unprivileged `being-shell` user, in a RAM-only
-  `/workshop`, with no network.
-- **The `bodycare` crate** (`crates/bodycare`). This is a power and
-  thermal controller: charge limit, fan floor, CPU caps and a restore
-  journal.
-- **Brainstem resume.** A restarted brainstem picks up its coarse state,
-  mute and sleep from `/run` instead of re-waking.
-- **Further changes** in `mind/turn.py`, `mind/voice.py`, `mind/tts.py`,
-  `mind/recognition.py`, `mind/commands.py`, the installer, GRUB and the
-  console.
-
-Run `python3 scripts/check-docs.py` to see exactly which pages these
-changes affect. Once that work is committed, re-verify those pages and
-move each item into the right document.
+The four main pages (user guide, reference, architecture, developer
+guide) were re-checked section by section on 24 November 2026 against
+the `wave4` working tree: commit `f414c51` (waves 1 to 3: the first-boot
+fixes, the Pip functions of wave 2, and the fixes from a full review)
+plus the wave 4 changes in progress that night. Where wave 4 work was
+still uncommitted when the pages were stamped, the pages describe the
+working tree as it then stood; `scripts/check-docs.py` flags any later
+change.

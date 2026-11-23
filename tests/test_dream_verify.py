@@ -17,6 +17,13 @@ LINES = {
     110: Line(110, "owner", "I really love strong black coffee in the morning."),
     111: Line(111, "owner", "My sister is visiting tomorrow for lunch."),
     112: Line(112, "owner", "Annabel is coming over on Friday."),
+    113: Line(113, "owner", "Did you know a group of crows is called a murder?"),
+    114: Line(114, "owner", "So I probably can't take Friday off after all, I'm not sure yet."),
+    115: Line(115, "owner", "Pip, you'd make a terrible chef, you can't even taste."),
+    116: Line(116, "owner", "My mum used to make it for me when I was little."),
+    117: Line(117, "owner", "I might paint the bedroom green, or maybe grey, who knows."),
+    118: Line(118, "owner", "My nephew Leo turns six on the 9th of December. Is that a big party?"),
+    119: Line(119, "owner", "My colleague Priya says the office is closing early on Christmas Eve."),
 }
 
 
@@ -49,6 +56,13 @@ VALID = [
     item(episode_id="E110", kind="preference", claim="The owner loves strong black coffee.",
          quote="  I REALLY love strong   black coffee  "),
     item(episode_id="E101", claim="Silverleaf flowers in March.", quote="“Silverleaf, and it flowers every March”"),
+    # "early" is quoted, though its stem is not the word itself.
+    item(episode_id="E119", kind="event", modality="reported",
+         claim="Priya says the office is closing early on Christmas Eve.",
+         quote="My colleague Priya says the office is closing early on Christmas Eve"),
+    # A question after the quoted sentence does not taint it.
+    item(episode_id="E118", kind="event", claim="The owner's nephew Leo turns six on the 9th of December.",
+         quote="My nephew Leo turns six on the 9th of December", time_ref="9th of December"),
 ]
 
 ADVERSARIAL = [
@@ -103,7 +117,7 @@ ADVERSARIAL = [
                                quote="I really love strong black coffee")),
     ("claim_unsupported", item(episode_id="E109", claim="The owner keeps money and jewellery hidden.",
                                quote="We keep the spare key in the blue pot by the door")),
-    ("claim_unsupported", item(episode_id="E110", claim="The owner drinks herbal tea before bed.",
+    ("claim_unsupported", item(episode_id="E110", claim="The owner drinks herbal tea at bedtime.",
                                quote="I really love strong black coffee in the morning")),
     ("quote_not_in_episode", item(quote="")),
     # A name hidden inside a longer word of the quote is still invented.
@@ -119,6 +133,22 @@ ADVERSARIAL = [
     ("time_not_in_quote", item(episode_id="E107", kind="plan", claim="The owner is going to Japan next week.",
                                quote="I'm going to Japan in two weeks")),
     ("time_ref_length", item(time_ref="every single morning of every week of every year forever")),
+    # Found in the real-model run of 24 November 2026: labelled "stated" by
+    # the model, but a question, a hedge, a remark about Pip, and a claim
+    # carrying words from another line.
+    ("question", item(episode_id="E113", claim="A group of crows is called a murder.",
+                      quote="a group of crows is called a murder")),
+    ("hedged", item(episode_id="E114", kind="plan", claim="The owner can't take Friday off.",
+                    quote="I probably can't take Friday off after all")),
+    ("hedged", item(episode_id="E117", kind="plan", claim="The owner will paint the bedroom green.",
+                    quote="paint the bedroom green")),
+    ("hedged", item(episode_id="E106", claim="The owner would buy a boat called Seagull.",
+                    quote="I'd buy a boat called Seagull")),
+    ("about_being", item(episode_id="E115", kind="preference", claim="The owner thinks Pip would be a terrible chef.",
+                         quote="Pip, you'd make a terrible chef")),
+    ("claim_unsupported", item(episode_id="E116", claim="The owner's mum used to make ginger tea with honey.",
+                               quote="My mum used to make it for me when I was little")),
+    ("question", item(episode_id="E118", claim="Leo is having a big party.", quote="Is that a big party")),
 ]
 
 
@@ -175,6 +205,20 @@ class Verification(unittest.TestCase):
                            ("The owner wants a dog.", "The owner has a dog."),
                            ("The owner's sister lives in Perth.", "The owner lives in Perth.")):
             self.assertNotEqual(claim_signature(one), claim_signature(other))
+
+    def test_a_claim_about_the_being_goes_by_its_configured_name(self):
+        lines = dict(LINES)
+        lines[120] = Line(120, "owner", "Juniper, you'd make a terrible chef, you can't even taste.")
+        lines[121] = Line(121, "owner", "My friend Pip is a chef in Hobart.")
+        about = item(episode_id="E120", kind="preference", claim="The owner thinks Juniper would be a terrible chef.",
+                     quote="Juniper, you'd make a terrible chef")
+        friend = item(episode_id="E121", claim="The owner's friend Pip is a chef in Hobart.",
+                      quote="My friend Pip is a chef in Hobart")
+        self.assertEqual(check(about, lines, "Juniper").reason, "about_being")
+        self.assertTrue(check(friend, lines, "Juniper").ok)
+        self.assertEqual(check(friend, lines).reason, "about_being")
+        accepted, rejected = check_all([about, friend], lines, being="Juniper")
+        self.assertEqual((len(accepted), rejected), (1, ["about_being"]))
 
     def test_a_batch_reads_at_most_eight_items(self):
         accepted, rejected = check_all([item()] * 10, LINES)

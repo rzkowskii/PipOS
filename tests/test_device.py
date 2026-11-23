@@ -15,13 +15,16 @@ class Ctx(SimpleNamespace):
     pass
 
 
-def make_ctx(state_dir, *, guest=False, body=None, fail=False):
+def make_ctx(state_dir, *, guest=False, body=None, fail=False, answer=None):
+    """`answer`: what the mind's send returns for being.brightness (the
+    brainstem's body.brightness fields), or None as when none came in time."""
     sent = []
 
     async def send(topic, **fields):
         if fail:
             raise ConnectionError("bus gone")
         sent.append((topic, fields))
+        return answer if topic == "being.brightness" else None
     return Ctx(state_dir=Path(state_dir), guest=guest, body=body or {}, voice={}, send=send, sent=sent)
 
 
@@ -66,6 +69,32 @@ class Controls(unittest.TestCase):
             self.assertIsNone(self.ask(text)[0], "not a request")
         reply, sent = self.ask("brighter", body={"brightness_reason": "no_control"})
         self.assertEqual((reply.line, sent), ("[neutral] I can't change my brightness on this machine.", []))
+
+    def test_the_reply_follows_the_brainstems_answer_at_the_limits(self):
+        top = {"ok": True, "level": 100, "at_max": True, "at_min": False, "limited": True}
+        bottom = {"ok": True, "level": 5, "at_max": False, "at_min": True, "limited": True}
+        middle = {"ok": True, "level": 65, "at_max": False, "at_min": False, "limited": False}
+        for text, answer, line in (
+            ("Brighter", top, "[neutral] That's as bright as I go."),
+            ("turn up your brightness", top, "[neutral] That's as bright as I go."),
+            ("Dimmer", bottom, "[neutral] That's as dim as I go."),
+            ("Brighter", middle, "[neutral] Brighter."),
+            ("Dimmer", middle, "[neutral] Dimmer."),
+            ("set your brightness to 0", bottom, "[neutral] Brightness 5 percent. That's as dim as I go."),
+            ("Set your brightness to 50 percent", dict(middle, level=50), "[neutral] Brightness 50 percent."),
+            ("full brightness", dict(top, limited=False), "[neutral] Brightness 100 percent."),
+        ):
+            reply, sent = self.ask(text, answer=answer)
+            self.assertEqual(reply.line, line, (text, answer))
+            self.assertEqual(reply.logged, "brightness")
+            self.assertEqual(len(sent), 1)
+
+    def test_a_change_that_failed_is_never_said_as_done(self):
+        reply, _ = self.ask("brighter", answer={"ok": False, "reason": "write_failed", "level": 40})
+        self.assertEqual(reply.line, "[concern] My screen didn't change just now.")
+        self.assertIsNone(reply.logged, "nothing changed, so nothing is logged")
+        reply, _ = self.ask("brighter", answer={"ok": False, "reason": "no_control"})
+        self.assertEqual(reply.line, "[neutral] I can't change my brightness on this machine.")
 
     def test_switching_off_and_restarting_always_ask_first(self):
         reply, sent = self.ask("Shut down")

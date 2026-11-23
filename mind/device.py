@@ -6,6 +6,9 @@ restarting, its version, and whether its last update worked.
   back on) and says how to undo it.
 - Brightness goes to the brainstem as `being.brightness` (`step` or
   `level`); the brainstem keeps it within bounds and puts it back on exit.
+  The reply waits briefly for its `body.brightness` answer, so at the ends
+  Pip says "That's as bright as I go." or "That's as dim as I go.", and a
+  change that failed is never reported as done.
 - Switching off and restarting always ask first (`Confirm`, strict: only a
   plain yes, never "okay" or "sure"), then the mind saves itself and runs
   `Reply.action`.
@@ -341,15 +344,47 @@ async def back_up(ctx, *, readiness=None, run=None, current=None, answer_within=
     return Reply("[neutral] Shall I back myself up to your stick now? Say yes.", confirm=Confirm(go))
 
 
-async def _send(ctx, topic, **fields):
+async def _ask(ctx, topic, **fields):
+    """(sent, answer): whether the message left, and what `send` returned
+    (the mind returns the brainstem's `body.brightness` fields, or None when
+    none came in time)."""
     send = getattr(ctx, "send", None)
     if send is None:
-        return False
+        return False, None
     try:
-        await send(topic, **fields)
-        return True
+        answer = await send(topic, **fields)
     except Exception:  # a lost bus is said honestly, never raised into the turn
-        return False
+        return False, None
+    return True, answer if isinstance(answer, dict) else None
+
+
+async def _send(ctx, topic, **fields):
+    return (await _ask(ctx, topic, **fields))[0]
+
+
+BRIGHTEST = "[neutral] That's as bright as I go."
+DIMMEST = "[neutral] That's as dim as I go."
+
+
+def brightness_line(kind, value, answer):
+    """What to say once the brainstem has answered (or not, in time)."""
+    if answer is not None and answer.get("ok") is False:
+        if answer.get("reason") == "no_control":
+            return "[neutral] I can't change my brightness on this machine."
+        return "[concern] My screen didn't change just now."
+    at_max = answer is not None and answer.get("at_max") is True
+    at_min = answer is not None and answer.get("at_min") is True
+    if kind == "step":
+        if value > 0:
+            return BRIGHTEST if at_max else "[neutral] Brighter."
+        return DIMMEST if at_min else "[neutral] Dimmer."
+    level = answer.get("level") if answer is not None else None
+    shown = int(level) if type(level) in (int, float) else max(5, value)
+    line = f"[neutral] Brightness {shown} percent."
+    if answer is not None and answer.get("limited") is True:
+        # "Set your brightness to 0" stops at the bottom, and says so.
+        line += " That's as dim as I go." if at_min else " That's as bright as I go." if at_max else ""
+    return line
 
 
 def _no_panel(ctx):
@@ -373,12 +408,12 @@ async def handle(text, ctx):
         if _no_panel(ctx):
             return Reply("[neutral] I can't change my brightness on this machine.")
         fields = {"step": value} if kind == "step" else {"level": value}
-        if not await _send(ctx, "being.brightness", **fields):
+        sent, answer = await _ask(ctx, "being.brightness", **fields)
+        if not sent:
             return Reply("[concern] I couldn't reach my screen just now.")
-        if kind == "step":
-            return Reply("[neutral] Brighter." if value > 0 else "[neutral] Dimmer.", logged="brightness")
-        shown = max(5, value)
-        return Reply(f"[neutral] Brightness {shown} percent.", logged="brightness")
+        line = brightness_line(kind, value, answer)
+        changed = answer is None or answer.get("ok") is not False
+        return Reply(line, logged="brightness" if changed else None)
     if kind in ("poweroff", "reboot"):
         if guest:
             return Reply("[neutral] Only my owner can switch me off. Closing my lid puts me to sleep.")

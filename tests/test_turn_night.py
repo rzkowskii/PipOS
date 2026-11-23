@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from mind.cortex import Cortex
 from mind.dream_store import journal
-from mind.night_shift import NightShift
+from mind.night_shift import Gate, NightShift
 from mind.turn import Config, Mind, RewarmJob
 from tests.test_mind import FakeBus, MindCase
 
@@ -81,6 +81,18 @@ class NightHooks(MindCase):
         self.assertEqual(len(self.shift.steps), 1, "done for tonight: no more steps")
         self.assertEqual(self.cortex_server.chats, [])
 
+    async def test_the_night_waits_while_the_embedding_pack_is_first_checked(self):
+        # Started in the night: the vectors job must not find no embedder
+        # and count itself done before the pack's check has answered.
+        self.mind._embedder_ok = None
+        self.enter_sleep()
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.shift.steps, [])
+        self.mind._embedder_ok = True
+        self.bus.push("stem.beat", state="asleep")
+        await asyncio.wait_for(self.shift.started.wait(), 2)
+        self.assertEqual(self.shift.steps, [(True, "2026-11-21")])
+
     async def test_opening_the_lid_interrupts_it(self):
         self.shift.hold = asyncio.Event()
         self.enter_sleep()
@@ -113,9 +125,41 @@ class NightHooks(MindCase):
 
     async def test_no_dreaming_is_claimed_on_a_night_that_is_not_eligible(self):
         (self.root / "dreams-enabled").unlink()
-        self.enter_sleep()
+        self.mind.skills.now = lambda: datetime(2026, 11, 21, 2, 30)
+        self.bus.push("body.lid", closed=True, seq=2)
+        self.bus.push("state.changed", state="asleep")
+        # On battery: no night work at all, upkeep included.
+        self.bus.push("body.state", hour=2, minute=30, temp=48.0, on_ac=False, lid_closed=True)
+        self.bus.push("stem.beat", state="asleep")
         await asyncio.sleep(0.1)
         self.assertEqual(self.bus.of("mind.dreaming"), [])
+        self.assertEqual(getattr(self.shift, "steps", []), [])
+
+    async def test_without_dream_consent_the_upkeep_still_runs_and_is_not_called_dreaming(self):
+        (self.root / "dreams-enabled").unlink()
+        self.enter_sleep()
+        await asyncio.wait_for(self.shift.started.wait(), 2)
+        (gate, night), = self.shift.steps
+        self.assertEqual(night, "2026-11-21")
+        self.assertIsInstance(gate, Gate)
+        for upkeep in ("checkpoint", "expiry", "search", "vectors", "diary", "backup", "rehash", "rewarm"):
+            self.assertTrue(gate.allows(upkeep), upkeep)
+        self.assertFalse(gate.allows("journal"))
+        self.assertFalse(gate.allows("dream"))
+        async with asyncio.timeout(2):
+            while not self.mind._dream_task.done():
+                await asyncio.sleep(0.01)
+        self.assertEqual(self.bus.of("mind.dreaming"), [], "upkeep is not a dream")
+        # Done for tonight without consent; the owner says yes, and the dreams follow.
+        self.bus.push("stem.beat", state="asleep")
+        await asyncio.sleep(0.05)
+        self.assertEqual(len(self.shift.steps), 1)
+        (self.root / "dreams-enabled").touch()
+        self.shift.started.clear()
+        self.bus.push("stem.beat", state="asleep")
+        await asyncio.wait_for(self.shift.started.wait(), 2)
+        self.assertEqual(self.shift.steps[-1], (True, "2026-11-21"))
+        await self.bus.wait("mind.dreaming")
 
     async def test_the_rewarm_job_reads_the_whole_prompt(self):
         await self.warmed()
@@ -151,11 +195,27 @@ class RealNightShift(NightHooks):
         self.assertIn("journal", self.shift.done_tonight())
         self.assertEqual(self.cortex_server.chats, [])
 
+    async def test_without_consent_the_night_tidies_memory_but_writes_no_journal(self):
+        (self.root / "dreams-enabled").unlink()
+        self.memory.log("heard", "The orchids are in the sunroom.", "Richard")
+        self.enter_sleep()
+        async with asyncio.timeout(3):
+            while "rewarm" not in self.shift.done_tonight():
+                await asyncio.sleep(0.01)
+        done = set(self.shift.done_tonight())
+        self.assertTrue({"checkpoint", "search", "vectors", "rewarm"} <= done, done)
+        self.assertNotIn("journal", done)
+        self.assertEqual(journal(self.memory.db, "Richard"), [], "no dream without the owner's yes")
+        self.assertEqual(self.bus.of("mind.dreaming"), [])
+        self.assertEqual(self.bus.of("mind.dream_committed"), [])
+
     # The fake-shift cases do not apply to the real one.
+    test_without_dream_consent_the_upkeep_still_runs_and_is_not_called_dreaming = None
     test_an_eligible_night_steps_the_shift_and_reports_a_committed_dream = None
     test_opening_the_lid_interrupts_it = None
     test_night_work_is_bracketed_by_mind_dreaming = None
     test_a_finished_step_says_it_stopped_dreaming = None
+    test_the_night_waits_while_the_embedding_pack_is_first_checked = None
 
 
 class StartUp(MindCase):

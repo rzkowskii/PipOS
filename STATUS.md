@@ -45,6 +45,15 @@ Generated 2026-11-23 23:28 AEDT.
 | `first-usb-20261122-0053` | no | not recorded |
 <!-- END GENERATED -->
 
+The generated block above was last written on 23 November from the main
+tree. Run `scripts/status --write` there (not in a worktree, which has no
+`out/images`) after the next merge. Since then, on 24 November at 03:52,
+`out/images/beingos-laptop-try.img` was built in the main tree with
+source-id `f8021f13…2fb0eaa9`, which matches commit `f414c51` (waves 1 to
+3). The main tree has since moved to `f7df770` (04:17), which changes only
+lab tests and so has the same source-id (re-checked at about 04:25). The
+image has not yet been through the boot gate or onto the laptop.
+
 ## Evidence per milestone
 
 Evidence levels: **host** (Mac-side tests), **QEMU** (a guest run on an image
@@ -62,13 +71,13 @@ first Try boot has reached **Mac** (23 November 2026, the frozen stick).
 | L6 camera | QEMU (older image) | Detector fixture only; no physical camera |
 | Installer and Try menu | QEMU | `test_local_screen` 19/19 on the 23 Nov Try screen image |
 | Laptop Try stick | QEMU | `test_laptop_smoke` on the frozen stick: 6 of 7 passed (log beside it); the install-from-Try case timed out waiting for the installed eyes. Hard power-off and organ-restart checks added afterwards, not yet run |
-| Host suites | host | 24 Nov, after the wave 2 integration: Rust 236 passed, none ignored; Python 1,821 run, all passing, 29 skipped (age not installed on the Mac, Linux-only sockets, real model); lab host checks 42 passing |
+| Host suites | host | 24 Nov, in the `wave4` worktree (commit `f414c51` plus wave 4 work in progress). About 04:00: Rust 245 passed, none ignored; Python 1,977 run, all passing, 39 skipped (age not installed on the Mac, Linux-only sockets, the real model); lab host checks 42 passing. About 04:15, with more wave 4 tests and a development model server up on port 8377: Python 2,008 run, 29 skipped, and 5 of the real-model tests in `test_real_cortex` failing (`mind.ready` reported no cortex, a slot save failed, three warm-ups were cancelled). Those tests had been skipped before; the cause is not yet known |
 | First hardware boot | Mac | 23 Nov, frozen stick, "show boot messages" entry: booted, face drawn on the GPU, model warmed, "Hey Pip" heard but the words after it not made out; no failed units. Logs in `out/hardware-logs/first-real-boot-2026-11-23/`. Round 2 is [FIRST-BOOT.md section 8](docs/FIRST-BOOT.md#8-round-2-hearing-typing-and-speed) |
 
 ## Blockers
 
 - **First Try boot:** done 23 November (Phase 0 below).
-- **Second Try image:** the wave 2 work of [PIP-FUNCTIONS.md](docs/PIP-FUNCTIONS.md) merged and built from one source-id, then the lab gates of its section 4.1. Hearing is the first thing it must fix.
+- **Second Try image:** waves 1 to 3 are committed (`f414c51`) and a laptop Try image was built from them at 03:52 on 24 November. Next: the lab gates of [PIP-FUNCTIONS.md](docs/PIP-FUNCTIONS.md) section 4.1 on that image, then round 2 on the laptop. Hearing is the first thing it must fix.
 - **SSD install:** all of Phase 1 (release key and laptop identity 1.2, update and backup from F2 1.3-1.4, memory bug fixes 1.11), a sealed laptop candidate through the boot gate, and the owner's answers in [DECISIONS-OWNER.md](docs/DECISIONS-OWNER.md).
 
 ## Next gate
@@ -109,11 +118,14 @@ asks for.
 - **2026-11-23** Frozen first-boot stick `pipos-laptop-try-20261123` (SHA-256 `8de540df…6588e612`) built at 22:09 and smoke-tested in QEMU (6 of 7 passed; the install-to-internal-disk case timed out, and the first boot does not install). A commit, "PipOS: first public release", followed at 23:13; it is not tagged `first-hardware-try`, and nothing yet ties it to the stick's bytes (plan 0.1, [DECISIONS-OWNER.md](docs/DECISIONS-OWNER.md) item 4). Improvement plan written (110 tasks). Docs restructured: DESIGN.md, DECISIONS.md, DECISIONS-OWNER.md, FIRST-BOOT.md and this file; USB-READINESS.md and DESIGN-COVERAGE.md superseded; DESIGN-AND-PLAN.md marked historical; the lab notebook kept out of the public tree (it holds private session links). Lab gains `try_timings.py`, bench mode, source-ids on images, gate mode, the laptop candidate lane and `scripts/check`.
 - **2026-11-24** Wave 2 planned in [PIP-FUNCTIONS.md](docs/PIP-FUNCTIONS.md) from the first boot's logs: hearing first, then a typing fallback, honest misses, everyday code skills, rings, the night shift and speed. Image and face work for it: the mind no longer waits for the model's hash; the face, mind and brainstem get CPU weight 1000, and the kernel gains the CPU controller that makes every unit's weight count; the face (5 s) and the mind (30 s) are watched by systemd; the face and the Try menu have a writable shader cache; the image ships compiled Python modules; the microphone mixer unit and bench mode are installed (bench starts only from the Try menu's "measure speed"); Space, Return or a click while the eyes rest asks for attention; a missed hearing makes the face squint. What landed is in [Wave 2 status](#wave-2-status) below. Still to check on the laptop: hearing at 1 m and 2 m with each microphone entry, end-of-speech to first word, decode speed and bench results. Open owner decisions: alarms with the lid closed (new; the default is silence), the source tag, the LFM licence and the screenshots.
 
+- **2026-11-24 (night)** Waves 1 to 3 done and committed: wave 1 (first-boot fixes, installer ISO, `6ccf7f9`), wave 2 (the Pip functions, `04d00f0`, with image-build fixes after it) and wave 3 (an adversarial review's 49 findings fixed in `9fed87c`; forget-everything reaching reminders, a plain yes for switching off and clearing, battery pleas needing two readings, images recording their source, in `f414c51`). Wave 4 is in progress in the `wave4` worktree: model packs checked before the voice, recogniser and embedding models load; the night's upkeep without dream consent; brightness answers at the ends; real-model runs. The four manual pages were re-checked against the worktree and restamped. Host suites pass (above). Nothing of waves 2 to 4 has run in QEMU or on the laptop yet.
+
 ## Wave 2 status
 
-Written after the integration pass of 24 November 2026. Everything here is
-**host** evidence (Mac-side tests with fakes): no image has been built from
-this source yet, so nothing below has run in QEMU or on the laptop.
+Written after the integration pass of 24 November 2026 and brought up to
+date after wave 3. Everything here is **host** evidence (Mac-side tests
+with fakes). A laptop Try image has now been built from `f414c51`, but
+nothing below has yet run in QEMU or on the laptop.
 
 **Delivered (host-tested).**
 
@@ -169,17 +181,20 @@ REFERENCE.md, FIRST-BOOT.md and LAB.md were corrected to match.
   sherpa-onnx smoke (L2.8), the slot-isolation probe and turn-latency
   checks with the real model (L7.1 to L7.3), strict reply shape (L7.9),
   three fixture days of dreaming (L8.13), and the lab apps suite (L9.6).
-- The voice, recogniser and embedding packs are not yet checked with
-  `model_pack.verify` before they are loaded; the conversation and dream
-  packs are.
-- Night maintenance (backup, rehash, re-warm) runs only when dreaming is
-  switched on, because it shares the dream's eligibility gate.
-- "Brighter" at full brightness still says "Brighter.": the brainstem's
-  answer arrives after the line. Brightness set by voice is restored only on
-  a clean brainstem stop.
-- `scripts/check-docs.py` reports only freshness: the manual pages'
-  `verified` stamps predate tonight's uncommitted sources. They need a full
-  re-check and new stamps once the work is committed.
+- Being fixed in wave 4 (uncommitted when this was written): the voice,
+  recogniser, VAD and embedding packs checked with `model_pack.trusted`
+  before they are loaded; night upkeep (backup, rehash, re-warm) on every
+  eligible night, with only the journal and the dream model needing dream
+  consent; "brighter" at full brightness answering "That's as bright as I
+  go." Brightness set by voice is still restored only on a clean
+  brainstem stop.
+- Care's dream window "whenever the lid is closed" is saved but not used:
+  the mind builds its `DreamPolicy` without the settings directory, so the
+  night window (before 5 a.m.) always applies.
+- Care's Dreams page still says "I use no model for this yet", which is no
+  longer true once the dream pack is on the image.
+- The manual pages were re-checked and restamped on 24 November; see
+  `scripts/check-docs.py` for anything changed since.
 - Not confirmed: that the image ships `hwclock` (clock setting relies on
   it), and the builder's resolved kernel `.config`. `IOWeight=` on the dream
   unit has no IO controller to act on.
@@ -191,7 +206,15 @@ recogniser's confidence call; Piper's and Moonshine's real-time factors,
 which decide the automatic voice; whether llama-server reports `cache_n`
 for the identity snapshot; recall thresholds on real phrasing; a bench run;
 `cat /sys/fs/cgroup/cgroup.controllers` listing cpu, memory and pids; the
-doctor's restarts, the mixer reset and backups to a labelled stick.
+doctor's restarts, the mixer reset and backups to a labelled stick. Also:
+the battery thresholds (15 % or 30 min, 10 min, 5 % or 5 min, the 9.3 V
+floor) against the real 81 % pack, the power-off after 10 minutes closed
+on battery, and plugging in during the 20 s grace; the backlight range and
+DPMS turning the LVDS panel off while dark; bodycare's charge limit, fan
+floor and caps (it ships in observe mode); the F1 captions overlay; the
+top-row keys with `hid_apple.fnmode=2`; the time-to-first-chirp after
+"Hey Pip"; the dream model's speed and heat with the lid closed. Nothing
+on the internal SSD until the owner says so.
 
 **Open owner decisions.** Alarms with the lid closed (default silence);
 whether Piper's Alba voice may be the default natural voice, since its

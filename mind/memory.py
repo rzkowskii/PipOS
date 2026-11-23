@@ -257,6 +257,9 @@ HYBRID_POOL = 50
 # ("why is the sky blue?") must be as close as COSINE_FLOOR_IMPERSONAL.
 # Calibrated with blink-8M on the sets in tests/test_memory_hybrid.py:
 # unrelated questions peak at about 0.22, paraphrases mostly score 0.2-0.6.
+# Re-checked on 24 November 2026 with lab/bench_recall_floors.py (1,080
+# settings): none of them raises hit@1 on the acceptance set above 24/30
+# without more false recalls than words alone, so these stay.
 COSINE_FLOOR = 0.20
 COSINE_FLOOR_IMPERSONAL = 0.32
 # A row sharing only some of the question's words gets a cosine lift from the

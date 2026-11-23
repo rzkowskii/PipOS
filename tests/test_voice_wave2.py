@@ -528,9 +528,29 @@ class RingBell(unittest.IsolatedAsyncioTestCase):
         plain = await self.speak({"text": "Hello.", "last": True})
         self.assertEqual(plain, [("words", True)])
         self.assertEqual(voice_module.clause_request({"text": "x", "last": True, "chirp": "ears"}).get("chirp"), None)
-        for state in ({"chirps_on": False}, {"muted": True}):
+        for state in ({"chirps_on": False}, {"muted": True}, {"lid_open": False}):
             order = await self.speak({"text": "Your timer is done.", "last": True, "chirp": "bell"}, **state)
             self.assertEqual(order, [("words", True)], state)
+
+    async def test_the_bell_is_only_for_the_first_clause_and_waits_for_no_quiet_hours(self):
+        order = await self.speak({"text": "Hello.", "last": False}, {"text": "Again.", "last": True, "chirp": "bell"})
+        self.assertEqual(order, [("words", True), ("words", False)], "a bell mid-reply never plays")
+        # The mind already decided this ring may sound; the voice does not second-guess it.
+        order = await self.speak({"text": "Your alarm.", "last": True, "chirp": "bell"}, quiet_hours=lambda clock: True)
+        self.assertEqual(order[0], ("bell", "/unused/bell.wav"))
+
+    async def test_a_chirp_still_playing_stops_before_the_bell(self):
+        voice = Voice(Mock(), "Richard", [], "")
+        voice.chirps_on, voice.lid_open, voice.muted = True, True, False
+        voice.chirp_bank = Mock(path=Mock(return_value="/unused/bell.wav"))
+        purr = asyncio.create_task(asyncio.sleep(60))
+        voice.chirp_task = purr
+        voice.play_chirp = AsyncMock(return_value=True)
+        self.assertTrue(await voice.ring_bell())
+        self.assertTrue(purr.cancelled(), "never two sounds at once")
+        voice.muted = True
+        self.assertFalse(await voice.ring_bell())
+        self.assertEqual(voice.play_chirp.await_count, 1)
 
 
 class Loading(AsyncEngine):

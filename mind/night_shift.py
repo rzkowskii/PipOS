@@ -9,9 +9,13 @@ written down, so the next quiet spell carries on instead of starting again.
 
 Only the database checkpoint may run off mains power or without bodycare's
 leave: it is quick and it protects the archive. Everything else needs both,
-compaction (which may vacuum the whole file) included. The memory jobs do
-their SQLite work on a connection of their own in a worker thread, so a
-long statement never holds up the event loop and an interrupt aborts it.
+compaction (which may vacuum the whole file) included. Upkeep (the database
+check, expiry, search, vectors, the day record, the backup, the model
+re-check and the re-warm) runs on every eligible night; dreaming (the
+journal and the dream model) also needs the owner's dream consent. The
+memory jobs do their SQLite work on a connection of their own in a worker
+thread, so a long statement never holds up the event loop and an interrupt
+aborts it.
 
 The order (PIP-FUNCTIONS 2.6): database checkpoint and check, gentle expiry,
 search index upkeep, memory vectors, the rule-based journal, the day record,
@@ -34,6 +38,9 @@ from .storage import atomic_write
 ORDER = ("checkpoint", "expiry", "search", "vectors", "journal", "diary",
          "backup", "dream", "rehash", "rewarm")
 LIGHT = frozenset({"checkpoint"})
+# Dreaming, which only runs with the owner's dream consent: the rule-based
+# journal (whose entries only a consenting owner ever hears) and the model.
+DREAMING = frozenset({"journal", "dream"})
 CHUNK_BUDGET = 1.0  # seconds a chunk should take; the interrupt bound is 2 s
 STATE_FILE = "night-shift.json"
 STATE_VERSION = 1
@@ -50,14 +57,19 @@ class Gate:
     `night`: asleep with the lid closed, in the owner's dream window (the
     dream policy). `on_ac`: on mains power. `body_ok`: bodycare's leave for
     sustained load (the package is under the owner's temperature target).
+    `dreams`: the owner's dream consent; without it the upkeep still runs
+    and the DREAMING jobs wait.
     """
 
     night: bool = False
     on_ac: bool = False
     body_ok: bool = False
+    dreams: bool = True
 
     def allows(self, name):
         if not self.night:
+            return False
+        if name in DREAMING and self.dreams is not True:
             return False
         return name in LIGHT or (self.on_ac and self.body_ok)
 
@@ -69,7 +81,12 @@ def as_gate(eligible):
     if isinstance(value, Gate):
         return value
     allowed = value is True
-    return Gate(allowed, allowed, allowed)
+    return Gate(allowed, allowed, allowed, allowed)
+
+
+def upkeep_only(night=True):
+    """The gate for an eligible night without dream consent."""
+    return Gate(night is True, night is True, night is True, False)
 
 
 class NightShift:
@@ -106,6 +123,12 @@ class NightShift:
 
     def done_tonight(self):
         return tuple(name for name in ORDER if name in self._state["done"])
+
+    def settled(self, *, dreams=True):
+        """True when nothing is left for tonight: every job is done, the
+        DREAMING ones not counted when there is no dream consent."""
+        done = set(self.done_tonight())
+        return all(name in done or (name in DREAMING and dreams is not True) for name in self.jobs)
 
     # -- running ------------------------------------------------------------
 

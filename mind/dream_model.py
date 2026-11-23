@@ -381,7 +381,7 @@ class DreamJob:
             return False
         except DreamUnavailable as exc:
             raise RuntimeError(str(exc)) from None
-        accepted, rejected = dream_verify.check_all(items, chunk.lines)
+        accepted, rejected = dream_verify.check_all(items, chunk.lines, self.being)
         self.tally.chunks += 1
         self.tally.proposed += len(items) if isinstance(items, list) else 0
         self.tally.accepted += len(accepted)

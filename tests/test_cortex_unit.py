@@ -154,11 +154,13 @@ class ChatTemplate(unittest.TestCase):
 
 
 class ReplyLength(unittest.TestCase):
-    def test_replies_are_capped_at_64_tokens_and_the_open_shape_stays(self):
+    def test_replies_are_capped_at_64_tokens_in_the_strict_shape(self):
         config = json.loads((ROOT / "config/being.json").read_text())
         self.assertEqual(config["max_tokens"], 64)
-        # The strict shape waits for a model audition on the Mac that does not regress.
-        self.assertEqual(config["reply_shape"], "open")
+        # Adopted after the audition of 24 November 2026 with the real
+        # reflex.gguf: complete replies 20/21, 17/18 and 18/18 against open's
+        # 20/21, 17/18 and 16/18 (lab/results/real-model-2026-11-24.json).
+        self.assertEqual(config["reply_shape"], "strict")
 
 
 class AuditionClient(unittest.TestCase):
@@ -170,6 +172,15 @@ class AuditionClient(unittest.TestCase):
         self.assertEqual((payload["top_k"], payload["id_slot"], payload["seed"]), (20, 0, cortex.seed))
         cfg = model_audition.config(profile, ROOT / "config/identity.md", "strict")
         self.assertEqual((cfg.reply_shape, cfg.max_tokens), ("strict", 64))
+
+    def test_a_reply_cut_off_at_its_token_limit_is_not_complete(self):
+        from lab import model_audition
+        rows = [{"completed": True, "cut_off": False, "reply": "Water evaporates."},
+                {"completed": True, "cut_off": True, "reply": "Water evaporates from the"},
+                {"completed": False, "cut_off": False, "reply": ""}]
+        rate = model_audition.complete_rate(rows)
+        self.assertEqual((rate["complete"], rate["spoken"], rate["sentence_end"], rate["trials"]), (1, 2, 1, 3))
+        self.assertEqual(rate["rate"], 0.333)
 
 
 class SSE(BaseHTTPRequestHandler):
