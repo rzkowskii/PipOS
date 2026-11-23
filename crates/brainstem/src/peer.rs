@@ -118,6 +118,24 @@ mod tests {
     }
 
     #[test]
+    fn only_the_mind_unit_can_say_the_mind_is_dreaming() {
+        // bodycare holds the package at the dream target on `mind.dreaming`.
+        // The topic is the mind's alone (allowed_from), and on the appliance
+        // only being-mind.service may call itself the mind.
+        for hardware_body in [true, false] {
+            assert!(crate::allowed_from("mind.dreaming", "mind", hardware_body));
+            for organ in ["bodycare", "eyes", "hands", "voice", "face", "keyboard", "soak"] {
+                assert!(!crate::allowed_from("mind.dreaming", organ, hardware_body), "{organ} cannot report a dream");
+            }
+        }
+        assert!(may_claim("mind", Some("being-mind.service")));
+        for unit in ["being-bench.service", "being-bodycare.service", "being-hands.service", "being-lab-observe.service"] {
+            assert!(!may_claim("mind", Some(unit)), "{unit} cannot speak as the mind");
+        }
+        assert!(!may_claim("mind", None));
+    }
+
+    #[test]
     fn a_development_machine_is_not_the_appliance() {
         assert!(!enforcing());
     }

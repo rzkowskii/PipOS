@@ -73,6 +73,11 @@ if [ "$tools_base" != "$base_id" ]; then
         docker_ build --quiet -t "$TOOLS_IMAGE" - >/dev/null
 fi
 
+# The tree's source id, taken before the ISO is started (lab/source_id.py).
+tree_id=$(cd "$ROOT" && python3 -m lab.source_id 2>/dev/null) || tree_id=""
+# A new ISO never sits beside the old one's source-id.
+rm -f "$OUTPUT/$NAME.iso.source-id" "$OUTPUT/.$NAME.iso.built-from"
+
 # The builder volume is mounted read-only: this script cannot change a build.
 docker_ run --rm -i \
     -v "$VOLUME:/work:ro" -v "$ROOT:/src" \
@@ -146,6 +151,12 @@ EOF
 image_file() { unsquashfs -cat "$rootfs" "$1" 2>/dev/null | head -n 1 | tr -cd '0-9a-f' || true; }
 build_id=$(image_file etc/being/build-id)
 source_id=$(image_file etc/being/source-id)
+# Without one in the system itself: the id lab/build.sh recorded beside these
+# images when the laptop build that made them finished (taken before it began).
+if [ ${#source_id} -ne 64 ] && [ -f "$IMAGES/being-source-id" ]; then
+    source_id=$(head -n 1 "$IMAGES/being-source-id" | tr -cd '0-9a-f')
+fi
+[ ${#source_id} -eq 64 ] || source_id=""
 {
     echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "build_id=${build_id:-unknown}"
@@ -231,12 +242,30 @@ xorriso -indev "$iso" -report_el_torito plain 2>/dev/null |
 (cd "$stage" && sha256sum "$NAME.iso" > "$NAME.iso.sha256")
 mv -f "$iso" "$OUT/$NAME.iso"
 mv -f "$stage/$NAME.iso.sha256" "$OUT/$NAME.iso.sha256"
-# lab/source_id.py compares IMAGE.source-id with the tree before a QEMU run.
-rm -f "$OUT/$NAME.iso.source-id"
-if [ ${#source_id} -eq 64 ]; then
-    echo "$source_id" > "$OUT/$NAME.iso.source-id"
-fi
+# The id of the source the ISO's system was built from, for the Mac side to
+# record as the ISO's source-id.
+echo "$source_id" > "$OUT/.$NAME.iso.built-from"
 INNER
+
+# lab/source_id.py compares IMAGE.source-id with the tree before a QEMU run.
+# The ISO records the source its laptop build came from (never the tree's id
+# as it is now, which could name code the ISO does not hold), and the tree's
+# id taken before the ISO was started says whether that build is fresh.
+built_from=$(tr -cd '0-9a-f' < "$OUTPUT/.$NAME.iso.built-from" 2>/dev/null || true)
+rm -f "$OUTPUT/.$NAME.iso.built-from"
+if [ ${#built_from} -eq 64 ]; then
+    if (cd "$ROOT" && python3 -m lab.source_id stamp "$OUTPUT/$NAME.iso" "$built_from") >/dev/null; then
+        if [ "$built_from" = "$tree_id" ]; then
+            echo "Source id ${built_from:0:12} recorded in $NAME.iso.source-id (the tree as it was when the ISO was started)."
+        else
+            echo "Note: $NAME.iso holds a laptop build from source ${built_from:0:12}, but the tree was ${tree_id:0:12} when the ISO was started; rebuild with lab/build.sh laptop for a fresh ISO." >&2
+        fi
+    else
+        echo "Note: could not write $NAME.iso.source-id." >&2
+    fi
+else
+    echo "Note: the laptop build records no source id (rebuild it with lab/build.sh laptop); $NAME.iso carries none, and BEING_GATE=1 refuses it." >&2
+fi
 
 ls -lh "$OUTPUT/$NAME.iso"
 cat "$OUTPUT/$NAME.iso.sha256"

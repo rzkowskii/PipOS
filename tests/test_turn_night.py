@@ -90,6 +90,33 @@ class NightHooks(MindCase):
         self.assertGreaterEqual(self.shift.interrupts, 1)
         self.assertTrue(self.mind._dream_task.done())
 
+    async def test_night_work_is_bracketed_by_mind_dreaming(self):
+        self.shift.hold = asyncio.Event()
+        self.enter_sleep()
+        await asyncio.wait_for(self.shift.started.wait(), 2)
+        self.assertEqual(self.bus.of("mind.dreaming"), [{"t": "mind.dreaming", "active": True}],
+                         "bodycare hears it before the work, so it can say why it holds the package")
+        self.bus.push("body.lid", closed=False, seq=3)
+        async with asyncio.timeout(2):
+            while not self.mind._dream_task.done():
+                await asyncio.sleep(0.01)
+        self.assertEqual([event["active"] for event in self.bus.of("mind.dreaming")], [True, False],
+                         "an interrupted night still says it stopped")
+
+    async def test_a_finished_step_says_it_stopped_dreaming(self):
+        self.enter_sleep()
+        await self.bus.wait("mind.dream_committed")
+        async with asyncio.timeout(2):
+            while not self.mind._dream_task.done():
+                await asyncio.sleep(0.01)
+        self.assertEqual([event["active"] for event in self.bus.of("mind.dreaming")], [True, False])
+
+    async def test_no_dreaming_is_claimed_on_a_night_that_is_not_eligible(self):
+        (self.root / "dreams-enabled").unlink()
+        self.enter_sleep()
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.bus.of("mind.dreaming"), [])
+
     async def test_the_rewarm_job_reads_the_whole_prompt(self):
         await self.warmed()
         self.mind.messages = [{"role": "user", "content": "x " * 300}, {"role": "assistant", "content": "[joy] ok"}]
@@ -127,6 +154,8 @@ class RealNightShift(NightHooks):
     # The fake-shift cases do not apply to the real one.
     test_an_eligible_night_steps_the_shift_and_reports_a_committed_dream = None
     test_opening_the_lid_interrupts_it = None
+    test_night_work_is_bracketed_by_mind_dreaming = None
+    test_a_finished_step_says_it_stopped_dreaming = None
 
 
 class StartUp(MindCase):

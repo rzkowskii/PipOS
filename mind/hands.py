@@ -1374,37 +1374,6 @@ class RecordingRenderer:
         self.started = False
 
 
-# Frame file header (/run/being-panel/<app>.frame). The C side, and the full
-# panel-mode spec, is os/package/being/being-panel-frame.h; tests compile it
-# and check the two agree. Little-endian, 128 bytes, RGBA rows follow.
-FRAME_MAGIC = b"BPN1"
-FRAME_VERSION = 1
-FRAME_HEADER = struct.Struct("<4sIIIIIQIIIiiI32s40s")
-FRAME_HEADER_SIZE = 128
-FRAME_FLAGS = {"visible": 1, "focus": 2, "pip_typing": 4, "pip_paused": 8, "job_busy": 16, "human_typing": 32,
-               "scrolled": 64}
-
-
-def read_frame_header(raw):
-    """Reference reader for the frame header (the face does the same in Rust).
-    Returns None for a bad header or a frame being written (odd sequence)."""
-    if len(raw) < FRAME_HEADER_SIZE:
-        return None
-    (magic, version, width, height, stride, flags, sequence, dirty_first, dirty_count, beat,
-     cursor_x, cursor_y, _reserved, title, status) = FRAME_HEADER.unpack_from(raw)
-    if magic != FRAME_MAGIC or version != FRAME_VERSION or stride < width * 4 or sequence % 2:
-        return None
-    if dirty_first + dirty_count > height:
-        return None
-    return {
-        "width": width, "height": height, "stride": stride, "sequence": sequence,
-        "dirty": (dirty_first, dirty_count), "flags": {k for k, bit in FRAME_FLAGS.items() if flags & bit},
-        "beat": beat, "cursor": (cursor_x, cursor_y),
-        "title": title.split(b"\0")[0].decode("utf-8", "replace"),
-        "status": status.split(b"\0")[0].decode("utf-8", "replace"),
-    }
-
-
 # -- forgetting ----------------------------------------------------------------
 
 _READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)

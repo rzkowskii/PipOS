@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mind.reminders import Reminders
+from mind.reminders import Reminders, mentions
 
 
 class RemindersTest(unittest.TestCase):
@@ -69,6 +69,23 @@ class RemindersTest(unittest.TestCase):
             with self.subTest(text=text, due_at=due_at, kind=kind), self.assertRaises(ValueError):
                 self.reminders.add(text, due_at, kind=kind)
         self.assertEqual(self.reminders.upcoming(), [])
+
+
+class MentionsTest(unittest.TestCase):
+    """The one rule forgetting uses for reminders, for an entry in the queue
+    or one held by a ring the owner may still answer."""
+
+    def test_it_matches_whole_words_either_way(self):
+        self.assertTrue(mentions("call Mum", ["Mum"]))
+        self.assertTrue(mentions("call Mum", ["I must call Mum on Sunday"]))
+        self.assertFalse(mentions("call Mumford", ["Mum"]))
+        self.assertFalse(mentions("buy milk", ["Mum likes milk"]))
+
+    def test_placeholders_and_empty_words_never_match(self):
+        self.assertFalse(mentions("Alarm", ["the alarm clock is broken"]))
+        self.assertFalse(mentions("Timer", ["the egg timer"]))
+        self.assertFalse(mentions("call Mum", []))
+        self.assertFalse(mentions("call Mum", None))
 
 
 class RingingTest(unittest.TestCase):

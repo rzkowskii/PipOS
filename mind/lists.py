@@ -427,7 +427,7 @@ async def _act(kind, match, store):
             return Reply(f"[neutral] Done. I've deleted {count_words(removed)} note{'s' if removed != 1 else ''}.",
                          logged="note.clear")
         return Reply(f"[neutral] Delete all {count_words(count)} of your notes? Say yes or no.",
-                     confirm=Confirm(clear_notes, Reply("[neutral] Okay, I've kept your notes.")))
+                     confirm=Confirm(clear_notes, Reply("[neutral] Okay, I've kept your notes."), strict=True))
 
     if kind == "add":
         name, problem = _which(store, _list_of(match), create=True)
@@ -532,5 +532,6 @@ async def _act(kind, match, store):
         everything = "the one thing" if count == 1 else f"all {what}"
         question = (f"[neutral] Delete {spoken_list(name)} and the {what} on it? Say yes or no." if drop
                     else f"[neutral] Clear {everything} off {spoken_list(name)}? Say yes or no.")
-        return Reply(question, confirm=Confirm(confirmed, Reply(f"[neutral] Okay, I've left {spoken_list(name)} as it is.")))
+        return Reply(question, confirm=Confirm(confirmed, Reply(f"[neutral] Okay, I've left {spoken_list(name)} as it is."),
+                                               strict=True))
     return None

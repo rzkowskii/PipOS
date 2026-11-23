@@ -76,11 +76,13 @@ class Controls(unittest.TestCase):
         self.assertEqual((yes.action, yes.logged), ("poweroff", "shutdown"))
         self.assertIn("Goodbye", yes.line)
         self.assertEqual(reply.confirm.on_no.line, "[neutral] Okay, I've left it.")
+        self.assertIs(reply.confirm.strict, True, "only a plain yes switches it off")
         for text in ("switch off", "Switch yourself off", "turn yourself off", "power down"):
             self.assertEqual(self.ask(text)[0].line, "[neutral] Shall I switch off? Say yes.", text)
         reply, _ = self.ask("Restart yourself")
         self.assertEqual(reply.line, "[neutral] Shall I restart? Say yes.")
         self.assertEqual(run(reply.confirm.on_yes()).action, "reboot")
+        self.assertIs(reply.confirm.strict, True, "only a plain yes restarts it")
         reply, _ = self.ask("shut down", guest=True)
         self.assertIsNone(reply.confirm)
         self.assertIn("Only my owner", reply.line)

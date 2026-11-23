@@ -60,10 +60,77 @@ Usage: lab/build.sh [command]
   up               start the builder VM and prepare Buildroot, nothing more
   down             stop the builder VM
   destroy          delete the builder VM and everything built in it
+
+Every image these commands write to out/images carries IMAGE.source-id, the
+source id (python3 -m lab.source_id) of the tree as it was when the build
+started, so the lab suites can tell a fresh image from an old one. Only a
+run that rebuilds the being package and then the image ("all") records one:
+plain "build", or "build"/"laptop" with other targets, may assemble an image
+from older code, so it gets none (BEING_GATE=1 refuses such an image).
+
+The commands that rebuild the being package (try-image, try-screen, laptop,
+laptop-try, and build or laptop given being-rebuild) first clean its build
+directory, so every source file is copied in again: Buildroot copies a local
+source tree with rsync --update, which keeps a build-directory file that is
+newer than its source. BEING_FAST_REBUILD=1 skips the clean (an incremental
+rebuild that may keep such files).
 EOF
 }
 
 docker_() { docker --context "colima-$PROFILE" "$@"; }
+
+# The tree's source id (lab/source_id.py), taken before a build starts:
+# a build takes most of an hour and the tree can change under it, so an id
+# taken afterwards could name code the image never contained. Empty when it
+# cannot be taken; the image then carries no id and BEING_GATE=1 refuses it.
+SOURCE_ID=""
+take_source_id() {
+    local ident
+    if ident=$(python3 -m lab.source_id 2>/dev/null) && printf '%s\n' "$ident" | grep -Eqx '[0-9a-f]{64}'; then
+        SOURCE_ID=$ident
+        echo "Source id ${SOURCE_ID:0:12}, taken before the build."
+    else
+        SOURCE_ID=""
+        echo "Note: python3 -m lab.source_id gave no source id; the image will carry none (BEING_GATE=1 refuses it)." >&2
+    fi
+}
+
+# Beside the images in the builder's output tree: the id of the tree the
+# last finished build there came from (lab/make-iso.sh reads it). Removed
+# before a build starts, so a build that stops part way leaves no id behind.
+BUILD_SOURCE_ID=being-source-id
+forget_build_source_id() {
+    run rm -f "$OUT/images/$BUILD_SOURCE_ID"
+}
+record_build_source_id() {
+    [ -n "$SOURCE_ID" ] && [ "$BEING_FRESH" = 1 ] || return 0
+    run sh -euc 'printf "%s\n" "$2" > "$1/images/$3"' record-source-id "$OUT" "$SOURCE_ID" "$BUILD_SOURCE_ID"
+}
+
+# IMAGE.source-id beside an image in out/images. unstamp_image runs before
+# the image is replaced, so the new image never sits beside an old id.
+unstamp_image() {
+    rm -f "$1.source-id"
+}
+stamp_image() {
+    unstamp_image "$1"
+    if [ -z "$SOURCE_ID" ]; then
+        echo "Note: $1 has no source id." >&2
+        return 0
+    fi
+    if [ "$BEING_FRESH" != 1 ]; then
+        echo "Note: $1 has no source id: this run did not rebuild the being package and then the image," \
+            "so the image may hold older code (lab/build.sh $cmd being-rebuild all records one)." >&2
+        return 0
+    fi
+    if fast_rebuild; then
+        echo "Note: BEING_FAST_REBUILD=1: $1 is recorded as built from ${SOURCE_ID:0:12}, but an in-place rebuild" \
+            "may have kept older files." >&2
+    fi
+    python3 -m lab.source_id stamp "$1" "$SOURCE_ID" >/dev/null ||
+        { echo "Note: could not write $1.source-id." >&2; return 0; }
+    echo "Source id ${SOURCE_ID:0:12} recorded in $1.source-id"
+}
 
 ensure_vm() {
     if ! colima status --profile "$PROFILE" >/dev/null 2>&1; then
@@ -96,6 +163,7 @@ run() {
         -e BR2_DL_DIR=/work/dl -e BR2_CCACHE_DIR=/work/ccache -e BEINGOS_LAB_KEYS=/work/beingos-keys -e BEING_PACK_ROLES="${BEING_PACK_ROLES:-}" \
         -e BEINGOS_RELEASE_CERT="${BEINGOS_RELEASE_CERT:-}" \
         -e BEINGOS_REQUIRE_RELEASE_KEY="${BEINGOS_REQUIRE_RELEASE_KEY:-0}" \
+        -e BEING_SOURCE_ID="$SOURCE_ID" \
         "$IMAGE" "$@"
 }
 
@@ -164,6 +232,84 @@ br_make() {
     # MAKE_JOBS is set only for trees configured with per-package directories,
     # where Buildroot can build independent packages at the same time.
     run make -C /work/buildroot O="$OUT" BR2_EXTERNAL=/src/os ${MAKE_JOBS:-} "$@"
+}
+
+# The being package uses Buildroot's local site method, whose rsync copies
+# only files newer than the build directory's copy (rsync --update): a
+# build-directory file with a later time (a workspace Cargo.toml, say) is
+# kept even after its source changed. Cleaning the build directory first
+# makes the next build copy every file in again. BEING_FAST_REBUILD=1 skips it.
+fast_rebuild() {
+    case "${BEING_FAST_REBUILD:-0}" in
+        0) return 1 ;;
+        1) return 0 ;;
+        *) echo "BEING_FAST_REBUILD must be 0 or 1" >&2; exit 2 ;;
+    esac
+}
+# Refuse a bad BEING_FAST_REBUILD before anything starts.
+check_fast_rebuild() {
+    fast_rebuild || true
+}
+being_clean() {
+    if fast_rebuild; then
+        echo "BEING_FAST_REBUILD=1: the being package is rebuilt in place (rsync --update may keep newer files)."
+    else
+        echo "Cleaning the being package so its sources are copied in afresh (BEING_FAST_REBUILD=1 skips this)."
+        br_make being-dirclean
+    fi
+}
+# Whether this run rebuilt the being package and then assembled the images
+# from it. Only then do the images hold the tree SOURCE_ID names: the being
+# package is the whole repository (mind, crates, config, sim and the unit
+# files), and Buildroot never copies a local source in again by itself, so a
+# plain "make all" can assemble an image from code copied in days ago.
+BEING_FRESH=0
+# Rebuild the being package from a fresh copy of the tree.
+being_rebuild() {
+    being_clean
+    br_make being-rebuild
+}
+# The being package from a fresh copy, then the images from it.
+being_rebuild_all() {
+    being_rebuild
+    br_make all
+    BEING_FRESH=1
+}
+# make with these targets. A being-rebuild among them cleans the package
+# first and runs on its own, after the targets before it and before the ones
+# after it: with per-package directories a parallel "being-rebuild all" can
+# assemble the image before the rebuild has installed.
+br_make_targets() {
+    local target before=() after=() found=0
+    for target in "$@"; do
+        if [ "$found" = 0 ] && [ "$target" = being-rebuild ]; then
+            found=1
+        elif [ "$found" = 0 ]; then
+            before+=("$target")
+        else
+            after+=("$target")
+        fi
+    done
+    if [ "$found" = 0 ]; then
+        br_make "$@"
+        # An explicit being-dirclean before "all": all builds being afresh.
+        local cleaned=0
+        for target in "$@"; do
+            case "$target" in
+                being-dirclean) cleaned=1 ;;
+                all) [ "$cleaned" = 0 ] || BEING_FRESH=1 ;;
+            esac
+        done
+        return 0
+    fi
+    [ "${#before[@]}" -eq 0 ] || br_make "${before[@]}"
+    being_rebuild
+    if [ "${#after[@]}" -gt 0 ]; then
+        br_make "${after[@]}"
+        for target in "${after[@]}"; do
+            [ "$target" != all ] || BEING_FRESH=1
+        done
+    fi
 }
 
 refresh_python_ssl() {
@@ -518,28 +664,37 @@ case "$cmd" in
         python3 lab/manifest.py "$src"
         ;;
     build)
+        check_fast_rebuild
+        take_source_id
         up
         # Apply the defconfig when there is no configuration yet, or it changed.
         run bash -c "[ -f $OUT/.config ] && [ $OUT/.config -nt /src/os/configs/$DEFCONFIG ]" || br_make "$DEFCONFIG"
         check_space
         refresh_python_ssl
         refresh_stale
-        br_make "$@"
+        forget_build_source_id
+        br_make_targets "$@"
+        record_build_source_id
         mkdir -p out/images
+        unstamp_image out/images/beingos.img
         run bash -c "cp --sparse=always $OUT/images/beingos.img /src/out/images/beingos.img.new && mv -f /src/out/images/beingos.img.new /src/out/images/beingos.img"
+        stamp_image out/images/beingos.img
         ls -lh out/images/beingos.img
         ;;
     try-image|try-screen)
         check_try_bench
+        check_fast_rebuild
+        take_source_id
         up
         run bash -c "[ -f $OUT/.config ] && [ $OUT/.config -nt /src/os/configs/$DEFCONFIG ]" || br_make "$DEFCONFIG"
         check_space
         refresh_python_ssl
         refresh_stale
+        forget_build_source_id
         # Two steps: with per-package directories a parallel "being-rebuild all"
         # can assemble the image before the rebuild has installed.
-        br_make being-rebuild
-        br_make all
+        being_rebuild_all
+        record_build_source_id
         mkdir -p out/images
         screen=${BEING_TRY_SCREEN:-0}
         if [ "$cmd" = try-screen ]; then
@@ -551,11 +706,13 @@ case "$cmd" in
             *) echo "BEING_TRY_SCREEN must be 0 or 1" >&2; exit 2 ;;
         esac
         output="$output$(try_bench_suffix).img"
+        unstamp_image "out/images/$output"
         # The builder sees only the variables run() names: pass the bench
         # choice to try-image.sh explicitly.
         run env BEING_TRY_SCREEN="$screen" BEING_TRY_BENCH="$TRY_BENCH" sh /src/os/board/beingos/try-image.sh \
             "$OUT/host" "$OUT/images/efi-part/EFI/BOOT/bootx64.efi" \
             "$OUT/images/rootfs.squashfs" "$OUT/images/models.ext4" /src/out/images
+        stamp_image "out/images/$output"
         ls -lh "out/images/$output"
         ;;
     laptop-config)
@@ -564,41 +721,50 @@ case "$cmd" in
         laptop_config
         ;;
     laptop)
+        check_fast_rebuild
+        take_source_id
         laptop_select
         up
         laptop_config
         check_space
         refresh_python_ssl
         refresh_stale
+        forget_build_source_id
         # The being package is a local source tree: rebuild it so the image
         # always holds the files that were tested.
         if [ "$#" -eq 0 ]; then
             # Two steps: with per-package directories a parallel "being-rebuild all"
             # can assemble the image before the rebuild has installed.
-            br_make being-rebuild
-            br_make all
+            being_rebuild_all
         else
-            br_make "$@"
+            br_make_targets "$@"
         fi
         laptop_verify
+        record_build_source_id
         mkdir -p out/images
+        unstamp_image "out/images/$LAPTOP_NAME.img"
         run bash -c "cp --sparse=always $OUT/images/beingos.img /src/out/images/$LAPTOP_NAME.img.new && mv -f /src/out/images/$LAPTOP_NAME.img.new /src/out/images/$LAPTOP_NAME.img"
+        stamp_image "out/images/$LAPTOP_NAME.img"
         ls -lh "out/images/$LAPTOP_NAME.img"
         ;;
     laptop-try)
         check_try_bench
+        check_fast_rebuild
+        take_source_id
         laptop_select
         up
         laptop_config
         check_space
         refresh_python_ssl
         refresh_stale
+        forget_build_source_id
         # Two steps: with per-package directories a parallel "being-rebuild all"
         # can assemble the image before the rebuild has installed.
-        br_make being-rebuild
-        br_make all
+        being_rebuild_all
         laptop_verify
+        record_build_source_id
         mkdir -p out/images
+        unstamp_image "out/images/$LAPTOP_NAME-try$(try_bench_suffix).img"
         # The laptop has no serial line, so its Try media always has the screen menu.
         run bash -euo pipefail -c '
             stage=$(mktemp -d /src/out/images/.laptop-try.XXXXXX)
@@ -608,11 +774,15 @@ case "$cmd" in
                 "$1/images/rootfs.squashfs" "$1/images/models.ext4" "$stage"
             mv -f "$stage/beingos-laptop-try$4.img" "/src/out/images/$2-try$4.img"
         ' laptop-try "$OUT" "$LAPTOP_NAME" "$TRY_BENCH" "$(try_bench_suffix)"
+        stamp_image "out/images/$LAPTOP_NAME-try$(try_bench_suffix).img"
         ls -lh "out/images/$LAPTOP_NAME-try$(try_bench_suffix).img"
         ;;
     laptop-make)
         laptop_select
         up
+        # A hand-run make can change the images: the record of the source
+        # they came from no longer holds (lab/make-iso.sh then stamps none).
+        forget_build_source_id
         br_make "$@"
         ;;
     release-key)
@@ -639,6 +809,7 @@ case "$cmd" in
         ;;
     make)
         up
+        forget_build_source_id
         br_make "$@"
         ;;
     shell)

@@ -6,8 +6,9 @@ restarting, its version, and whether its last update worked.
   back on) and says how to undo it.
 - Brightness goes to the brainstem as `being.brightness` (`step` or
   `level`); the brainstem keeps it within bounds and puts it back on exit.
-- Switching off and restarting always ask first (`Confirm`), then the mind
-  saves itself and runs `Reply.action`.
+- Switching off and restarting always ask first (`Confirm`, strict: only a
+  plain yes, never "okay" or "sure"), then the mind saves itself and runs
+  `Reply.action`.
 - The version is /etc/being/build-id. "Did your update work?" is answered
   from the boot health check and the action log, never guessed.
 - "When did you last back up?" and "back yourself up" (to a stick labelled
@@ -28,6 +29,7 @@ BUILD_ID = Path("/etc/being/build-id")
 SLOT_GOOD = Path("/run/being-slot-good")
 CMDLINE = Path("/proc/cmdline")
 UPTIME = Path("/proc/uptime")
+
 # The boot health check needs a minute of health inside three minutes.
 HEALTH_DEADLINE_S = 180
 RECENT_UPDATE_S = 14 * 86400
@@ -83,6 +85,14 @@ NUMBER_WORDS = {
     "fifty": 50, "sixty": 60, "seventy": 70, "seventy five": 75, "eighty": 80, "ninety": 90, "hundred": 100,
     "a hundred": 100, "one hundred": 100, "half": 50,
 }
+
+
+def _strict(on_yes):
+    """A confirm only a plain yes answers: switching off cannot be taken back."""
+    try:
+        return Confirm(on_yes, strict=True)
+    except TypeError:  # the spec's frozen Confirm, without `strict`
+        return Confirm(on_yes)
 
 
 def may_match(text):
@@ -375,11 +385,11 @@ async def handle(text, ctx):
         if kind == "poweroff":
             async def off():
                 return Reply("[neutral] Saving myself. Goodbye for now.", action="poweroff", logged="shutdown")
-            return Reply("[neutral] Shall I switch off? Say yes.", confirm=Confirm(off))
+            return Reply("[neutral] Shall I switch off? Say yes.", confirm=_strict(off))
 
         async def again():
             return Reply("[neutral] Restarting. I'll be back in about a minute.", action="reboot", logged="reboot")
-        return Reply("[neutral] Shall I restart? Say yes.", confirm=Confirm(again))
+        return Reply("[neutral] Shall I restart? Say yes.", confirm=_strict(again))
     if kind == "version":
         return Reply(version_line())
     if kind in ("last_backup", "back_up"):

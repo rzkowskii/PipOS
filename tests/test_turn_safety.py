@@ -146,6 +146,47 @@ class WorkshopNews(MindCase):
             self.mind._guest_memory = None
 
 
+class WhatCannotBeUndoneNeedsAPlainYes(MindCase):
+    """Switching off, restarting and clearing a list or the notes: "okay" and
+    "sure" are not a yes for these, only a plain yes is."""
+
+    ask = SkillCase.ask
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.calls = []
+        self.mind._power_command = lambda action: self.calls.append(action) or True
+
+    async def test_okay_does_not_switch_it_off_or_restart_it(self):
+        for request, answer in (("Shut down", "okay"), ("Restart yourself", "sure")):
+            self.assertIn("Say yes", await self.ask(request))
+            await self.ask(answer)
+            await asyncio.sleep(0.05)
+            self.assertEqual(self.calls, [], answer)
+            self.mind._pending_confirm = None
+
+    async def test_a_plain_yes_still_switches_it_off(self):
+        self.assertIn("Shall I switch off", await self.ask("Shut down"))
+        self.assertIn("Goodbye", await self.ask("yes"))
+        async with asyncio.timeout(5):
+            await self.mind._turn
+        self.assertEqual(self.calls, ["poweroff"])
+
+    async def test_okay_does_not_clear_a_list_or_the_notes(self):
+        await self.ask("Add milk to my shopping list")
+        await self.ask("Make a note: the plumber comes Thursday")
+        self.assertIn("Say yes or no", await self.ask("Clear my shopping list"))
+        await self.ask("okay")
+        self.mind._pending_confirm = None
+        self.assertIn("milk", await self.ask("What's on my shopping list?"))
+        self.assertIn("Say yes or no", await self.ask("Delete all my notes"))
+        await self.ask("sure")
+        self.mind._pending_confirm = None
+        self.assertIn("plumber", await self.ask("Read my notes"))
+        await self.ask("Clear my shopping list")
+        self.assertIn("empty", await self.ask("yes"))
+
+
 class AFailedSwitchOff(SkillCase):
     async def asyncSetUp(self):
         from mind.reply import Confirm

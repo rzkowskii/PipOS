@@ -8,8 +8,6 @@ import json
 import os
 import random
 import re
-import shutil
-import struct
 import subprocess
 import sys
 import tempfile
@@ -22,7 +20,7 @@ from mind import hands
 from mind.hands import (
     NAME, RECIPES, Check, OscFilter, Ring, Typist, cage_command, check_python, check_shell_line,
     clear_workshop, end_word, forget_file, heredoc, name_stem, osc_flags, python_grammar,
-    read_frame_header, remove_files, renderer_command, sanitise, shell_grammar, unique_name,
+    remove_files, renderer_command, sanitise, shell_grammar, unique_name,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -541,80 +539,37 @@ class ForgetTest(unittest.TestCase):
 
 
 class PanelFrameTest(unittest.TestCase):
-    """The C header (os/package/being/being-panel-frame.h) and the Python
-    reference reader agree on the frame layout and the OSC keys."""
+    """What hands tells the renderer in band (OSC 7770) is what the real
+    renderer parses: panel_osc() in os/package/being/being-console-panel.h.
+    The frame file itself is checked in tests/test_panel_frame_contract.py."""
 
-    HEADER = ROOT / "os/package/being/being-panel-frame.h"
+    PANEL_H = ROOT / "os/package/being/being-console-panel.h"
 
-    def test_python_layout(self):
-        self.assertEqual(hands.FRAME_HEADER.size, 128)
+    def parsed_keys(self):
+        text = self.PANEL_H.read_text()
+        head = text.index("static void panel_osc(")
+        body = text[head:text.index("\n}\n", head)]
+        return set(re.findall(r'memcmp\(pair, "(\w+)", \d+\)', body)), body
 
-    def test_header_constants_match(self):
-        text = self.HEADER.read_text()
-        for name, bit in hands.FRAME_FLAGS.items():
-            c_name = {"visible": "BP_VISIBLE", "focus": "BP_FOCUS", "pip_typing": "BP_PIP_TYPING",
-                      "pip_paused": "BP_PIP_PAUSED", "job_busy": "BP_JOB_BUSY", "human_typing": "BP_HUMAN_TYPING",
-                      "scrolled": "BP_SCROLLED"}[name]
-            shift = bit.bit_length() - 1
-            self.assertIn(f"{c_name} = 1u << {shift}", text)
-        for key in ("visible", "focus", "pip", "job", "human", "title", "status", "scroll", "wipe"):
-            self.assertIn(f'"{key}"', text)
+    def test_no_stale_frame_reader_is_left(self):
+        for name in ("read_frame_header", "FRAME_HEADER", "FRAME_FLAGS"):
+            self.assertFalse(hasattr(hands, name), name)
 
-    @unittest.skipUnless(shutil.which("cc"), "no C compiler")
-    def test_compiled_writer_is_read_by_python(self):
-        program = r'''
-#include <stdio.h>
-#include <stdlib.h>
-#include "being-panel-frame.h"
-int main(int argc, char **argv) {
-    size_t size = being_panel_file_size(4, 3);
-    struct being_panel_header *frame = calloc(1, size);
-    uint8_t rows[2 * 16];
-    being_panel_init(frame, 4, 3);
-    for (int i = 0; i < 32; ++i) rows[i] = (uint8_t)i;
-    being_panel_begin(frame);
-    being_panel_rows(frame, 1, 2, rows, 16);
-    being_panel_osc(frame, "visible", "1");
-    being_panel_osc(frame, "pip", "typing");
-    being_panel_osc(frame, "job", "busy");
-    being_panel_osc(frame, "title", "Pip's terminal");
-    being_panel_osc(frame, "status", "Running in 4 \xc2\xb7 Esc or say stop and more text here");
-    int act = being_panel_osc(frame, "wipe", "1");
-    frame->beat = 9; frame->cursor_x = 2; frame->cursor_y = 1;
-    being_panel_end(frame);
-    FILE *out = fopen(argv[1], "wb");
-    fwrite(frame, 1, size, out);
-    fclose(out);
-    return act == BP_ACT_WIPE ? 0 : 3;
-}
-'''
-        with tempfile.TemporaryDirectory() as work:
-            source = Path(work) / "writer.c"
-            source.write_text(program)
-            binary = Path(work) / "writer"
-            build = subprocess.run(["cc", "-std=c11", "-Wall", "-Werror", "-I", str(self.HEADER.parent),
-                                    "-o", str(binary), str(source)], capture_output=True, text=True)
-            self.assertEqual(build.returncode, 0, build.stderr)
-            frame = Path(work) / "terminal.frame"
-            self.assertEqual(subprocess.run([str(binary), str(frame)]).returncode, 0)
-            raw = frame.read_bytes()
-        header = read_frame_header(raw)
-        self.assertEqual(len(raw), 128 + 4 * 4 * 3)
-        self.assertEqual((header["width"], header["height"], header["stride"]), (4, 3, 16))
-        self.assertEqual(header["sequence"], 2)
-        self.assertEqual(header["dirty"], (1, 2))
-        self.assertEqual(header["flags"], {"visible", "pip_typing", "job_busy"})
-        self.assertEqual(header["title"], "Pip's terminal")
-        self.assertTrue(header["status"].startswith("Running in 4 ·"))
-        self.assertLessEqual(len(header["status"].encode()), 39)
-        self.assertEqual(raw[128 + 16:128 + 48], bytes(range(32)))
-        self.assertEqual((header["beat"], header["cursor"]), (9, (2, 1)))
+    def test_every_key_hands_sends_is_one_the_renderer_parses(self):
+        keys, body = self.parsed_keys()
+        source = (ROOT / "mind/hands.py").read_text()
+        sent = set()
+        for call in re.findall(r"(?:renderer|self)\.flags\(((?:[^()]|\([^()]*\))*)\)", source):
+            sent |= set(re.findall(r"(?:^|[,(\s])(\w+)=", call))
+        self.assertTrue({"pip", "job", "title", "status", "wipe", "scroll"} <= sent, sent)
+        # visible= is the face's to decide; the renderer ignores it harmlessly.
+        self.assertEqual(sent - keys - {"visible"}, set())
+        for word in ("typing", "paused", "busy", "up", "down"):
+            self.assertIn(f'"{word}"', body)
 
-    def test_reader_refuses_a_frame_being_written(self):
-        raw = bytearray(hands.FRAME_HEADER.pack(b"BPN1", 1, 4, 3, 16, 0, 3, 0, 0, 0, -1, -1, 0, b"", b""))
-        self.assertIsNone(read_frame_header(bytes(raw)))
-        raw = hands.FRAME_HEADER.pack(b"BPN1", 1, 4, 3, 16, 0, 4, 2, 5, 0, -1, -1, 0, b"", b"")
-        self.assertIsNone(read_frame_header(raw))  # dirty rows past the end
+    def test_flag_values_are_the_words_the_renderer_matches(self):
+        data = osc_flags(focus=False, human=True, pip="typing", job="busy", wipe=1).decode()
+        self.assertEqual(data, "\x1b]7770;focus=0;human=1;pip=typing;job=busy;wipe=1\x07")
 
 
 class ShelfTest(unittest.TestCase):

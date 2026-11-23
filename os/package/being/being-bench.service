@@ -14,9 +14,11 @@ Type=oneshot
 Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1
 # The bench runs its own model servers on a private port, so the waking and
 # dream models are stopped first, and the waking one is started again after.
-ExecStartPre=-/usr/bin/systemctl stop being-cortex.service being-dream-cortex.service
+# The two systemctl calls run outside the sandbox below (+): they order
+# systemd about, which the bench itself never needs to do.
+ExecStartPre=-+/usr/bin/systemctl stop being-cortex.service being-dream-cortex.service
 ExecStart=/usr/bin/python3 -m mind.bench
-ExecStopPost=-/usr/bin/systemctl --no-block start being-cortex.service
+ExecStopPost=-+/usr/bin/systemctl --no-block start being-cortex.service
 # A full run, thread sweep and dream model included, takes tens of minutes;
 # a soak (being.bench.soak=MINUTES) adds three steps of that length.
 TimeoutStartSec=6h
@@ -24,15 +26,39 @@ TimeoutStartSec=6h
 KillMode=mixed
 TimeoutStopSec=60
 CPUWeight=100
+# The bench's llama-server is a child of this unit, so it runs in the same
+# sandbox as being-cortex.service: it reads /models, is reachable only on
+# loopback (it has no authentication) and may talk to nothing else. The
+# differences are what measuring needs. ProtectKernelTunables stays off:
+# the soak writes the CPU frequency caps and turbo in /sys (and puts them
+# back). Writable: this boot's PIPLOGS folder on the Try stick
+# (/run/beinglogs, mounted by being-usb-logs) and, without a stick, the
+# fallback /run/being-bench, kept after the oneshot ends so the results can
+# still be read. Slot files go to the private /tmp.
 NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_IPC_LOCK
+# A setting may ask for mlock (LLAMA_ARG_MLOCK=1), as the cortex drop-in can.
+LimitMEMLOCK=infinity
+ProtectSystem=strict
+ReadWritePaths=-/run/beinglogs
+RuntimeDirectory=being-bench
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 ProtectHome=yes
 PrivateTmp=yes
+PrivateDevices=yes
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
 ProtectHostname=yes
 LockPersonality=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
+RestrictNamespaces=yes
 SystemCallArchitectures=native
 
 [Install]

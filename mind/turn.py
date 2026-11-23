@@ -33,7 +33,7 @@ from .profile import (
     DEFAULT_PERSONALITY, Personality, daily_greeting, first_words, good_night, personality_greetings,
     self_reply, spoken_count, welcome_back,
 )
-from .reminders import RING_GAP, Reminder
+from .reminders import RING_GAP, Reminder, mentions
 from .retention import SECONDS_PER_DAY, load_policy as load_memory_policy
 from .skills import Skills, find_zone, number_words, speakable_time
 from .speech import GRAMMAR, STRICT_GRAMMAR, ClauseSplitter, EchoGuard, TagParser, ThinkFilter, boilerplate
@@ -415,6 +415,7 @@ class Announcement:
     deadline: float
     speaking: bool = False
     plea: int | None = None
+    forgotten: bool = False  # its reminder was forgotten after it was offered
 
 
 @dataclass
@@ -439,6 +440,14 @@ class RewarmJob:
 def _tagged(line, tag="neutral"):
     line = (line or "").strip()
     return line if line.startswith("[") else f"[{tag}] {line}"
+
+
+def _spoken_words(content):
+    """What was said in a user message, without the (senses) and (note)
+    lines the mind put round it (Mind._user_content)."""
+    lines = [line for line in str(content or "").splitlines()
+             if not (line.startswith("(") and line.endswith(")"))]
+    return "\n".join(lines).strip()
 
 
 def _plain(line):
@@ -534,6 +543,9 @@ class Mind:
         self._volume = self._load_volume()
         self.battery_level = None  # the brainstem's judgement, when it sends one
         self._plea_stage = 0  # the highest battery plea due since it was unplugged
+        # The stage the last body.state called for: a plea needs two in a row,
+        # so one bad reading (a gauge glitch, a sag under load) never pleads.
+        self._plea_reading = 0
         self._plea_due = None
         self._plea_thanks_until = None  # monotonic deadline for "Thanks, that's better"
         self._plea_woke = 0  # the stage it last woke itself for
@@ -1339,6 +1351,7 @@ class Mind:
         self._dream_idle_night = None
         self.state = "waking"
         self.battery = self.on_ac = self.charging = None
+        self._plea_reading = 0
 
     def _cancel(self):
         self._cancelled = True
@@ -1741,8 +1754,8 @@ class Mind:
         policy = load_initiative_policy(self.state_dir)
         local_now = self.skills.now()
         if isinstance(entry, Reminder):
-            allowed = self._may_ring(policy, entry.kind, local_now)
-            reply = self._ring_line(entry)
+            allowed = not pending.forgotten and self._may_ring(policy, entry.kind, local_now)
+            reply = self._ring_line(entry) if allowed else ""
         else:
             allowed = (policy.greetings and entry == local_now.date() and self._has_fresh_presence(time.monotonic())
                        and not policy.is_quiet(local_now))
@@ -3232,7 +3245,8 @@ class Mind:
         """Every fact and archived sentence, a batch at a time; the stored day
         records (counts only, but counts of conversations no longer
         remembered); then the lists and notes, the told-jokes record, the
-        action log, the backups' erase mark and the model's cache."""
+        action log, the reminders and greeted days, the backups' erase mark
+        and the model's cache."""
         memory = self.memory
         # Nothing in the prompt or the model's cache survives this, so it is
         # dropped first instead of being scrubbed batch by batch.
@@ -3269,6 +3283,13 @@ class Mind:
                     module.erase_all(self.state_dir)
             except Exception as exc:
                 log(f"could not erase {name}: {exc!r}")
+        # Reminders, alarms, timers and the greeted days go too: a reminder's
+        # task is the owner's words, and a greeted day says when they talked.
+        try:
+            self.skills.reminders.erase_all()
+        except Exception as exc:
+            log(f"could not erase reminders: {exc!r}")
+        self._drop_rings()
         backup = optional_module("backup")
         try:
             if backup is not None and hasattr(backup, "note_erase"):
@@ -3374,6 +3395,7 @@ class Mind:
             if pending.get("replace"):
                 await self._say("[neutral] Okay. I've replaced it.")
                 return
+            self._forget_reminders(change.texts)
             # Count what was actually taken, not what was offered.
             taken = len(change.fact_ids) + len(set(pending["episodes"]).intersection(change.episode_ids))
             count = "That's" if taken <= 1 else "Those are"
@@ -3399,14 +3421,51 @@ class Mind:
             self._last_memory = None
             change = _LiveEdit(tuple(m["content"] for m in dropped))
             await self._scrub(change)
+            # Only the owner's own words reach reminders, as in the archive
+            # (memory.edit gives back what was heard, never Pip's reply): a
+            # reply that happened to say "water the tomatoes" must not cancel
+            # the owner's reminder to.
+            self._forget_reminders(_spoken_words(m["content"]) for m in dropped if m["role"] == "user")
             return change
         targets = {"fact_ids" if subject.kind == "fact" else "episode_ids": [subject.key]}
         change = self.memory.edit(**targets, replacement=replacement)
         if change:
             await self._scrub(change)
+            if replacement is None:
+                # "Forget that": a reminder holding those words goes too. A
+                # correction keeps them; the owner only changed a detail.
+                self._forget_reminders(change.texts)
         if not change or replacement is None:
             self._last_memory = None
         return change
+
+    def _forget_reminders(self, texts):
+        """Forgetting reaches reminders too: none may keep the forgotten words
+        (Reminders.forget_mentioning). Returns how many were cancelled."""
+        texts = [text for text in texts or () if text and text != "[forgotten]"]
+        if not texts:
+            return 0
+        self._drop_rings(texts)
+        try:
+            return self.skills.reminders.forget_mentioning(texts)
+        except Exception as exc:
+            log(f"could not forget reminders: {exc!r}")
+            return 0
+
+    def _drop_rings(self, texts=None):
+        """A ring that may still be answered, or one offered and not yet said,
+        holds a reminder's words outside the database: a "snooze" would set it
+        again. It goes with them (every one when `texts` is None)."""
+        def forgotten(entry):
+            return isinstance(entry, Reminder) and (texts is None or mentions(entry.text, texts))
+
+        if self._ring is not None and forgotten(self._ring.entry):
+            self._ring = None
+        pending = self._announcement
+        if pending is not None and not pending.speaking and forgotten(pending.entry):
+            # Its grant may still come: _speak_announcement then finds the
+            # entry gone and answers "nothing to say".
+            pending.forgotten = True
 
     def _backup_note(self):
         """Once per wake, after a forget: a backup made earlier still holds it.
@@ -3468,9 +3527,12 @@ class Mind:
 
     def _check_battery(self):
         """Plead for power once per stage and thank once when plugged back
-        in. At the critical stage it saves at once, in the background: the
-        cells may cut out before any power-off is announced."""
-        stage = self._plea_stage_now()
+        in. A stage counts only once two body.state updates in a row call for
+        it. A critical reading saves at once, in the background, even the
+        first time: the cells may cut out before any power-off is announced,
+        and saving says nothing."""
+        reading = self._plea_stage_now()
+        stage, self._plea_reading = min(reading, self._plea_reading), reading
         if self.on_ac is True or self.charging is True:
             if self._plea_stage:
                 self._plea_thanks_until = time.monotonic() + THANKS_SECONDS
@@ -3481,7 +3543,7 @@ class Mind:
             self._plea_stage = stage
             self._plea_due = stage
             self._plea_thanks_until = None
-        if self._plea_stage == PLEA_CRITICAL and not self._critical_saved:
+        if PLEA_CRITICAL in (self._plea_stage, reading) and not self._critical_saved:
             self._critical_saved = True
             log("battery critical: saving now")
             self._critical_save_task = asyncio.create_task(self._save_everything(SHUTDOWN_GRACE))
@@ -3790,9 +3852,27 @@ class Mind:
         self._dream_task = asyncio.create_task(self._dream_batch(night))
 
     async def _dream_batch(self, night):
-        if self.night_shift is not None:
-            await self._night_step(night)
+        """One batch of the night's work, bracketed by mind.dreaming, so
+        bodycare can give "dreaming" as the reason it holds the package."""
+        if self._eligible_night() != night:
             return
+        try:
+            await self._send_dreaming(True)
+            if self.night_shift is not None:
+                await self._night_step(night)
+            else:
+                await self._journal_batch(night)
+        finally:
+            await self._send_dreaming(False)
+
+    async def _send_dreaming(self, active):
+        try:
+            await self.bus.send("mind.dreaming", active=active)
+        except Exception as exc:  # the night's work never waits on the bus
+            log(f"could not send mind.dreaming: {exc!r}")
+
+    async def _journal_batch(self, night):
+        """Without a night shift: the rule-based dream journal alone."""
         started = time.monotonic()
         if self._eligible_night() != night:
             return

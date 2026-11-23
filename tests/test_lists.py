@@ -73,6 +73,7 @@ class ListsTest(unittest.TestCase):
         self.assertEqual(reply.line, "[neutral] Clear all three things off your shopping list? Say yes or no.")
         self.assertEqual(lists.Lists(self.dir).items("shopping"), ["milk", "eggs", "tea"])   # nothing yet
         self.assertEqual(reply.confirm.on_no.line, "[neutral] Okay, I've left your shopping list as it is.")
+        self.assertIs(reply.confirm.strict, True, "only a plain yes clears a list")
         done = asyncio.run(reply.confirm.on_yes())
         self.assertEqual(done.line, "[neutral] Done. Your shopping list is empty.")
         self.assertEqual(done.logged, "list.clear")
@@ -145,6 +146,7 @@ class ListsTest(unittest.TestCase):
                          "thing 2 matters; and two more.")
         reply = self.say("delete all my notes")
         self.assertIn("Delete all five of your notes?", reply.line)
+        self.assertIs(reply.confirm.strict, True, "only a plain yes deletes every note")
         self.assertEqual(asyncio.run(reply.confirm.on_yes()).line, "[neutral] Done. I've deleted five notes.")
         self.assertEqual(lists.Lists(self.dir).notes(), [])
         self.assertIsNone(self.say("make a note"))      # nothing to note: not ours

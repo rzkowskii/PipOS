@@ -1924,6 +1924,11 @@ class Volume(MindCase):
 class BatteryCare(MindCase):
     """Task 1.19 (mind side): pleas, thanks, and a clean goodbye."""
 
+    def reading(self, **fields):
+        """Two body.state updates in a row: one alone never pleads."""
+        for _ in range(2):
+            self.bus.push("body.state", **fields)
+
     async def announce(self):
         self.bus.push("stem.beat")
         offer = await self.bus.wait("mind.announce", len(self.bus.of("mind.announce")) + 1)
@@ -1937,7 +1942,7 @@ class BatteryCare(MindCase):
 
     async def test_a_plea_once_then_thanks_when_plugged_in(self):
         self.bus.push("state.changed", state="idle")
-        self.bus.push("body.state", battery=14, charging=False, on_ac=False)
+        self.reading(battery=14, charging=False, on_ac=False)
         await asyncio.sleep(0.05)
         self.assertEqual(await self.announce(), "I'm running low on battery. Could you plug me in?")
         self.bus.sent.clear()
@@ -1951,7 +1956,7 @@ class BatteryCare(MindCase):
 
     async def test_time_to_empty_comes_before_percentage(self):
         self.bus.push("state.changed", state="idle")
-        self.bus.push("body.state", battery=40, charging=False, on_ac=False, minutes_left=8)
+        self.reading(battery=40, charging=False, on_ac=False, minutes_left=8)
         await asyncio.sleep(0.05)
         self.assertIn("nearly empty", await self.announce())
 
@@ -1961,6 +1966,8 @@ class BatteryCare(MindCase):
         self.bus.push("body.state", battery=4, charging=False, on_ac=False)
         await asyncio.sleep(0.1)
         self.assertTrue((self.root / "context.json").exists(), "the conversation is saved at once")
+        self.bus.push("body.state", battery=4, charging=False, on_ac=False)
+        await asyncio.sleep(0.05)
         self.bus.sent.clear()
         line = await self.announce()
         self.assertIn("Please plug me in right now", line)
@@ -2005,13 +2012,13 @@ class BatteryCare(MindCase):
         self.bus.push("stem.beat")
         await asyncio.sleep(0.1)
         self.assertEqual(self.bus.of("mind.announce"), [])
-        self.bus.push("body.state", battery=40, charging=False, on_ac=False, battery_level="low")
+        self.reading(battery=40, charging=False, on_ac=False, battery_level="low")
         await asyncio.sleep(0.05)
         self.assertEqual(await self.announce(), "I'm running low on battery. Could you plug me in?")
 
     async def test_it_wakes_itself_to_plead(self):
         self.bus.push("state.changed", state="asleep")
-        self.bus.push("body.state", battery=12, charging=False, on_ac=False)
+        self.reading(battery=12, charging=False, on_ac=False)
         await asyncio.sleep(0.05)
         self.bus.push("stem.beat")
         await self.bus.wait("being.wake")
@@ -2023,7 +2030,7 @@ class BatteryCare(MindCase):
 
     async def test_a_thanks_not_said_soon_is_dropped(self):
         self.bus.push("state.changed", state="asleep")
-        self.bus.push("body.state", battery=12, charging=False, on_ac=False)
+        self.reading(battery=12, charging=False, on_ac=False)
         await asyncio.sleep(0.05)
         with patch("mind.turn.THANKS_SECONDS", 0.05):
             self.bus.push("body.state", battery=12, charging=True, on_ac=True)
@@ -2033,6 +2040,30 @@ class BatteryCare(MindCase):
         self.bus.push("stem.beat")
         await asyncio.sleep(0.1)
         self.assertEqual(self.bus.of("mind.announce"), [])
+
+    async def test_one_bad_reading_never_pleads(self):
+        self.bus.push("state.changed", state="idle")
+        self.bus.push("body.state", battery=40, charging=False, on_ac=False)
+        self.bus.push("body.state", battery=3, charging=False, on_ac=False, battery_level="low")
+        self.bus.push("body.state", battery=40, charging=False, on_ac=False, battery_level="ok")
+        self.bus.push("body.state", battery=40, charging=False, on_ac=False, minutes_left=2)
+        self.bus.push("body.state", battery=40, charging=False, on_ac=False, minutes_left=90)
+        self.bus.push("stem.beat")
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.bus.of("mind.announce"), [], "a glitch between good readings is not a plea")
+        self.assertEqual(self.mind._plea_due, None)
+
+    async def test_a_stage_needs_two_readings_that_reach_it(self):
+        self.bus.push("state.changed", state="idle")
+        self.bus.push("body.state", battery=14, charging=False, on_ac=False)
+        self.bus.push("body.state", battery=8, charging=False, on_ac=False)
+        await asyncio.sleep(0.05)
+        self.assertEqual(await self.announce(), "I'm running low on battery. Could you plug me in?",
+                         "low twice, very low once: the low plea")
+        self.bus.push("body.state", battery=8, charging=False, on_ac=False)
+        await asyncio.sleep(0.05)
+        self.bus.sent.clear()
+        self.assertIn("nearly empty", await self.announce())
 
     async def test_battery_question_includes_time_left(self):
         self.bus.push("body.state", battery=40, charging=False, on_ac=False, minutes_left=75)

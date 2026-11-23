@@ -5,6 +5,7 @@ These run on the Mac without Buildroot. Anything that needs the builder, a VM
 or the laptop is named in the plan, not faked here.
 """
 
+import json
 import os
 import re
 import shlex
@@ -616,6 +617,70 @@ class UnitTests(unittest.TestCase):
                 self.assertTrue(any(journal.parent == Path(place) or Path(place) in journal.parents
                                     for place in writable), (journal, writable))
 
+    def test_bodycare_journal_lives_where_the_crate_looks_for_it(self):
+        # Act mode writes nothing it has not journalled, so the unit's runtime
+        # directory and the crate's own default (the first $RUNTIME_DIRECTORY)
+        # must agree: a restart without --journal still finds the originals.
+        service = unit(PACKAGE / "being-bodycare.service")
+        self.assertEqual(values(service, "Service", "RuntimeDirectory"), ["being-bodycare"])
+        self.assertEqual(values(service, "Service", "RuntimeDirectoryMode"), ["0700"])
+        main = (ROOT / "crates/bodycare/src/main.rs").read_text()
+        self.assertIn('std::env::var_os("RUNTIME_DIRECTORY")', main)
+        self.assertIn('default_journal(Some("/run/being-bodycare".into()))', main)
+        start, stop = (values(service, "Service", key)[0].split() for key in ("ExecStart", "ExecStopPost"))
+        self.assertEqual(start[start.index("--journal") + 1], stop[stop.index("--journal") + 1],
+                         "the restore must read the journal the running service wrote")
+        # /run/being is the brainstem's; bodycare never needs it writable.
+        self.assertNotIn("/run/being", " ".join(values(service, "Service", "ReadWritePaths")).split())
+
+    def test_bench_model_server_runs_in_the_cortex_sandbox(self):
+        # mind/bench.py starts llama-server as its own child, so the bench
+        # unit's sandbox is the model server's: the cortex unit's, except
+        # where measuring needs more.
+        bench = unit(PACKAGE / "being-bench.service")
+        cortex = unit(OS / "package/cortex/being-cortex.service")
+        for key in ("NoNewPrivileges", "CapabilityBoundingSet", "LimitMEMLOCK", "ProtectSystem", "ProtectHome",
+                    "PrivateTmp", "PrivateDevices", "IPAddressDeny", "IPAddressAllow", "RestrictAddressFamilies",
+                    "ProtectKernelModules", "ProtectKernelLogs", "ProtectControlGroups", "ProtectClock",
+                    "ProtectHostname", "LockPersonality", "RestrictRealtime", "RestrictSUIDSGID",
+                    "RestrictNamespaces", "SystemCallArchitectures"):
+            with self.subTest(key=key):
+                self.assertTrue(values(cortex, "Service", key), key)
+                self.assertEqual(values(bench, "Service", key), values(cortex, "Service", key))
+        # The soak writes the CPU caps and turbo in /sys and puts them back.
+        source = (ROOT / "mind/bench.py").read_text()
+        self.assertIn('CPU = Path("/sys/devices/system/cpu")', source)
+        self.assertFalse(values(bench, "Service", "ProtectKernelTunables"))
+        # The model server itself is started with the cortex's loopback address.
+        self.assertIn('"--host", "127.0.0.1"', source)
+
+    def test_bench_can_write_its_results_inside_its_sandbox(self):
+        from mind import bench, usb_logs
+        service = unit(PACKAGE / "being-bench.service")
+        writable = ["/run/" + name for line in values(service, "Service", "RuntimeDirectory") for name in line.split()]
+        writable += [path.lstrip("-") for line in values(service, "Service", "ReadWritePaths") for path in line.split()]
+        # Without a stick: /run/being-bench, kept after the oneshot has ended.
+        self.assertIn("/run/being-bench", writable)
+        self.assertIn('fallback = Path("/run/being-bench")', (ROOT / "mind/bench.py").read_text())
+        self.assertEqual(values(service, "Service", "RuntimeDirectoryPreserve"), ["yes"])
+        # With one: this boot's PIPLOGS folder, inside being-usb-logs' mount.
+        self.assertIn(str(usb_logs.MOUNT_POINT), writable)
+        self.assertIn("-" + str(usb_logs.MOUNT_POINT), values(service, "Service", "ReadWritePaths"),
+                      "a boot without a Try stick has no PIPLOGS mount")
+        self.assertEqual(bench.PIPLOGS_STATE, Path("/run/being-usb-logs/folder"))
+
+    def test_bench_orders_the_cortex_about_from_outside_its_sandbox(self):
+        service = unit(PACKAGE / "being-bench.service")
+        for key, verb in (("ExecStartPre", "stop"), ("ExecStopPost", "start")):
+            with self.subTest(key=key):
+                (line,) = values(service, "Service", key)
+                prefix = line[:line.index("/")]
+                self.assertEqual(set(prefix), {"-", "+"}, line)
+                self.assertIn(f" {verb} ", line)
+                self.assertIn("being-cortex.service", line)
+        (start,) = values(service, "Service", "ExecStart")
+        self.assertTrue(start.startswith("/usr/bin/python3"), "the bench itself stays in the sandbox")
+
     def test_every_unit_file_here_is_installed_by_the_recipe(self):
         recipe = (PACKAGE / "being.mk").read_text()
         for path in sorted(PACKAGE.iterdir()):
@@ -894,6 +959,279 @@ class PowerRuleTests(unittest.TestCase):
         self.assertEqual(products, {"8509", "821d|828c", "8242"})
         for line in rules:
             self.assertNotIn("link_power_management_policy", line)
+
+
+# A stand-in docker for lab/build.sh and lab/make-iso.sh. It logs every call,
+# runs no make (and no Buildroot download), and on the host, with /src and
+# /work mapped into the scratch tree, runs only the steps that put images
+# and their source ids in place.
+BUILD_FAKE_DOCKER = r'''#!/usr/bin/env python3
+import json, os, sys
+root = os.environ["FAKE_ROOT"]
+args = sys.argv[1:]
+with open(os.path.join(root, "docker-calls.jsonl"), "a") as log:
+    log.write(json.dumps(args) + "\n")
+if args[:1] == ["--context"]:
+    args = args[2:]
+if args[:2] == ["image", "inspect"]:
+    print("sha256:fixture")
+    sys.exit(0)
+if args[:1] != ["run"]:
+    sys.exit(0)
+args = args[1:]
+env = {}
+while args and args[0] not in ("beingos-builder", "pipos-iso-tools"):
+    option = args.pop(0)
+    if option == "-e":
+        key, _, value = args.pop(0).partition("=")
+        env[key] = value
+    elif option == "-v":
+        args.pop(0)
+image, command = args[0], args[1:]
+def mapped(part):
+    return part.replace("/src/", root + "/").replace("/work/", root + "/work/").replace("--sparse=always ", "")
+if image == "pipos-iso-tools":
+    # make-iso.sh's inner script: an ISO, and the id it found beside the images.
+    sys.stdin.read()
+    out, name = mapped(env["OUT"] + "/"), env["NAME"]
+    with open(out + name + ".iso", "w") as iso:
+        iso.write("iso fixture\n")
+    with open(out + name + ".iso.sha256", "w") as digest:
+        digest.write("fixture  " + name + ".iso\n")
+    record = mapped(env["IMAGES"] + "/") + "being-source-id"
+    found = open(record).read().strip() if os.path.exists(record) else ""
+    with open(out + "." + name + ".iso.built-from", "w") as built:
+        built.write(found + "\n")
+    sys.exit(0)
+if command[:1] == ["make"]:
+    targets = [part for part in command[1:] if not part.startswith(("-", "O=", "BR2_EXTERNAL="))]
+    with open(os.path.join(root, "make-targets.jsonl"), "a") as log:
+        log.write(json.dumps(targets) + "\n")
+    # The tree changes while the build runs.
+    touch = os.environ.get("FAKE_TOUCH_DURING_MAKE")
+    if touch:
+        with open(os.path.join(root, touch), "a") as changed:
+            changed.write("# changed during the build\n")
+    sys.exit(0)
+runs = ("try-image.sh", "cp --sparse", "record-source-id")
+if not (any(any(word in part for word in runs) for part in command)
+        or (command[:2] == ["rm", "-f"] and command[2].endswith("/being-source-id"))):
+    sys.exit(0)
+command = [mapped(part) for part in command]
+child = {key: value for key, value in os.environ.items() if not key.startswith("BEING_TRY_")}
+child.update(env)
+os.execvpe(command[0], command, child)
+'''
+
+
+class BuildScriptSourceIdTests(unittest.TestCase):
+    """lab/build.sh and lab/make-iso.sh, run for real against stand-in colima and docker."""
+
+    TREES = {"build": "x86_64", "try-image": "x86_64", "try-screen": "x86_64",
+             "laptop": "laptop", "laptop-try": "laptop"}
+    IMAGES = {"build": "beingos.img", "try-image": "beingos-try.img", "try-screen": "beingos-try-screen.img",
+              "laptop": "beingos-laptop.img", "laptop-try": "beingos-laptop-try.img"}
+
+    def setUp(self):
+        from tests.test_build_try_bench import try_image_options
+        from lab import candidate_manifest
+        scratch = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.root = scratch / "tree"
+        (self.root / "lab").mkdir(parents=True)
+        for name in ("build.sh", "make-iso.sh", "source_id.py", "candidate_manifest.py", "__init__.py"):
+            shutil.copy2(ROOT / "lab" / name, self.root / "lab" / name)
+        for scope in candidate_manifest.IMAGE_SCOPES:
+            path = self.root / scope
+            if scope.startswith("Cargo."):
+                path.write_text(scope + "\n")
+            else:
+                path.mkdir(parents=True, exist_ok=True)
+                (path / "fixture").write_text(scope + "\n")
+        board = self.root / "os/board/beingos"
+        board.mkdir(parents=True)
+        (board / "try-image.sh").write_text(try_image_options())
+        for tree in ("x86_64", "laptop", "laptop-maintenance"):
+            images = self.root / "work/output" / tree / "images"
+            (images / "efi-part/EFI/BOOT").mkdir(parents=True)
+            (self.root / "work/output" / tree / "host").mkdir()
+            for name in ("efi-part/EFI/BOOT/bootx64.efi", "rootfs.squashfs", "models.ext4", "beingos.img"):
+                (images / name).write_text(f"{tree} fixture\n")
+        commands = scratch / "bin"
+        commands.mkdir()
+        (commands / "colima").write_text("#!/bin/sh\nexit 0\n")
+        (commands / "docker").write_text(BUILD_FAKE_DOCKER)
+        for command in commands.iterdir():
+            command.chmod(0o755)
+        self.env = {key: value for key, value in os.environ.items() if not key.startswith("BEING_")}
+        self.env.update(PATH=str(commands) + os.pathsep + os.environ["PATH"], FAKE_ROOT=str(self.root),
+                        PYTHONDONTWRITEBYTECODE="1")
+        self.env.pop("PYTHONPATH", None)
+
+    def run_script(self, *argv, **env):
+        return subprocess.run(["bash", *argv], cwd=self.root, env=dict(self.env, **env),
+                              capture_output=True, text=True, timeout=60)
+
+    def tree_id(self):
+        result = subprocess.run([sys.executable, "-m", "lab.source_id"], cwd=self.root, env=self.env,
+                                capture_output=True, text=True, timeout=30, check=True)
+        return result.stdout.strip()
+
+    def sidecar(self, name, folder="out/images"):
+        path = self.root / folder / f"{name}.source-id"
+        return path.read_text().strip() if path.exists() else None
+
+    def record(self, tree):
+        path = self.root / "work/output" / tree / "images/being-source-id"
+        return path.read_text().strip() if path.exists() else None
+
+    def make_targets(self):
+        log = self.root / "make-targets.jsonl"
+        targets = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        if log.exists():
+            log.unlink()
+        return targets
+
+    # Each command as it rebuilds the being package and then the image.
+    FRESH_ARGV = {"build": ("build", "being-rebuild", "all")}
+
+    def test_every_image_command_records_the_id_taken_before_the_build(self):
+        for command, image in self.IMAGES.items():
+            with self.subTest(command=command):
+                before = self.tree_id()
+                # The tree changes while make runs: the image keeps the id it started from.
+                argv = self.FRESH_ARGV.get(command, (command,))
+                result = self.run_script("lab/build.sh", *argv, FAKE_TOUCH_DURING_MAKE=f"mind/{command}.py")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue((self.root / "out/images" / image).exists())
+                self.assertNotEqual(self.tree_id(), before)
+                self.assertEqual(self.sidecar(image), before)
+                self.assertEqual(self.record(self.TREES[command]), before)
+                self.make_targets()
+
+    def test_the_gate_accepts_a_freshly_built_image(self):
+        from lab import source_id
+        self.assertEqual(self.run_script("lab/build.sh", "laptop-try").returncode, 0)
+        image = self.root / "out/images/beingos-laptop-try.img"
+        status, message = source_id.check(image, self.root)
+        source_id.cached_tree_id.cache_clear()
+        self.assertEqual(status, "match", message)
+
+    def test_a_new_image_never_keeps_an_old_images_id(self):
+        old = "0" * 64
+        images = self.root / "out/images"
+        images.mkdir(parents=True)
+        (images / "beingos-try.img").write_text("old image\n")
+        (images / "beingos-try.img.source-id").write_text(old + "\n")
+        (self.root / "lab/source_id.py").unlink()
+        result = self.run_script("lab/build.sh", "try-image")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gave no source id", result.stderr)
+        self.assertIsNone(self.sidecar("beingos-try.img"))
+        self.assertIsNone(self.record("x86_64"))
+
+    def test_the_being_package_is_cleaned_before_every_rebuild(self):
+        for command in ("try-image", "try-screen", "laptop", "laptop-try"):
+            with self.subTest(command=command):
+                self.assertEqual(self.run_script("lab/build.sh", command).returncode, 0)
+                targets = [target for call in self.make_targets() for target in call]
+                self.assertIn("being-dirclean", targets)
+                self.assertLess(targets.index("being-dirclean"), targets.index("being-rebuild"))
+                self.assertLess(targets.index("being-rebuild"), targets.index("all"))
+        for argv in (("build", "being-rebuild", "all"), ("laptop", "being-rebuild", "all")):
+            with self.subTest(argv=argv):
+                self.assertEqual(self.run_script("lab/build.sh", *argv).returncode, 0)
+                targets = [target for call in self.make_targets() for target in call]
+                self.assertLess(targets.index("being-dirclean"), targets.index("being-rebuild"))
+
+    def test_an_image_whose_being_package_was_not_rebuilt_gets_no_id(self):
+        # Buildroot never copies the local being source in again by itself:
+        # a plain "make all" can assemble an image from code copied in long
+        # ago, so naming the tree's id beside it would let the gate pass it.
+        images = self.root / "out/images"
+        images.mkdir(parents=True)
+        for argv, image, tree in ((("build",), "beingos.img", "x86_64"),
+                                  (("build", "linux-rebuild", "all"), "beingos.img", "x86_64"),
+                                  (("build", "being-rebuild"), "beingos.img", "x86_64"),
+                                  (("laptop", "linux-rebuild", "all"), "beingos-laptop.img", "laptop"),
+                                  (("laptop", "all", "being-rebuild"), "beingos-laptop.img", "laptop")):
+            with self.subTest(argv=argv):
+                (images / f"{image}.source-id").write_text("0" * 64 + "\n")
+                (self.root / "work/output" / tree / "images/being-source-id").write_text("0" * 64 + "\n")
+                result = self.run_script("lab/build.sh", *argv)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIsNone(self.sidecar(image))
+                self.assertIsNone(self.record(tree))
+                self.assertIn("did not rebuild the being package", result.stderr)
+                self.make_targets()
+
+    def test_being_rebuild_runs_on_its_own_between_the_other_targets(self):
+        # With per-package directories a parallel "being-rebuild all" can
+        # assemble the image before the rebuild has installed.
+        result = self.run_script("lab/build.sh", "laptop", "grub2-rebuild", "linux-reconfigure", "being-rebuild", "all")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [[target for target in call if target != "/work/buildroot"] for call in self.make_targets()]
+        tail = calls[calls.index(["grub2-rebuild", "linux-reconfigure"]):]
+        self.assertEqual(tail, [["grub2-rebuild", "linux-reconfigure"], ["being-dirclean"], ["being-rebuild"], ["all"]])
+        self.assertEqual(self.sidecar("beingos-laptop.img"), self.tree_id())
+
+    def test_an_explicit_dirclean_before_all_counts_as_a_fresh_build(self):
+        result = self.run_script("lab/build.sh", "build", "being-dirclean", "all")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.sidecar("beingos.img"), self.tree_id())
+
+    def test_a_fast_rebuild_is_recorded_with_a_warning(self):
+        result = self.run_script("lab/build.sh", "try-image", BEING_FAST_REBUILD="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.sidecar("beingos-try.img"), self.tree_id())
+        self.assertIn("may have kept older files", result.stderr)
+
+    def test_fast_rebuild_and_plain_builds_skip_the_clean(self):
+        for argv, env in ((("try-image",), {"BEING_FAST_REBUILD": "1"}),
+                          (("laptop-try",), {"BEING_FAST_REBUILD": "1"}),
+                          (("build",), {}), (("laptop", "linux-rebuild", "all"), {})):
+            with self.subTest(argv=argv, env=env):
+                result = self.run_script("lab/build.sh", *argv, **env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                targets = [target for call in self.make_targets() for target in call]
+                self.assertNotIn("being-dirclean", targets)
+        (self.root / "docker-calls.jsonl").unlink()
+        result = self.run_script("lab/build.sh", "try-image", BEING_FAST_REBUILD="yes")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("BEING_FAST_REBUILD must be 0 or 1", result.stderr)
+        self.assertFalse((self.root / "docker-calls.jsonl").exists(), "refused before anything started")
+
+    def test_a_hand_run_make_forgets_the_builds_source_id(self):
+        self.assertEqual(self.run_script("lab/build.sh", "laptop").returncode, 0)
+        self.assertIsNotNone(self.record("laptop"))
+        self.assertEqual(self.run_script("lab/build.sh", "laptop-make", "being-rebuild").returncode, 0)
+        self.assertIsNone(self.record("laptop"))
+
+    def test_iso_records_the_source_of_the_laptop_build_it_holds(self):
+        self.assertEqual(self.run_script("lab/build.sh", "laptop").returncode, 0)
+        fresh = self.tree_id()
+        result = self.run_script("lab/make-iso.sh")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.sidecar("pipos-macbook.iso", "out/iso"), fresh)
+        self.assertFalse((self.root / "out/iso/.pipos-macbook.iso.built-from").exists())
+        # The tree moves on: the ISO still names the build it holds, and says so.
+        (self.root / "mind/later.py").write_text("later\n")
+        result = self.run_script("lab/make-iso.sh")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.sidecar("pipos-macbook.iso", "out/iso"), fresh)
+        self.assertIn("rebuild with lab/build.sh laptop", result.stderr)
+        # A build with no record (an older build, or a hand-run make): no id at all.
+        (self.root / "work/output/laptop/images/being-source-id").unlink()
+        result = self.run_script("lab/make-iso.sh")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIsNone(self.sidecar("pipos-macbook.iso", "out/iso"))
+
+    def test_iso_reads_the_record_build_sh_writes(self):
+        build = (ROOT / "lab/build.sh").read_text()
+        self.assertIn("BUILD_SOURCE_ID=being-source-id", build)
+        self.assertIn('"$IMAGES/being-source-id"', (ROOT / "lab/make-iso.sh").read_text())
+
+    def test_iso_script_parses(self):
+        subprocess.run(["bash", "-n", str(ROOT / "lab/make-iso.sh")], check=True, timeout=10)
 
 
 if __name__ == "__main__":

@@ -107,6 +107,16 @@ def _holds(outer, inner):
                                           for start in range(len(outer) - size + 1))
 
 
+def mentions(task_text, texts):
+    """True if a task holds forgotten words, or is held whole in them
+    (Reminders.forget_mentioning). "Alarm" and "Timer" never match."""
+    task = _words(task_text)
+    if not task or str(task_text).casefold() in PLACEHOLDERS:
+        return False
+    wanted = [words for text in texts or () if (words := _words(text))]
+    return any(_holds(task, text) or (len(" ".join(task)) >= 4 and _holds(text, task)) for text in wanted)
+
+
 def next_occurrence(rule, at_local, zone, after):
     """The first time strictly after `after` that the rule rings."""
     days = rule_days(rule)
@@ -413,13 +423,9 @@ class Reminders:
         placeholder names "Alarm" and "Timer" are not the owner's words, so
         forgetting a fact about an alarm clock never cancels the alarms.
         """
-        wanted = [words for text in texts if (words := _words(text))]
         removed = 0
         for entry in self.upcoming():
-            task = _words(entry.text)
-            if not task or entry.text.casefold() in PLACEHOLDERS:
-                continue
-            if any(_holds(task, text) or (len(" ".join(task)) >= 4 and _holds(text, task)) for text in wanted):
+            if mentions(entry.text, texts):
                 removed += self.cancel(entry.id)
         return removed
 
