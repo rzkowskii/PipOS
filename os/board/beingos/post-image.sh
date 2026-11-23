@@ -40,6 +40,8 @@ for descriptor in "$src"/os/package/being/model-packs/*/pack.json; do
     fi
 done
 bench=
+# BEING_PACK_ROLES limits which packs are staged (comma-separated), e.g. to
+# keep downloadable release media under 2 GB without the dream model.
 case "${BEING_TRY_BENCH:-0}" in
     0) ;;
     1) bench=--bench ;;
@@ -48,7 +50,7 @@ esac
 MODELS=$(mktemp -d "$BINARIES_DIR/.beingos-model.XXXXXX")
 trap 'rm -rf "$MODELS"' EXIT
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$src" python3 -m lab.package_model \
-    --source "$src/out/models" --output "$MODELS" $bench \
+    --source "$src/out/models" --output "$MODELS" $bench ${BEING_PACK_ROLES:+--roles "$BEING_PACK_ROLES"} \
     --certificate "$BEINGOS_LAB_KEYS/cert.pem" --key "$BEINGOS_LAB_KEYS/key.pem"
 rm -f "$BINARIES_DIR/models.ext4" "$BINARIES_DIR/mind.ext4"
 # ext4's own metadata grows with the partition: from 2 GB up a 64 MB journal,

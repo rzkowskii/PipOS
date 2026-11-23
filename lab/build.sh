@@ -90,7 +90,7 @@ run() {
     if [ -t 0 ] && [ -t 1 ]; then tty="-it"; fi
     docker_ run --rm $tty \
         -v "$VOLUME:/work" -v "$ROOT:/src" \
-        -e BR2_DL_DIR=/work/dl -e BR2_CCACHE_DIR=/work/ccache -e BEINGOS_LAB_KEYS=/work/beingos-keys \
+        -e BR2_DL_DIR=/work/dl -e BR2_CCACHE_DIR=/work/ccache -e BEINGOS_LAB_KEYS=/work/beingos-keys -e BEING_PACK_ROLES="${BEING_PACK_ROLES:-}" \
         -e BEINGOS_RELEASE_CERT="${BEINGOS_RELEASE_CERT:-}" \
         -e BEINGOS_REQUIRE_RELEASE_KEY="${BEINGOS_REQUIRE_RELEASE_KEY:-0}" \
         "$IMAGE" "$@"
