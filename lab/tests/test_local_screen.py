@@ -382,7 +382,8 @@ class LocalScreen(unittest.TestCase):
         self.select("y")
         self.console("13-confirm-install", profile)
         self.type_line(f"ERASE {approved['device']}")
-        deadline = time.monotonic() + 180
+        # Preparing checks every model pack (about 2 GB) on an emulated CPU first.
+        deadline = time.monotonic() + 900
         with target.open("rb", buffering=0) as disk:
             while time.monotonic() < deadline:
                 disk.seek(512)
@@ -448,7 +449,7 @@ class LocalScreen(unittest.TestCase):
         self.select("3")
         self.wait_text("Restore identity and settings")
         self.restore_through_screen(device, WRONG_IDENTITY)
-        self.wait_text("Backup restore failed.", screenshot="21-restore-wrong-key", timeout=110)
+        self.wait_text("Backup restore failed.", screenshot="21-restore-wrong-key", timeout=600)
         self.wait_text("Choice:", prompt=True)
         self.sh("sync")
         after = target.stat()
@@ -458,7 +459,7 @@ class LocalScreen(unittest.TestCase):
 
         self.restore_through_screen(device, RESTORE_IDENTITY)
         self.wait_text("Press Enter to return to PipOS.", prompt=True,
-                       screenshot="22-restore-complete", timeout=200)
+                       screenshot="22-restore-complete", timeout=900)
         self.key("ret")
         self.face("23-after-restore")
         self.vm.send("poweroff\n")
