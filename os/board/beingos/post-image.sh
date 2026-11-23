@@ -49,7 +49,11 @@ case "${BEING_TRY_BENCH:-0}" in
 esac
 MODELS=$(mktemp -d "$BINARIES_DIR/.beingos-model.XXXXXX")
 trap 'rm -rf "$MODELS"' EXIT
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$src" python3 -m lab.package_model \
+# Buildroot's host Python may lack bz2 (voice packs are .tar.bz2); prefer the
+# builder's own Python 3, which has it.
+pack_python=python3
+[ -x /usr/bin/python3 ] && /usr/bin/python3 -c 'import bz2' 2>/dev/null && pack_python=/usr/bin/python3
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$src" "$pack_python" -m lab.package_model \
     --source "$src/out/models" --output "$MODELS" $bench ${BEING_PACK_ROLES:+--roles "$BEING_PACK_ROLES"} \
     --certificate "$BEINGOS_LAB_KEYS/cert.pem" --key "$BEINGOS_LAB_KEYS/key.pem"
 rm -f "$BINARIES_DIR/models.ext4" "$BINARIES_DIR/mind.ext4"
