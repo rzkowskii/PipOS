@@ -159,6 +159,11 @@ pub const NAMES: &[&str] = &[
     "dazed",
 ];
 
+/// Looks the face uses on its own that are not expressions the brainstem
+/// can ask for (so they are not in NAMES, `--list` or the demo).
+#[cfg_attr(not(test), allow(dead_code))]
+pub const OWN: &[&str] = &["loading"];
+
 /// The six from the original expression sheet, in its order.
 pub const SHEET: &[&str] = &["joy", "curiosity", "surprise", "skepticism", "concern", "sleepy"];
 
@@ -199,6 +204,9 @@ pub fn preset(name: &str) -> Option<Pose> {
         // Heavy lids over the resting egg, drooping toward the outside.
         "tired" => Pose::sym(Eye { y: -0.04, top: -0.02, top_slant: 0.22, top_curve: 0.18, glow: 0.55, ..rest }),
         "muted" => Pose::sym(Eye { x: -0.74, y: 0.0, w: 0.34, h: 0.05, round: 4.0, glow: 0.5, ..o }),
+        // Waiting for the rest of the body at power-on: the resting egg,
+        // calm and a little dimmer, its lids relaxed. Not sick, just early.
+        "loading" => Pose::sym(Eye { h: 0.31, top: 0.26, glow: 0.78, ..rest }),
         "dazed" => Pose {
             l: Eye { x: -0.74, y: 0.08, w: 0.30, h: 0.30, round: 2.0, glow: 0.6, ..o },
             r: Eye { x: 0.78, y: -0.06, w: 0.40, h: 0.20, round: 2.0, tilt: -0.25, glow: 0.6, ..o },
@@ -237,7 +245,7 @@ mod tests {
 
     #[test]
     fn every_name_has_a_preset() {
-        for name in NAMES.iter().chain(SHEET) {
+        for name in NAMES.iter().chain(SHEET).chain(OWN) {
             assert!(preset(name).is_some(), "missing preset: {name}");
         }
         assert!(preset("nonsense").is_none());
@@ -246,7 +254,7 @@ mod tests {
     #[test]
     fn presets_stay_on_screen() {
         // A 16:10 screen spans x in [-1.6, 1.6] and y in [-1, 1].
-        for name in NAMES {
+        for name in NAMES.iter().chain(OWN) {
             let p = preset(name).unwrap();
             for e in [p.l, p.r] {
                 assert!(e.x.abs() + e.w < 1.5, "{name} too wide");

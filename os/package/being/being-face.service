@@ -17,6 +17,12 @@ ExecCondition=/usr/libexec/being-screen-mode face
 ExecStart=/usr/bin/being-face --fullscreen --bus ${BEING_BUS}
 Restart=always
 RestartSec=300ms
+# Only limits that cannot stop the eyes: the face is the KMS master and its
+# F2 menu runs Setup, which needs the network and the disks.
+NoNewPrivileges=yes
+ProtectHome=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
 
 [Install]
 WantedBy=sysinit.target

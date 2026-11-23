@@ -41,7 +41,8 @@ class Wifi(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not IMAGE or not Path(IMAGE).is_file():
-            raise RuntimeError("Set BEING_WIFI_IMAGE to the policy-enabled hwsim companion.")
+            # Outside gate mode a missing companion is a skip; BEING_GATE=1 turns it into a failure.
+            raise unittest.SkipTest("Set BEING_WIFI_IMAGE to the policy-enabled hwsim companion.")
 
     def sh(self, command, timeout=30):
         status, output = self.vm.run(command, timeout)

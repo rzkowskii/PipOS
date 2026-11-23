@@ -1,13 +1,32 @@
 //! The face's connection to the brainstem. It reconnects by itself, and it tells
 //! the animation when the brainstem has gone quiet.
 
-use crate::anim::Anim;
+use crate::anim::{Anim, Drives};
+use crate::overlay::Captions;
 use bus::{Client, Event};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-const SUBS: &[&str] =
-    &["state.changed", "face.*", "say.level", "stem.beat", "body.lid", "body.state", "mind.cancel", "mind.reply_done"];
+/// Words heard and said (hear.*, say.request) arrive for the captions
+/// overlay; it drops them unless it is open, and the face never logs them.
+const SUBS: &[&str] = &[
+    "state.changed",
+    "face.*",
+    "say.level",
+    "say.request",
+    "stem.beat",
+    "body.lid",
+    "body.state",
+    "body.drives",
+    "camera.policy",
+    "life.woke",
+    "organ.*",
+    "hear.partial",
+    "hear.final",
+    "hear.cancel",
+    "mind.cancel",
+    "mind.reply_done",
+];
 const RETRY: Duration = Duration::from_millis(700);
 /// With no heartbeat for this long, the face looks unwell.
 const QUIET: Duration = Duration::from_secs(3);
@@ -18,6 +37,67 @@ pub const LID_GRACE: Duration = Duration::from_secs(4);
 /// After asking the brainstem to show the face, give it this long to answer
 /// before showing the face without it.
 const RECOVER_WAIT: Duration = Duration::from_secs(2);
+/// On the appliance, a brainstem that has never answered in this long since
+/// the face started is missing, not late: the waiting look turns to dazed.
+pub const LOADING: Duration = Duration::from_secs(60);
+/// A first wake older than this is not a birth any more (a face restarted
+/// later in the first day must not replay it).
+const BIRTH_FRESH: u64 = 180;
+
+/// What the face keeps from the bus beside the animation.
+#[derive(Default)]
+pub struct Side {
+    /// The brainstem authorizes camera capture now.
+    pub camera: bool,
+    pub captions: Captions,
+    birth: BirthGate,
+}
+
+/// The birth ceremony plays once: on a fresh first wake, once per face
+/// process, and (on the appliance) once per boot through a marker in /run.
+#[derive(Default)]
+pub struct BirthGate {
+    played: bool,
+    marker: Option<PathBuf>,
+}
+
+impl BirthGate {
+    pub fn with_marker(marker: Option<PathBuf>) -> BirthGate {
+        BirthGate { played: false, marker }
+    }
+
+    /// Whether this `life.woke` should start the ceremony.
+    fn admit(&mut self, ev: &Event, now_unix: u64) -> bool {
+        if self.played || ev.bool("first") != Some(true) {
+            return false;
+        }
+        let fresh = ev.data.get("woke_at").and_then(|v| v.as_u64()).is_some_and(|at| now_unix.saturating_sub(at) <= BIRTH_FRESH);
+        if !fresh {
+            return false;
+        }
+        if let Some(marker) = &self.marker {
+            if marker.exists() {
+                self.played = true;
+                return false;
+            }
+            if let Err(e) = std::fs::write(marker, b"") {
+                eprintln!("face: could not note the birth at {}: {e}", marker.display());
+            }
+        }
+        self.played = true;
+        true
+    }
+}
+
+impl Side {
+    pub fn new(birth_marker: Option<PathBuf>) -> Side {
+        Side { birth: BirthGate::with_marker(birth_marker), ..Side::default() }
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
 
 /// What to do about a lid that has never been reported.
 #[derive(Debug, PartialEq, Eq)]
@@ -98,6 +178,13 @@ pub struct Link {
     lid_seq: Option<u64>,
     pending_panel_ready: Option<u64>,
     lid_wait: LidWait,
+    started: Instant,
+    /// Heard from a brainstem at least once.
+    answered: bool,
+    /// Show the calm waiting look, not dazed, until a brainstem first
+    /// answers (the appliance, where the face starts before everything).
+    loading: bool,
+    pub side: Side,
 }
 
 impl Link {
@@ -113,7 +200,29 @@ impl Link {
             lid_seq: None,
             pending_panel_ready: None,
             lid_wait: LidWait::new(now, lid_grace),
+            started: now,
+            answered: false,
+            loading: lid_grace.is_some(),
+            side: Side::default(),
         }
+    }
+
+    /// The brainstem has been silent long enough to look unwell.
+    pub fn quiet(&self) -> bool {
+        self.last_beat.elapsed() > QUIET
+    }
+
+    /// A key while the panel is dark and the brainstem is quiet: light the
+    /// face here, since nobody else will (task 2.2).
+    pub fn unblank_locally(&mut self, anim: &mut Anim) {
+        eprintln!("face: a key with the panel dark and the brainstem quiet; showing the face");
+        anim.set_lid(None, true, false);
+        unblank_backlight();
+    }
+
+    /// Seconds since the brainstem was last heard, if it ever was.
+    pub fn beat_age(&self) -> Option<f64> {
+        (self.answered && self.client.is_some()).then(|| self.last_beat.elapsed().as_secs_f64())
     }
 
     /// Take in everything waiting on the bus. Never blocks.
@@ -134,6 +243,7 @@ impl Link {
                 match client.try_recv() {
                     Ok(Some(ev)) => {
                         self.last_beat = now;
+                        self.answered = true;
                         if ev.topic == "body.lid" {
                             let seq = ev.data.get("seq").and_then(|seq| seq.as_u64());
                             let snapshot = ev.bool("snapshot").unwrap_or(false);
@@ -155,7 +265,7 @@ impl Link {
                                 self.pending_panel_ready = if visible { seq } else { None };
                             }
                         } else {
-                            apply(&ev, anim);
+                            apply(&ev, anim, &mut self.side);
                         }
                     }
                     Ok(None) => break,
@@ -169,7 +279,13 @@ impl Link {
         if closed {
             self.client = None;
         }
-        anim.set_link_lost(now.duration_since(self.last_beat) > QUIET);
+        let lost = now.duration_since(self.last_beat) > QUIET;
+        anim.set_link_lost(lost);
+        anim.set_loading(self.loading && !self.answered && now.duration_since(self.started) < LOADING);
+        if lost {
+            self.side.camera = false;
+            self.side.captions.link_lost();
+        }
         match self.lid_wait.step(now, self.client.is_some(), anim.panel_blank()) {
             LidStep::Wait => {}
             LidStep::AskBrainstem => {
@@ -228,8 +344,25 @@ fn unblank_backlight() {
 #[cfg(not(target_os = "linux"))]
 fn unblank_backlight() {}
 
-fn apply(ev: &Event, anim: &mut Anim) {
+fn drive(ev: &Event, name: &str) -> Option<f32> {
+    ev.f64(name).filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0) as f32)
+}
+
+fn apply(ev: &Event, anim: &mut Anim, side: &mut Side) {
+    side.captions.event(ev);
     match ev.topic.as_str() {
+        "body.drives" => anim.set_drives(Drives {
+            energy: drive(ev, "energy"),
+            arousal: drive(ev, "arousal"),
+            social: drive(ev, "social"),
+            comfort: drive(ev, "comfort"),
+        }),
+        "camera.policy" => side.camera = ev.bool("allowed") == Some(true),
+        "life.woke" => {
+            if side.birth.admit(ev, unix_now()) {
+                anim.born();
+            }
+        }
         "state.changed" => {
             if let Some(state) = ev.str("state") {
                 anim.set_state(state, ev.bool("muted").unwrap_or(false), ev.bool("unwell").unwrap_or(false));
@@ -266,13 +399,13 @@ mod tests {
     fn cancel_drops_the_reply_expression_and_keeps_the_timeout_cue() {
         let mut anim = Anim::new(7);
         anim.set_state("thinking", false, false);
-        apply(&Event::new("face.express").with("name", "joy").with("hold", 30.0), &mut anim);
+        apply(&Event::new("face.express").with("name", "joy").with("hold", 30.0), &mut anim, &mut Side::default());
         assert_eq!(anim.target_name(), "joy");
-        apply(&Event::new("mind.cancel"), &mut anim);
+        apply(&Event::new("mind.cancel"), &mut anim, &mut Side::default());
         assert_eq!(anim.target_name(), "thinking");
         // The brainstem sends these in this order on a thinking timeout.
-        apply(&Event::new("face.express").with("name", "concern"), &mut anim);
-        apply(&Event::new("state.changed").with("state", "attending"), &mut anim);
+        apply(&Event::new("face.express").with("name", "concern"), &mut anim, &mut Side::default());
+        apply(&Event::new("state.changed").with("state", "attending"), &mut anim, &mut Side::default());
         assert_eq!(anim.target_name(), "concern");
     }
 
@@ -281,11 +414,11 @@ mod tests {
         let mut anim = Anim::new(7);
         anim.set_state("thinking", false, false);
         anim.express("joy", 30.0);
-        apply(&Event::new("mind.reply_done").with("spoke", false), &mut anim);
+        apply(&Event::new("mind.reply_done").with("spoke", false), &mut anim, &mut Side::default());
         assert_eq!(anim.target_name(), "thinking");
         anim.express("joy", 30.0);
-        apply(&Event::new("mind.reply_done").with("spoke", true), &mut anim);
-        apply(&Event::new("state.changed").with("state", "speaking"), &mut anim);
+        apply(&Event::new("mind.reply_done").with("spoke", true), &mut anim, &mut Side::default());
+        apply(&Event::new("state.changed").with("state", "speaking"), &mut anim, &mut Side::default());
         assert_eq!(anim.target_name(), "joy");
     }
 
@@ -352,6 +485,39 @@ mod tests {
         let mut wait = LidWait::new(start, None);
         assert_eq!(wait.step(at(start, 60.0), false, true), LidStep::Wait);
         assert!(wait.reading(None, false));
+    }
+
+    #[test]
+    fn the_birth_plays_once_only_for_a_fresh_first_wake() {
+        let now = 1_800_000_000u64;
+        let woke = |first: bool, at: u64| Event::new("life.woke").with("first", first).with("woke_at", at);
+        let mut gate = BirthGate::default();
+        assert!(!gate.admit(&woke(false, now), now), "not the first wake");
+        assert!(!gate.admit(&woke(true, now - 600), now), "a first wake ten minutes old is not a birth");
+        assert!(gate.admit(&woke(true, now - 5), now));
+        assert!(!gate.admit(&woke(true, now - 5), now), "a reconnect does not replay it");
+
+        let marker = std::env::temp_dir().join(format!("face-born-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        assert!(BirthGate::with_marker(Some(marker.clone())).admit(&woke(true, now), now));
+        assert!(!BirthGate::with_marker(Some(marker.clone())).admit(&woke(true, now), now), "a restarted face does not replay it");
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn drives_camera_and_birth_reach_the_face() {
+        let mut anim = Anim::new(7);
+        let mut side = Side::default();
+        anim.set_lid(Some(false), false, true);
+        anim.set_state("idle", false, false);
+        apply(&Event::new("camera.policy").with("allowed", true).with("seq", 3), &mut anim, &mut side);
+        assert!(side.camera);
+        apply(&Event::new("camera.policy").with("allowed", false).with("seq", 4), &mut anim, &mut side);
+        assert!(!side.camera);
+        apply(&Event::new("body.drives").with("energy", 0.1).with("arousal", 0.5).with("social", 2.0), &mut anim, &mut side);
+        let first = Event::new("life.woke").with("first", true).with("woke_at", unix_now());
+        apply(&first, &mut anim, &mut side);
+        assert!(anim.being_born());
     }
 
     #[test]

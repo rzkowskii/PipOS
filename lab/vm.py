@@ -236,6 +236,10 @@ class VM:
         """Power on. With `disk`, reuse that disk instead of a fresh one."""
         if not self.image.exists():
             raise RuntimeError(f"no image at {self.image}: run lab/build.sh first")
+        # Refuse an image built from other source (BEING_ALLOW_STALE=1 overrides;
+        # BEING_GATE=1 also refuses one with no recorded source-id).
+        from lab import source_id
+        source_id.enforce(self.image)
         if self.dir is None:
             # A short path: Unix socket paths are limited to about 100 bytes.
             self.dir = Path(tempfile.mkdtemp(prefix="being-vm-", dir="/tmp"))
@@ -686,4 +690,5 @@ def main():
 
 
 if __name__ == "__main__":
+    sys.path.insert(0, str(ROOT))   # `from lab import source_id` when run as lab/vm.py
     main()

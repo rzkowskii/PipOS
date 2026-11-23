@@ -18,7 +18,10 @@ from lab import candidate_manifest
 ROOT = Path(__file__).resolve().parent.parent
 SUITES = ("l0", "l1", "l2", "l3", "l4", "l5", "l6", "model_pack", "installer", "try", "setup",
           "face_usb", "local_screen", "install_apply", "hardware", "hardware_image", "b43_firmware",
-          "hardware_ssh", "network_modes", "wifi", "laptop_smoke")
+          "hardware_ssh", "network_modes", "wifi", "laptop_smoke", "iso")
+# Suites whose media no candidate seals yet: run them by hand (lab/make-iso.sh, then
+# python3 -m unittest lab.tests.test_iso) until the candidate lane builds the ISO.
+UNSEALED = ("iso",)
 BINDINGS = {
     "factory": ("BEING_FACTORY_IMAGE", "BEING_SETUP_IMAGE", "BEING_L6_IMAGE", "BEING_HARDWARE_IMAGE",
                 "BEING_TRY_EXISTING_IMAGE", "BEING_INSTALL_OLD_IMAGE", "BEING_NETWORK_IMAGE"),
@@ -29,12 +32,15 @@ BINDINGS = {
     "update_fixtures": ("BEING_UPDATE_FIXTURES",),
     "installed_fixtures": ("BEING_INSTALL_UPDATE_IMAGE",),
     "wifi_image": ("BEING_WIFI_IMAGE",),
+    # The laptop Try stick from a `candidate NAME --laptop` build: enables laptop_smoke.
+    "laptop_try": ("BEING_LAPTOP_TRY_IMAGE",),
 }
+OPTIONAL_ROLES = ("wifi_image", "laptop_try")
 INSTALLED_CASE = ("lab.tests.test_install_apply.InstallerApply."
                   "test_installs_both_slots_then_keeps_identity_and_memory_after_usb_removal")
 
 RELEASE_ROLES = {role: "extra:installed_fixtures" if role == "installed_fixtures" else role
-                 for role in BINDINGS if role != "wifi_image"}
+                 for role in BINDINGS if role not in OPTIONAL_ROLES}
 
 
 def read_release(path):
@@ -60,18 +66,28 @@ def bind_release(args):
         if path.is_absolute() or str(path) != os.path.normpath(str(path)):
             raise ValueError(f"{key} in manifest must use a normalized relative path")
         setattr(args, role, args.manifest.parent / path)
+    laptop = release["artifacts"].get("laptop_try")
+    if laptop:
+        if getattr(args, "laptop_try", None) is not None:
+            raise ValueError("--manifest selects candidate files; remove explicit laptop_try")
+        path = Path(laptop["path"])
+        if path.is_absolute() or str(path) != os.path.normpath(str(path)):
+            raise ValueError("laptop_try in manifest must use a normalized relative path")
+        args.laptop_try = args.manifest.parent / path
     return release, digest
 
 
-def suite_names(with_wifi):
+def suite_names(with_wifi, with_laptop=False):
     known = {"test_" + name for name in SUITES}
+    # Host checks of the lab tools live in lab/tests/host/ and are not guest suites.
     available = {path.stem for path in (ROOT / "lab/tests").glob("test_*.py")}
     if available != known:
         raise ValueError(f"review candidate suite inventory: missing {sorted(known - available)}, "
                          f"unclassified {sorted(available - known)}")
-    # laptop_smoke needs the laptop Try stick, which candidates do not seal yet.
+    # laptop_smoke needs the laptop Try stick, sealed only by `candidate NAME --laptop`.
     return ["lab.tests.test_" + name for name in SUITES
-            if (name != "wifi" or with_wifi) and name != "laptop_smoke"]
+            if (name != "wifi" or with_wifi) and (name != "laptop_smoke" or with_laptop)
+            and name not in UNSEALED]
 
 
 def inputs(args):
@@ -238,13 +254,16 @@ def main(argv=None):
         release = None
         if args.manifest:
             release, digest = bind_release(args)
-        modules = suite_names(args.wifi_image is not None)
+        modules = suite_names(args.wifi_image is not None, getattr(args, "laptop_try", None) is not None)
         env, records = inputs(args)
         if release:
             for role, key in RELEASE_ROLES.items():
                 expected = release["artifacts"][key]
                 if any(records[role][field] != expected[field] for field in ("bytes", "sha256")):
                     raise ValueError(f"{key} does not match the sealed manifest: {records[role]['path']}")
+            laptop = release["artifacts"].get("laptop_try")
+            if laptop and any(records["laptop_try"][field] != laptop[field] for field in ("bytes", "sha256")):
+                raise ValueError(f"laptop_try does not match the sealed manifest: {records['laptop_try']['path']}")
         if args.output:
             output = args.output.resolve()
             if release and any(output.is_relative_to(ROOT / scope)
@@ -263,11 +282,13 @@ def main(argv=None):
         print("Separate Wi-Fi hwsim qualification was not selected.", flush=True)
     batches = {}
     if release:
-        for role in ("factory", "try_image"):
-            batches["inspect_" + role] = [sys.executable, "-m", "lab.hardware_image", records[role]["path"]]
+        for role in ("factory", "try_image", "laptop_try"):
+            if role in records:
+                batches["inspect_" + role] = [sys.executable, "-m", "lab.hardware_image", records[role]["path"]]
     for module in modules:
         batches[module] = [sys.executable, "-m", "lab.candidate_tests", "_worker", module]
-    report = {"inputs": records, "wifi_selected": args.wifi_image is not None, "face_sha256": args.face_sha256,
+    report = {"inputs": records, "wifi_selected": args.wifi_image is not None,
+              "laptop_selected": "laptop_try" in records, "face_sha256": args.face_sha256,
               "suite_timeout_seconds": args.suite_timeout, "suites": dict.fromkeys(batches, "pending")}
     if release:
         report["manifest"] = {"path": str(args.manifest.absolute()), "sha256": digest,

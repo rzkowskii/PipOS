@@ -5,15 +5,18 @@ import asyncio
 import json
 import os
 import random
+import sqlite3
 import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from . import care
 from . import console_ui as ui
 from .bus import Bus
 from .initiative_setup import configure_initiative
+from .network_enforce import installed
 from .network_policy import INTERNET, LOCAL_ONLY, PAIRED_LAN, load_policy, validate_time_server
 from .profile import (
     FACTORY_CONFIG, PRESET_LABELS, PRESETS, SPEECH_RATES, TRAITS, VOICES, default_mind_dir,
@@ -156,8 +159,9 @@ async def restart_try_organs():
             # registrations from the new processes cannot be missed.
             while (await bus.recv())["t"] != "state.changed":
                 pass
-            async with child("systemctl", "try-restart", "being-mind.service", "being-voice.service",
-                             "being-lab-body.service") as process:
+            # The laptop image has no lab body; naming a missing unit fails the restart.
+            units = installed("being-mind.service", "being-voice.service", "being-lab-body.service")
+            async with child("systemctl", "try-restart", *units) as process:
                 if await process.wait():
                     raise RuntimeError("Could not restart the mind and audio services.")
             waiting = {"mind", "voice"}
@@ -234,15 +238,22 @@ def tune_personality(profile):
 
 
 def random_character(profile, voices):
-    name = random.choice(NAMES)
-    draft = replace(profile, name=name, voice=random.choice(tuple(voices)) if voices else profile.voice,
-                    personality=random_personality())
-    phrase = f"Hey {name}"
-    try:
-        check_wake_phrase(phrase)
-    except (ValueError, RuntimeError, OSError):
-        return draft
-    return replace(draft, wake_word=phrase)
+    """A random name, voice and personality, with a wake phrase that matches the name.
+
+    A name whose "Hey <name>" the recognizer cannot spot is re-rolled, so the
+    being is never called one thing and woken by another.
+    """
+    voice = random.choice(tuple(voices)) if voices else profile.voice
+    personality = random_personality()
+    for name in random.sample(NAMES, len(NAMES)):
+        phrase = f"Hey {name}"
+        try:
+            check_wake_phrase(phrase)
+        except (ValueError, RuntimeError, OSError):
+            continue
+        return replace(profile, name=name, voice=voice, personality=personality, wake_word=phrase)
+    # No name can be spotted (no recognizer here): keep the current name and phrase.
+    return replace(profile, voice=voice, personality=personality)
 
 
 def review_roll(profile, roll):
@@ -349,7 +360,31 @@ def configure_network(mind_dir):
     return subprocess.run(command, check=False).returncode
 
 
-def personalize(profile, mind_dir, *, dry_run=False, network_dir=None, temporary=False):
+def system_entries(appliance, installed_being):
+    """Owner controls beyond the profile. They act at once, apart from Keep."""
+    if not appliance:
+        return []
+    entries = [("C", "Senses and memory", "Camera, dreams, memory, clock"),
+               ("A", "Volume and microphone"), ("T", "Time zone")]
+    if installed_being:
+        entries += [("B", "Back up to a USB stick"), ("U", "Update from a USB stick")]
+    return entries
+
+
+def run_system_entry(choice, mind_dir, *, temporary):
+    if choice == "c":
+        care.care_menu(mind_dir, temporary=temporary)
+    elif choice == "a":
+        care.audio_page(mind_dir, temporary)
+    elif choice == "t":
+        care.zone_page(mind_dir, temporary)
+    elif choice == "b":
+        care.backup_menu(mind_dir, temporary=temporary)
+    elif choice == "u":
+        care.update_menu(try_boot=temporary)
+
+
+def personalize(profile, mind_dir, *, dry_run=False, network_dir=None, temporary=False, appliance=False):
     installed = available_voices() or set()
     voices = {key: label for key, label in VOICES.items() if key in installed}
     if not ui.enabled():
@@ -359,8 +394,10 @@ def personalize(profile, mind_dir, *, dry_run=False, network_dir=None, temporary
                    ("5", "Speaking speed"), ("6", "Personality"), ("7", "Surprise me", "A random new character")]
         if network_dir is not None:
             entries.append(("8", "Network"))
-        entries += [("9", "Quiet hours and announcements"), ("P", "Play sample"),
-                    ("K", "Keep these choices", "Finish setup"), ("Q", "Cancel")]
+        entries += [("9", "Quiet hours and announcements")]
+        extra = system_entries(appliance and not dry_run, network_dir is not None)
+        entries += extra
+        entries += [("P", "Play sample"), ("K", "Keep these choices", "Finish setup"), ("Q", "Cancel")]
         if ui.enabled():
             subtitle = ("Try keeps these choices until you restart." if temporary else
                         "Try these choices out without saving." if dry_run else None)
@@ -401,6 +438,11 @@ def personalize(profile, mind_dir, *, dry_run=False, network_dir=None, temporary
             ui.screen("Quiet hours and announcements" if ui.enabled() else None, context="Setup")
             with ui.indented(skip="Quiet hours and announcements"):
                 configure_initiative(mind_dir, dry_run=dry_run, temporary=temporary)
+        elif choice in {key.lower() for key, *_ in extra}:
+            try:
+                run_system_entry(choice, mind_dir, temporary=temporary)
+            except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
+                ui.note(str(error), "danger")
         elif choice == "p":
             preview(profile)
         elif choice == "q":
@@ -422,6 +464,11 @@ def main(argv=None):
     mode.add_argument("--dry-run", action="store_true", help="try choices without saving")
     mode.add_argument("--network", action="store_true", help="change network settings on the installed appliance")
     mode.add_argument("--initiative", action="store_true", help="change quiet hours and automatic announcements")
+    mode.add_argument("--care", action="store_true", help="camera, dreams, memory, clock and network")
+    mode.add_argument("--audio", action="store_true", help="volume and microphone")
+    mode.add_argument("--time-zone", action="store_true", help="choose the time zone")
+    mode.add_argument("--backup", action="store_true", help="back up to a USB stick")
+    mode.add_argument("--update", action="store_true", help="update the system from a USB stick")
     args = parser.parse_args(argv)
     if not args.show and not sys.stdin.isatty():
         parser.error("personalization requires an interactive terminal")
@@ -433,6 +480,15 @@ def main(argv=None):
         network_dir = mind_dir if on_appliance and not live_preview and not args.dry_run else None
         if args.initiative:
             return configure_initiative(mind_dir, temporary=live_preview)
+        if args.care or args.audio or args.time_zone or args.backup or args.update:
+            if not on_appliance:
+                raise ValueError("These settings are available on the appliance.")
+            choice = "c" if args.care else "a" if args.audio else "t" if args.time_zone else \
+                "b" if args.backup else "u"
+            if choice == "u" and live_preview:
+                raise ValueError("Updates are for an installed being.")
+            run_system_entry(choice, mind_dir, temporary=live_preview)
+            return 0
         if args.network:
             if network_dir is None:
                 raise ValueError("Network setup is available on the installed appliance.")
@@ -443,7 +499,8 @@ def main(argv=None):
             return 0
         if live_preview and not ui.enabled():
             print("Try PipOS keeps these choices until you reboot.")
-        selected = personalize(profile, mind_dir, dry_run=args.dry_run, network_dir=network_dir, temporary=live_preview)
+        selected = personalize(profile, mind_dir, dry_run=args.dry_run, network_dir=network_dir, temporary=live_preview,
+                               appliance=on_appliance)
         if selected is None:
             ui.note("Setup canceled.")
         elif args.dry_run:

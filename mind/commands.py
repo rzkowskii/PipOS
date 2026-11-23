@@ -28,6 +28,11 @@ def _strip(text):
 _PATTERNS = [
     ("guest_start", r"start guest mode|don['’]?t remember this(?:[\s,.:;!?][\s\S]*)?"),
     ("guest_end", r"end guest mode"),
+    # Memory questions with an answer of their own, before the general recall.
+    ("remember_me", r"do you (?:still )?(?:remember|know) (?:me|who i am)|(?:do you know|remember) who i am"),
+    ("about_me", r"what (?:else )?do you (?:remember|know) about me|what have you (?:remembered|learned) about me"
+                 r"|what (?:things )?do you remember"),
+    ("talked_about", r"what (?:did we talk|were we talking|have we been talking) about(?: (?:earlier|before|lately|recently))?"),
     ("recall", r"(?:what|anything)(?: else)? do you (?:remember|know) about (?P<x>.+)"),
     ("recall", r"do you remember (?:anything about |what i (?:said|told you) about )?(?P<x>.+)"),
     ("recall", r"(?:can|could) you remember (?:what i (?:said|told you) about |what we talked about )(?P<x>.+)"),
@@ -35,12 +40,16 @@ _PATTERNS = [
     ("recall_heard", r"what did i (?:say|mention) about (?P<x>.+)"),
     ("recall_said", r"what did you (?:say|tell me) about (?P<x>.+)"),
     ("recall_heard", r"when did i (?:tell you about|mention) (?P<x>.+)"),
-    ("recall", r"what (?:did we talk|were we talking) about(?: (?P<x>.+))?"),
-    ("forget_last", r"forget (?:that|it|this)(?: again| please)?"),
+    ("recall", r"what (?:did we talk|were we talking) about (?P<x>.+)"),
+    # "Forget it" is how people say "never mind": it never deletes anything.
+    ("never_mind", r"(?:oh[, ]+)?(?:forget it|never ?mind)(?: then)?"),
+    ("forget_last", r"forget (?:that|this|what i just said)(?: again| please)?"),
     ("forget", r"forget (?:about |what i (?:said|told you) about |everything about |that )?(?P<x>.+)"),
-    ("correct", r"(?:no[,. ]+)?that(?:'s| is) (?:wrong|not right|incorrect)[,.:; ]+(?P<x>.+)"),
+    ("correct", r"(?:no[,. ]+)?that(?:['’]s| is) (?:wrong|not right|incorrect|not true)[,.:; ]+(?P<x>.+)"),
     ("remember", r"(?:please )?(?:can you |could you )?remember (?:that |this[:, ]+)?(?P<x>.+)"),
     ("remember", r"(?:please )?don'?t forget (?:that )?(?P<x>.+)"),
+    ("set_time", r"(?:set|change) (?:the|your) (?:time|clock) to (?P<x>.+)"),
+    ("set_time", r"(?:actually[, ]+)?the time is (?:now |actually )?(?P<x>\d.*)"),
     ("time", r"(?:what(?:['’]s| is) the time|what time is it|tell me the time)(?: now)?"),
     ("date", r"(?:what(?:['’]s| is) (?:the|today['’]s) date|what date is it|tell me the date)(?: today)?"),
     ("day", r"what day(?: of the week)? (?:is it(?: today)?|is today)"),
@@ -52,10 +61,32 @@ _PATTERNS = [
     ("skills", r"what can you do|what (?:skills|commands) (?:do you have|can i use)"),
     ("name", r"what(?:['’]s| is) your name|what (?:should|do) i call you"),
     ("age", r"how old are you|what(?:['’]s| is) your age|when were you born"),
-    ("battery", r"how much charge do you have|how is your battery|what(?:'s| is) your battery level"),
+    ("battery", r"how much (?:charge|battery) do you have(?: left)?|how(?:['’]s| is) your battery(?: doing| health)?"
+                r"|what(?:['’]s| is) your battery(?: level| at)?|tell me about your battery|are you charging"
+                r"|how long (?:will|can) your battery last|how much battery (?:is )?left"),
     ("sleep", r"go to sleep|good ?night|sleep now|time to sleep"),
-    ("look", r"(?:take a )?look at this|what(?:'s| is) this|what do you see"),
+    ("look", r"(?:take a )?look at this|what do you see|can you see (?:me|this|anything)"),
+    ("dream", r"what did you dream(?: about)?(?: last night)?|did you dream(?: last night)?|do you dream"),
+    # Questions about what it is. Answered honestly in code, never left to a
+    # small model that may claim feelings or deny being anything at all.
+    ("self_alive", r"are you alive|are you (?:a )?living(?: thing| being)?"),
+    ("self_aware", r"are you (?:conscious|sentient|self[- ]aware|aware)|do you have (?:a )?(?:consciousness|mind of your own)"),
+    ("self_feel", r"do you (?:have )?(?:feel(?:ings)?|emotions)(?: anything)?|can you feel(?: anything)?|do you get (?:lonely|sad|happy)"),
+    ("self_what", r"what are you|are you (?:real|a robot|a computer|a person|human|an ai|just a program)"),
+    # Its loudness. The voice organ owns the mixer; the mind only asks.
+    ("volume_up", r"(?:speak|talk) (?:up|louder)|(?:be )?louder|turn (?:it|yourself|your voice|the volume) up"
+                  r"|turn up (?:the |your )?volume|(?:i )?can['’]?t hear you(?: well)?"),
+    ("volume_down", r"(?:speak|talk) (?:more )?(?:quieter|softer|more quietly|more softly|down)|(?:be )?quieter|(?:be )?softer"
+                    r"|turn (?:it|yourself|your voice|the volume) down|turn down (?:the |your )?volume|you(?:['’]re| are) too loud"),
+    ("volume_set", r"(?:set|change|put) (?:your |the )?volume (?:to |at )?(?P<x>.+)"),
 ]
+# A remembered "fact" that is really a question or an instruction goes to the
+# conversation: "remember when we went fishing?" is not a thing to store.
+QUESTION = re.compile(
+    r"^(?:how|when|where|what|who|whom|whose|which|why|can|could|would|will|should|did|do|does|is|are|was|were|have|has)\b",
+    re.I,
+)
+_NOT_A_FACT = re.compile(r"^(?:when|how|what|why|where|who|whom|whose|which|if|whether)\b", re.I)
 _COMPILED = [(kind, re.compile(rf"^(?:{pattern})$", re.I)) for kind, pattern in _PATTERNS]
 _COMMAND_START = re.compile(
     r"^(?:(?:remember|forget|don'?t\s+forget)\b"
@@ -71,7 +102,13 @@ _COMMAND_START = re.compile(
     r"|(?:set|change|clear|remove) (?:my|the|your) (?:weather|time zone|timezone)\b"
     r"|use the (?:system|device) (?:time zone|timezone)\b"
     r"|what(?:['’]s| is) your name\b|what (?:should|do) i call you\b"
-    r"|how (?:much charge|is your battery)\b|what(?:'s| is) your battery\b)",
+    r"|how (?:much charge|is your battery)\b|what(?:'s| is) your battery\b"
+    r"|never ?mind\b|(?:speak|talk|turn|be) (?:up|down|louder|quieter|softer|it|the|your|yourself|more)\b"
+    r"|louder\b|quieter\b|softer\b|(?:set|change|put) (?:your |the )?(?:volume|time|clock)\b|the time is\b"
+    r"|are you (?:alive|conscious|sentient|real|aware|self|a |an |just|human|living)\b"
+    r"|do you (?:have |get |feel|dream|remember me|know me)|what are you\b|can you (?:feel|see)\b"
+    r"|did you dream\b|tell me about your battery\b|how long (?:will|can) your\b|are you charging\b"
+    r"|i can'?t hear you\b|you(?:'re| are) too loud\b)",
     re.I,
 )
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
@@ -106,7 +143,13 @@ def greeting(text, name=""):
     said = " ".join(_SPOKEN_WORD.findall(text.casefold().replace("’", "'")))
     address = " ".join(_SPOKEN_WORD.findall(name.casefold().replace("’", "'")))
     if address:
+        # Just its name, or "hey Pip" said again once the eyes have brightened,
+        # is a hello: the person is waiting to be noticed.
+        if said in (address, f"hey {address}", f"ok {address}", f"okay {address}"):
+            return "hello"
         said = said.removeprefix(f"hey {address} ").removeprefix(address + " ").removesuffix(" " + address)
+    if said in ("hey", "hiya", "yo", "oh hi", "oh hello"):
+        return "hello"
     if salutation := _SALUTATION.match(said):
         said = said[salutation.end():].lstrip()
         if address:
@@ -213,7 +256,168 @@ def parse(text, name="", *, now=None):
         if match:
             captured = match.groupdict().get("x")
             arg = _strip(captured or "")
-            if captured is not None and len(arg) < 2:
+            if captured is not None and len(arg) < (1 if kind in ("set_time", "volume_set") else 2):
                 return None
+            if kind == "remember":
+                # "Remember when we went fishing?" is a question, but "remember
+                # that when I'm tired I get grumpy" is a fact introduced as one.
+                introduced = re.search(r"\b(?:that|this)[:, ]*$", said[:match.start("x")], re.I)
+                if text.rstrip().endswith("?") or (_NOT_A_FACT.match(arg) and not introduced):
+                    return None
             return Command(kind, arg)
     return _weather_command(said)
+
+
+def volume_level(arg):
+    """A spoken volume ("forty", "40 percent", "max") as 0-100, or None."""
+    said = arg.casefold().replace("%", " percent").replace("-", " ")
+    said = re.sub(r"\b(?:percent|per cent|please|out of (?:a )?hundred)\b", " ", said).strip()
+    if said in ("max", "maximum", "full", "full volume", "all the way up", "the max", "the maximum"):
+        return 100
+    if said in ("half", "half way", "halfway", "the middle", "middle"):
+        return 50
+    if said.isdigit():
+        value = int(said)
+        return value if 0 <= value <= 100 else None
+    value = spoken_number(said)
+    return value if value is not None and 0 <= value <= 100 else None
+
+
+_ONES = {w: i for i, w in enumerate(
+    "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
+    "sixteen seventeen eighteen nineteen".split())}
+_TENS = {w: 10 * i for i, w in enumerate("_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()) if w != "_"}
+
+
+def spoken_number(said):
+    """Whole numbers up to one hundred, in words."""
+    words = said.replace(" and ", " ").split()
+    if words == ["a", "hundred"] or words == ["one", "hundred"] or words == ["hundred"]:
+        return 100
+    if len(words) == 1:
+        return _ONES.get(words[0], _TENS.get(words[0]))
+    if len(words) == 2 and words[0] in _TENS and words[1] in _ONES and 0 < _ONES[words[1]] < 10:
+        return _TENS[words[0]] + _ONES[words[1]]
+    return None
+
+
+_CLOCK = re.compile(
+    r"^(?P<hour>\d{1,2})(?:[:.](?P<minute>\d{2}))?\s*(?P<half>a\.?m\.?|p\.?m\.?)?(?:\s+(?:in the (?:morning|afternoon|evening)|at night|tonight))?$",
+    re.I,
+)
+
+
+def clock_time(arg):
+    """A spoken clock time ("3:45 pm", "15:45", "9 in the morning") as (hour, minute), or None."""
+    said = " ".join(arg.split())
+    match = _CLOCK.match(said)
+    if not match:
+        return None
+    hour, minute = int(match["hour"]), int(match["minute"] or 0)
+    half = (match["half"] or "").replace(".", "").casefold()
+    part = said.casefold()
+    if not half:
+        if "afternoon" in part or "evening" in part or "at night" in part or "tonight" in part:
+            half = "pm"
+        elif "morning" in part:
+            half = "am"
+    if half:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if half == "pm" else 0)
+    elif not match["minute"] and hour <= 12 and "morning" not in part:
+        # "Set the time to 3" says too little: 3 am or 3 pm.
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour, minute
+
+
+# -- wording of memories -------------------------------------------------
+
+_REFLECT = {
+    "i": "you", "me": "you", "my": "your", "mine": "yours", "myself": "yourself", "am": "are",
+    "i'm": "you're", "i've": "you've", "i'll": "you'll", "i'd": "you'd", "we": "we", "our": "our",
+}
+
+
+def reflect(text, *, start=False):
+    """Turn the owner's own words round for a read-back: "my cat" -> "your cat".
+
+    Only first-person words change. "Am" changes only after "I", so "I am
+    here" reads back "you are here" and "Amsterdam" stays as it is.
+    """
+    out = []
+    previous = ""
+    for token in re.split(r"([^\w']+)", text.replace("’", "'")):
+        low = token.casefold()
+        if low == "am" and previous != "i":
+            out.append(token)
+        elif low in _REFLECT and token:
+            word = _REFLECT[low]
+            out.append(word.capitalize() if start and not "".join(out).strip() else word)
+        else:
+            out.append(token)
+        if token.strip(" ,;:"):
+            previous = low
+    return "".join(out)
+
+
+# The last linking word in a fact divides what it is about from what is said
+# about it: "my cat is called | Tom", "my birthday is in | May".
+_LINK = re.compile(
+    r"\b(?:is|are|was|were|am|be|called|named|at|in|on|from|to|by|likes?|loves?|hates?|lives?|works?|uses?)\s+",
+    re.I,
+)
+# What follows "that's wrong," when it is only the new value: "it's Jim".
+_FRAGMENT = re.compile(
+    r"^(?:no[, ]+)?(?:actually[, ]+)?(?:it(?:['’]s| is| was| should be)|its|that(?:['’]s| is| should be)|"
+    r"they(?:['’]re| are)|he(?:['’]s| is)|she(?:['’]s| is)|the answer is|i said|i meant)\s+(?P<value>.+)$",
+    re.I,
+)
+SPLICE_WORDS = 4
+
+
+def correction_value(replacement):
+    """The new value in a fragment such as "it's Jim", or None for a whole sentence."""
+    match = _FRAGMENT.match(replacement.strip())
+    return _strip(match["value"]) if match else None
+
+
+def subject_of(fact):
+    """The part of a fact before its last linking word, or None."""
+    links = list(_LINK.finditer(fact))
+    if not links:
+        return None
+    head = fact[:links[-1].end()].strip()
+    tail = fact[links[-1].end():].strip()
+    if not tail or len(tail.split()) > SPLICE_WORDS or len(head.split()) < 2:
+        return None
+    return head
+
+
+_ONE_VALUE = re.compile(
+    r"(?:\b(?:is|are|am|was|were)(?:\s+(?:in|on|at|from))?|\b(?:called|named)"
+    r"|\b(?:live|lives|living|work|works|working)\s+(?:in|at|for))$", re.I)
+
+
+def replaceable_subject(fact):
+    """The subject of a fact that holds one value at a time, or None.
+
+    "My cat is called Tom" and "I live in Perth" have one answer, so a new
+    one may replace the old. "I like tea" and "I went to Rome" do not:
+    liking coffee too is no reason to ask about the tea.
+    """
+    head = subject_of(fact)
+    return head if head is not None and _ONE_VALUE.search(head) else None
+
+
+def splice_correction(fact, value):
+    """Put a short new value in place of a fact's old one: (fact, "Jim") ->
+    "my cat is called Jim". None when the fact has no clear place for it."""
+    if not value or len(value.split()) > SPLICE_WORDS:
+        return None
+    head = subject_of(fact)
+    if head is None:
+        return None
+    return f"{head} {value}"

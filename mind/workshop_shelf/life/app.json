@@ -1,0 +1,14 @@
+{
+  "name": "life",
+  "aliases": [
+    "life",
+    "game of life",
+    "the game of life",
+    "conway's game of life"
+  ],
+  "summary": "Conway's game of life.",
+  "keys": "Ctrl-C stops it.",
+  "entry": "main.py",
+  "size": 1519,
+  "sha256": "78a65677103f817ee927d36db13b59d4e410a82b7f8eeda638c4dc7f1390fb26"
+}

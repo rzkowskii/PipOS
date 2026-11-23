@@ -1,0 +1,38 @@
+# PipOS power settings for the MacBookPro9,2 (plan task 2.9).
+#
+# USB autosuspend only for devices that are idle most of the time: the
+# FaceTime HD camera, the Bluetooth module (no Bluetooth stack is built, so
+# it is always idle) and the IR receiver. The keyboard and trackpad are
+# never autosuspended: a suspended keyboard loses the first key press, and
+# Pip's attention key and Esc must always work.
+#
+# The IDs are those Apple used on 2012 MacBook Pros. Check them against the
+# hardware report's `lsusb`-style listing (task 1.18) on the first boot; an
+# ID that does not match simply leaves that device at the kernel default.
+
+ACTION!="add", GOTO="being_power_end"
+SUBSYSTEM!="usb", GOTO="being_power_end"
+ENV{DEVTYPE}!="usb_device", GOTO="being_power_end"
+ATTR{idVendor}!="05ac", GOTO="being_power_end"
+
+# Never: the internal keyboard and trackpad (ANSI, ISO and JIS variants).
+ATTR{idProduct}=="0252|0253|0254", TEST=="power/control", ATTR{power/control}="on", GOTO="being_power_end"
+
+# FaceTime HD camera (UVC). being-eyes opens it only with the owner's consent.
+ATTR{idProduct}=="8509", TEST=="power/control", ATTR{power/control}="auto", ATTR{power/autosuspend_delay_ms}="2000"
+# Bluetooth USB host controller (BCM20702).
+ATTR{idProduct}=="821d|828c", TEST=="power/control", ATTR{power/control}="auto", ATTR{power/autosuspend_delay_ms}="2000"
+# Apple IR receiver.
+ATTR{idProduct}=="8242", TEST=="power/control", ATTR{power/control}="auto", ATTR{power/autosuspend_delay_ms}="2000"
+
+LABEL="being_power_end"
+
+# SATA link power management: the kernel already defaults to
+# med_power_with_dipm (CONFIG_SATA_MOBILE_LPM_POLICY=3, read from the
+# resolved 23 Nov 2026 laptop kernel config; tests/test_os_image.py checks
+# that linux.config never overrides it), so nothing is written here.
+#
+# HDA codec power saving stays off while awake (a click and a 1-2 s wake-up
+# on the first sound). bodycare may set
+# /sys/module/snd_hda_intel/parameters/power_save while Pip sleeps, once it
+# has been measured on the laptop.

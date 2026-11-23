@@ -1,7 +1,7 @@
 # Sourced by lab/build.sh. The Linux build also runs this file inside a
 # disposable container, with /src read-only and /release as its only output.
 candidate_artifacts() {
-    local buildroot_version=$1 tar_sha=$2 defconfig=$3 lane=$4
+    local buildroot_version=$1 tar_sha=$2 defconfig=$3 lane=$4 laptop=${5:-no}
     local work=/tmp/beingos-candidate output=/tmp/beingos-candidate/output
     local archive="buildroot-$buildroot_version.tar.xz"
     for tool in mkfs.ext4 tune2fs; do
@@ -52,16 +52,95 @@ candidate_artifacts() {
     done
     PATH="$output/host/bin:$output/host/sbin:$PATH" sh /src/lab/installed-update-media.sh \
         /release/beingos-installed.raucb /release/beingos.raucb /release/beingos-installed-update-qa.img
+    if [ "$laptop" = yes ]; then
+        candidate_laptop "$tree" "$output" "$lane"
+    fi
+}
+
+# The laptop images from the same frozen /src and Buildroot tree: the laptop
+# factory disk, the laptop Try stick (with PIPLOGS), and a lab-versus-laptop
+# root parity report that fails the candidate on any unexplained difference.
+candidate_laptop() {
+    local tree=$1 lab_output=$2 lane=$3 output=/tmp/beingos-candidate/laptop
+    if [ "$lane" = cache-overlay ]; then
+        output=/work/output/laptop
+    fi
+    local -a buildroot=(make -C "$tree" "O=$output" BR2_EXTERNAL=/src/os BR2_JLEVEL=4)
+    "${buildroot[@]}" beingos_laptop_defconfig
+    local key
+    for key in BR2_PACKAGE_BEING_LAB_BODY BR2_TARGET_ENABLE_ROOT_LOGIN BR2_TARGET_GENERIC_GETTY BR2_PACKAGE_OPENSSH; do
+        if grep -qx "$key=y" "$output/.config"; then
+            echo "Laptop candidate config has lab-only $key=y" >&2
+            return 1
+        fi
+    done
+    cp "$output/.config" /release/laptop-buildroot.config
+    if [ "$lane" = cache-overlay ]; then
+        "${buildroot[@]}" libopenssl-reconfigure linux-reconfigure python3-reconfigure dosfstools-reconfigure \
+            cortex-reconfigure being-rebuild
+    fi
+    "${buildroot[@]}" all
+    candidate_laptop_verify "$output"
+    local images="$output/images"
+    cp --sparse=always "$images/beingos.img" /release/beingos-laptop.img
+    BEING_TRY_SCREEN=1 BEING_TRY_LAPTOP=1 sh /src/os/board/beingos/try-image.sh "$output/host" \
+        "$images/efi-part/EFI/BOOT/bootx64.efi" "$images/rootfs.squashfs" "$images/models.ext4" /release
+
+    local scratch=/tmp/beingos-candidate/parity variant
+    rm -rf "$scratch"
+    mkdir -p "$scratch"
+    for variant in lab laptop; do
+        local squashfs="$lab_output/images/rootfs.squashfs"
+        [ "$variant" = laptop ] && squashfs="$images/rootfs.squashfs"
+        "$lab_output/host/bin/unsquashfs" -no-progress -no-xattrs -ignore-errors -d "$scratch/$variant" "$squashfs" >/dev/null
+        (cd /src && python3 -m lab.candidate_parity listing "$scratch/$variant") > "/release/rootfs-$variant.json"
+        rm -rf "$scratch/$variant"
+    done
+    (cd /src && python3 -m lab.candidate_parity compare /release/rootfs-lab.json /release/rootfs-laptop.json \
+        --output /release/rootfs-parity.json)
+}
+
+# The same target checks `lab/build.sh laptop` runs (laptop_verify), for the
+# shipping variant: parity alone cannot see a lab file present in both roots.
+candidate_laptop_verify() {
+    local out=$1 bad=0 f
+    local t="$out/target" grub="$out/images/efi-part/EFI/BOOT/grub.cfg"
+    for f in usr/lib/systemd/system/being-lab-body.service usr/lib/being/sim/body.py usr/sbin/sshd \
+             usr/sbin/being-lab-access usr/lib/systemd/system/being-lab-observe.service \
+             usr/lib/systemd/system/being-lab-dev.service; do
+        if [ -e "$t/$f" ]; then echo "Laptop candidate contains lab-only /$f" >&2; bad=1; fi
+    done
+    if grep -q "ttyS0\|^serial " "$grub" "$t/usr/share/being/installed-grub.cfg"; then
+        echo "Laptop candidate boot configuration still names the serial console" >&2; bad=1
+    fi
+    if grep -q "oops=panic\|BEING_[A-Z]*_ARGS" "$grub" "$t/usr/share/being/installed-grub.cfg"; then
+        echo "Laptop candidate boot configuration panics on an oops or holds an unexpanded token" >&2; bad=1
+    fi
+    if ! { grep -qx compatible=beingos-laptop-v1 "$t/etc/rauc/system.conf" &&
+           grep -qx compatible=beingos-laptop-installed-v1 "$t/usr/share/being/installed-rauc.conf" &&
+           grep -qx laptop "$t/usr/share/being/variant"; }; then
+        echo "Laptop candidate does not carry the laptop update identity" >&2; bad=1
+    fi
+    if ! grep -qx "${BEING_SOURCE_ID:-unknown}" "$t/etc/being/source-id" 2>/dev/null; then
+        echo "Note: the laptop candidate's /etc/being/source-id is missing or differs from BEING_SOURCE_ID" >&2
+    fi
+    return "$bad"
 }
 
 build_candidate() (
-    local lane=clean
-    if [ "${2:-}" = --cache-overlay ]; then lane=cache-overlay; fi
-    if [ "$#" -lt 1 ] || [ "$#" -gt 2 ] || { [ "$#" -eq 2 ] && [ "$lane" = clean ]; } ||
-       ! [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-        echo 'Usage: lab/build.sh candidate NAME [--cache-overlay]' >&2
+    local lane=clean laptop=no option
+    local usage='Usage: lab/build.sh candidate NAME [--cache-overlay] [--laptop]'
+    if [ "$#" -lt 1 ] || ! [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        echo "$usage" >&2
         exit 2
     fi
+    for option in "${@:2}"; do
+        case "$option" in
+            --cache-overlay) lane=cache-overlay ;;
+            --laptop) laptop=yes ;;
+            *) echo "$usage" >&2; exit 2 ;;
+        esac
+    done
     local dest="$ROOT/out/candidates/$1"
     local frozen="$dest/source" started_vm=no overlay_volume=
     command -v 7zz >/dev/null || command -v 7z >/dev/null || {
@@ -90,6 +169,9 @@ with open(sys.argv[1]) as source:
         python3 -m lab.candidate_manifest snapshot --root "$frozen" --output "$dest/frozen.json"
     )
     cmp "$dest/source.json" "$dest/frozen.json"
+    # Every image built from this snapshot carries this id in /etc/being/source-id.
+    local source_id
+    source_id=$(cd "$frozen" && python3 -m lab.candidate_manifest source-id --root "$frozen")
 
     cleanup_candidate() {
         if [ -s "$dest/container.id" ]; then
@@ -118,7 +200,7 @@ with open(sys.argv[1]) as source:
     local -a run_options=(--rm --init --cidfile "$dest/container.id"
         -v "$frozen:/src:ro" -v "$dest/media:/release"
         -e BR2_DL_DIR=/work/dl -e BR2_CCACHE_DIR=/work/ccache \
-        -e BEINGOS_LAB_KEYS=/work/beingos-keys -e PYTHONDONTWRITEBYTECODE=1)
+        -e BEINGOS_LAB_KEYS=/work/beingos-keys -e PYTHONDONTWRITEBYTECODE=1 -e "BEING_SOURCE_ID=$source_id")
     local builder_id
     builder_id=$(cat "$dest/builder-id")
     if [ "$lane" = cache-overlay ]; then
@@ -132,15 +214,27 @@ with open(sys.argv[1]) as source:
                     -o lowerdir=/base,upperdir=/scratch/upper,workdir=/scratch/work /work
                 trap "umount /work" EXIT
                 runuser -u builder -- bash /src/lab/candidate-build.sh "$@"
-            ' candidate-cache "$BUILDROOT_VERSION" "$BUILDROOT_SHA256" "$DEFCONFIG" "$lane" \
+            ' candidate-cache "$BUILDROOT_VERSION" "$BUILDROOT_SHA256" "$DEFCONFIG" "$lane" "$laptop" \
             2>&1 | tee "$dest/build.log"
     else
         docker_ run "${run_options[@]}" -v "$VOLUME:/work" "$builder_id" \
             timeout --kill-after=60s 6h bash /src/lab/candidate-build.sh \
-            "$BUILDROOT_VERSION" "$BUILDROOT_SHA256" "$DEFCONFIG" "$lane" 2>&1 | tee "$dest/build.log"
+            "$BUILDROOT_VERSION" "$BUILDROOT_SHA256" "$DEFCONFIG" "$lane" "$laptop" 2>&1 | tee "$dest/build.log"
     fi
 
     cd "$frozen"
+    local -a laptop_evidence=()
+    if [ "$laptop" = yes ]; then
+        laptop_evidence=(--laptop-factory "$dest/media/beingos-laptop.img"
+            --laptop-try "$dest/media/beingos-laptop-try.img"
+            --extra "laptop_buildroot_config=$dest/media/laptop-buildroot.config"
+            --extra "rootfs_parity=$dest/media/rootfs-parity.json")
+    fi
+    local image
+    for image in "$dest"/media/*.img; do
+        [ -f "$image" ] || continue
+        printf '%s\n' "$source_id" > "$image.source-id"
+    done
     local -a cache_evidence=()
     if [ "$lane" = cache-overlay ]; then
         cache_evidence=(--extra "prior_buildroot_config=$dest/media/buildroot-original.config")
@@ -158,6 +252,7 @@ with open(sys.argv[1]) as source:
         --extra "readiness=$dest/scope/USB-READINESS.md" \
         --extra "buildroot_config=$dest/media/buildroot.config" \
         ${cache_evidence[@]+"${cache_evidence[@]}"} \
+        ${laptop_evidence[@]+"${laptop_evidence[@]}"} \
         --output "$dest/release.json"
     echo "Packaged $dest/release.json"
 )

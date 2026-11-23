@@ -26,7 +26,7 @@ class MemoryTest(unittest.TestCase):
         self.dir.cleanup()
 
     def test_search_terms_drop_filler(self):
-        self.assertEqual(search_terms("What do you remember about my sister's birthday?"), ["sister's", "birthday"])
+        self.assertEqual(search_terms("What do you remember about my sister's birthday?"), ["sister", "birthday"])
         self.assertEqual(search_terms("what is it"), [])
 
     def test_remember_then_recall(self):
@@ -226,6 +226,97 @@ class MemoryTest(unittest.TestCase):
         self.assertIsNone(validate_selection(rows, [guest]))
         self.assertIsNone(validate_selection(rows, [keep, keep]))
         self.assertIsNone(validate_selection(rows, [True]))
+
+
+
+
+class MemoryUpkeepTest(unittest.TestCase):
+    def setUp(self):
+        self.memory = Memory(None)
+
+    def tearDown(self):
+        self.memory.close()
+
+    def test_every_telling_of_a_fact_is_linked_and_forgotten_with_it(self):
+        first = self.memory.log("heard", "Remember the gate code is 4411", "Richard")
+        fact = self.memory.remember("the gate code is 4411", "Richard", first)
+        second = self.memory.log("heard", "Remember: the gate code is 4411", "Richard")
+        self.assertEqual(self.memory.remember("The  gate code is 4411", "Richard", second), fact)
+        source, = self.memory.db.execute("SELECT source FROM facts WHERE id = ?", (fact,)).fetchone()
+        self.assertEqual(source, second, "a retold fact ages from its latest telling")
+        change = self.memory.edit(fact_ids=[fact])
+        self.assertEqual(set(change.episode_ids), {first, second})
+        self.assertFalse(self.memory.contains("4411"))
+
+    def test_a_tombstone_keeps_neither_speaker_nor_moment(self):
+        episode = self.memory.log("heard", "My lantern is obsidian and heavy", "Richard")
+        self.memory.edit(episode_ids=[episode])
+        speaker, ts, text = self.memory.db.execute(
+            "SELECT speaker, ts, text FROM episodes WHERE id = ?", (episode,)).fetchone()
+        self.assertEqual((speaker, text), (None, "[forgotten]"))
+        self.assertEqual(ts % 86400, 0)
+
+    def test_a_correction_keeps_who_said_it(self):
+        episode = self.memory.log("heard", "My lantern is obsidian and heavy", "Richard")
+        self.memory.edit(episode_ids=[episode], replacement="My lantern is brass and light")
+        self.assertEqual(self.memory.db.execute("SELECT speaker, text FROM episodes WHERE id = ?", (episode,)).fetchone(),
+                         ("Richard", "My lantern is brass and light"))
+
+    def test_copies_are_found_whatever_the_apostrophes_and_spacing(self):
+        fact = self.memory.remember("Tom's bike is the blue one")
+        copy = self.memory.log("said", "You said tom’s   bike is the BLUE one, right?", "Pip")
+        self.memory.edit(fact_ids=[fact])
+        self.assertEqual(self.memory.db.execute("SELECT text FROM episodes WHERE id = ?", (copy,)).fetchone()[0],
+                         "[forgotten]")
+
+    def test_facts_about_the_same_thing_and_the_latest_facts(self):
+        from mind.commands import subject_of
+
+        tom = self.memory.remember("my cat is called Tom")
+        jim = self.memory.remember("my cat is called Jim")
+        self.memory.remember("my dog is called Rex")
+        self.assertEqual([f.id for f in self.memory.same_subject("my cat is called Jim", subject_of, exclude=jim)], [tom])
+        self.assertEqual([f.text for f in self.memory.latest_facts(2)], ["my dog is called Rex", "my cat is called Jim"])
+
+    def test_owner_lines_are_conversation_only(self):
+        self.memory.log("heard", "I planted tomatoes", "Richard")
+        self.memory.log("heard", "Remember that my cat is Tom", "Richard", command=True)
+        self.memory.log("said", "Lovely.", "Pip")
+        self.memory.log("heard", "What do you remember?", "Richard", memory_reply=True)
+        self.assertEqual([e.text for e in self.memory.owner_lines("Richard")], ["I planted tomatoes"])
+
+    def test_canned_replies_are_not_history(self):
+        self.memory.log("said", "Hi. Good to hear you.", "Pip", canned=True)
+        self.memory.log("said", "Kites are lovely to hear about.", "Pip")
+        self.assertEqual([e.text for e in self.memory.recall_history("hear")], ["Kites are lovely to hear about."])
+
+    def test_copies_of_wording_without_an_ascii_word_are_still_found(self):
+        fact = self.memory.remember("Zoë Ångström")
+        copy = self.memory.log("said", "Did you say ZOË  ÅNGSTRÖM?", "Pip")
+        street = self.memory.remember("the Straße market")
+        other = self.memory.log("said", "Is THE STRASSE market near you?", "Pip")
+        self.memory.edit(fact_ids=[fact, street])
+        for row in (copy, other):
+            self.assertEqual(self.memory.db.execute("SELECT text FROM episodes WHERE id = ?", (row,)).fetchone()[0],
+                             "[forgotten]")
+
+    def test_a_blank_wording_is_never_a_copy_of_everything(self):
+        kept = self.memory.log("heard", "I planted tomatoes", "Richard")
+        self.assertEqual(self.memory._verbatim_copies(["   "]), [])
+        self.assertEqual(self.memory.db.execute("SELECT text FROM episodes WHERE id = ?", (kept,)).fetchone()[0],
+                         "I planted tomatoes")
+
+    def test_a_clock_set_back_by_hand_is_believed(self):
+        import time as clock
+
+        now = clock.time()
+        with patch("mind.memory.time.time", return_value=now + 5 * 3600):
+            self.memory.log("heard", "stamped by a clock five hours fast", "Richard")
+        sure, stamp = self.memory.owner_set_clock(now)
+        self.assertEqual(sure, now, "no doubt about the clock it was just given")
+        self.assertLessEqual(self.memory.newest_timestamp(), now)
+        with self.assertRaises(ValueError):
+            self.memory.owner_set_clock(1_000_000_000)
 
 
 if __name__ == "__main__":

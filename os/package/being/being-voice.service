@@ -13,6 +13,25 @@ ExecStart=/usr/bin/python3 -m mind.voice
 Restart=always
 RestartSec=1
 TimeoutStopSec=5
+# The ears and voice need the sound card and the bus, and no network.
+# The QEMU lab also gives them a virtio serial microphone port
+# (mind/mic_port.py) and has them load snd-aloop (mind/voice.py), so the
+# virtio ports stay allowed and kernel modules stay loadable. With cgroup BPF
+# in the kernel (linux.config) DevicePolicy= is enforced, not advisory.
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+DevicePolicy=closed
+DeviceAllow=char-alsa rw
+DeviceAllow=char-virtio-portsdev rw
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

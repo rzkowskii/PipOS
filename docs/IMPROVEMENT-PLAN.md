@@ -532,3 +532,9 @@ Sources: the four review areas (vision, mind-core, mind-periphery, rust-organs),
 - **Installing to the internal SSD before Phase 1 is complete,** even on the maintenance variant (principle 3).
 - **A general package manager or desktop for the workshop feature.** It is scoped to a sandboxed workshop on a read-only root (task 7.8).
 - **Claiming sentience, or describing features that do not exist.** The README and the being itself describe what is true today (task 3.9).
+
+---
+
+### Status note (lab and docs), 23 Nov 2026
+
+Done: 0.4 and 0.5 (`docs/FIRST-BOOT.md`), 0.6 (`lab/try_timings.py`), 0.9 (`docs/DECISIONS-OWNER.md`), 1.23 and 8.8 (README, `docs/DESIGN.md`, `docs/DECISIONS.md`, root `STATUS.md` with `scripts/status`; USB-READINESS and DESIGN-COVERAGE superseded; DESIGN-AND-PLAN historical; the lab notebook is not copied into the public tree because it carries private session links), 8.1 (`scripts/check fast|boot-gate|full`). Partial: 1.1 (`lab/build.sh candidate NAME --laptop` path in `lab/candidate-build.sh`, laptop roles in the manifest, `lab/candidate_parity.py`; never run in the builder; post-build must write `/etc/being/source-id`), 1.22 (source-ids, `BEING_GATE=1`, test_wifi skip, smoke organ-restart and hard power-off checks; the VT probe, `being-brainstem-failed` and `hello.ok` are other lanes), 4.7 (`lab/bench_guest.py` and `lab/bench_report.py`; the service, GRUB entry and bench partition are lane C), 7.11 (`lab/media.sh`). STATUS.md is the place for later status.

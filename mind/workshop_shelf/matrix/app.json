@@ -1,0 +1,14 @@
+{
+  "name": "matrix",
+  "aliases": [
+    "matrix",
+    "matrix rain",
+    "the matrix",
+    "falling letters"
+  ],
+  "summary": "Falling green letters.",
+  "keys": "Ctrl-C stops it.",
+  "entry": "main.py",
+  "size": 1475,
+  "sha256": "bfcaa739c09991f281e13f1a58904dae80c4a4c5599b15fb6421a07b32e25c38"
+}

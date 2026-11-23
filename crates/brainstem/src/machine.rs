@@ -46,8 +46,15 @@ pub struct Config {
     pub attend: f64,
     /// Give up listening after this much silence from the ears.
     pub listen_timeout: f64,
-    /// Give up on a reply that never comes.
+    /// Give up on a reply that has been thinking this long in all, however
+    /// steadily the mind reports progress (the hard cap).
     pub think_timeout: f64,
+    /// Give up on a reply when a mind that reports progress (`mind.progress`)
+    /// has gone this long without a report.
+    pub think_stall: f64,
+    /// The cap for a mind that has never reported progress: an older mind
+    /// cannot say it is still working, so it gets a fixed budget instead.
+    pub think_blind: f64,
     /// Give up on speech that never finishes.
     pub speak_timeout: f64,
     /// Idle this long in the dark or at night and it gets drowsy.
@@ -64,13 +71,60 @@ impl Default for Config {
             boot_grace: 20.0,
             attend: 20.0,
             listen_timeout: 15.0,
-            think_timeout: 120.0,
+            think_timeout: 600.0,
+            think_stall: 45.0,
+            think_blind: 300.0,
             speak_timeout: 60.0,
             drowsy_after: 900.0,
             asleep_after: 180.0,
         }
     }
 }
+
+/// Where the being stood, coarsely, the last time the brainstem wrote it
+/// down. Kept in /run so a restarted brainstem picks up where it was instead
+/// of reopening the mic or faking a nap; a reboot clears it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Coarse {
+    Waking,
+    Awake,
+    Asleep,
+}
+
+impl Coarse {
+    pub fn name(self) -> &'static str {
+        match self {
+            Coarse::Waking => "waking",
+            Coarse::Awake => "awake",
+            Coarse::Asleep => "asleep",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Coarse> {
+        match name {
+            "waking" => Some(Coarse::Waking),
+            "awake" => Some(Coarse::Awake),
+            "asleep" => Some(Coarse::Asleep),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Resume {
+    pub muted: bool,
+    pub coarse: Coarse,
+    pub natural_sleep: bool,
+    /// It had finished waking at least once before.
+    pub woke: bool,
+    /// The lid blocked interaction when it was written.
+    pub lid_blocked: bool,
+}
+
+/// After a restart, an unknown lid is not applied to the state for this
+/// long, so the first real reading decides (privacy does not wait: the body
+/// and the routing treat an unknown lid as closed from the start).
+pub const RESUME_LID_HOLD: f64 = 3.0;
 
 pub struct Machine {
     cfg: Config,
@@ -85,6 +139,16 @@ pub struct Machine {
     unwell: bool,
     lid_blocked: bool,
     lid_wake: bool,
+    /// The lid was confirmed closed during the current blocked spell.
+    closed_seen: bool,
+    /// A wake has finished at least once (in this process or, after a
+    /// restart, before it). Until then opening the lid waits for the mind.
+    woke_once: bool,
+    /// An unknown lid is ignored until then (after a restart).
+    lid_hold_until: f64,
+    /// The mind has said it reports progress while it thinks.
+    progress_capable: bool,
+    last_progress: f64,
     dark: bool,
     night: bool,
     /// It fell asleep by itself, so morning may wake it. A requested sleep lasts
@@ -111,6 +175,11 @@ impl Machine {
             unwell: false,
             lid_blocked: false,
             lid_wake: false,
+            closed_seen: false,
+            woke_once: false,
+            lid_hold_until: f64::NEG_INFINITY,
+            progress_capable: false,
+            last_progress: now,
             dark: false,
             night: false,
             natural_sleep: false,
@@ -118,6 +187,42 @@ impl Machine {
             then_attend: false,
             last_activity: now,
             last_stimulus: now,
+        }
+    }
+
+    /// Pick up after a brainstem restart within the same boot.
+    pub fn resume(cfg: Config, now: f64, saved: &Resume) -> Machine {
+        let mut m = Machine::new(cfg, now);
+        m.muted = saved.muted;
+        m.woke_once = saved.woke;
+        m.lid_blocked = saved.lid_blocked;
+        m.lid_hold_until = now + RESUME_LID_HOLD;
+        match saved.coarse {
+            Coarse::Waking => {}
+            Coarse::Awake => {
+                m.state = State::Idle;
+                m.woke_once = true;
+            }
+            Coarse::Asleep => {
+                m.state = State::Asleep;
+                m.natural_sleep = saved.natural_sleep;
+            }
+        }
+        m
+    }
+
+    /// What a restarted brainstem needs to carry on as itself.
+    pub fn persist(&self) -> Resume {
+        Resume {
+            muted: self.muted,
+            coarse: match self.state {
+                State::Waking => Coarse::Waking,
+                State::Asleep => Coarse::Asleep,
+                _ => Coarse::Awake,
+            },
+            natural_sleep: self.state == State::Asleep && self.natural_sleep,
+            woke: self.woke_once,
+            lid_blocked: self.lid_blocked,
         }
     }
 
@@ -162,6 +267,12 @@ impl Machine {
         }
         if to != State::Waking {
             self.lid_wake = false;
+        }
+        if prev == State::Waking && matches!(to, State::Idle | State::Attending) {
+            self.woke_once = true;
+        }
+        if to == State::Thinking {
+            self.last_progress = now;
         }
         self.since = now;
         self.last_activity = now;
@@ -228,18 +339,31 @@ impl Machine {
         }
     }
 
-    /// The lid blocks interaction until it is confirmed open.
-    pub fn set_env(&mut self, lid_blocked: bool, dark: bool, night: bool, now: f64) -> Vec<Event> {
+    /// The lid blocks interaction until it is confirmed open. `lid` is the
+    /// reading: closed, open, or unknown (`None`).
+    pub fn set_env(&mut self, lid: Option<bool>, dark: bool, night: bool, now: f64) -> Vec<Event> {
         let mut out = Vec::new();
-        let was_blocked = self.lid_blocked;
-        self.lid_blocked = lid_blocked;
         self.dark = dark;
         self.night = night;
+        if lid.is_none() && now < self.lid_hold_until {
+            return out;
+        }
+        self.lid_hold_until = f64::NEG_INFINITY;
+        let lid_blocked = lid != Some(false);
+        let was_blocked = self.lid_blocked;
+        self.lid_blocked = lid_blocked;
         if lid_blocked && !was_blocked {
+            self.closed_seen = false;
             self.sleep(false, now, &mut out);
         }
+        if lid == Some(true) {
+            self.closed_seen = true;
+        }
         if !lid_blocked && was_blocked && self.state == State::Asleep {
-            self.lid_wake = true;
+            // Opening a lid that was really closed, once it has been awake,
+            // need not wait for the mind. A lid that was only unknown (every
+            // boot starts that way) waits for the organs like any wake.
+            self.lid_wake = self.closed_seen || self.woke_once;
             self.then_attend = false;
             self.go(State::Waking, now, &mut out);
         }
@@ -261,6 +385,7 @@ impl Machine {
                     self.up.remove(name);
                     if name == "mind" {
                         self.mind_ready = false;
+                        self.progress_capable = false;
                     }
                     if self.announcing && matches!(name, "mind" | "voice") {
                         out.push(Event::new("say.stop"));
@@ -270,7 +395,18 @@ impl Machine {
                 }
                 self.check_health(now, &mut out);
             }
-            "mind.ready" => self.mind_ready = true,
+            "mind.ready" => {
+                self.mind_ready = true;
+                if ev.bool("progress") == Some(true) {
+                    self.progress_capable = true;
+                }
+            }
+            "mind.progress" => {
+                self.progress_capable = true;
+                if self.state == State::Thinking {
+                    self.last_progress = now;
+                }
+            }
             "mind.announce"
                 if self.mind_ready
                     && self.up.contains("voice")
@@ -389,8 +525,12 @@ impl Machine {
                 }
             }
             State::Thinking => {
-                if now - self.since > self.cfg.think_timeout {
-                    out.push(Event::new("mind.cancel").with("reason", "think_timeout"));
+                let cap = if self.progress_capable { self.cfg.think_timeout } else { self.cfg.think_blind };
+                let stalled = self.progress_capable && now - self.last_progress > self.cfg.think_stall;
+                let too_long = now - self.since > cap;
+                if stalled || too_long {
+                    let why = if too_long { "too_long" } else { "no_progress" };
+                    out.push(Event::new("mind.cancel").with("reason", "think_timeout").with("why", why));
                     out.push(Event::new("face.express").with("name", "concern").with("hold", 3.0));
                     self.attend(now, &mut out);
                 }
@@ -495,9 +635,9 @@ mod tests {
     #[test]
     fn a_name_heard_while_waking_from_the_lid_is_answered_once_awake() {
         let mut m = awake();
-        m.set_env(true, false, false, 20.0);
+        m.set_env(Some(true), false, false, 20.0);
         assert_eq!(m.state(), State::Asleep);
-        m.set_env(false, false, false, 30.0);
+        m.set_env(Some(false), false, false, 30.0);
         assert_eq!(m.state(), State::Waking);
         m.on_event(&ev("hear.wake"), 30.2);
         assert_eq!(m.state(), State::Waking, "the eyes finish opening first");
@@ -508,7 +648,7 @@ mod tests {
     #[test]
     fn a_name_while_waking_behind_a_closed_lid_is_still_ignored() {
         let mut m = awake();
-        m.set_env(true, false, false, 20.0);
+        m.set_env(Some(true), false, false, 20.0);
         m.on_event(&ev("hear.wake"), 20.5);
         assert_eq!(m.state(), State::Asleep);
     }
@@ -622,15 +762,144 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_that_never_comes_times_out() {
+    fn a_reply_from_a_mind_that_never_reports_progress_gets_a_fixed_budget() {
         let mut m = awake();
         m.on_event(&ev("hear.wake"), 11.0);
         m.on_event(&Event::new("hear.final").with("text", "are you there"), 12.0);
-        assert!(m.on_tick(100.0).is_empty());
-        let out = m.on_tick(133.0);
+        // A cold turn on this CPU can take minutes: 120 s is no longer the end.
+        assert!(m.on_tick(200.0).is_empty());
+        let out = m.on_tick(313.0);
         assert_eq!(topics(&out), ["mind.cancel", "face.express", "state.changed"]);
         assert_eq!(out[0].str("reason"), Some("think_timeout"));
+        assert_eq!(out[0].str("why"), Some("too_long"));
         assert_eq!(m.state(), State::Attending);
+    }
+
+    #[test]
+    fn progress_keeps_a_long_reply_alive_until_it_stalls_or_hits_the_cap() {
+        let progress = Event::new("mind.progress").with("phase", "prompt").with("done", 100);
+        let mut m = awake();
+        m.on_event(&Event::new("mind.ready").with("progress", true), 10.5);
+        m.on_event(&ev("hear.wake"), 11.0);
+        m.on_event(&Event::new("hear.final").with("text", "tell me about your day"), 12.0);
+        // Steady progress every 5 s keeps it thinking well past the old 120 s.
+        let mut t = 12.0;
+        while t < 400.0 {
+            t += 5.0;
+            m.on_event(&progress, t);
+            assert!(m.on_tick(t + 0.1).is_empty(), "cancelled at {t}");
+        }
+        assert_eq!(m.state(), State::Thinking);
+        // Then the mind goes quiet: 45 s later it gives up.
+        assert!(m.on_tick(t + 44.0).is_empty());
+        let out = m.on_tick(t + 45.5);
+        assert_eq!(out[0].str("why"), Some("no_progress"));
+        assert_eq!(m.state(), State::Attending);
+
+        // However steady the progress, 600 s in all is the end.
+        m.on_event(&Event::new("hear.final").with("text", "and then"), 1000.0);
+        let mut t = 1000.0;
+        let mut cancelled = None;
+        while t < 1700.0 && cancelled.is_none() {
+            t += 5.0;
+            m.on_event(&progress, t);
+            cancelled = m.on_tick(t).into_iter().find(|e| e.topic == "mind.cancel");
+        }
+        let cancel = cancelled.expect("the hard cap");
+        assert_eq!(cancel.str("why"), Some("too_long"));
+        assert!((1600.0..1606.0).contains(&t), "{t}");
+    }
+
+    #[test]
+    fn progress_before_a_turn_does_not_count_toward_it_and_a_new_mind_starts_blind() {
+        let mut m = awake();
+        m.on_event(&ev("mind.progress"), 10.5);
+        m.on_event(&ev("hear.wake"), 11.0);
+        m.on_event(&Event::new("hear.final").with("text", "hi"), 100.0);
+        assert!(m.on_tick(144.0).is_empty(), "the stall clock starts with the turn");
+        assert_eq!(m.on_tick(146.0)[0].str("why"), Some("no_progress"));
+        // A restarted mind has not said it reports progress.
+        m.on_event(&Event::new("organ.down").with("name", "mind"), 150.0);
+        m.on_event(&up("mind"), 151.0);
+        m.on_event(&ev("mind.ready"), 151.5);
+        m.on_event(&ev("hear.wake"), 152.0);
+        m.on_event(&Event::new("hear.final").with("text", "hi again"), 153.0);
+        assert!(m.on_tick(300.0).is_empty());
+        assert_eq!(m.on_tick(454.0)[0].str("why"), Some("too_long"));
+    }
+
+    #[test]
+    fn the_physical_boot_waits_for_the_mind_even_though_the_lid_opens_at_once() {
+        // On hardware the lid starts unknown, then the switch is read open.
+        let mut m = Machine::new(Config::default(), 0.0);
+        m.set_env(None, false, false, 0.0);
+        assert_eq!(m.state(), State::Asleep);
+        m.on_event(&up("face"), 0.3);
+        m.set_env(Some(false), false, false, 0.5);
+        assert_eq!(m.state(), State::Waking);
+        m.on_event(&up("voice"), 1.0);
+        m.on_tick(5.0);
+        assert_eq!(m.state(), State::Waking, "an unknown lid opening is not a lid wake");
+        m.on_event(&up("mind"), 14.0);
+        m.on_event(&ev("mind.ready"), 30.0);
+        m.on_tick(30.1);
+        assert_eq!(m.state(), State::Idle);
+        // Once it has woken properly, closing and opening the lid wakes at once.
+        m.on_event(&Event::new("organ.down").with("name", "mind"), 40.0);
+        m.set_env(Some(true), false, false, 41.0);
+        m.set_env(Some(false), false, false, 42.0);
+        m.on_tick(43.6);
+        assert_eq!(m.state(), State::Idle);
+    }
+
+    #[test]
+    fn booting_with_the_lid_closed_then_opening_it_is_a_lid_wake() {
+        let mut m = Machine::new(Config::default(), 0.0);
+        m.set_env(None, false, false, 0.0);
+        m.set_env(Some(true), false, false, 0.4);
+        m.set_env(Some(false), false, false, 9.0);
+        m.on_tick(10.6);
+        assert_eq!(m.state(), State::Idle);
+    }
+
+    #[test]
+    fn a_restart_resumes_mute_and_state_without_faking_a_nap() {
+        let mut m = awake();
+        m.on_event(&ev("key.mute"), 11.0);
+        let saved = m.persist();
+        assert_eq!(saved, Resume { muted: true, coarse: Coarse::Awake, natural_sleep: false, woke: true, lid_blocked: false });
+
+        let mut again = Machine::resume(Config::default(), 0.0, &saved);
+        assert_eq!(again.state(), State::Idle, "no waking gesture after a restart");
+        assert!(again.muted(), "the mic stays closed");
+        assert_eq!(again.snapshot().bool("muted"), Some(true));
+        // The lid is unknown for a moment after the restart: no fake sleep.
+        assert!(again.set_env(None, false, false, 0.1).is_empty());
+        assert!(again.set_env(Some(false), false, false, 0.5).is_empty());
+        assert_eq!(again.state(), State::Idle);
+        // But a lid that stays unknown is acted on after the hold.
+        let mut lost = Machine::resume(Config::default(), 0.0, &saved);
+        lost.set_env(None, false, false, RESUME_LID_HOLD + 0.1);
+        assert_eq!(lost.state(), State::Asleep);
+
+        // A requested sleep survives a restart, even with the lid open.
+        let mut m = awake();
+        m.on_event(&ev("being.sleep"), 12.0);
+        let saved = m.persist();
+        assert_eq!((saved.coarse, saved.natural_sleep), (Coarse::Asleep, false));
+        let mut again = Machine::resume(Config::default(), 0.0, &saved);
+        again.set_env(None, false, false, 0.1);
+        again.set_env(Some(false), false, false, 0.6);
+        again.on_tick(5000.0);
+        assert_eq!(again.state(), State::Asleep);
+        // A natural sleep still wakes in the morning.
+        let natural = Resume { natural_sleep: true, ..saved };
+        let mut again = Machine::resume(Config::default(), 0.0, &natural);
+        again.set_env(Some(false), false, false, 0.2);
+        again.on_tick(61.0);
+        assert_eq!(again.state(), State::Waking);
+        assert_eq!(Coarse::from_name(Coarse::Asleep.name()), Some(Coarse::Asleep));
+        assert_eq!(Coarse::from_name("dreaming"), None);
     }
 
     #[test]
@@ -666,13 +935,13 @@ mod tests {
         let mut m = awake();
         m.on_event(&ev("hear.wake"), 11.0);
         m.on_event(&Event::new("hear.final").with("text", "hello"), 12.0);
-        let out = m.set_env(true, false, false, 13.0);
+        let out = m.set_env(Some(true), false, false, 13.0);
         assert_eq!(topics(&out), ["say.stop", "mind.cancel", "state.changed"]);
         assert_eq!(m.state(), State::Asleep);
         // Its name does not wake it while the lid is shut.
         m.on_event(&ev("hear.wake"), 14.0);
         assert_eq!(m.state(), State::Asleep);
-        m.set_env(false, false, false, 20.0);
+        m.set_env(Some(false), false, false, 20.0);
         assert_eq!(m.state(), State::Waking);
         m.on_tick(22.0);
         assert_eq!(m.state(), State::Idle);
@@ -683,9 +952,9 @@ mod tests {
         let mut m = awake();
         m.on_event(&ev("key.mute"), 11.0);
         m.on_event(&Event::new("organ.down").with("name", "mind"), 12.0);
-        m.set_env(true, false, false, 13.0);
-        assert!(m.set_env(true, true, false, 13.1).is_empty());
-        m.set_env(false, false, false, 14.0);
+        m.set_env(Some(true), false, false, 13.0);
+        assert!(m.set_env(Some(true), true, false, 13.1).is_empty());
+        m.set_env(Some(false), false, false, 14.0);
         m.on_tick(15.6);
         assert_eq!(m.state(), State::Idle);
         assert!(m.muted() && m.unwell());
@@ -696,7 +965,7 @@ mod tests {
     #[test]
     fn gets_drowsy_in_the_dark_and_wakes_in_the_morning() {
         let mut m = awake();
-        m.set_env(false, true, true, 10.0);
+        m.set_env(Some(false), true, true, 10.0);
         m.on_tick(500.0);
         assert_eq!(m.state(), State::Idle, "not yet");
         m.on_tick(911.0);
@@ -705,7 +974,7 @@ mod tests {
         assert_eq!(m.state(), State::Asleep);
         m.on_tick(5000.0);
         assert_eq!(m.state(), State::Asleep, "still dark");
-        m.set_env(false, false, false, 30000.0);
+        m.set_env(Some(false), false, false, 30000.0);
         m.on_tick(30000.0);
         assert_eq!(m.state(), State::Waking);
     }

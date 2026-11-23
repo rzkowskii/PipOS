@@ -1,0 +1,13 @@
+{
+  "name": "snake",
+  "aliases": [
+    "snake",
+    "the snake game",
+    "a snake game"
+  ],
+  "summary": "Steer a snake to the food.",
+  "keys": "Keys: W A S D steer, Q quits.",
+  "entry": "main.py",
+  "size": 3281,
+  "sha256": "22974482d6607d0b495875c586e5d156e4d520068f9455c5c8af9b3739d41bf9"
+}

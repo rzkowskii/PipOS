@@ -3,6 +3,7 @@ set -eu
 
 IFS= read -r cmdline </proc/cmdline
 set -f
+slot=
 for argument in $cmdline; do
     case "$argument" in
         being.try=1)
@@ -14,11 +15,40 @@ for argument in $cmdline; do
                 exit 1
             fi
             PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m mind.install_binding ;;
+        rauc.slot=A|rauc.slot=B)
+            slot=${argument#rauc.slot=} ;;
     esac
 done
 
-# During a trial boot, the inactive slot is the rollback copy.
+# RAUC has already compared the bundle's compatible string with this
+# system's. Check it again against the variant this root was built as, so a
+# lab bundle can never turn the laptop back into the lab image.
+variant=lab
+if [ -r /usr/share/being/variant ]; then
+    IFS= read -r variant </usr/share/being/variant
+fi
+bundle=${RAUC_MF_COMPATIBLE:-}
+if [ -n "$bundle" ]; then
+    if [ -n "${RAUC_SYSTEM_COMPATIBLE:-}" ] && [ "$bundle" != "$RAUC_SYSTEM_COMPATIBLE" ]; then
+        echo "This update is for a different kind of PipOS ($bundle)" >&2
+        exit 1
+    fi
+    case "$variant:$bundle" in
+        laptop:beingos-laptop-*|lab:beingos-lab-*|lab:beingos-installed-*) ;;
+        *)
+            echo "This update is for a different kind of PipOS ($bundle, not $variant)" >&2
+            exit 1 ;;
+    esac
+fi
+
+# During a trial boot, the inactive slot is the rollback copy. A confirmed
+# slot that is running but not fully healthy (a degraded being) may still be
+# updated: that is how a fix reaches it.
 if [ ! -f /run/being-slot-good ]; then
-    echo "PipOS must finish its health check before installing an update" >&2
-    exit 1
+    if [ -n "$slot" ] && grub-editenv /bootstate/EFI/BOOT/grubenv list 2>/dev/null | grep -qx "GOOD=$slot"; then
+        echo "PipOS slot $slot is confirmed but not fully healthy; allowing the update" >&2
+    else
+        echo "PipOS must finish its health check before installing an update" >&2
+        exit 1
+    fi
 fi

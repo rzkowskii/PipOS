@@ -9,6 +9,7 @@ try_active=
 seen=
 invalid=
 esp= a= b= models= mind= root= slot= fstab= gpt_auto=
+trial=
 
 for arg in $cmdline; do
     key=${arg%%=*}
@@ -17,6 +18,9 @@ for arg in $cmdline; do
         being.try)
             trying=yes
             if [ "$value" = 1 ]; then try_active=yes; fi
+            continue ;;
+        being.trial)
+            trial=$value
             continue ;;
         being.installed) field=installed; installed=$value ;;
         being.esp) field=esp; esp=$value ;;
@@ -39,13 +43,55 @@ case " $seen " in *" installed "*) ;; *) exit 0 ;; esac
 [ -z "$try_active" ] || exit 0
 early=${2:?Missing early systemd generator directory}
 requires="$early/local-fs.target.requires"
+wants="$early/local-fs.target.wants"
 binding=being-installed-bind.service
-mkdir -p "$requires"
+mkdir -p "$requires" "$wants"
+
+# write_mount NAME WHAT TYPE OPTIONS [UNITS] [requires|wants]
+# Only what the being cannot live without is required by local-fs.target. A
+# damaged boot-state or model partition must not drop the boot into
+# emergency mode (there is no login there): the face still comes up and says
+# it is unwell.
+write_mount() {
+    cat > "$early/$1.mount" <<EOF
+[Unit]
+Before=local-fs.target
+Requires=${5:-}
+After=${5:-}
+
+[Mount]
+What=$2
+Where=/$1
+Type=$3
+Options=$4
+EOF
+    if [ "${6:-requires}" = wants ]; then
+        ln -sf "../$1.mount" "$wants/$1.mount"
+    else
+        ln -sf "../$1.mount" "$requires/$1.mount"
+    fi
+}
 
 deny() {
     for unit in bootstate.mount mind.mount models.mount rauc.service being-boot-health.service being-trial-reboot.service; do
         ln -sf /dev/null "$early/$unit"
     done
+    # The root is read-only and fstab=no: without this /var stays read-only.
+    write_mount var tmpfs tmpfs mode=0755,nosuid,nodev
+    # A trial slot that cannot prove who it is never confirms itself: reboot,
+    # so the boot loader spends one of its attempts and falls back.
+    if [ "$trial" = 1 ]; then
+        mkdir -p "$early/multi-user.target.wants"
+        cat > "$early/being-installed-deny-reboot.service" <<EOF
+[Unit]
+Description=Reboot a PipOS trial slot whose installed identity is invalid
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --no-block reboot
+EOF
+        ln -sf ../being-installed-deny-reboot.service "$early/multi-user.target.wants/being-installed-deny-reboot.service"
+    fi
     printf '%s\n' 'being-installed-generator: invalid installed boot identity; disk mounts and updates disabled.' >&2
     exit 0
 }
@@ -116,26 +162,41 @@ Wants=$esp_check
 After=$esp_check
 EOF
 
-write_mount() {
-    cat > "$early/$1.mount" <<EOF
+write_mount var tmpfs tmpfs mode=0755,nosuid,nodev
+write_mount bootstate "$esp_path" vfat rw,umask=0077,nodev,nosuid,noexec,nofail "$binding" wants
+write_mount models "/dev/disk/by-partuuid/$models" ext4 ro,noload,noatime,nodev,nosuid,noexec,nofail "$binding" wants
+write_mount mind "$mind_path" ext4 rw,noatime,nodev,nosuid,noexec,discard "$binding $check"
+
+# Logs that survive a reboot: the journal lives on /mind/log/journal (64 MB,
+# 30 days; 50-being-journal.conf) and every boot adds a line to boots.txt.
+# None of this is required: without it the journal simply stays in RAM.
+cat > "$early/being-boot-record.service" <<EOF
 [Unit]
-Before=local-fs.target
-Requires=${5:-}
-After=${5:-}
+Description=Keep PipOS logs on the mind partition
+DefaultDependencies=no
+Requires=mind.mount
+After=mind.mount
+Before=var-log-journal.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/being-boot-record
+EOF
+cat > "$early/var-log-journal.mount" <<EOF
+[Unit]
+Description=PipOS journal on the mind partition
+Requires=being-boot-record.service var.mount
+After=being-boot-record.service var.mount
+Before=systemd-journal-flush.service
 
 [Mount]
-What=$2
-Where=/$1
-Type=$3
-Options=$4
+What=/mind/log/journal
+Where=/var/log/journal
+Type=none
+Options=bind,nodev,nosuid,noexec
 EOF
-    ln -sf "../$1.mount" "$requires/$1.mount"
-}
-
-write_mount var tmpfs tmpfs mode=0755,nosuid,nodev
-write_mount bootstate "$esp_path" vfat rw,umask=0077,nodev,nosuid,noexec "$binding"
-write_mount models "/dev/disk/by-partuuid/$models" ext4 ro,noload,noatime,nodev,nosuid,noexec "$binding"
-write_mount mind "$mind_path" ext4 rw,noatime,nodev,nosuid,noexec,discard "$binding $check"
+ln -sf ../var-log-journal.mount "$wants/var-log-journal.mount"
 
 cat > "$early/rauc.service.d/being-installed.conf" <<EOF
 [Unit]

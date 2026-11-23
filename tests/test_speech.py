@@ -1,6 +1,8 @@
 import unittest
 
-from mind.speech import EMOTIONS, GRAMMAR, ClauseSplitter, EchoGuard, TagParser, ThinkFilter, clean
+from mind.speech import (
+    EMOTIONS, GRAMMAR, STRICT_GRAMMAR, ClauseSplitter, EchoGuard, TagParser, ThinkFilter, boilerplate, clean,
+)
 
 
 def feed_all(obj, pieces):
@@ -159,6 +161,26 @@ class GrammarTest(unittest.TestCase):
         for emotion in EMOTIONS:
             self.assertIn(f'"{emotion}"', GRAMMAR)
         self.assertTrue(GRAMMAR.startswith("root ::="))
+
+
+
+
+class ReplyShapeTest(unittest.TestCase):
+    def test_the_strict_grammar_bounds_sentences_and_forbids_markup(self):
+        self.assertIn('root ::= "[" emotion "] " sentence (" " sentence)?', STRICT_GRAMMAR)
+        rule = next(line for line in STRICT_GRAMMAR.splitlines() if line.startswith("part ::="))
+        for forbidden in ("\\n", "()", "*", "#", "<>"):
+            self.assertIn(forbidden, rule)
+        self.assertIn("{0,160}", STRICT_GRAMMAR)
+        for emotion in EMOTIONS:
+            self.assertIn(f'"{emotion}"', STRICT_GRAMMAR)
+
+    def test_boilerplate_is_recognised(self):
+        for text in ("As an AI, I can't.", "I'm just a language model.", "How can I help you today?",
+                     "I don’t have feelings."):
+            self.assertTrue(boilerplate(text), text)
+        for text in ("Kites ride the wind.", "I can help you water the fern.", "That model train sounds fun."):
+            self.assertFalse(boilerplate(text), text)
 
 
 if __name__ == "__main__":

@@ -69,6 +69,9 @@ itself and forwards only gaze targets to the face. Detections expire after
 | `mind.cancel` | brainstem | optional `reason` | Abandon the reply in progress. `think_timeout` indicates a reply that failed to start. |
 | `mind.announce` | mind | `announcement`, `lid_seq`, optional `idle_only` | Request a chance to speak with the current lid reading. First-daily greetings require the idle state. |
 | `mind.dream_committed` | mind | `lid_seq` | Report a committed overnight batch with journal entries for the current confirmed closure. The brainstem consumes the receipt locally and acknowledges it only on the next confirmed opening. |
+| `mind.clock` | mind | `utc_offset` (seconds east of UTC, or null) | The owner's time-zone offset now. Sent on every new bus connection and whenever it changes; the brainstem uses it for night, drowsiness and the senses line. Null means no zone is set, and the brainstem keeps UTC. |
+| `mind.progress` | mind | `phase`, optional `tokens` | The cortex is still working on this reply (a slow cold read is not a hang). Being added by plan task 1.15; the fields settle with that work. |
+| `life.woke` | brainstem | `id`, `born`, `wakes`, `woke_at`, `first`, `lost_power`, `new_body`, `body`, optional `slept` | The life record for this wake: its identity, birth time, wake count, whether this is the first wake, whether the last wake ended in a power loss, whether it woke in a different body, and how long it slept. |
 | `stem.announce_ready` | brainstem | `announcement` | The voice is free and the brainstem has entered thinking for the matching announcement. |
 | `being.sleep`, `being.wake` | mind | | Go to sleep or wake up, on request |
 | `camera.request` | eyes | `enabled` | Report the current owner permission after connecting or when it changes |

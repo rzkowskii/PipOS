@@ -1,7 +1,10 @@
 import unittest
 from datetime import date, datetime
 
-from mind.commands import Command, greeting, history_query, may_be_command, parse
+from mind.commands import (
+    Command, clock_time, correction_value, greeting, history_query, may_be_command, parse, reflect,
+    splice_correction, subject_of, volume_level,
+)
 
 
 class CommandsTest(unittest.TestCase):
@@ -27,7 +30,8 @@ class CommandsTest(unittest.TestCase):
         self.check("What did I say about the coffee shop?", "recall_heard", "the coffee shop")
         self.check("When did I mention the coffee shop?", "recall_heard", "the coffee shop")
         self.check("What did we talk about yesterday?", "recall", "yesterday")
-        self.check("Pip, what were we talking about?", "recall")
+        self.check("Pip, what were we talking about?", "talked_about")
+        self.check("What did we talk about earlier?", "talked_about")
 
     def test_immediate_remind_me_questions_leave_recall_for_the_conversation_path(self):
         for said in (
@@ -79,7 +83,9 @@ class CommandsTest(unittest.TestCase):
 
     def test_forget(self):
         self.check("Forget that.", "forget_last")
-        self.check("forget it", "forget_last")
+        self.check("forget it", "never_mind")
+        self.check("Never mind", "never_mind")
+        self.check("forget this", "forget_last")
         self.check("Forget about my sister's birthday", "forget", "my sister's birthday")
         self.check("forget what I said about the bins", "forget", "the bins")
 
@@ -155,6 +161,103 @@ class CommandsTest(unittest.TestCase):
             "What was that café we talked about before I went to Hobart?",
         ]:
             self.assertIsNone(parse(said, "Pip"), said)
+
+
+class NewCommandsTest(unittest.TestCase):
+    def check(self, said, kind, arg=""):
+        self.assertEqual(parse(said, "Pip"), Command(kind, arg), said)
+
+    def test_remembering_a_question_is_not_a_fact(self):
+        for said in ("Remember when we went fishing?", "Can you remember names?",
+                     "remember how we met", "Remember what I told you"):
+            with self.subTest(said=said):
+                self.assertIsNone(parse(said, "Pip"))
+
+    def test_a_fact_introduced_with_that_is_kept_whatever_its_first_word(self):
+        # Sent to the model, "remember to ..." would get "I will!" with nothing kept.
+        self.check("Remember that when I'm tired I get grumpy", "remember", "when I'm tired I get grumpy")
+        self.check("Don't forget that how I take my tea is with milk", "remember", "how I take my tea is with milk")
+        self.check("Remember to take the bins out on Tuesday", "remember", "to take the bins out on Tuesday")
+
+    def test_only_one_value_subjects_can_be_replaced(self):
+        from mind.commands import replaceable_subject
+        self.assertEqual(replaceable_subject("my cat is called Tom"), "my cat is called")
+        self.assertEqual(replaceable_subject("my birthday is in May"), "my birthday is in")
+        self.assertEqual(replaceable_subject("my sister lives in Perth"), "my sister lives in")
+        self.assertIsNone(replaceable_subject("I like tea"), "liking coffee too replaces nothing")
+        self.assertIsNone(replaceable_subject("I went to Rome"))
+
+    def test_memory_questions_with_their_own_answers(self):
+        self.check("Do you remember me?", "remember_me")
+        self.check("Pip, do you know who I am?", "remember_me")
+        self.check("What do you know about me?", "about_me")
+        self.check("What do you remember?", "about_me")
+        self.check("What were we talking about?", "talked_about")
+        self.check("What did we talk about about the garden", "recall", "about the garden")
+
+    def test_honest_self_questions(self):
+        for said, kind in [("Are you alive?", "self_alive"), ("Are you sentient", "self_aware"),
+                           ("Are you conscious?", "self_aware"), ("Do you have feelings?", "self_feel"),
+                           ("Can you feel anything?", "self_feel"), ("What are you?", "self_what"),
+                           ("Are you real?", "self_what")]:
+            self.check(said, kind)
+        self.assertIsNone(parse("What are you doing later?", "Pip"))
+
+    def test_volume_and_clock(self):
+        self.check("Speak louder", "volume_up")
+        self.check("I can't hear you", "volume_up")
+        self.check("Pip, be quieter please", "volume_down")
+        self.check("You're too loud", "volume_down")
+        self.check("Set your volume to 40 percent", "volume_set", "40 percent")
+        self.check("Set the time to 3:45 pm", "set_time", "3:45 pm")
+        self.check("The time is 9 in the morning", "set_time", "9 in the morning")
+        self.check("Set the time to 3", "set_time", "3")
+        for partial in ("speak louder", "set your volume", "are you alive", "set the time"):
+            self.assertTrue(may_be_command(partial), partial)
+
+    def test_battery_phrasings(self):
+        for said in ("How's your battery?", "How is your battery doing?", "Tell me about your battery",
+                     "Are you charging?", "How long will your battery last?"):
+            self.check(said, "battery")
+
+    def test_look_no_longer_takes_what_is_this(self):
+        self.assertIsNone(parse("What is this?", "Pip"))
+        self.check("What do you see?", "look")
+
+    def test_its_name_alone_is_a_hello(self):
+        for text in ("Pip", "Hey Pip.", "hello Pip", "Hi, Pip!", "hey"):
+            self.assertEqual(greeting(text, "Pip"), "hello", text)
+
+    def test_spoken_numbers_and_times(self):
+        self.assertEqual([volume_level(x) for x in ("forty", "forty five percent", "70", "max", "half", "101", "loud")],
+                         [40, 45, 70, 100, 50, None, None])
+        self.assertEqual(clock_time("3:45 pm"), (15, 45))
+        self.assertEqual(clock_time("12 am"), (0, 0))
+        self.assertEqual(clock_time("9 in the morning"), (9, 0))
+        self.assertEqual(clock_time("7 in the evening"), (19, 0))
+        self.assertEqual(clock_time("15:05"), (15, 5))
+        self.assertIsNone(clock_time("3"))
+        self.assertIsNone(clock_time("13 pm"))
+
+    def test_reflect_turns_the_owners_words_round(self):
+        self.assertEqual(reflect("my cat is called Tom"), "your cat is called Tom")
+        self.assertEqual(reflect("I'm going to Amsterdam with my sister"), "you're going to Amsterdam with your sister")
+        self.assertEqual(reflect("I am here", start=True), "You are here")
+
+    def test_a_short_correction_is_spliced_only_where_it_clearly_fits(self):
+        for fact, value, result in [
+            ("my cat is called Tom", "Jim", "my cat is called Jim"),
+            ("my birthday is in May", "June", "my birthday is in June"),
+            ("the bins go out on Tuesday", "Monday", "the bins go out on Monday"),
+            ("hunter2", "swordfish", None),
+            ("my cat is called Tom", "a very long new name for him", None),
+        ]:
+            with self.subTest(fact=fact):
+                self.assertEqual(splice_correction(fact, value), result)
+        self.assertEqual(correction_value("it's Jim"), "Jim")
+        self.assertEqual(correction_value("No, actually it's Canberra."), "Canberra")
+        self.assertIsNone(correction_value("my cat is called Jim"))
+        self.assertEqual(subject_of("my cat is called Tom"), subject_of("My cat is called Jim").lower())
 
 
 if __name__ == "__main__":

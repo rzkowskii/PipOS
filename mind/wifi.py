@@ -21,6 +21,7 @@ from .storage import atomic_write, private_directory, sync_directory
 
 
 PROFILE = Path("/mind/network/wifi.json")
+ETHERNET = Path("network/ethernet.json")  # relative to the mind directory
 RUNTIME = Path("/run/being-wifi")
 NETWORKD_FILE = Path("/run/systemd/network/00-being-wifi.network")
 NETWORK_MODE = Path("/run/being-network/mode")
@@ -182,6 +183,131 @@ def networkd_config(interface, mode, *, ethernet=False):
     return "\n".join((*lines, ""))
 
 
+def ethernet_config():
+    """Every wired link, DHCP, with the same privacy choices as Internet Wi-Fi."""
+    lines = ["[Match]", "Type=ether", "",
+             "[Network]", "DHCP=yes", "LinkLocalAddressing=ipv6", "IPv6AcceptRA=yes",
+             "IPv6PrivacyExtensions=yes", "LLMNR=no", "MulticastDNS=no", "LLDP=no", "EmitLLDP=no",
+             "", "[DHCPv4]", "UseDNS=yes", "UseNTP=no", "UseDomains=no", "SendHostname=no",
+             "", "[DHCPv6]", "UseDNS=yes", "UseNTP=no", "UseDomains=no", ""]
+    return "\n".join(lines)
+
+
+def load_ethernet(mind=Path("/mind")):
+    """Whether the owner switched wired Ethernet on. A missing file means off."""
+    path = Path(mind) / ETHERNET
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    with os.fdopen(fd, "rb") as source:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+            raise PermissionError(f"Expected a private Ethernet setting at {path}.")
+        raw = source.read(257)
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        raise ValueError("Unreadable Ethernet setting.") from None
+    if not isinstance(value, dict) or set(value) != {"version", "enabled"} or value["version"] != 1 \
+            or type(value["enabled"]) is not bool:
+        raise ValueError("Unreadable Ethernet setting.")
+    return value["enabled"]
+
+
+def save_ethernet(mind, enabled):
+    path = Path(mind) / ETHERNET
+    with owner_change(path):
+        atomic_write(path, json.dumps({"version": 1, "enabled": bool(enabled)}) + "\n")
+
+
+def wireless_interfaces(sys_net=None):
+    base = SYS_NET if sys_net is None else sys_net
+    try:
+        names = sorted(path.name for path in base.iterdir())
+    except OSError:
+        return []
+    return [name for name in names if INTERFACE.fullmatch(name) and (base / name / "phy80211").is_dir()]
+
+
+def parse_scan(text):
+    """Networks from `iw dev X scan`, strongest first, one entry per name.
+
+    Hidden networks (no name) are left out; the owner types those by hand.
+    """
+    networks = {}
+    current = None
+
+    def keep(entry):
+        if entry and entry.get("ssid") and entry["security"] in ("wpa2", "wpa3"):
+            old = networks.get(entry["ssid"])
+            if old is None or entry["signal"] > old["signal"]:
+                networks[entry["ssid"]] = entry
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if raw.startswith("BSS "):
+            keep(current)
+            current = {"ssid": "", "signal": -100.0, "security": "open", "suites": set()}
+        elif current is None:
+            continue
+        elif line.startswith("signal:"):
+            try:
+                current["signal"] = float(line.split()[1])
+            except (IndexError, ValueError):
+                pass
+        elif line.startswith("SSID:"):
+            name = line[5:].strip()
+            # iw escapes unprintable bytes as \xNN; such names are not offered.
+            current["ssid"] = name if name.isprintable() and "\\x" not in name and \
+                len(name.encode("utf-8")) <= 32 else ""
+        elif line.startswith("RSN:"):
+            current["security"] = "wpa2"
+        elif "Authentication suites:" in line and current["security"] == "wpa2":
+            suites = set(line.split(":", 1)[1].split())
+            current["security"] = "wpa2" if "PSK" in suites else "wpa3" if "SAE" in suites else "other"
+        elif line.startswith("WPA:") and current["security"] == "open":
+            current["security"] = "other"  # WPA1 only: not supported
+    keep(current)
+    return sorted(({key: value for key, value in entry.items() if key != "suites"} for entry in networks.values()),
+                  key=lambda entry: -entry["signal"])
+
+
+def link_up(interface, sys_net=None):
+    """Whether the kernel has the link administratively up."""
+    base = SYS_NET if sys_net is None else sys_net
+    try:
+        return bool(int((base / interface / "flags").read_text(encoding="ascii"), 16) & 1)
+    except (OSError, ValueError):
+        return False
+
+
+def scan(interface, *, run=subprocess.run):
+    """Ask the radio which networks are near. Only on the owner's request.
+
+    The link is raised for the scan and lowered again unless it was already
+    up in a mode that allows it. A first join in Internet mode finds the link
+    down, because nothing manages it yet. No address is requested and nothing
+    is joined.
+    """
+    if not INTERFACE.fullmatch(interface):
+        raise ValueError("Invalid Wi-Fi interface name.")
+    raised = False
+    try:
+        if effective_mode() == LOCAL_ONLY or not link_up(interface):
+            run(["ip", "link", "set", "dev", interface, "up"], check=True, timeout=5,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            raised = True
+        result = run(["iw", "dev", interface, "scan"], capture_output=True, text=True, timeout=20, check=False)
+        if result.returncode:
+            raise ValueError("The Wi-Fi radio could not scan. Its firmware may be missing.")
+        return parse_scan(result.stdout)
+    finally:
+        if raised:
+            run(["ip", "link", "set", "dev", interface, "down"], check=False, timeout=5,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def serve():
     profile = load_profile()
     if profile is None:
@@ -260,6 +386,10 @@ def main():
                            help="save to an installed mind partition mounted by a Linux live system")
     commands.add_parser("status", help="show the saved network and connection state")
     commands.add_parser("forget", help="disconnect and remove the saved network")
+    wired = commands.add_parser("ethernet", help="switch owner wired Ethernet (used in Internet mode)")
+    wired.add_argument("action", choices=("on", "off", "status"))
+    survey = commands.add_parser("scan", help="list nearby Wi-Fi networks as JSON")
+    survey.add_argument("interface", nargs="?")
     commands.add_parser("serve")
     commands.add_parser("cleanup")
     args = parser.parse_args()
@@ -280,6 +410,17 @@ def main():
                 PROFILE.unlink(missing_ok=True)
                 sync_directory(PROFILE.parent)
                 subprocess.run(["systemctl", "stop", SERVICE], check=True)
+        elif args.command == "ethernet":
+            if args.action != "status":
+                save_ethernet(Path("/mind"), args.action == "on")
+                subprocess.run(["systemctl", "restart", "being-network-reconcile.service"], check=True, timeout=100)
+            print("Wired Ethernet " + ("on" if load_ethernet() else "off")
+                  + (" (used in Internet mode)." if effective_mode() != INTERNET else "."))
+        elif args.command == "scan":
+            names = [args.interface] if args.interface else wireless_interfaces()
+            if not names:
+                raise ValueError("No Wi-Fi interface. The radio or its firmware is missing.")
+            print(json.dumps({"interface": names[0], "networks": scan(names[0])}))
         elif args.command == "serve":
             serve()
         elif args.command == "cleanup":

@@ -21,6 +21,45 @@ uniform vec3 uHalo;    // bloom colour, linear
 uniform float uGrid;   // LED-grid depth, 0..1
 uniform float uPitch;  // LED-grid pitch in whole pixels
 uniform float uGlowR;  // reach of the bloom in screen units; it is zero beyond
+uniform vec2 uOrigin;  // where this viewport starts in the window, in pixels
+// Privacy marks (render.rs: Marks): glint, guest ring, covered ears, network
+// dot; then SSH mark and the fixed marks' level on screen.
+uniform vec4 uMarks[2];
+
+// Distance to a segment.
+float sdSegment(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a, ba = b - a;
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
+// The fixed marks, as a colour already encoded for the screen. They stay
+// dim (render.rs: MARK_LEVEL), so the lab never counts them as eyes.
+vec3 fixedMarks(vec2 p, float px) {
+    float aspect = uRes.x / uRes.y;
+    float level = uMarks[1].y;
+    float m = 0.0;
+    if (uMarks[0].z > 0.0) {
+        // Covered ears: a short rounded bar at each side of the face.
+        vec2 q = vec2(abs(p.x) - (aspect - 0.075), p.y);
+        float d = length(vec2(q.x, max(abs(q.y) - 0.11, 0.0))) - 0.018;
+        m = max(m, uMarks[0].z * clamp(0.5 - d / px, 0.0, 1.0));
+    }
+    if (uMarks[0].w > 0.0) {
+        // Network: a dot in the top right corner.
+        float d = length(p - vec2(aspect - 0.075, 0.915)) - 0.017;
+        m = max(m, uMarks[0].w * clamp(0.5 - d / px, 0.0, 1.0));
+    }
+    if (uMarks[1].x > 0.0) {
+        // SSH session: a small ">_" prompt in the top left corner.
+        vec2 o = vec2(-aspect + 0.06, 0.915);
+        float d = min(sdSegment(p, o + vec2(0.0, 0.022), o + vec2(0.022, 0.0)),
+                      sdSegment(p, o + vec2(0.022, 0.0), o + vec2(0.0, -0.022)));
+        d = min(d, sdSegment(p, o + vec2(0.036, -0.024), o + vec2(0.070, -0.024))) - 0.005;
+        m = max(m, uMarks[1].x * clamp(0.5 - d / px, 0.0, 1.0));
+    }
+    return sqrt(uFill) * (level * m);
+}
 
 // Distance to an ellipse with half-axes ab. Three rounds of the closest-point
 // iteration are accurate at any aspect ratio, which a one-step estimate is not:
@@ -81,7 +120,7 @@ float sdEye(vec2 p, vec4 a, vec4 b, vec4 c, vec3 shape, vec4 ellipse, out vec2 u
 }
 
 void main() {
-    vec2 p = (gl_FragCoord.xy - 0.5 * uRes) / (0.5 * uRes.y);
+    vec2 p = (gl_FragCoord.xy - uOrigin - 0.5 * uRes) / (0.5 * uRes.y);
     float px = 1.0 / (0.5 * uRes.y);
 
     vec3 lit = vec3(0.0); // the eyes themselves
@@ -111,8 +150,22 @@ void main() {
         // Further down, the rim itself deepens toward the bloom's blue, the
         // way a dim light looks bluer, rather than greying into teal.
         vec3 rim = mix(uFill, uHalo, 0.5 * clamp(1.5 - 1.5 * g, 0.0, 1.0));
-        lit = max(lit, mix(rim, uCore, t) * (c * g2));
+        vec3 colour = mix(rim, uCore, t);
+        if (uMarks[0].x > 0.0) {
+            // The camera may capture: a small glint up and to the left in
+            // each eye, in the eye's own hottest colour (never white).
+            vec2 at = eye.xy + vec2(-0.34 * eye.z, 0.36 * eye.w);
+            float r = 0.16 * min(eye.z, eye.w);
+            float glint = clamp(1.0 - length(p - at) / r, 0.0, 1.0);
+            colour = mix(colour, uCore * 1.35, uMarks[0].x * smoothstep(0.0, 0.45, glint));
+        }
+        lit = max(lit, colour * (c * g2));
         cover = max(cover, c);
+        if (uMarks[0].y > 0.0) {
+            // Guest mode: a soft ring just outside each eye.
+            float ring = 1.0 - smoothstep(0.0, 0.012, abs(d - 0.05));
+            halo += uMarks[0].y * 0.22 * g2 * ring;
+        }
 
         // Bloom: a bright skin hugging the edge, then a broad soft falloff
         // that reaches exactly zero at uGlowR, with no edge of its own.
@@ -122,8 +175,12 @@ void main() {
         halo += g2 * (0.34 * exp(-o / (0.055 * uGlowR)) + 0.10 * w * w);
     }
 
+    vec3 marks = vec3(0.0);
+    if (uMarks[0].z + uMarks[0].w + uMarks[1].x > 0.0) {
+        marks = fixedMarks(p, px);
+    }
     if (cover == 0.0 && halo == 0.0) {
-        frag = vec4(0.0, 0.0, 0.0, 1.0);
+        frag = vec4(marks, 1.0);
         return;
     }
 
@@ -144,5 +201,5 @@ void main() {
     // A little ordered noise below one 8-bit step hides banding in the bloom.
     float n = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
     col += (n - 0.5) / 255.0;
-    frag = vec4(col, 1.0);
+    frag = vec4(max(col, marks), 1.0);
 }

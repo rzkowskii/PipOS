@@ -26,7 +26,12 @@ SCOPES = ("Cargo.toml", "Cargo.lock", "crates", "config", "mind", "os", "sim", "
 OPTIONAL_SCOPES = (".cargo", "rust-toolchain", "rust-toolchain.toml", "out/models")
 FACTORY = ("esp", "system-a", "system-b", "models", "mind")
 TRY = ("try-esp", "try-system", "try-models")
-IMAGES = ("factory", "try_image", "installed_image")
+LAPTOP_TRY = (*TRY, "try-logs")  # the laptop stick adds the FAT32 PIPLOGS partition
+IMAGES = ("factory", "try_image", "installed_image", "laptop_factory", "laptop_try")
+# Laptop images carry their own root file system (no lab body, no sshd, no
+# gettys); every other image shares the lab root.
+LAPTOP_IMAGES = ("laptop_factory", "laptop_try")
+LAYOUTS = {"try_image": TRY, "laptop_try": LAPTOP_TRY}
 ARTIFACTS = (*IMAGES, "factory_bundle", "installed_bundle", "update_fixtures")
 SECTOR = 512  # Buildroot/genimage raw outputs use 512-byte logical sectors.
 BLOCK = 1 << 20
@@ -157,7 +162,7 @@ def disk_record(stream, length, role):
     if gpt(stream, last_lba, last_lba) != first:
         raise ValueError(f"inconsistent primary and backup GPT in {role}")
     guid, parts, *_ = first
-    expected = TRY if role == "try_image" else FACTORY
+    expected = LAYOUTS.get(role, FACTORY)
     if tuple(p["name"] for p in parts) != expected:
         raise ValueError(f"unexpected {role} partitions")
     ids = {guid, *(p["id"] for p in parts)}
@@ -183,7 +188,7 @@ def artifact_records(paths, directory, factory_ids):
     if (not {"factory", "try_image"} <= paths.keys() or
             any(not re.fullmatch(r"extra:[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}", role) for role in extra_roles)):
         raise ValueError("expected named factory and Try artifacts")
-    records, root_hashes, disk_ids, inodes = {}, set(), set(), set()
+    records, root_hashes, laptop_roots, disk_ids, inodes = {}, set(), set(), set(), set()
     for role, path in sorted(paths.items()):
         with regular(path) as (stream, info):
             if (info.st_dev, info.st_ino) in inodes or not info.st_size:
@@ -193,22 +198,63 @@ def artifact_records(paths, directory, factory_ids):
             record["path"] = os.path.relpath(path, directory)
             if role in IMAGES:
                 layout = disk_record(stream, info.st_size, role)
-                if role == "factory" and any(p["id"] != factory_ids[p["name"]] for p in layout["partitions"]
-                                             if p["name"] in factory_ids):
-                    raise ValueError("factory slot IDs differ from the source board configuration")
+                if role in ("factory", "laptop_factory") and any(
+                        p["id"] != factory_ids[p["name"]] for p in layout["partitions"] if p["name"] in factory_ids):
+                    raise ValueError(f"{role} slot IDs differ from the source board configuration")
                 ids = {layout["disk_id"], *(p["id"] for p in layout["partitions"])}
+                if role == "laptop_factory":
+                    # Both factory disks take their A/B slot IDs from slots.sh; nothing else may repeat.
+                    ids -= set(factory_ids.values())
                 if disk_ids.intersection(ids):
                     raise ValueError(f"{role} shares GPT identities with another candidate disk")
                 disk_ids.update(ids)
-                root_hashes.update(p["rootfs"]["sha256"] for p in layout["partitions"] if "rootfs" in p)
+                (laptop_roots if role in LAPTOP_IMAGES else root_hashes).update(
+                    p["rootfs"]["sha256"] for p in layout["partitions"] if "rootfs" in p)
                 record.update(layout)
             records[role] = record
     if len(root_hashes) != 1:
         raise ValueError("candidate system payloads differ across factory, Try or installed slots")
+    if laptop_roots and len(laptop_roots) != 1:
+        raise ValueError("laptop system payloads differ between the laptop factory and laptop Try images")
+    if laptop_roots & root_hashes:
+        raise ValueError("the laptop images carry the lab system payload")
     if ("factory_bundle" in records and "installed_bundle" in records and
             records["factory_bundle"]["sha256"] == records["installed_bundle"]["sha256"]):
         raise ValueError("factory and installed channels supplied identical bundles")
     return records
+
+
+# The source-id (lab/source_id.py): only files that go into an image count.
+IMAGE_SCOPES = ("Cargo.toml", "Cargo.lock", "crates", "config", "mind", "os", "sim")
+# The few lab files that shape an image: the build recipe (lab/build.sh edits
+# the laptop .config), the model packager post-image.sh runs, and the bench
+# script being.mk installs from the source tree (its rsync skips /lab).
+OPTIONAL_IMAGE_SCOPES = ("rust-toolchain", "rust-toolchain.toml", ".cargo", "out/models/reflex.gguf",
+                         "out/models/manifest.json", "out/firmware-overlay",
+                         "lab/build.sh", "lab/candidate-build.sh", "lab/package_model.py", "lab/bench_guest.py")
+
+
+def image_source_files(root):
+    root = Path(root)
+    files = {}
+    for scope in (*IMAGE_SCOPES, *OPTIONAL_IMAGE_SCOPES):
+        path = root / scope
+        if not os.path.lexists(path):
+            if scope in IMAGE_SCOPES:
+                raise FileNotFoundError(f"missing image input: {path}")
+            continue
+        for item in source_files(path):
+            with regular(item) as (stream, info):
+                digest = fingerprint(stream, info.st_size)["sha256"]
+                # The execute bit matters too: Buildroot runs post-build hooks and installs scripts as found.
+                files[item.relative_to(root).as_posix()] = digest + ("+x" if info.st_mode & 0o111 else "")
+    return files
+
+
+def image_source_id(root):
+    """The id written into /etc/being/source-id of every image built from `root`."""
+    encoded = json.dumps(image_source_files(root), sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(b"pipos-source-id-v2\n" + encoded).hexdigest()
 
 
 def publish(path, data):
@@ -237,7 +283,8 @@ def main(argv=None):
     before = commands.add_parser("snapshot", help="record the frozen source and any out/models inputs")
     seal = commands.add_parser("seal", help="bind explicit build outputs to a pre-build snapshot")
     verify = commands.add_parser("verify", help="recheck source, layout and all recorded bytes")
-    for command in (before, seal, verify):
+    ident = commands.add_parser("source-id", help="print the image source-id of --root (lab/source_id.py)")
+    for command in (before, seal, verify, ident):
         command.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1], help="source checkout")
     for command in (before, seal):
         command.add_argument("--output", type=Path, required=True, help="new JSON file outside the input scopes")
@@ -251,6 +298,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     root = args.root.resolve()
     try:
+        if args.command == "source-id":
+            print(image_source_id(root))
+            return 0
         if args.command != "verify":
             output = args.output.resolve()
             if any(output.is_relative_to(root / scope) for scope in (*SCOPES, *OPTIONAL_SCOPES)):
@@ -269,7 +319,8 @@ def main(argv=None):
                 paths[role] = Path(filename)
             records = artifact_records(paths, args.output.parent, factory_slots(root))
             check_source(root, source)
-            candidate = {"kind": "beingos-candidate-v1", "source": source, "artifacts": records}
+            candidate = {"kind": "beingos-candidate-v1", "source": source, "artifacts": records,
+                         "source_id": image_source_id(root)}
             if args.model_audit:
                 audit = read_json(args.model_audit)
                 bind_model_audit(source, records, audit)

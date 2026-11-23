@@ -126,3 +126,65 @@ class DiskInventoryTests(unittest.TestCase):
         result, disks = self.inspect()
         self.assertIsNone(result["boot_disk"])
         self.assertTrue(all("boot_disk_unknown" in disk["reasons"] for disk in disks.values()))
+
+
+class TargetContents(unittest.TestCase):
+    """What an install would erase, read from the target's GPT without writing."""
+
+    def image(self, parts, *, sector=512, capacity=64 * 1024**2, signature=None):
+        import uuid as uuid_module
+
+        from mind.install_apply import gpt_records
+
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        path = directory / "disk.img"
+        mbr, primary, table, _, _ = gpt_records(
+            sector, capacity, parts, uuid_module.uuid4(), {part["name"]: uuid_module.uuid4() for part in parts})
+        with path.open("wb") as disk:
+            disk.truncate(capacity)
+            for data, offset in ((mbr, 0), (primary, sector), (table, 2 * sector)):
+                disk.seek(offset)
+                disk.write(data)
+            if signature:
+                offset, data = signature
+                disk.seek(offset)
+                disk.write(data)
+        before = path.read_bytes()
+        self.addCleanup(lambda: self.assertEqual(path.read_bytes(), before, "inspection wrote to the disk"))
+        return str(path)
+
+    @staticmethod
+    def part(name, kind, start, count=2048):
+        return {"name": name, "gpt_type": kind, "start_lba": start, "sector_count": count}
+
+    def test_apfs_partition_means_macos(self):
+        from mind import install_disks
+
+        disk = self.image([self.part("EFI", "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", 2048),
+                           self.part("Macintosh HD", install_disks.APFS_TYPE, 4096)])
+        found = install_disks.disk_contents(disk)
+        self.assertEqual((found["readable"], found["macos"], found["being"], found["partitions"]), (True, True, False, 2))
+
+    def test_hfs_signature_without_an_apple_type_still_means_macos(self):
+        from mind import install_disks
+
+        linux = "0fc63daf-8483-4772-8e79-3d69d8477de4"
+        disk = self.image([self.part("data", linux, 2048)], signature=(2048 * 512 + 1024, b"H+"))
+        self.assertTrue(install_disks.disk_contents(disk)["macos"])
+
+    def test_pipos_layout_is_a_being_and_blank_disk_is_neither(self):
+        from mind import install_disks
+
+        linux, esp = "0fc63daf-8483-4772-8e79-3d69d8477de4", "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+        names = install_disks.BEING_NAMES
+        disk = self.image([self.part(name, esp if name == "esp" else linux, 2048 + index * 2048)
+                           for index, name in enumerate(names)])
+        found = install_disks.disk_contents(disk)
+        self.assertTrue(found["being"])
+        self.assertFalse(found["macos"])
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        blank = directory / "blank.img"
+        blank.write_bytes(bytes(1024 * 1024))
+        self.assertEqual(install_disks.disk_contents(str(blank)),
+                         {"macos": False, "being": False, "partitions": 0, "readable": True})
+        self.assertFalse(install_disks.disk_contents(str(directory / "missing"))["readable"])

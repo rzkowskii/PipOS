@@ -4,16 +4,22 @@
 //! (SDL_VIDEODRIVER=kmsdrm). On a development Mac it runs in a window.
 
 mod anim;
+mod dpms;
 mod eye;
 mod link;
+mod overlay;
+mod pace;
+mod panel;
 mod render;
+mod status;
+mod text;
 
 use bus::Event;
 use sdl2::event::{Event as SdlEvent, WindowEvent};
 use sdl2::keyboard::Keycode;
 use sdl2::mouse::MouseButton;
 use sdl2::video::GLProfile;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const HELP: &str = "\
@@ -38,20 +44,28 @@ For tests: --hidden shows no window, --exit-after SECS quits by itself, and
 For reviewing motion off-screen:
   face --script NAME           play a scripted scene instead of the brainstem:
                                tour (wake, attention, thought, speech, emotions,
-                               idle life, a yawn, sleep) or drowse (a long quiet
-                               spell: heavy lids and a yawn, then company)
+                               idle life, a yawn, sleep), drowse (a long quiet
+                               spell: heavy lids and a yawn, then company) or
+                               birth (the first power-on)
   face --frames DIR [--fps N]  run on a fixed clock with no window and save
                                every frame as DIR/frame-00000.png (default 30
                                fps); pair with --demo or --script, --size and
                                --exit-after, which then counts scene seconds
                                (default: the end of the scene).
                                ffmpeg -framerate 30 -i DIR/frame-%05d.png out.mp4
+  face --marks glint,ring,ears,network,ssh   show privacy marks (stills, frames)
+  face --seed N                the same idle life every run (blinks, glances and
+                               gestures), for reproducible frame dumps
 
-Keys: Esc interrupts it, M mutes it, F2 opens appliance setup, F9 recovers a face with no lid reading,
-and Q closes the window.
+Keys: Esc interrupts it, M mutes it, F1 shows captions and health (off by default and
+never logged), F2 opens appliance setup, F9 recovers a face with no lid reading, and Q
+closes the window. With the panel dark and the brainstem silent, any key shows the face.
+While an app panel has focus, keys go to it (M is a letter then; F10 still mutes).
 
 Full screen, the face shows itself after a few seconds with no lid reading
-(dazed if the brainstem is gone). With being.verbose=1 on the kernel command
+(waiting calmly for the first minute, then dazed if the brainstem is gone), turns
+the panel's connector off while dark (BEING_FACE_DPMS=0 leaves it on), and draws
+at 60, 30, 15 or 5 frames a second as what it shows needs. With being.verbose=1 on the kernel command
 line it first leaves the boot messages up for 20 s (being.verbose_hold=SECS,
 0 to wait for a key); Esc, F2, Enter or Space ends the wait.";
 
@@ -75,6 +89,9 @@ struct Args {
     script: Option<String>,
     frames: Option<PathBuf>,
     fps: f64,
+    seed: Option<u32>,
+    /// Privacy marks forced on, for reviewing stills and frames.
+    marks: Option<render::Marks>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -97,6 +114,8 @@ fn parse_args() -> Result<Args, String> {
         script: None,
         frames: None,
         fps: 30.0,
+        seed: None,
+        marks: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -128,6 +147,8 @@ fn parse_args() -> Result<Args, String> {
                 a.script = Some(name);
             }
             "--frames" => a.frames = Some(PathBuf::from(value("--frames")?)),
+            "--seed" => a.seed = Some(value("--seed")?.parse().map_err(|_| "--seed wants a whole number")?),
+            "--marks" => a.marks = Some(parse_marks(&value("--marks")?)?),
             "--fps" => {
                 let fps: f64 = value("--fps")?.parse().map_err(|_| "--fps wants a number")?;
                 if !(1.0..=120.0).contains(&fps) {
@@ -163,6 +184,7 @@ fn parse_args() -> Result<Args, String> {
         a.exit_after = Some(match a.script.as_deref() {
             Some("tour") => 38.0,
             Some("drowse") => 16.0,
+            Some("birth") => 9.0,
             _ if a.demo => 2.5 + 2.4 * eye::NAMES.len() as f64,
             _ => return Err("--frames needs --script, --demo or --exit-after".to_string()),
         });
@@ -240,6 +262,9 @@ fn run() -> Result<(), String> {
     let mut renderer = unsafe { render::Renderer::new(&gl)? };
     let mut look = render::Look::default();
 
+    if let Some(marks) = args.marks {
+        look.marks = marks;
+    }
     if offscreen {
         return stills(&gl, &renderer, &look, &args);
     }
@@ -269,11 +294,11 @@ fn run() -> Result<(), String> {
     }
     let mut events = sdl.event_pump()?;
     let local_setup = cfg!(target_os = "linux") && std::env::var("BEING_LOCAL_SETUP").as_deref() == Ok("1");
+    let appliance = cfg!(target_os = "linux") && args.fullscreen && !hidden;
 
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(1);
+    let seed = args.seed.unwrap_or_else(|| {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(1)
+    });
     let mut anim = anim::Anim::new(seed);
     let solo = args.demo || args.standalone || args.script.is_some();
     // The appliance starts dark until the brainstem reports the lid, but not
@@ -281,6 +306,9 @@ fn run() -> Result<(), String> {
     // is gone) rather than leave a black panel.
     let lid_grace = args.fullscreen.then_some(link::LID_GRACE);
     let mut link = if solo { None } else { Some(link::Link::new(args.bus.clone(), lid_grace)) };
+    if let Some(link) = &mut link {
+        link.side = link::Side::new(appliance.then(|| PathBuf::from(BIRTH_MARKER)));
+    }
     if solo {
         anim.set_state("idle", false, false);
         if args.demo || args.script.is_some() {
@@ -289,6 +317,31 @@ fn run() -> Result<(), String> {
     } else if args.fullscreen {
         anim.set_lid(None, false, true);
     }
+
+    // The connector goes off while dark, on SDL's own DRM handle (task 2.2).
+    let dpms_wanted = appliance && std::env::var("BEING_FACE_DPMS").as_deref() != Ok("0");
+    let drm = dpms_wanted && dpms::sdl_drm_fd(&window).is_some();
+    if dpms_wanted && !drm {
+        eprintln!("face: SDL gives no KMS/DRM handle; the panel stays powered while dark");
+    }
+    let mut power = dpms::Power::new(drm);
+    let mut connectors = dpms::Connectors::default();
+    let watch = if appliance { status::Watch::start(PathBuf::from("/")) } else { status::Watch::none() };
+    let mut panel = Some(panel::Panel::new(
+        std::env::var_os("BEING_PANEL_DIR").map_or_else(|| PathBuf::from(panel::DIR), PathBuf::from),
+    ));
+    let mut keys = panel::KeySender::new(std::env::var_os("BEING_HANDS_KEYS").map_or_else(|| PathBuf::from(panel::KEYS), PathBuf::from));
+    let mut panel_tex: Option<render::Texture> = None;
+    // The picture changed while hidden, so the texture is out of date.
+    let mut panel_behind = false;
+    let mut panel_amount = 0f32;
+    let mut panel_focus = false;
+    let mut overlay_tex: Option<render::Texture> = None;
+    let mut overlay_drawn: Option<Instant> = None;
+    let mut note_tex: Option<render::Texture> = None;
+    let mut stats = pace::Stats::new(Instant::now());
+    let mut frame_ms = 0f64;
+    let mut rate = 60u32;
 
     let mut demo_next = 2.5f64;
     let mut demo_index = 0usize;
@@ -313,11 +366,29 @@ fn run() -> Result<(), String> {
                 SdlEvent::Window { win_event: WindowEvent::DisplayChanged(display), .. } => {
                     fast_display = fast_refresh(display);
                 }
-                SdlEvent::KeyDown { keycode: Some(key), repeat: false, .. } => {
+                SdlEvent::KeyDown { keycode: Some(key), keymod, repeat, .. } => {
+                    // Typing into an open, focused app panel goes to hands.
+                    // Esc, F1, F2, F9 and F10 keep their meaning; M is a letter.
+                    let reserved = [Keycode::Escape, Keycode::F1, Keycode::F2, Keycode::F9, Keycode::F10].contains(&key);
+                    if panel_focus && !reserved {
+                        if let Some(bytes) = panel::key_bytes(key, keymod) {
+                            keys.send(&bytes);
+                        }
+                        continue;
+                    }
+                    if repeat {
+                        continue;
+                    }
+                    let dark_and_alone = anim.panel_blank() && link.as_ref().is_some_and(|l| l.quiet());
                     if key == Keycode::Escape {
                         if let Some(link) = &mut link {
                             link.send(Event::new("key.interrupt"));
                         }
+                    } else if key == Keycode::F1 {
+                        if let Some(link) = &mut link {
+                            link.side.captions.toggle();
+                        }
+                        overlay_drawn = None;
                     } else if key == Keycode::M || key == Keycode::F10 {
                         if let Some(link) = &mut link {
                             link.send(Event::new("key.mute"));
@@ -332,6 +403,11 @@ fn run() -> Result<(), String> {
                             .status();
                     } else if key == Keycode::Q && !args.fullscreen {
                         break 'run;
+                    }
+                    if dark_and_alone {
+                        if let Some(link) = &mut link {
+                            link.unblank_locally(&mut anim);
+                        }
                     }
                 }
                 // SDL may synthesize a mouse event from the same touch, or
@@ -386,57 +462,299 @@ fn run() -> Result<(), String> {
             }
         });
         let panel_blank = anim.panel_blank();
-        // Keep polling the lid and input while dark. The black frame can
-        // stay on scanout until the first frame of the wake gesture.
+
+        // The workshop panel: read what is new, and let its focus steer the
+        // eyes. Nothing is read while the screen is dark, and nothing is
+        // uploaded while the face covers the panel in its sleep (the app's
+        // own state does not change).
+        let mut shown = None;
+        let covered = anim.asleep();
+        if let (Some(panel), false) = (&mut panel, panel_blank) {
+            let update = panel.poll(now);
+            if let Some(header) = panel.shown(now).filter(|_| !covered) {
+                shown = Some(header.clone());
+                let (w, h) = (panel.width as i32, panel.height as i32);
+                // Rows that changed while the panel was hidden never reached
+                // the texture: upload the whole picture once it shows again.
+                let behind = std::mem::take(&mut panel_behind);
+                unsafe {
+                    match (&panel_tex, update) {
+                        (Some(tex), panel::Update::Rows(first, count)) if tex.w == w && tex.h == h && !behind => {
+                            renderer.upload_rows(&gl, tex, first as i32, count as i32, &panel.pixels);
+                        }
+                        (Some(tex), panel::Update::Nothing) if tex.w == w && tex.h == h && !behind => {}
+                        _ => {
+                            if let Some(old) = panel_tex.take() {
+                                renderer.delete(&gl, old);
+                            }
+                            panel_tex = Some(renderer.texture(&gl, w, h, &panel.pixels)?);
+                        }
+                    }
+                }
+            } else if update != panel::Update::Nothing {
+                panel_behind = true;
+            }
+            let flags = panel.flags(now);
+            anim.set_typing_hidden(shown.is_none() && flags & panel::flag::PIP_TYPING != 0);
+        } else if let (Some(panel), true) = (&mut panel, panel_blank) {
+            // Nothing of an app's screen stays in the face while it is dark;
+            // the whole frame is read again when the panel lights.
+            if !panel.pixels.is_empty() {
+                panel.forget_picture();
+            }
+        }
+        let target = if shown.is_some() { 1.0 } else { 0.0 };
+        let step = dt.min(0.1) / panel::TRANSITION;
+        panel_amount = if target > panel_amount { (panel_amount + step).min(1.0) } else { (panel_amount - step).max(0.0) };
+        panel_focus = shown.as_ref().is_some_and(|h| h.has(panel::flag::FOCUS)) && panel_amount > 0.5;
+        anim.set_focus(shown.as_ref().and_then(|h| {
+            let gaze = |point: Option<(u32, u32)>| point.map(|(x, y)| panel::gaze_at(x, y, h.width, h.height));
+            if h.has(panel::flag::PIP_PAUSED) {
+                Some(anim::Focus { kind: anim::FocusKind::Paused, at: [0.0, 0.1] })
+            } else if h.has(panel::flag::PIP_TYPING) {
+                gaze(h.cursor_point()).map(|at| anim::Focus { kind: anim::FocusKind::Typing, at })
+            } else if h.has(panel::flag::JOB_BUSY) {
+                gaze(h.newest_point()).map(|at| anim::Focus { kind: anim::FocusKind::Watching, at })
+            } else {
+                None
+            }
+        }));
+        // Once the panel has faded out, its texture goes too.
+        if shown.is_none() && panel_amount == 0.0 {
+            if let Some(old) = panel_tex.take() {
+                unsafe { renderer.delete(&gl, old) };
+            }
+        }
+
+        // Privacy on the face (task 7.5).
+        let privacy = watch.get();
+        let camera = link.as_ref().is_some_and(|l| l.side.camera);
+        let on = |b: bool| if b { 1.0 } else { 0.0 };
+        look.marks = render::Marks {
+            glint: on(camera && !anim.asleep()),
+            ring: on(privacy.guest),
+            ears: on(anim.muted()),
+            network: on(privacy.network),
+            ssh: on(privacy.ssh),
+        };
+        if let Some(marks) = args.marks {
+            look.marks = marks;
+        }
+
+        // The connector is turned on before the first lit frame and off once
+        // the black frame has rested on scanout.
+        match power.step(now, panel_blank, panel_blank && blank_presented) {
+            dpms::Step::Nothing => {}
+            step => {
+                let off = step == dpms::Step::TurnOff;
+                let value = if off { dpms::DPMS_OFF } else { dpms::DPMS_ON };
+                let result = dpms::sdl_drm_fd(&window)
+                    .ok_or_else(|| "no DRM handle".to_string())
+                    .and_then(|fd| connectors.set(fd, value));
+                match result {
+                    Ok(_) => eprintln!("face: panel connector {}", if off { "off while dark" } else { "on" }),
+                    Err(e) => {
+                        let which = if off { "off" } else { "on" };
+                        eprintln!("face: could not turn the panel connector {which} ({e}); leaving it to the backlight");
+                        power.restore();
+                        power.disable();
+                    }
+                }
+            }
+        }
+
+        let (w, h) = if hidden {
+            (args.size.0 as i32, args.size.1 as i32)
+        } else {
+            let (w, h) = window.drawable_size();
+            (w as i32, h as i32)
+        };
+        if !panel_blank {
+            // Captions and health, behind F1. Redrawn at most twice a second.
+            let open = link.as_ref().is_some_and(|l| l.side.captions.on);
+            if open {
+                let changed = link.as_mut().is_some_and(|l| l.side.captions.take_changed());
+                let stale = overlay_drawn.is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_millis(500));
+                if changed || stale || overlay_tex.is_none() {
+                    overlay_drawn = Some(now);
+                    let health = overlay::Health {
+                        renderer: drawn_by.clone(),
+                        software,
+                        scale,
+                        hz: rate,
+                        frame_ms,
+                        beat_age: link.as_ref().and_then(|l| l.beat_age()),
+                        camera,
+                        privacy,
+                        network_mode: if appliance { status::network_mode(Path::new("/")) } else { None },
+                        dpms_off: power.is_off(),
+                    };
+                    if let (Some(font), Some(link)) = (text::font(), &link) {
+                        let zoom = (h / 800).max(1) as usize;
+                        let columns = ((w as usize / zoom).saturating_sub(24) / font.w).clamp(40, 120);
+                        let lines = link.side.captions.lines(&health, columns);
+                        let pic = font.render(&lines, columns, text::Ink { rgb: CAPTION_INK, backing: 200 });
+                        unsafe {
+                            if let Some(old) = overlay_tex.take() {
+                                renderer.delete(&gl, old);
+                            }
+                            overlay_tex = Some(renderer.texture(&gl, pic.w as i32, pic.h as i32, &pic.rgba)?);
+                        }
+                    }
+                }
+            } else if let Some(old) = overlay_tex.take() {
+                unsafe { renderer.delete(&gl, old) };
+            }
+            // A software renderer says so on screen for its first half
+            // minute, too dim for anyone's eye detector to count.
+            if software && scene_time < SOFTWARE_NOTE.as_secs_f64() {
+                if note_tex.is_none() {
+                    if let Some(font) = text::font() {
+                        let line = format!("drawn in software ({drawn_by}): slower, at 1/{scale} size");
+                        let columns = line.chars().count();
+                        let pic = font.render(&[line], columns, text::Ink { rgb: NOTE_INK, backing: 0 });
+                        note_tex = Some(unsafe { renderer.texture(&gl, pic.w as i32, pic.h as i32, &pic.rgba)? });
+                    }
+                }
+            } else if let Some(old) = note_tex.take() {
+                unsafe { renderer.delete(&gl, old) };
+            }
+        }
+        let overlays: Vec<(&render::Texture, i32)> =
+            overlay_tex.iter().map(|t| (t, 8)).chain(note_tex.iter().map(|t| (t, 4))).collect();
+        let scene = Scene {
+            blank: panel_blank,
+            amount: panel_amount,
+            eyes: pose.uniforms(),
+            look: &look,
+            panel: panel_tex.as_ref(),
+            overlays: &overlays,
+        };
+
         if let Some(dir) = &args.frames {
-            let (w, h) = args.size;
-            let px = unsafe { renderer.snapshot(&gl, w, h, &pose.uniforms(), &look)? };
-            write_png(&dir.join(format!("frame-{frame_no:05}.png")), w, h, &px)?;
+            let (fw, fh) = args.size;
+            let px = unsafe { render::capture(&gl, fw, fh, || scene.draw(&gl, &mut renderer, fw as i32, fh as i32, 1))? };
+            write_png(&dir.join(format!("frame-{frame_no:05}.png")), fw, fh, &px)?;
         }
         frame_no += 1;
+
+        let mut drew = false;
+        let mut drawing = Duration::ZERO;
         if !hidden && !(panel_blank && blank_presented) {
-            if panel_blank {
-                unsafe { render::blank(&gl) };
-            } else {
-                let (w, h) = window.drawable_size();
-                unsafe { renderer.draw_scaled(&gl, w as i32, h as i32, scale, &pose.uniforms(), &look)? };
-            }
+            unsafe { scene.draw(&gl, &mut renderer, w, h, scale)? };
+            drawing = frame_start.elapsed();
             window.gl_swap_window();
+            drew = true;
             blank_presented = panel_blank;
             if let Some(link) = &mut link {
                 link.presented();
             }
         }
+        drop(overlays);
+        if let Some(link) = &mut link {
+            if panel_blank {
+                // Nothing heard is kept while the screen is dark.
+                link.side.captions.forget();
+            }
+        }
 
-        // Pace high-refresh displays as well as unsynced ones. An absolute
-        // deadline avoids rounding every frame up to the next vblank.
-        let slow = anim.asleep() || panel_blank;
+        // Draw only as often as what is on screen needs (task 2.1).
+        rate = pace::hz(anim.activity(), software);
+        if panel_amount > 0.0 && panel_amount < 1.0 {
+            rate = pace::hz(pace::Activity::Active, software);
+        } else if shown.is_some() {
+            rate = rate.max(pace::hz(pace::Activity::Calm, software));
+        }
+        let work = frame_start.elapsed();
+        if drew {
+            frame_ms = if frame_ms == 0.0 { work.as_secs_f64() * 1e3 } else { 0.9 * frame_ms + 0.1 * work.as_secs_f64() * 1e3 };
+        }
+        stats.frame(work, drawing, drew, rate);
+        if let Some(line) = stats.report(Instant::now()) {
+            eprintln!("{line}");
+        }
         if recording {
             deadline = None;
-        } else if !vsync || fast_display || slow || software {
-            let hz = if slow { 15 } else if software { 20 } else { 60 };
-            let period = Duration::from_secs_f64(1.0 / f64::from(hz));
-            let base = deadline
-                .filter(|&next| frame_start.saturating_duration_since(next) < period)
-                .unwrap_or(frame_start);
-            let next = base + period;
-            if let Some(wait) = next.checked_duration_since(Instant::now()) {
-                std::thread::sleep(wait);
-            }
-            deadline = Some(next);
+        } else if !vsync || fast_display || software || rate < 60 {
+            deadline = Some(pace::wait(deadline, frame_start, rate));
         } else {
             deadline = None;
         }
     }
 
+    if power.restore() {
+        if let Some(fd) = dpms::sdl_drm_fd(&window) {
+            let _ = connectors.set(fd, dpms::DPMS_ON);
+        }
+    }
     if let Some(path) = &args.record {
         let (w, h) = args.size;
-        let px = unsafe { renderer.snapshot(&gl, w, h, &pose.uniforms(), &look)? };
+        let overlays: Vec<(&render::Texture, i32)> = overlay_tex.iter().map(|t| (t, 8)).collect();
+        let scene = Scene {
+            blank: anim.panel_blank(),
+            amount: panel_amount,
+            eyes: pose.uniforms(),
+            look: &look,
+            panel: panel_tex.as_ref(),
+            overlays: &overlays,
+        };
+        let px = unsafe { render::capture(&gl, w, h, || scene.draw(&gl, &mut renderer, w as i32, h as i32, 1))? };
         write_png(path, w, h, &px)?;
         println!("recorded {} (showing: {})", path.display(), anim.target_name());
     }
     Ok(())
 }
+
+/// Everything one frame shows: the eyes (full screen, or gliding into the
+/// strip by `amount`), the app panel, and overlays anchored bottom left.
+struct Scene<'a> {
+    blank: bool,
+    amount: f32,
+    eyes: [f32; 32],
+    look: &'a render::Look,
+    panel: Option<&'a render::Texture>,
+    /// Each overlay with its margin from the bottom-left corner.
+    overlays: &'a [(&'a render::Texture, i32)],
+}
+
+impl Scene<'_> {
+    /// Draw into the bound framebuffer, `w` by `h`.
+    ///
+    /// # Safety
+    /// Needs the renderer's GL context to be current.
+    unsafe fn draw(&self, gl: &glow::Context, renderer: &mut render::Renderer, w: i32, h: i32, scale: i32) -> Result<(), String> {
+        if self.blank {
+            render::blank(gl);
+            return Ok(());
+        }
+        if self.amount > 0.0 {
+            let layout = panel::layout(w, h, self.amount);
+            render::blank(gl);
+            renderer.draw_scaled_in(gl, layout.eyes, scale, &self.eyes, self.look)?;
+            if let Some(tex) = self.panel {
+                renderer.draw_texture(gl, tex, layout.panel, w, h, layout.panel_alpha);
+            }
+        } else {
+            renderer.draw_scaled(gl, w, h, scale, &self.eyes, self.look)?;
+        }
+        let zoom = (h / 800).max(1);
+        for &(tex, margin) in self.overlays {
+            let rect = panel::Rect { x: margin * zoom, y: margin * zoom, w: tex.w * zoom, h: tex.h * zoom };
+            renderer.draw_texture(gl, tex, rect, w, h, 1.0);
+        }
+        Ok(())
+    }
+}
+
+/// Marks that the birth ceremony has played this boot (the appliance only).
+const BIRTH_MARKER: &str = "/run/being-face-born";
+/// How long a software renderer's note stays on screen.
+const SOFTWARE_NOTE: Duration = Duration::from_secs(30);
+/// Overlay text: the eyes' own cyan, so it never reads as boot text.
+const CAPTION_INK: [u8; 3] = [120, 215, 255];
+/// The software note: dim enough (r+g+b at most 110) that the lab never
+/// counts it as lit.
+const NOTE_INK: [u8; 3] = [10, 42, 58];
 
 /// A verbose boot (`being.verbose=1` on the kernel command line) keeps the
 /// kernel's and systemd's messages readable: the face (and the Try menu, in
@@ -561,7 +879,23 @@ mod verbose {
     }
 }
 
-const SCRIPTS: &[&str] = &["tour", "drowse"];
+const SCRIPTS: &[&str] = &["tour", "drowse", "birth"];
+
+/// `--marks glint,ring,ears,network,ssh` (any of them).
+fn parse_marks(list: &str) -> Result<render::Marks, String> {
+    let mut marks = render::Marks::default();
+    for name in list.split(',').filter(|n| !n.is_empty()) {
+        match name {
+            "glint" => marks.glint = 1.0,
+            "ring" => marks.ring = 1.0,
+            "ears" => marks.ears = 1.0,
+            "network" => marks.network = 1.0,
+            "ssh" => marks.ssh = 1.0,
+            other => return Err(format!("--marks: no mark called {other} (glint, ring, ears, network, ssh)")),
+        }
+    }
+    Ok(marks)
+}
 
 /// A made-up voice: syllables in phrases, with breaths between them.
 fn voice_level(t: f64) -> f32 {
@@ -622,6 +956,12 @@ fn scene(anim: &mut anim::Anim, name: &str, from: f64, to: f64) -> f32 {
             }
             if at(26.0) {
                 anim.perform("survey");
+            }
+        }
+        "birth" => {
+            // The very first power-on.
+            if at(0.3) {
+                anim.born();
             }
         }
         "drowse" => {

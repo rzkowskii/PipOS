@@ -1,0 +1,12 @@
+{
+  "name": "hangman",
+  "aliases": [
+    "hangman",
+    "hang man"
+  ],
+  "summary": "Guess the word, one letter at a time.",
+  "keys": "Type a letter, then Enter.",
+  "entry": "main.py",
+  "size": 1716,
+  "sha256": "29ccd4585bfc5e97d2551a68c95e38d953b753ebd983cd87544c68767b479a41"
+}

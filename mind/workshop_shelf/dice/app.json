@@ -1,0 +1,13 @@
+{
+  "name": "dice",
+  "aliases": [
+    "dice",
+    "a dice roller",
+    "dice roller"
+  ],
+  "summary": "Roll some dice.",
+  "keys": "Enter rolls again, q quits.",
+  "entry": "main.py",
+  "size": 1249,
+  "sha256": "5794a7a72358ed40b799cf0618ccb8868b3a071a45e913bb9ea83e7066c4a86b"
+}

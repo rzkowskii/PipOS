@@ -23,6 +23,65 @@ def terminal_excerpt(text, limit=240):
     return line[:limit - 1].rstrip() + "…"
 
 
+def quote(text, limit=12):
+    """A short exact excerpt of the owner's words, never paraphrased."""
+    words = terminal_excerpt(text).split()
+    return " ".join(words[:limit]) + ("…" if len(words) > limit else "")
+
+
+def dream_report(db, owner, *, now=None, zone=None, enabled=True, window_hours=18):
+    """The answer to "What did you dream about?", built only from the journal.
+
+    Returns (line, source_ids). A dream that did not happen is said plainly;
+    nothing is ever invented to fill the gap.
+    """
+    now = time.time() if now is None else now
+    if not enabled:
+        return ("I didn't dream. Dreaming is switched off; you can turn it on in Setup, "
+                "under Senses and memory."), ()
+    entries = [entry for entry in journal(db, owner, limit=20) if now - entry.published_at <= window_hours * 3600]
+    if not entries:
+        if dreamt_recently(db, owner, now=now, zone=zone):
+            # It did dream; it just kept nothing. Never claim it did not.
+            return ("I dreamt last night, but nothing from our conversations stood out enough to keep, "
+                    "so I have nothing to tell you."), ()
+        return ("I didn't dream last night, so I have nothing to tell you. "
+                "I only dream with my lid closed while I'm plugged in."), ()
+    first = entries[0]
+    count = len(entries)
+    moments = "one moment" if count == 1 else f"{count} moments"
+    line = (f"I went back over {moments} from our conversations. "
+            f"One was when you said: \"{quote(first.source.text)}\"")
+    return line, tuple(entry.source.id for entry in entries)
+
+
+def dreamt_recently(db, owner, *, now=None, zone=None):
+    """Whether a dream ran on the night that ended today or yesterday, from its checkpoint."""
+    from datetime import date
+
+    now = time.time() if now is None else now
+    try:
+        row = db.execute("SELECT night, batches FROM dream_checkpoints WHERE owner = ?", (owner,)).fetchone()
+    except sqlite3.Error:
+        return False
+    if not row or not isinstance(row[0], str) or not row[1]:
+        return False
+    try:
+        night = date.fromisoformat(row[0])
+    except ValueError:
+        return False
+    return 0 <= (datetime.fromtimestamp(now, zone).date() - night).days <= 1
+
+
+def morning_remark(db, owner, *, now=None, window_hours=12):
+    """One tentative remark after a dream night, or None. Said at most once."""
+    now = time.time() if now is None else now
+    entries = [entry for entry in journal(db, owner, limit=5) if now - entry.published_at <= window_hours * 3600]
+    if not entries:
+        return None
+    return f"I was thinking about when you said \"{quote(entries[0].source.text, 8)}\". I might have that wrong."
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="being-dream-journal", description=__doc__)
     parser.add_argument("--mind-dir", type=Path, help="directory containing the local archive")

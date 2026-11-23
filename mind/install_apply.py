@@ -30,6 +30,7 @@ BOOTLOADER = Path("/usr/share/being/install/bootx64.efi")
 GRUB_TEMPLATE = Path("/usr/share/being/installed-grub.cfg")
 BLKSSZGET = 0x1268
 BLKFLSBUF = 0x1261
+BLKDISCARD = 0x1277
 BLKGETSIZE64 = 0x80081272
 BLKGETDISKSEQ = 0x80081280
 GPT_ENTRIES = 128
@@ -277,7 +278,24 @@ def restore_mind_image(path, directory, restore):
         run_tool("umount", mind)
 
 
-def create_images(directory, parts, ids, sector, *, profile=None, initiative=None, restore=None):
+def seed_skills(directory, skills):
+    """skills.json for the new mind: the owner's time zone and weather city."""
+    import json
+
+    from .skills import find_zone
+    from .weather import normalize_location
+
+    zone = skills.get("time_zone") or ""
+    if zone and (find_zone(zone) is None or find_zone(zone).key != zone):
+        raise ValueError("The chosen time zone is not available on this system.")
+    location = normalize_location(skills.get("weather_location") or "")
+    path = directory / "skills.json"
+    path.write_text(json.dumps({"weather_location": location, "time_zone": zone}, ensure_ascii=False, indent=2)
+                    + "\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+
+
+def create_images(directory, parts, ids, sector, *, profile=None, initiative=None, restore=None, skills=None):
     images = {}
     for part in parts:
         name = part["name"]
@@ -303,13 +321,15 @@ def create_images(directory, parts, ids, sector, *, profile=None, initiative=Non
                     raise OSError(f"The staged EFI file {name_on_esp} could not be verified.")
         else:
             populate = ("-d", MODELS) if name == "models" else ()
-            if name == "mind" and (profile is not None or initiative is not None):
+            if name == "mind" and (profile is not None or initiative is not None or skills is not None):
                 seed = directory / "mind-seed"
                 seed.mkdir(mode=0o700)
                 if profile is not None:
                     save_profile(seed, profile)
                 if initiative is not None:
                     save_policy(seed, initiative)
+                if skills is not None:
+                    seed_skills(seed, skills)
                 populate = ("-d", seed)
             run_tool("mke2fs", "-q", "-F", "-t", "ext4", "-b", "4096", "-m", "0",
                      "-L", name, "-U", str(uuid.uuid4()), "-E", "nodiscard,lazy_itable_init=1",
@@ -389,6 +409,20 @@ def bytes_to_write(images, parts, root_size):
     return total
 
 
+def discard_mind(target, parts, sector):
+    """Tell the disk the old memory range is free, so a previous being's data is
+    not left in blocks the new, sparse mind image never writes. Best effort: a
+    disk without discard support keeps the old blocks until they are reused."""
+    for part in parts:
+        if part["name"] == "mind":
+            try:
+                fcntl.ioctl(target, BLKDISCARD, struct.pack("=QQ", part["start_lba"] * sector, part["size_bytes"]))
+            except OSError:
+                return False
+            return True
+    return False
+
+
 def write_validated(target, capacity, sector, parts, records, images, source, root_size, progress, meter=None):
     mbr, primary, table, backup, backup_table = records
     total = bytes_to_write(images, parts, root_size) if meter is not None else 0
@@ -398,8 +432,10 @@ def write_validated(target, capacity, sector, parts, records, images, source, ro
         pwrite_all(target, bytes(MIB), capacity - MIB)
         os.fsync(target)
 
-    invalidate_boot()
+    # Announced first: from here on an error leaves a disk that no longer starts.
     progress("Writing installation data.")
+    invalidate_boot()
+    discard_mind(target, parts, sector)
     written = progress_counter(meter, total)
     verification = []
     for part in parts:
@@ -452,7 +488,8 @@ def write_validated(target, capacity, sector, parts, records, images, source, ro
         raise
 
 
-def apply_installation(plan, recheck, *, progress=print, meter=None, profile=None, initiative=None, restore=None):
+def apply_installation(plan, recheck, *, progress=print, meter=None, profile=None, initiative=None, restore=None,
+                       skills=None):
     """Install from the Try USB. Validate any mind content before claiming the disk.
 
     `progress` receives each stage message and the optional `meter` receives
@@ -462,9 +499,10 @@ def apply_installation(plan, recheck, *, progress=print, meter=None, profile=Non
         raise ValueError("Installation requires a root session booted from Try PipOS USB.")
     if ((profile is not None and not isinstance(profile, Profile))
             or (initiative is not None and not isinstance(initiative, InitiativePolicy))
-            or (restore is not None and not callable(restore))):
+            or (restore is not None and not callable(restore))
+            or (skills is not None and not isinstance(skills, dict))):
         raise ValueError("Invalid installed mind initialization.")
-    if restore is not None and (profile is not None or initiative is not None):
+    if restore is not None and (profile is not None or initiative is not None or skills is not None):
         raise ValueError("Choose trial settings or a backup for the new installation.")
     sector, capacity = geometry(plan)
     parts = plan["partitions"]
@@ -478,7 +516,8 @@ def apply_installation(plan, recheck, *, progress=print, meter=None, profile=Non
         bytes_to_stage = model_size() + parts[-1]["size_bytes"] // 256 + 256 * MIB
         progress("Preparing the installation files in RAM.")
         with staging(bytes_to_stage) as directory:
-            images = create_images(directory, parts, ids, sector, profile=profile, initiative=initiative, restore=restore)
+            images = create_images(directory, parts, ids, sector, profile=profile, initiative=initiative,
+                                   restore=restore, skills=skills)
             with claim_target(plan, recheck, sector, capacity) as target:
                 write_validated(target, capacity, sector, parts, records, images, source, root_size, progress,
                                 meter)

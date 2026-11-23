@@ -156,8 +156,10 @@ class Reports(FakeMachine):
             self.write(f"{base}/class", cls)
             self.write(f"sys/bus/pci/drivers/{driver}/.keep", "")
             self.link(f"{base}/driver", self.root / f"sys/bus/pci/drivers/{driver}")
-        self.write("sys/class/drm/card0-eDP-1/status", "connected\n")
-        self.write("sys/class/drm/card0-eDP-1/modes", "1280x800\n")
+        # The 13-inch MacBookPro9,2 panel is LVDS, not eDP.
+        self.write("sys/class/drm/card0-LVDS-1/status", "connected\n")
+        self.write("sys/class/drm/card0-LVDS-1/modes", "1280x800\n")
+        self.write("sys/class/drm/card0-LVDS-1/dpms", "On\n")
         self.write("proc/asound/cards", " 0 [PCH            ]: HDA-Intel - HDA Intel PCH\n"
                    "                      HDA Intel PCH at 0xc0600000 irq 32\n")
         self.write("proc/asound/card0/codec#0", "Codec: Cirrus Logic CS4206\nAddress: 0\n")
@@ -220,6 +222,172 @@ class Reports(FakeMachine):
 
     def test_report_survives_an_empty_root(self):
         self.assertIn("===== kernel =====", usb_logs.hardware_report(self.root))
+
+
+class Linux618Layout(Reports):
+    """applesmc on Linux 6.18: a nameless hwmon whose attributes sit on the platform device."""
+
+    def smc(self, keys):
+        base = "sys/devices/platform/applesmc.768"
+        self.write(f"sys/bus/platform/drivers/applesmc/.keep", "")
+        self.link(f"{base}/driver", self.root / "sys/bus/platform/drivers/applesmc")
+        self.write(f"{base}/fan1_input", "1998\n")
+        self.write(f"{base}/fan1_min", "2000\n")
+        self.write(f"{base}/temp5_input", "31000\n")
+        self.write(f"{base}/temp5_label", "TB0T\n")
+        self.write(f"{base}/key_count", f"{len(keys)}\n")
+        self.write(f"{base}/key_at_index", "0\n")
+        self.write(f"{base}/hwmon/hwmon3/power/.keep", "")
+        self.link("sys/class/hwmon/hwmon3", self.root / f"{base}/hwmon/hwmon3")
+        self.link(f"{base}/hwmon/hwmon3/device", self.root / base)
+        return self.root / base
+
+    def test_nameless_hwmon_is_found_and_the_summary_no_longer_says_not_found(self):
+        self.macbook()
+        for name in ("name", "fan1_input", "temp1_input"):
+            (self.root / "sys/class/hwmon/hwmon1" / name).unlink()
+        self.smc([])
+        text = usb_logs.summary(self.root)
+        self.assertIn("applesmc:       found at sys/devices/platform/applesmc.768", text)
+        self.assertIn('"fan1_input": "1998"', text)
+        sensors = {sensor["name"]: sensor for sensor in usb_logs.hwmon(self.root)}
+        self.assertIn("temp5_input (TB0T)", sensors["applesmc"]["readings"])
+
+    def test_smc_keys_are_listed_and_only_bclm_and_bfcl_are_read(self):
+        keys = ["#KEY", "BCLM", "F0Mn", "TB0T", "CH0B", "BFCL", "XXXX"]
+        base = self.smc(keys)
+        reads = []
+        real_open = open
+
+        def fake_open(path, mode="r", *args, **kwargs):
+            path = Path(path)
+            if path.parent == base and path.name == "key_at_index" and "w" in mode:
+                class Selector:
+                    def __enter__(self_inner):
+                        return self_inner
+
+                    def __exit__(self_inner, *_):
+                        return False
+
+                    def write(self_inner, value):
+                        name = keys[int(value)]
+                        (base / "key_at_index_name").write_text(name + "\n")
+                        (base / "key_at_index_type").write_text("ui8\n")
+                        (base / "key_at_index_data_length").write_text("1\n")
+                        (base / "key_at_index_data").write_bytes(b"\x50" if name == "BCLM" else b"\x01")
+                return Selector()
+            if path.name == "key_at_index_data":
+                reads.append((base / "key_at_index_name").read_text().strip())
+            return real_open(path, mode, *args, **kwargs)
+
+        with patch("builtins.open", fake_open):
+            found = usb_logs.smc_keys(self.root)
+        self.assertEqual(found["key_count"], 7)
+        self.assertEqual([entry.split()[0] for entry in found["keys"]], ["BCLM", "F0Mn", "TB0T", "CH0B", "BFCL"])
+        self.assertEqual(found["values"], {"BCLM": "50", "BFCL": "01"})
+        self.assertEqual(reads, ["BCLM", "BFCL"], "data is read for BCLM and BFCL only")
+
+    def test_power_battery_and_connector_details(self):
+        self.macbook()
+        self.write("sys/class/power_supply/BAT0/uevent",
+                   "POWER_SUPPLY_TYPE=Battery\nPOWER_SUPPLY_CYCLE_COUNT=812\nPOWER_SUPPLY_CHARGE_FULL=4100000\n"
+                   "POWER_SUPPLY_CHARGE_FULL_DESIGN=5770000\nPOWER_SUPPLY_SERIAL_NUMBER=SECRET\n")
+        self.write("sys/devices/system/cpu/cpufreq/policy0/scaling_driver", "intel_cpufreq\n")
+        self.write("sys/devices/system/cpu/intel_pstate/no_turbo", "0\n")
+        self.write("sys/devices/system/cpu/cpu0/thermal_throttle/package_throttle_count", "3\n")
+        self.write("sys/class/powercap/intel-rapl:0/name", "package-0\n")
+        self.write("sys/class/powercap/intel-rapl:0/constraint_0_name", "long_term\n")
+        self.write("sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw", "35000000\n")
+        health = usb_logs.battery_health(self.root)[0]
+        self.assertEqual((health["cycle_count"], health["health_percent"]), ("812", 71.1))
+        power = usb_logs.cpu_power(self.root)
+        self.assertEqual(power["scaling_driver"], "intel_cpufreq")
+        self.assertEqual(power["rapl"]["intel-rapl:0"]["long_term"]["limit_uw"], "35000000")
+        self.assertEqual(power["thermal_throttle"]["cpu0"]["package_throttle_count"], "3")
+        self.assertEqual(usb_logs.connector_details(self.root)[0]["type"], "LVDS")
+        text = usb_logs.hardware_report(self.root)
+        self.assertIn("===== battery health =====", text)
+        self.assertNotIn("SECRET", text)
+        summary = usb_logs.summary(self.root)
+        self.assertIn("Battery health: 71.1% of design", summary)
+
+    def test_clamp_probe_flags_a_held_clock(self):
+        self.write("sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", "1197000\n")
+        process = SimpleNamespace(wait=lambda *_: 0, kill=lambda: None)
+        result = usb_logs.clamp_probe(self.root, 0.5, spawn=lambda: process, sleep=lambda _: None)
+        self.assertTrue(result["clamped"])
+        self.assertEqual(result["peak_mhz"], 1197)
+
+    def test_blank_check_restores_the_backlight(self):
+        self.write("sys/class/backlight/gmux_backlight/bl_power", "0\n")
+        self.write("sys/class/backlight/gmux_backlight/actual_brightness", "800\n")
+        seen = []
+        result = usb_logs.blank_check(self.root, sleep=lambda _: seen.append(
+            (self.root / "sys/class/backlight/gmux_backlight/bl_power").read_text()))
+        self.assertEqual(seen, ["4\n"])
+        self.assertEqual(result[0]["bl_power_after"], "0")
+
+
+class Privacy(FakeMachine):
+    def test_scrub_hides_serials_addresses_and_speech(self):
+        line = ('usb 1-2: SerialNumber: 0001ABC wlan0 a8:20:66:12:34:56 '
+                '{"t": "hear.final", "text": "my bank pin is 4321"} Serial: 8250/16550 driver')
+        text = usb_logs.scrub(line)
+        for secret in ("0001ABC", "12:34:56", "4321"):
+            self.assertNotIn(secret, text)
+        self.assertIn("a8:20:66:xx:xx:xx", text)
+        self.assertIn("Serial: 8250/16550 driver", text, "driver banners are kept")
+
+    def test_scrub_hides_quoted_serials_whole_and_keeps_json_quotes(self):
+        text = usb_logs.scrub('{"serial": "S1AB 2CD", "model": "APPLE SSD"} serial=ABC123 '
+                              '"POWER_SUPPLY_SERIAL_NUMBER": "3X 99"')
+        for secret in ("S1AB", "2CD", "ABC123", "3X", " 99"):
+            self.assertNotIn(secret, text)
+        self.assertIn('"serial": "[hidden]", "model": "APPLE SSD"', text)
+
+    def test_journal_masks_addresses_split_across_reads_and_never_keeps_speech(self):
+        canary = "violet-canary-7731"
+        journal = usb_logs.Journal(self.root / "journal.txt", self.root / "cursor")
+        journal.feed(b"wlan0: associated with a8:20:", free=10**9)
+        journal.feed(b"66:12:34:56\n", free=10**9)
+        journal.feed(('being-mind[9]: {"t": "say.request", "text": "' + canary + '"}\n').encode(), free=10**9)
+        journal.feed(b"tail without newline 11:22:33:44:55:66", free=10**9)
+        journal.stop()
+        text = (self.root / "journal.txt").read_text()
+        self.assertIn("a8:20:66:xx:xx:xx", text)
+        self.assertNotIn("12:34:56", text)
+        self.assertNotIn(canary, text)
+        self.assertIn("11:22:33:xx:xx:xx", text)
+        self.assertNotIn(canary, " ".join(sum(journal.notable.values(), [])))
+
+    def test_owner_can_switch_try_diagnostics_off_and_on(self):
+        folder = self.root / "stick/boot-0001-x"
+        folder.mkdir(parents=True)
+        state = self.root / "state"
+        state.mkdir()
+        (state / "folder").write_text(f"{folder}\n")
+        calls = []
+        with patch.object(usb_logs, "STATE_DIR", state):
+            self.assertTrue(usb_logs.logging_enabled())
+            usb_logs.set_logging(False, systemctl=lambda *args: calls.append(args))
+            self.assertFalse(usb_logs.logging_enabled())
+            self.assertTrue((folder.parent / usb_logs.LOGGING_OFF).exists())
+            usb_logs.set_logging(True, systemctl=lambda *args: calls.append(args))
+            self.assertTrue((state / "enable").exists())
+        self.assertEqual(calls, [("stop", "being-usb-logs.service"), ("restart", "being-usb-logs.service")])
+
+    def test_keys_are_captured_from_evdev_records(self):
+        import struct
+
+        reader, writer = os.pipe()
+        events = b"".join(struct.pack(usb_logs.EVENT, 0, 0, 1, code, 1) for code in (59, 225, 999))
+        events += struct.pack(usb_logs.EVENT, 0, 0, 1, 59, 0)  # a release is not a press
+        os.write(writer, events)
+        os.close(writer)
+        ticks = iter([0.0, 0.0, 0.1, 0.2, 5.0, 5.0, 5.0])
+        found = usb_logs.capture_keys(1.0, paths=[f"/dev/fd/{reader}"], clock=lambda: next(ticks, 9.0))
+        os.close(reader)
+        self.assertEqual(found["pressed"], ["F1", "BrightnessUp", "code 999"])
 
 
 class JournalCopy(FakeMachine):

@@ -157,3 +157,33 @@ class PublicationTests(unittest.TestCase):
         for part in self.parts:
             expected = self.payloads.get(part["name"], self.root_bytes)
             self.assertEqual(os.pread(self.target, len(expected), part["start_lba"] * self.sector), expected)
+
+
+class MindSeedAndDiscard(unittest.TestCase):
+    def test_seeded_time_zone_is_checked_and_private(self):
+        import json
+        import tempfile
+
+        from mind import install_apply
+
+        with tempfile.TemporaryDirectory() as directory:
+            seed = Path(directory)
+            install_apply.seed_skills(seed, {"time_zone": "Australia/Sydney"})
+            path = seed / "skills.json"
+            self.assertEqual(json.loads(path.read_text()), {"weather_location": "", "time_zone": "Australia/Sydney"})
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            with self.assertRaises(ValueError):
+                install_apply.seed_skills(seed, {"time_zone": "Mars/Olympus"})
+
+    def test_mind_range_is_discarded_best_effort(self):
+        import struct
+
+        from mind import install_apply
+
+        parts = [{"name": "esp", "start_lba": 2048, "size_bytes": 1024},
+                 {"name": "mind", "start_lba": 4096, "size_bytes": 8 * 1024**2}]
+        with patch.object(install_apply.fcntl, "ioctl") as ioctl:
+            self.assertTrue(install_apply.discard_mind(7, parts, 512))
+        ioctl.assert_called_once_with(7, install_apply.BLKDISCARD, struct.pack("=QQ", 4096 * 512, 8 * 1024**2))
+        with patch.object(install_apply.fcntl, "ioctl", side_effect=OSError(95, "Operation not supported")):
+            self.assertFalse(install_apply.discard_mind(7, parts, 512))

@@ -13,6 +13,10 @@ struct Stem {
 
 impl Stem {
     fn start(tag: &str, require: &str) -> Stem {
+        Stem::start_with(tag, require, &[], &[])
+    }
+
+    fn start_with(tag: &str, require: &str, args: &[&str], envs: &[(&str, &str)]) -> Stem {
         // Short path: Unix socket paths are limited to about 100 bytes.
         let dir = PathBuf::from(format!("/tmp/bt-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -22,6 +26,8 @@ impl Stem {
             .arg(&path)
             .arg("--require")
             .arg(require)
+            .args(args)
+            .envs(envs.iter().copied())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
@@ -33,8 +39,11 @@ impl Stem {
         Stem { child, dir, path }
     }
 
+    /// Join and wait for the hub's receipt, so nothing sent after this is missed.
     fn join(&self, name: &str, subs: &[&str]) -> Client {
-        Client::connect(&self.path, name, subs).unwrap()
+        let client = Client::connect(&self.path, name, subs).unwrap();
+        assert!(client.wait_joined(Duration::from_secs(5)), "no hello.ok for {name}");
+        client
     }
 }
 
@@ -475,5 +484,152 @@ fn it_is_born_once_and_knows_how_each_wake_began() {
     assert_eq!(fourth.bool("lost_power"), Some(false));
     assert_eq!(fourth.str("id"), Some(id.as_str()));
     assert!(terminate(stem).success());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_kill_while_muted_restarts_muted_and_awake_without_a_nap() {
+    let dir = PathBuf::from(format!("/tmp/bt-{}-resume", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sock = dir.join("bus.sock");
+    let start = |boot: &str| {
+        let child = Command::new(env!("CARGO_BIN_EXE_brainstem"))
+            .arg("--bus")
+            .arg(&sock)
+            .arg("--require")
+            .arg("mind")
+            .env("BEING_BOOT_ID", boot)
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while std::os::unix::net::UnixStream::connect(&sock).is_err() {
+            assert!(Instant::now() < deadline, "brainstem did not start");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child
+    };
+    let joined = |name: &str, subs: &[&str]| Client::connect_joined(&sock, name, subs, Duration::from_secs(5)).unwrap();
+
+    let mut stem = start("boot-1");
+    let mut mind = joined("mind", &["state.changed"]);
+    let mut face = joined("face", &[]);
+    mind.send(&Event::new("mind.ready")).unwrap();
+    wait_for(&mind, "idle", state_is("idle"));
+    face.send(&Event::new("key.mute")).unwrap();
+    wait_for(&mind, "muted", |e| e.topic == "state.changed" && e.bool("muted") == Some(true));
+    std::thread::sleep(Duration::from_millis(100));
+    stem.kill().unwrap();
+    stem.wait().unwrap();
+    drop((mind, face));
+    let _ = std::fs::remove_file(&sock);
+
+    // Same boot: still muted, still awake.
+    let mut stem = start("boot-1");
+    let voice = joined("voice", &["state.changed"]);
+    let snap = wait_for(&voice, "snapshot", |e| e.topic == "state.changed");
+    assert_eq!(snap.bool("muted"), Some(true), "a restart must not reopen the mic");
+    assert_eq!(snap.str("state"), Some("idle"), "a restart is not a nap");
+    assert!(quiet(&voice, state_is("waking")));
+    drop(voice);
+    stem.kill().unwrap();
+    stem.wait().unwrap();
+    let _ = std::fs::remove_file(&sock);
+
+    // A new boot starts fresh.
+    let mut stem = start("boot-2");
+    let voice = joined("voice", &["state.changed"]);
+    let snap = wait_for(&voice, "snapshot", |e| e.topic == "state.changed");
+    assert_eq!((snap.bool("muted"), snap.str("state")), (Some(false), Some("waking")));
+    drop(voice);
+    stem.kill().unwrap();
+    stem.wait().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn only_the_brainstem_orders_the_voice_and_the_mind() {
+    let stem = Stem::start("orders", "mind");
+    let watcher = stem.join("watcher", &["*"]);
+    let mut rogue = stem.join("rogue", &[]);
+    let mut eyes = stem.join("eyes", &[]);
+    for topic in ["voice.mute", "say.stop", "mind.cancel", "hello.ok", "body.care"] {
+        rogue.send(&Event::new(topic).with("on", false)).unwrap();
+    }
+    // Progress and announcements are the mind's alone.
+    eyes.send(&Event::new("mind.progress")).unwrap();
+    eyes.send(&Event::new("mind.shutdown_ready")).unwrap();
+    rogue.send(&Event::new("hear.wake")).unwrap();
+    wait_for(&watcher, "the honest event", |e| e.topic == "hear.wake");
+    assert!(quiet(&watcher, |e| matches!(
+        e.topic.as_str(),
+        "voice.mute" | "say.stop" | "mind.cancel" | "hello.ok" | "body.care" | "mind.progress" | "mind.shutdown_ready"
+    )));
+    // The power and thermal keeper may publish its own report.
+    let mut care = stem.join("bodycare", &[]);
+    care.send(&Event::new("body.care").with("mode", "observe")).unwrap();
+    let got = wait_for(&watcher, "body.care", |e| e.topic == "body.care");
+    assert_eq!(got.str("mode"), Some("observe"));
+}
+
+#[test]
+fn nothing_is_routed_before_hello_and_long_lines_are_dropped_whole() {
+    use std::io::Write;
+    let stem = Stem::start("hello", "mind");
+    let watcher = stem.join("watcher", &["hear.*"]);
+    let mut raw = std::os::unix::net::UnixStream::connect(&stem.path).unwrap();
+    raw.write_all(b"{\"t\":\"hear.wake\"}\n").unwrap();
+    assert!(quiet(&watcher, |e| e.topic == "hear.wake"), "no hello, no routing");
+    // A line far over the cap is thrown away, and the line after it still counts.
+    raw.write_all(b"{\"t\":\"hello\",\"name\":\"raw\",\"sub\":[]}\n").unwrap();
+    let mut huge = b"{\"t\":\"hear.final\",\"text\":\"".to_vec();
+    huge.extend(std::iter::repeat_n(b'a', 200 * 1024));
+    huge.extend(b"\"}\n");
+    raw.write_all(&huge).unwrap();
+    raw.write_all(b"{\"t\":\"hear.partial\",\"text\":\"after\"}\n").unwrap();
+    let after = wait_for(&watcher, "the line after the long one", |e| e.topic.starts_with("hear."));
+    assert_eq!((after.topic.as_str(), after.str("text")), ("hear.partial", Some("after")));
+}
+
+#[test]
+fn a_reply_with_no_progress_is_cancelled_on_the_configured_budget() {
+    let stem = Stem::start_with("think", "mind", &[], &[("BEING_THINK_TIMEOUT", "1")]);
+    let watcher = stem.join("watcher", &["state.changed", "mind.cancel"]);
+    let mut mind = stem.join("mind", &[]);
+    let mut voice = stem.join("voice", &[]);
+    mind.send(&Event::new("mind.ready").with("progress", true)).unwrap();
+    wait_for(&watcher, "idle", state_is("idle"));
+    voice.send(&Event::new("hear.wake")).unwrap();
+    voice.send(&Event::new("hear.final").with("text", "a long question")).unwrap();
+    wait_for(&watcher, "thinking", state_is("thinking"));
+    let cancel = wait_for(&watcher, "the cancel", |e| e.topic == "mind.cancel");
+    assert_eq!((cancel.str("reason"), cancel.str("why")), (Some("think_timeout"), Some("too_long")));
+}
+
+#[test]
+fn a_dying_battery_warns_then_powers_off_after_the_mind_saves() {
+    let dir = PathBuf::from(format!("/tmp/bt-{}-poweroff-mark", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mark = dir.join("off");
+    let cmd = format!("touch {}", mark.display());
+    let stem = Stem::start_with("battery", "mind", &["--poweroff-cmd", &cmd], &[("BEING_SHUTDOWN_GRACE", "30")]);
+    let watcher = stem.join("watcher", &["body.battery", "stem.shutdown", "body.state"]);
+    let mut mind = stem.join("mind", &[]);
+    let mut lab = stem.join("lab", &[]);
+    lab.send(&Event::new("sim.body").with("battery", 14.0).with("charging", false)).unwrap();
+    let plea = wait_for(&watcher, "the first plea", |e| e.topic == "body.battery");
+    assert_eq!(plea.str("level"), Some("low"));
+    lab.send(&Event::new("sim.body").with("battery", 4.0)).unwrap();
+    let going = wait_for(&watcher, "the shutdown notice", |e| e.topic == "stem.shutdown");
+    assert_eq!(going.str("reason"), Some("battery_critical"));
+    assert!(!mark.exists(), "the mind gets its grace");
+    mind.send(&Event::new("mind.shutdown_ready")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !mark.exists() {
+        assert!(Instant::now() < deadline, "no power-off after the mind saved");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

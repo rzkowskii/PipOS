@@ -1,0 +1,13 @@
+{
+  "name": "stopwatch",
+  "aliases": [
+    "stopwatch",
+    "a stopwatch",
+    "stop watch"
+  ],
+  "summary": "A stopwatch with laps.",
+  "keys": "Enter marks a lap, Ctrl-C stops.",
+  "entry": "main.py",
+  "size": 1291,
+  "sha256": "c3c70c2e17288d612735c71702c47a2bc839daa840c9424972c4a0bee8572c0e"
+}

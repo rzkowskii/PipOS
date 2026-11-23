@@ -14,7 +14,7 @@ from . import console_ui as ui
 from . import install_disks, installer, setup, usb_logs
 from .initiative import POLICY_PATH as INITIATIVE_POLICY_PATH, load_policy as load_initiative_policy
 from .initiative_setup import describe_policy
-from .profile import FACTORY_CONFIG, PROFILE_FILE, load_profile
+from .profile import FACTORY_CONFIG, PROFILE_FILE, factory_profile, load_profile
 from .try_mode import is_try_boot
 
 
@@ -28,20 +28,31 @@ MEDIA_MOUNTS = (
     ("exfat", "ro,nodev,nosuid,noexec,umask=077"),
     ("ext4", "ro,nodev,nosuid,noexec,noload"),
 )
+# Only for writing a backup to a stick the owner picked. Still nothing on it
+# may run or act as a device, and FAT writes go out at once (flush).
+WRITABLE_MOUNTS = (
+    ("vfat", "rw,nodev,nosuid,noexec,utf8,fmask=0177,dmask=0077,flush"),
+    ("exfat", "rw,nodev,nosuid,noexec,fmask=0177,dmask=0077"),
+    ("ext4", "rw,nodev,nosuid,noexec"),
+)
 MEDIA_FILE_LIMIT = 60
 MEDIA_DEPTH = 4
 MEDIA_MIN_BYTES = 1024**2
 BACKUP_SUFFIXES = (".age", ".agekey", ".key", ".txt")
+TRY_HINT = "Meet the being. Nothing is kept."
+TRY_HINT_LOGGED = "Conversations are not kept. Boot diagnostics are saved on this stick."
 MENU = (
-    ("1", "Try PipOS", "Meet the being. Nothing is kept."),
+    ("1", "Try PipOS", TRY_HINT),
     ("2", "Install PipOS", "Make this Mac its home."),
     ("3", "Restore a being", "Bring a backed-up being home."),
     ("4", "Setup", "Name, voice and personality."),
     ("5", "Check hardware", "See what PipOS can find."),
+    ("6", "Back up to a USB stick", "Save this Try being to a stick."),
     ("Q", "Return to PipOS", None),
 )
 RESTORE_CHOICES = (
-    ("1", "Restore with conversation archive", "Everything, including past conversations."),
+    ("1", "Restore with conversation archive",
+     "Who the being is, its settings and past conversations. Reminders, Wi-Fi and the weather city start fresh."),
     ("2", "Restore identity and settings", "Who the being is and how it is set up. Conversations start fresh."),
     ("Q", "Back", None),
 )
@@ -98,9 +109,62 @@ def profile_to_keep():
     else:
         print(f"\n{setup.description(profile)}")
         print("The installed being starts with fresh memory.")
-    if input(ui.prompt("Keep this Try profile? [y/N] ")).strip().lower() in {"y", "yes"}:
+    try:
+        changed = profile != factory_profile(FACTORY_CONFIG)
+    except Exception:  # a factory problem must not block keeping the Try choices
+        changed = True
+    # Choices the owner made in Try are kept unless they say otherwise.
+    answer = input(ui.prompt("Keep this Try profile? [Y/n] " if changed else "Keep this Try profile? [y/N] "))
+    answer = answer.strip().lower()
+    if answer in {"y", "yes"} or (changed and answer == ""):
         return profile
     return None
+
+
+def zone_to_keep():
+    """The time zone chosen in Try, to seed the installed being's clock."""
+    if not temporary_mind_mounted():
+        return None
+    import json
+
+    from .skills import find_zone
+
+    try:
+        # Only a zone the owner chose in Try; the factory zone needs no question.
+        settings = json.loads((MIND_DIR / "skills.json").read_text(encoding="utf-8"))
+        chosen = settings.get("time_zone") if isinstance(settings, dict) else None
+        zone = find_zone(chosen) if isinstance(chosen, str) and chosen else None
+    except (OSError, ValueError):
+        return None
+    if zone is None:
+        return None
+    key = installer.display_text(zone.key)
+    if input(ui.prompt(f"Keep the time zone {key}? [Y/n] ")).strip().lower() in {"", "y", "yes"}:
+        return {"time_zone": zone.key}
+    return None
+
+
+def carry_to_keep():
+    """Bring Pip home: an opt-in offer, only when Try holds something the owner said."""
+    from . import backup
+
+    if not temporary_mind_mounted() or not backup.has_conversation(MIND_DIR):
+        return None
+    if ui.enabled():
+        ui.line()
+        ui.card(["You can bring this being home as it is: what you talked about, what it remembers,",
+                 "its name, voice and settings. Otherwise the installed being starts fresh."],
+                title="Bring Pip home")
+    else:
+        print("\nBring Pip home: carry what you talked about, what it remembers and its settings "
+              "into the installation. Otherwise the installed being starts fresh.")
+    if input(ui.prompt("Keep what you and Pip talked about? [y/N] ")).strip().lower() not in {"y", "yes"}:
+        return None
+
+    def restore(target):
+        backup.carry(MIND_DIR, target)
+
+    return restore
 
 
 def initiative_to_keep():
@@ -135,6 +199,11 @@ def disk_card(number, disk):
     details = [installer.display_text(disk["device"])]
     if disk.get("serial"):
         details.append(f"serial {installer.display_text(disk['serial'])}")
+    contents = install_disks.disk_contents(disk["device"], disk.get("logical_sector_bytes") or 512)
+    if contents["being"]:
+        details.append("holds a PipOS being")
+    elif contents["macos"]:
+        details.append("holds macOS")
     ui.card([ui.pad(left, inner - ui.visible_len(right)) + right,
              "   " + ui.paint(ui.dot().join(details), "muted")], tone="accent_soft")
 
@@ -217,10 +286,18 @@ def install(*, restore=None):
         if settings:
             ui.screen("Your Try settings", context=ui.step(2, total, name),
                       subtitle="Choose what the installed being keeps from this Try session.")
-        choices["profile"] = profile_to_keep()
-        initiative = initiative_to_keep()
-        if initiative is not None:
-            choices["initiative"] = initiative
+        carried = carry_to_keep()
+        if carried is not None:
+            # The whole Try being goes home, its settings included.
+            choices.update(restore=carried, carried=True)
+        else:
+            choices["profile"] = profile_to_keep()
+            initiative = initiative_to_keep()
+            if initiative is not None:
+                choices["initiative"] = initiative
+            zone = zone_to_keep()
+            if zone is not None:
+                choices["skills"] = zone
     installer.confirm_installation(device, expected_plan=plan, flow=(name, total, total), **choices)
     input(ui.prompt("Press Enter to return to PipOS. "))
     return True
@@ -252,10 +329,10 @@ def unmount_media():
         pass
 
 
-def mount_media(device):
+def mount_media(device, *, writable=False):
     unmount_media()
     MEDIA_DIR.mkdir(mode=0o700, exist_ok=True)
-    for filesystem, options in MEDIA_MOUNTS:
+    for filesystem, options in (WRITABLE_MOUNTS if writable else MEDIA_MOUNTS):
         try:
             result = subprocess.run(["mount", "-t", filesystem, "-o", options, device, str(MEDIA_DIR)],
                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -374,6 +451,61 @@ def restore_file(prompt):
     raise ValueError("Enter an absolute path to a readable file on the mounted backup media.")
 
 
+def checkpoint_from_record(files):
+    """Read the checkpoint from a record file and have the owner confirm its fingerprint.
+
+    Returns None to fall back to typing the full value.
+    """
+    from .backup import fingerprint, read_checkpoint_file
+
+    while True:
+        record = pick_file("Checkpoint record file [Enter to type the checkpoint instead]: ", files)
+        if record is None:
+            return None
+        try:
+            _, checkpoint = read_checkpoint_file(record)
+            break
+        except (OSError, ValueError):
+            message = "That file is not a checkpoint record. Choose the one ending in -checkpoint.txt."
+            ui.line(ui.mark("warning", message)) if ui.enabled() else print(message)
+    short = fingerprint(checkpoint)
+    if ui.enabled():
+        ui.line()
+        ui.card([ui.paint(f"Checkpoint {short}", "text", "bold"),
+                 "Compare it with the checkpoint the surviving being showed, or the one you wrote down."],
+                title="Check the fingerprint")
+    else:
+        print(f"Checkpoint {short}")
+        print("Compare it with the checkpoint the surviving being showed, or the one you wrote down.")
+    if input(ui.prompt("Does it match? [y/N] ")).strip().lower() not in {"y", "yes"}:
+        raise ValueError("The checkpoint was not confirmed. Nothing was restored.")
+    return checkpoint
+
+
+def unlock_if_protected(identity):
+    """(key path, holder). A passphrase-protected key is unlocked into RAM once.
+
+    The holder is a temporary directory that removes the unlocked key when it
+    is cleaned up or dropped; it is None for a key without a passphrase.
+    """
+    from .backup import working_directory
+    from .backup_crypto import BackupCryptoError, is_protected_file, unlock_identity
+
+    if not is_protected_file(identity):
+        return identity, None
+    holder = working_directory()
+    if ui.enabled():
+        ui.line()
+        ui.para("This key has a passphrase. Type it when asked; it is not shown.", "muted")
+    else:
+        print("This key has a passphrase. Type it when asked; it is not shown.")
+    try:
+        return unlock_identity(identity, Path(holder.name) / "identity.key"), holder
+    except BackupCryptoError as error:
+        holder.cleanup()
+        raise ValueError(f"{error} Nothing was restored.") from None
+
+
 def restore_inputs(executable, *, archive, files=None):
     if files is None:
         if ui.enabled():
@@ -396,22 +528,33 @@ def restore_inputs(executable, *, archive, files=None):
     identity = ask("Private identity file: ")
     if identity is None:
         return None
+    # A passphrase is asked for now, before any progress screen can draw over age's prompt.
+    identity, unlocked = unlock_if_protected(identity)
+    if files is not None:
+        # Restoring works, but the stick alone opens the backup.
+        ui.note("The private key is on the same stick as the backup. Anyone with this stick can read it. "
+                "Keep the key on a different stick.", "warning")
     extras = []
     if archive:
         proof = ask("Latest deletion checkpoint file: ")
         if proof is None:
             return None
-        if ui.enabled():
-            ui.line()
-            ui.para("Use the current checkpoint from the surviving being or your separately saved record.", "muted")
-        else:
-            print("Use the current checkpoint from the surviving being or your separately saved record.")
-        checkpoint = getpass.getpass(ui.prompt("Independently known current checkpoint: "),
-                                     stream=sys.stdout).strip().lower()
-        if not checkpoint:
-            return None
-        if not re.fullmatch(r"[0-9a-f]{64}", checkpoint):
-            raise ValueError("Enter the independently recorded hexadecimal checkpoint value.")
+        checkpoint = None
+        if files is not None:
+            checkpoint = checkpoint_from_record(files)
+        if checkpoint is None:
+            if ui.enabled():
+                ui.line()
+                ui.para("Use the current checkpoint from the surviving being or your separately saved record.",
+                        "muted")
+            else:
+                print("Use the current checkpoint from the surviving being or your separately saved record.")
+            checkpoint = getpass.getpass(ui.prompt("Independently known current checkpoint: "),
+                                         stream=sys.stdout).strip().lower()
+            if not checkpoint:
+                return None
+            if not re.fullmatch(r"[0-9a-f]{64}", checkpoint):
+                raise ValueError("Enter the independently recorded hexadecimal checkpoint value.")
         extras = ["--deletions", str(proof), "--current-checkpoint", checkpoint]
 
     def prepare(mind_dir):
@@ -423,6 +566,9 @@ def restore_inputs(executable, *, archive, files=None):
                                     stderr=subprocess.DEVNULL, timeout=900, check=False)
         except (OSError, subprocess.SubprocessError):
             raise ValueError(message) from None
+        finally:
+            if unlocked is not None:
+                unlocked.cleanup()  # the unlocked key lived in RAM only for this restore
         if result.returncode:
             raise ValueError(message)
 
@@ -471,10 +617,73 @@ def being_name():
         return ""
 
 
+def flush_keys():
+    """Drop key presses typed during a check, so they don't answer the next prompt."""
+    try:
+        import termios
+
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except (ImportError, OSError, ValueError):
+        pass
+
+
+def answer(question):
+    return input(ui.prompt(f"{question} [y/N] ")).strip().lower() in {"y", "yes"}
+
+
+def guided_checks():
+    """Keys, screen and camera, with the owner watching. Results go to the stick."""
+    results = {}
+    ui.screen("Guided checks", context="Check hardware",
+              subtitle="Three short checks. Their results are saved with this boot's diagnostics.")
+    ui.para("1. Keys. For 10 seconds, press F1 to F12 along the top row, then the same keys while "
+            "holding fn.", "plain")
+    input(ui.prompt("Press Enter to start. "))
+    results["keys"] = usb_logs.capture_keys(10)
+    flush_keys()
+    ui.note(f"Heard {len(results['keys']['pressed'])} key presses.")
+    ui.line()
+    ui.para("2. Screen. The screen goes dark for one second. Watch the Apple logo on the lid.", "plain")
+    input(ui.prompt("Press Enter to start. "))
+    results["blank"] = usb_logs.blank_check()
+    results["blank_screen_went_dark"] = answer("Did the screen go dark?")
+    results["blank_lid_logo_went_dark"] = answer("Did the Apple logo on the lid go dark?")
+    ui.line()
+    ui.para("3. Camera. With your permission the camera runs for 10 seconds. Look for the green light. "
+            "No pictures are kept.", "plain")
+    if answer("Turn the camera on for 10 seconds?"):
+        was_on = (MIND_DIR / "camera.enabled").is_file()
+        started = subprocess.run(["being-camera", "enable"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, timeout=40, check=False).returncode == 0
+        time.sleep(10)
+        if not was_on:
+            subprocess.run(["being-camera", "disable"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=40, check=False)
+        results["camera_started"] = started
+        results["camera_light_seen"] = answer("Did the green light come on?")
+    else:
+        results["camera"] = "skipped by the owner"
+    saved = usb_logs.save_guided(results)
+    ui.note("Saved with the boot diagnostics." if saved else "There is no diagnostics stick on this boot.",
+            "success" if saved else "muted")
+    input(ui.prompt("Press Enter to go back. "))
+
+
+def menu_entries():
+    """The Try menu, worded for what this boot really keeps."""
+    try:
+        logged = usb_logs.logging_enabled() is True
+    except OSError:
+        logged = False
+    if not logged:
+        return MENU
+    return tuple((key, label, TRY_HINT_LOGGED if hint == TRY_HINT else hint) for key, label, hint in MENU)
+
+
 def welcome():
     if not ui.enabled():
         print("\nPipOS")
-        ui.options(MENU)
+        ui.options(menu_entries())
         return
     name = being_name()
     ui.screen(f"Hello, I'm {name}." if name else "Hello.", context="Running from USB")
@@ -484,7 +693,33 @@ def welcome():
     ui.para("Right now I'm running from the USB stick. Try keeps your choices and our conversations "
             "in memory until you restart.", "muted")
     ui.line()
-    ui.options(MENU)
+    ui.options(menu_entries())
+
+
+IDLE_SECONDS = 240
+
+
+class Idle(Exception):
+    """Nobody touched the menu for a while."""
+
+
+def idle_input(text, seconds=IDLE_SECONDS):
+    """input(), but give the screen back to the eyes after a few idle minutes."""
+    import signal
+
+    if not hasattr(signal, "SIGALRM") or not ui.enabled():
+        return input(text)
+
+    def expire(*_):
+        raise Idle()
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.alarm(seconds)
+    try:
+        return input(text)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def try_menu():
@@ -492,7 +727,11 @@ def try_menu():
         print("Try keeps setup choices and conversations in RAM until you reboot.")
     while True:
         welcome()
-        choice = input(ui.prompt("Choice: ")).strip().lower()
+        try:
+            # Only this top menu times out: nothing is half-done here.
+            choice = idle_input(ui.prompt("Choice: ")).strip().lower()
+        except Idle:
+            return 0
         try:
             if choice in {"1", "q"}:
                 return 0
@@ -514,7 +753,12 @@ def try_menu():
                 # On a laptop Try stick, keep a copy with the boot logs.
                 usb_logs.save_check(report)
                 if ui.enabled():
-                    input(ui.prompt("Press Enter to go back. "))
+                    if input(ui.prompt("G runs the guided checks. Press Enter to go back. ")).strip().lower() == "g":
+                        guided_checks()
+            elif choice == "6":
+                from . import care
+
+                care.backup_menu(MIND_DIR, temporary=True)
             else:
                 warn("Choose a number from the menu or press Q.")
         except (OSError, ValueError, subprocess.SubprocessError) as error:

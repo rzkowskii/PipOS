@@ -158,3 +158,97 @@ class OfflineWifi(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WifiScanAndEthernet(unittest.TestCase):
+    SCAN = """BSS 11:22:33:44:55:66(on wlan0)
+\tsignal: -61.00 dBm
+\tSSID: Home
+\tRSN:\t * Version: 1
+\t\t * Authentication suites: PSK
+BSS 11:22:33:44:55:67(on wlan0)
+\tsignal: -40.00 dBm
+\tSSID: Home
+\tRSN:\t * Version: 1
+\t\t * Authentication suites: PSK SAE
+BSS aa:bb:cc:dd:ee:ff(on wlan0)
+\tsignal: -50.00 dBm
+\tSSID: Modern
+\tRSN:\t * Version: 1
+\t\t * Authentication suites: SAE
+BSS aa:bb:cc:dd:ee:00(on wlan0)
+\tsignal: -30.00 dBm
+\tSSID: Cafe Open
+BSS aa:bb:cc:dd:ee:01(on wlan0)
+\tsignal: -20.00 dBm
+\tSSID: 
+\tRSN:\t * Version: 1
+\t\t * Authentication suites: PSK
+"""
+
+    def test_scan_offers_named_wpa2_and_wpa3_networks_strongest_first(self):
+        from mind import wifi
+
+        networks = wifi.parse_scan(self.SCAN)
+        self.assertEqual([(n["ssid"], n["security"]) for n in networks], [("Home", "wpa2"), ("Modern", "wpa3")])
+        self.assertEqual(networks[0]["signal"], -40.0)
+
+    def test_scan_raises_the_link_only_for_the_scan_when_offline(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from mind import wifi
+
+        calls = []
+
+        def run(command, **_):
+            calls.append(command[:2])
+            return SimpleNamespace(returncode=0, stdout=self.SCAN)
+
+        with patch.object(wifi, "effective_mode", return_value="local-only"):
+            wifi.scan("wlan0", run=run)
+        self.assertEqual(calls, [["ip", "link"], ["iw", "dev"], ["ip", "link"]])
+        with self.assertRaises(ValueError):
+            wifi.scan("wlan0; reboot", run=run)
+
+    def test_a_link_that_is_already_up_is_left_up_after_a_scan(self):
+        from types import SimpleNamespace
+
+        calls = []
+
+        def run(command, **_):
+            calls.append(command[:2])
+            return SimpleNamespace(returncode=0, stdout=self.SCAN)
+
+        with tempfile.TemporaryDirectory() as directory:
+            net = Path(directory)
+            (net / "wlan0").mkdir()
+            (net / "wlan0" / "flags").write_text("0x1003\n")
+            self.assertTrue(wifi.link_up("wlan0", net))
+            with patch.object(wifi, "SYS_NET", net), patch.object(wifi, "effective_mode", return_value="internet"):
+                wifi.scan("wlan0", run=run)
+            self.assertEqual(calls, [["iw", "dev"]])
+            # A first join in Internet mode finds the link down: raised for the scan only.
+            (net / "wlan0" / "flags").write_text("0x1002\n")
+            calls.clear()
+            with patch.object(wifi, "SYS_NET", net), patch.object(wifi, "effective_mode", return_value="internet"):
+                wifi.scan("wlan0", run=run)
+            self.assertEqual(calls, [["ip", "link"], ["iw", "dev"], ["ip", "link"]])
+
+    def test_ethernet_switch_is_private_and_defaults_off(self):
+        import tempfile
+        from pathlib import Path
+
+        from mind import wifi
+
+        with tempfile.TemporaryDirectory() as directory:
+            mind = Path(directory)
+            self.assertFalse(wifi.load_ethernet(mind))
+            wifi.save_ethernet(mind, True)
+            self.assertTrue(wifi.load_ethernet(mind))
+            self.assertEqual((mind / wifi.ETHERNET).stat().st_mode & 0o777, 0o600)
+            wifi.save_ethernet(mind, False)
+            self.assertFalse(wifi.load_ethernet(mind))
+            (mind / wifi.ETHERNET).write_text('{"version": 1, "enabled": "yes"}')
+            with self.assertRaises(ValueError):
+                wifi.load_ethernet(mind)

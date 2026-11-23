@@ -40,6 +40,8 @@ STOP_SPACE = 4 * 1024 * 1024          # stop copying the journal below this
 KEEP_NEWEST = 3                       # this boot and the two before it are never pruned:
                                       # 2 x JOURNAL_CAP on 128 MB still leaves LOW_SPACE
 SNAPSHOTS = (0, 20, 90, 300)          # seconds after start
+SLOW_SNAPSHOT = 90                     # the one that also lists the SMC keys
+LOGGING_OFF = "LOGGING-OFF.txt"        # on PIPLOGS: the owner switched Try diagnostics off
 FSYNC_EVERY = 3.0
 READ_LIMIT = 256 * 1024
 NOTABLE = (
@@ -85,6 +87,24 @@ def mask_mac(text):
     """Keep the maker prefix of a hardware address, hide the rest."""
     return re.sub(r"\b([0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2})(:[0-9a-fA-F]{2}){3}\b",
                   r"\1:xx:xx:xx", text)
+
+
+# Serial numbers as the kernel, udev, power supplies, DMI and smartctl print them.
+SERIALS = re.compile(
+    r"(?i)(\b(?:serial[ _-]?(?:number|no\.?)|serial(?=\"\s*:|\s*=)|SerialNumber|ID_SERIAL(?:_SHORT)?|product_serial|"
+    r"board_serial|chassis_serial|POWER_SUPPLY_SERIAL_NUMBER|iSerial)\"?\s*[:=]\s*)"
+    # A quoted value is hidden up to its closing quote, spaces and all.
+    r"(?:\"(?:[^\"\\]|\\.)*\"|[^\s\",;]+)")
+# Speech that reaches a log by mistake: bus payloads with a text field.
+SPEECH = re.compile(r'(?i)("(?:text|heard|transcript|partial)"\s*:\s*)"(?:[^"\\]|\\.)*"')
+
+
+def scrub(text):
+    """Remove what identifies this machine or its owner from a diagnostics line."""
+    text = mask_mac(text)
+    text = SERIALS.sub(lambda match: match[1] + ('"[hidden]"' if match[0].endswith('"') and
+                                                  match[0][len(match[1]):].startswith('"') else "[hidden]"), text)
+    return SPEECH.sub(r'\1"[speech removed]"', text)
 
 
 def kernel_log(root):
@@ -373,13 +393,204 @@ def lid_state(root):
 def hwmon(root):
     sensors = []
     for path in sorted((root / "sys/class/hwmon").glob("hwmon*")):
+        name, base = field(path / "name"), path
+        if name is None and not list(path.glob("*_input")):
+            # Linux 6.18 applesmc: a nameless hwmon whose readings live on the
+            # platform device (hwmonN/device/), named by that device's driver.
+            driver = driver_of(path / "device")
+            if driver:
+                name, base = driver, path / "device"
         readings = {}
-        for item in sorted(path.glob("*_input"))[:64]:
+        for item in sorted(base.glob("*_input"))[:64]:
             label = field(item.with_name(item.name.replace("_input", "_label")))
             value = field(item)
             readings[item.name + (f" ({label})" if label else "")] = value
-        sensors.append({"name": field(path / "name"), "readings": readings})
+        sensors.append({"name": name, "readings": readings})
     return sensors
+
+
+def applesmc_dir(root):
+    """Where applesmc keeps its attributes, on old and 6.18 layouts alike, or None."""
+    platform = root / "sys/devices/platform/applesmc.768"
+    candidates = [platform] if platform.is_dir() else []
+    for path in sorted((root / "sys/class/hwmon").glob("hwmon*")):
+        if field(path / "name") == "applesmc":
+            candidates.append(path)
+        elif driver_of(path / "device") == "applesmc":
+            candidates.append(path / "device")
+    for candidate in candidates:
+        if (candidate / "key_count").exists() or list(candidate.glob("fan*_input")):
+            return candidate
+    return candidates[0] if candidates else None
+
+
+SMC_INTERESTING = re.compile(r"\A(?:BCLM|BFCL|CH0B|CH0C|CH0I|CH0K|CH0R|F\d[A-Za-z]{2}|FNum|TB\dT|B0AC|B0AV|BNum)\Z")
+SMC_READ = ("BCLM", "BFCL")  # data is read only for these two
+
+
+def smc_keys(root, *, budget=10.0, limit=2048):
+    """List SMC keys through key_at_index; read data only for BCLM and BFCL.
+
+    Writing an index only selects which key the next reads describe. No SMC
+    value is ever written.
+    """
+    base = applesmc_dir(root)
+    if base is None or not (base / "key_count").exists():
+        return {"available": False}
+    try:
+        count = int(field(base / "key_count") or "0")
+    except ValueError:
+        return {"available": False}
+    found, values = [], {}
+    started = time.monotonic()
+    for index in range(min(count, limit)):
+        if time.monotonic() - started > budget:
+            found.append(f"(stopped after {index} of {count} keys: time budget)")
+            break
+        try:
+            with open(base / "key_at_index", "w", encoding="ascii") as selector:
+                selector.write(str(index))
+            name = (field(base / "key_at_index_name") or "").strip()
+        except OSError:
+            continue
+        if SMC_INTERESTING.match(name):
+            kind = field(base / "key_at_index_type")
+            found.append(f"{name} type={kind or '?'} bytes={field(base / 'key_at_index_data_length') or '?'}")
+            if name in SMC_READ:
+                try:
+                    with open(base / "key_at_index_data", "rb") as data:
+                        values[name] = data.read(32).hex()
+                except OSError as error:
+                    values[name] = f"(unreadable: {error})"
+    return {"available": True, "key_count": count, "keys": found, "values": values}
+
+
+def smc_readings(root):
+    base = applesmc_dir(root)
+    if base is None:
+        return None
+    readings = {}
+    for item in sorted(base.glob("*"))[:400]:
+        if re.fullmatch(r"(?:fan\d+_(?:input|min|max|label|manual|output)|temp\d+_(?:input|label)|light)", item.name):
+            readings[item.name] = field(item)
+    return {"path": str(base.relative_to(root)) if base.is_relative_to(root) else str(base), "readings": readings}
+
+
+def cpu_power(root):
+    """cpufreq, intel_pstate, RAPL limits and throttle counts, read-only."""
+    base = root / "sys/devices/system/cpu"
+    policy = base / "cpufreq/policy0"
+    info = {key: field(policy / key) for key in (
+        "scaling_driver", "scaling_governor", "scaling_min_freq", "scaling_max_freq", "scaling_cur_freq",
+        "cpuinfo_min_freq", "cpuinfo_max_freq", "energy_performance_preference")}
+    info["intel_pstate"] = {key: field(base / "intel_pstate" / key) for key in (
+        "status", "no_turbo", "max_perf_pct", "min_perf_pct", "turbo_pct", "num_pstates")}
+    rapl = {}
+    for zone in sorted((root / "sys/class/powercap").glob("intel-rapl:*")):
+        entry = {"name": field(zone / "name"), "enabled": field(zone / "enabled")}
+        for constraint in sorted(zone.glob("constraint_*_name")):
+            number = constraint.name.split("_")[1]
+            entry[field(constraint) or f"constraint {number}"] = {
+                "limit_uw": field(zone / f"constraint_{number}_power_limit_uw"),
+                "window_us": field(zone / f"constraint_{number}_time_window_us")}
+        rapl[zone.name] = entry
+    info["rapl"] = rapl
+    info["rapl_lock"] = "unknown (the lock bit is in MSR 0x610; this image reads no MSRs)"
+    throttle = {}
+    for cpu in sorted(base.glob("cpu[0-9]*")):
+        counts = {key: field(cpu / "thermal_throttle" / key) for key in
+                  ("core_throttle_count", "package_throttle_count")}
+        if any(counts.values()):
+            throttle[cpu.name] = counts
+    info["thermal_throttle"] = throttle
+    return info
+
+
+def battery_health(root):
+    """Cycle count, full versus design capacity, from every battery."""
+    found = []
+    for path in sorted((root / "sys/class/power_supply").glob("*")):
+        values = uevent(path)
+        if values.get("POWER_SUPPLY_TYPE") != "Battery":
+            continue
+        full = values.get("POWER_SUPPLY_CHARGE_FULL") or values.get("POWER_SUPPLY_ENERGY_FULL")
+        design = values.get("POWER_SUPPLY_CHARGE_FULL_DESIGN") or values.get("POWER_SUPPLY_ENERGY_FULL_DESIGN")
+        health = None
+        try:
+            health = round(100 * int(full) / int(design), 1) if full and design and int(design) else None
+        except ValueError:
+            pass
+        found.append({"name": path.name, "cycle_count": values.get("POWER_SUPPLY_CYCLE_COUNT"),
+                      "full": full, "design": design, "health_percent": health,
+                      "voltage_now": values.get("POWER_SUPPLY_VOLTAGE_NOW"),
+                      "power_now": values.get("POWER_SUPPLY_POWER_NOW") or values.get("POWER_SUPPLY_CURRENT_NOW"),
+                      "status": values.get("POWER_SUPPLY_STATUS"), "capacity": values.get("POWER_SUPPLY_CAPACITY")})
+    return found
+
+
+def connector_details(root):
+    """Each DRM connector's type (LVDS on this MacBook), status and DPMS state."""
+    found = []
+    for path in sorted((root / "sys/class/drm").glob("card*-*")):
+        kind = re.sub(r"-\d+\Z", "", path.name.split("-", 1)[1]) if "-" in path.name else path.name
+        found.append({"name": path.name, "type": kind, "status": field(path / "status"),
+                      "dpms": field(path / "dpms"), "enabled": field(path / "enabled")})
+    return found
+
+
+def power_controls(root):
+    """USB runtime power control, SATA link power management, rfkill."""
+    usb = {path.name: field(path / "power/control") for path in sorted((root / "sys/bus/usb/devices").glob("*"))
+           if (path / "power/control").exists()}
+    sata = {path.name: field(path / "link_power_management_policy")
+            for path in sorted((root / "sys/class/scsi_host").glob("host*"))
+            if (path / "link_power_management_policy").exists()}
+    rfkill = [{"name": field(path / "name"), "type": field(path / "type"), "soft": field(path / "soft"),
+               "hard": field(path / "hard")} for path in sorted((root / "sys/class/rfkill").glob("rfkill*"))]
+    return {"usb_power_control": usb, "sata_link_power": sata, "rfkill": rfkill}
+
+
+def bcma_cores(root):
+    """The Broadcom Wi-Fi chip's cores; b43 support depends on the 802.11 core revision."""
+    return [{"device": path.name, **{key: field(path / key) for key in ("manuf", "id", "rev", "class")}}
+            for path in sorted((root / "sys/bus/bcma/devices").glob("*"))]
+
+
+def clamp_probe(root=Path("/"), seconds=3.0, *, spawn=None, sleep=time.sleep):
+    """Run one busy thread for a few seconds and sample the clock speed.
+
+    Without a battery the firmware asserts PROCHOT and holds the CPU near
+    1.2 GHz; this shows whether that is happening.
+    """
+    cpus = sorted((root / "sys/devices/system/cpu").glob("cpu[0-9]*/cpufreq/scaling_cur_freq"))
+    if not cpus:
+        return {"available": False}
+    command = [sys.executable, "-c", f"import time\nend=time.monotonic()+{seconds}\nwhile time.monotonic()<end: pass"]
+    process = (spawn or (lambda: subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)))()
+    samples = []
+    try:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            sleep(0.25)
+            values = []
+            for path in cpus:
+                try:
+                    values.append(int(field(path) or "0") // 1000)
+                except ValueError:
+                    pass
+            if values:
+                samples.append(max(values))
+    finally:
+        try:
+            process.wait(seconds + 2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+    if not samples:
+        return {"available": False}
+    peak = max(samples)
+    return {"available": True, "seconds": seconds, "peak_mhz": peak, "lowest_mhz": min(samples),
+            "clamped": peak <= 1300}
+
 
 
 def power_supplies(root):
@@ -458,8 +669,13 @@ def section(title, body):
     return f"===== {title} =====\n{body.rstrip()}\n\n"
 
 
-def hardware_report(root=Path("/")):
-    """A plain-text report of everything the kernel shows about this machine."""
+def hardware_report(root=Path("/"), *, slow=False, load=False):
+    """A plain-text report of everything the kernel shows about this machine.
+
+    `slow` adds the SMC key list, once per boot and for Check hardware.
+    `load` adds a 3 s single-thread load, only when the owner asks for a
+    check, so it never competes with the being's own start.
+    """
     parts = []
 
     def add(title, make):
@@ -486,15 +702,30 @@ def hardware_report(root=Path("/")):
     add("input devices", lambda: read(root / "proc/bus/input/devices"))
     add("lid", lambda: lid_state(root))
     add("hwmon (applesmc, coretemp, ...)", lambda: hwmon(root))
+    add("applesmc readings", lambda: smc_readings(root))
+    if slow:
+        add("applesmc keys (key_at_index, data for BCLM and BFCL only)", lambda: smc_keys(root))
     add("power supplies", lambda: power_supplies(root))
+    add("battery health", lambda: battery_health(root))
+    add("cpu frequency, intel_pstate, RAPL, throttling", lambda: cpu_power(root))
+    if load:
+        add("single-thread load (3 s): clock speed", lambda: clamp_probe(root) if root == Path("/") else None)
     add("backlight", lambda: backlights(root))
+    add("drm connectors (type, dpms)", lambda: connector_details(root))
+    add("mixer (amixer scontents)", lambda: (run(["amixer", "scontents"]) or "(amixer is not on this image)")
+        if root == Path("/") else None)
     add("network interfaces", lambda: interfaces(root))
+    add("lspci -nn", lambda: run(["lspci", "-nn"]) if root == Path("/") else None)
+    add("bcma cores (b43 core revision)", lambda: bcma_cores(root))
     add("b43 firmware files", lambda: firmware_files(root))
+    add("power controls (USB, SATA link, rfkill)", lambda: power_controls(root))
     add("cameras (video4linux)", lambda: cameras(root))
     add("block devices (read from sysfs only)", lambda: block_devices(root))
+    add("SSD health (smartctl)", lambda: (run(["smartctl", "-H", "-A", "/dev/sda"])
+                                          or "(smartctl is not on this image)") if root == Path("/") else None)
     add("mounts", lambda: read(root / "proc/self/mounts"))
     add("loaded modules", lambda: read(root / "proc/modules"))
-    return mask_mac("".join(parts))
+    return scrub("".join(parts))
 
 
 # --- the summary ------------------------------------------------------------
@@ -561,13 +792,26 @@ def summary(root=Path("/"), *, boot=None, notable=None, journal_bytes=None, fail
         say("Battery", "NOT found")
     mains = [s for s in supplies if s["values"].get("POWER_SUPPLY_TYPE") == "Mains"]
     say("Charger", ", ".join(f"{s['name']} online={s['values'].get('POWER_SUPPLY_ONLINE', '?')}" for s in mains) or "not found")
-    sensors = guard(lambda: hwmon(root), [])
-    smc = [s for s in sensors if isinstance(s, dict) and s["name"] == "applesmc"] if isinstance(sensors, list) else []
+    if batteries:
+        health = guard(lambda: battery_health(root), [])
+        if health:
+            first = health[0]
+            say("Battery health", f"{first['health_percent']}% of design" if first["health_percent"] is not None
+                else "design capacity unknown")
+            say("Battery cycles", first["cycle_count"] or "unknown")
+    smc = guard(lambda: smc_readings(root))
     if smc:
-        fans = {k: v for k, v in smc[0]["readings"].items() if k.startswith("fan")}
-        say("applesmc", f"found, {len(smc[0]['readings'])} readings, fans {json.dumps(fans) if fans else 'none'}")
+        fans = {k: v for k, v in smc["readings"].items() if k.startswith("fan") and k.endswith("_input")}
+        say("applesmc", f"found at {smc['path']}, {len(smc['readings'])} readings, "
+                        f"fans {json.dumps(fans) if fans else 'none'}")
     else:
         say("applesmc", "NOT found")
+    power = guard(lambda: cpu_power(root))
+    if isinstance(power, dict) and power.get("scaling_driver"):
+        pstate = power["intel_pstate"]
+        say("CPU scaling", f"{power['scaling_driver']} {power['scaling_governor'] or ''}, max "
+                           f"{int(power['scaling_max_freq'] or 0) // 1000} MHz, no_turbo={pstate['no_turbo']}, "
+                           f"max_perf_pct={pstate['max_perf_pct']}")
     camera = guard(lambda: cameras(root), [])
     usb = guard(lambda: usb_devices(root), [])
     usb = usb if isinstance(usb, list) else []
@@ -596,7 +840,7 @@ def summary(root=Path("/"), *, boot=None, notable=None, journal_bytes=None, fail
                        ("audio", "Audio messages"), ("smc", "applesmc messages")):
         if notable.get(key):
             tail += ["", f"--- {title} (first {len(notable[key])}) ---", *notable[key]]
-    return mask_mac("\n".join(head + lines + tail) + "\n")
+    return scrub("\n".join(head + lines + tail) + "\n")
 
 
 def uptime(root):
@@ -626,6 +870,7 @@ class Journal:
         self.process = None
         self.restarts = 0
         self.partial = b""
+        self.unwritten = b""
         self.notable = notable if notable is not None else {}
         self.stopped = False
 
@@ -651,12 +896,21 @@ class Journal:
             for key, pattern in NOTABLE:
                 kept = self.notable.setdefault(key, [])
                 if len(kept) < NOTABLE_KEEP and pattern.search(text):
-                    kept.append(text[:300])
+                    kept.append(scrub(text)[:300])
 
     def feed(self, data, free):
         self.scan(data)
         if self.stopped:
             return
+        # Identifiers are masked on whole lines, so none can hide across reads.
+        pending = self.unwritten + data
+        cut = pending.rfind(b"\n") + 1
+        if cut == 0 and len(pending) < 4096:
+            self.unwritten = pending
+            return
+        cut = cut or len(pending)
+        self.unwritten = pending[cut:]
+        data = scrub(pending[:cut].decode("utf-8", "replace")).encode("utf-8")
         if self.written + len(data) > self.cap or free < STOP_SPACE:
             self.stream.write(b"\n[being-usb-logs: journal copy stopped here, "
                               + (b"size cap reached" if free >= STOP_SPACE else b"stick nearly full") + b"]\n")
@@ -705,6 +959,9 @@ class Journal:
                 self.process.kill()
             self.process = None
         if not self.stream.closed:
+            if self.unwritten:
+                self.stream.write(scrub(self.unwritten.decode("utf-8", "replace")).encode("utf-8"))
+                self.unwritten = b""
             self.pending = True
             self.sync(force=True)
             self.stream.close()
@@ -714,15 +971,15 @@ def failed_units():
     return run(["systemctl", "list-units", "--failed", "--plain", "--no-legend", "--no-pager"])
 
 
-def snapshot(folder, number, journal, label):
+def snapshot(folder, number, journal, label, *, slow=False):
     """Rewrite the report files in this boot's folder."""
     failed = failed_units()
     for name, make in (
         ("summary.txt", lambda: summary(boot=f"#{number}", notable=journal.notable if journal else None,
                                         journal_bytes=journal.written if journal else None,
                                         failed_units=failed)),
-        ("hardware-report.txt", lambda: f"Snapshot: {label}\n\n" + hardware_report()),
-        ("dmesg.txt", lambda: mask_mac(kernel_log(Path("/")) or "")),
+        ("hardware-report.txt", lambda: f"Snapshot: {label}\n\n" + hardware_report(slow=slow)),
+        ("dmesg.txt", lambda: scrub(kernel_log(Path("/")) or "")),
         ("services.txt", lambda: run(["systemctl", "list-units", "--all", "--plain", "--no-pager"]) or ""),
     ):
         try:
@@ -758,8 +1015,20 @@ def serve():
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         log(f"no logs partition used: {error}")
         return 0
-    log(f"writing diagnostics to {device} (label {label or 'none'}) on boot disk {disk}")
     STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if (base / LOGGING_OFF).exists():
+        if (STATE_DIR / "enable").exists():
+            (base / LOGGING_OFF).unlink(missing_ok=True)
+            (STATE_DIR / "enable").unlink(missing_ok=True)
+            (STATE_DIR / "off").unlink(missing_ok=True)
+            append_line(base / "boots.txt", "diagnostics switched back on by the owner")
+        else:
+            (STATE_DIR / "off").write_text("owner\n", encoding="utf-8")
+            log("the owner switched Try diagnostics off; nothing is written")
+            os.chdir("/")
+            subprocess.run(["umount", str(base)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return 0
+    log(f"writing diagnostics to {device} (label {label or 'none'}) on boot disk {disk}")
     folder = current_folder()
     if folder is None or not folder.is_dir():
         number, folder = new_folder(base)
@@ -796,7 +1065,9 @@ def serve():
                 registered = journal.process
         elapsed = time.monotonic() - started
         if due and elapsed >= due[0]:
-            snapshot(folder, number, journal, f"{due.pop(0)} s after the logger started")
+            # The slow checks once per boot, after the being has settled.
+            when = due.pop(0)
+            snapshot(folder, number, journal, f"{when} s after the logger started", slow=when == SLOW_SNAPSHOT)
             continue
         wait = min(1.0, (due[0] - elapsed) if due else 1.0)
         if journal.pending:
@@ -844,12 +1115,133 @@ def save_check(menu_report=None):
         if menu_report is not None:
             body += section("Check hardware (menu)", json.dumps(menu_report, indent=1, default=str))
         body += section("summary", summary())
-        body += hardware_report()
-        write_file(path, mask_mac(body))
+        body += hardware_report(slow=True, load=True)
+        write_file(path, scrub(body))
         return path
     except Exception as error:
         log(f"could not save the hardware check: {error!r}")
         return None
+
+
+# --- guided checks, with the owner at the keyboard (Check hardware, G) ------
+
+KEY_NAMES = {
+    1: "Esc", 59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6", 65: "F7", 66: "F8", 67: "F9",
+    68: "F10", 87: "F11", 88: "F12", 113: "Mute", 114: "VolumeDown", 115: "VolumeUp", 120: "Scale",
+    161: "Eject", 163: "NextSong", 164: "PlayPause", 165: "PreviousSong", 204: "Dashboard",
+    224: "BrightnessDown", 225: "BrightnessUp", 229: "KbdIllumDown", 230: "KbdIllumUp", 464: "Fn",
+}
+EVENT = "llHHi"  # struct input_event on x86_64: timeval, type, code, value
+
+
+def keyboard_events(root=Path("/")):
+    text = read(root / "proc/bus/input/devices") or ""
+    found = []
+    for block in text.strip().split("\n\n"):
+        handlers = re.search(r"^H: Handlers=(.*)$", block, re.M)
+        if handlers and "kbd" in handlers[1].split():
+            found += [root / "dev/input" / name for name in handlers[1].split() if re.fullmatch(r"event\d+", name)]
+    return found
+
+
+def capture_keys(seconds=10.0, *, paths=None, clock=time.monotonic):
+    """Key codes pressed in the next few seconds, by name where known. Read-only."""
+    import struct
+
+    size = struct.calcsize(EVENT)
+    handles = []
+    for path in paths if paths is not None else keyboard_events():
+        try:
+            handles.append(os.open(path, os.O_RDONLY | os.O_NONBLOCK))
+        except OSError:
+            continue
+    pressed = []
+    selector = selectors.DefaultSelector()
+    try:
+        for fd in handles:
+            selector.register(fd, selectors.EVENT_READ)
+        deadline = clock() + seconds
+        while handles and clock() < deadline and len(pressed) < 200:
+            for key, _ in selector.select(max(0.0, min(0.25, deadline - clock()))):
+                try:
+                    data = os.read(key.fd, size * 64)
+                except BlockingIOError:
+                    continue
+                for offset in range(0, len(data) - size + 1, size):
+                    _, _, kind, code, value = struct.unpack_from(EVENT, data, offset)
+                    if kind == 1 and value == 1:
+                        pressed.append(KEY_NAMES.get(code, f"code {code}"))
+    finally:
+        selector.close()
+        for fd in handles:
+            os.close(fd)
+    return {"devices": len(handles), "pressed": pressed}
+
+
+def blank_check(root=Path("/"), *, seconds=1.0, sleep=time.sleep):
+    """Turn the panel backlight off through bl_power for a moment, then restore it."""
+    results = []
+    for path in sorted((root / "sys/class/backlight").glob("*")):
+        control = path / "bl_power"
+        before = field(control)
+        if before is None:
+            results.append({"name": path.name, "bl_power": None})
+            continue
+        entry = {"name": path.name, "bl_power_before": before, "brightness": field(path / "actual_brightness")}
+        try:
+            control.write_text("4\n")
+            sleep(seconds)
+            entry["brightness_while_off"] = field(path / "actual_brightness")
+        except OSError as error:
+            entry["error"] = str(error)
+        finally:
+            try:
+                control.write_text(f"{before}\n")
+            except OSError as error:
+                entry["restore_error"] = str(error)
+        entry["bl_power_after"] = field(control)
+        results.append(entry)
+    return results
+
+
+def save_guided(results):
+    """Write the guided check results to this boot's folder. Returns the file or None."""
+    try:
+        folder = current_folder()
+        if folder is None or not folder.is_dir():
+            return None
+        path = folder / f"guided-check-{time.strftime('%H%M%S', time.gmtime())}.txt"
+        write_file(path, scrub(section("Guided checks", results)))
+        return path
+    except Exception as error:
+        log(f"could not save the guided check: {error!r}")
+        return None
+
+
+def logging_enabled():
+    """None when this boot has no PIPLOGS stick, else whether diagnostics are kept."""
+    if (STATE_DIR / "off").exists():
+        return False
+    folder = current_folder()
+    return True if folder is not None and folder.is_dir() else None
+
+
+def set_logging(on, *, systemctl=None):
+    """The Setup switch for Try diagnostics. Off lasts across boots of this stick."""
+    control = systemctl or (lambda *args: subprocess.run(["systemctl", *args], check=False, timeout=30,
+                                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if on:
+        (STATE_DIR / "enable").write_text("owner\n", encoding="utf-8")
+        (STATE_DIR / "folder").unlink(missing_ok=True)
+        control("restart", "being-usb-logs.service")
+        return
+    folder = current_folder()
+    if folder is not None and folder.is_dir():
+        write_file(folder.parent / LOGGING_OFF, "The owner switched Try diagnostics off in Setup.\n"
+                   "Delete this file, or switch them on again in Setup, to keep diagnostics.\n")
+    (STATE_DIR / "off").write_text("owner\n", encoding="utf-8")
+    control("stop", "being-usb-logs.service")
 
 
 def main(argv=None):

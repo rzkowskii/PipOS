@@ -1,6 +1,16 @@
 # BeingOS: a 2012 MacBook Pro that is its own AI
 
-*Design and phased plan, written 2026-11-20 and budgeted for the 13-inch MacBookPro9,2. Building started the same day. The OS image now exists and runs in a virtual laptop on a development Mac; [README.md](README.md) says where it stands and [docs/LAB.md](docs/LAB.md) how. The image first booted on the real laptop, from a USB stick, on 23 November 2026. Nothing is installed on its internal disk yet, and the estimates below have not been replaced by measurements. "BeingOS" is a working title.*
+> **Historical (marked 23 November 2026).** The product is now **PipOS**
+> ("Persistent Intelligence Platform Operating System"); the being is Pip.
+> This file is the original design of 20 November, kept as a record. The current statement of
+> intent is [docs/DESIGN.md](docs/DESIGN.md), changed commitments are in
+> [docs/DECISIONS.md](docs/DECISIONS.md), status is in [STATUS.md](STATUS.md)
+> and the work ahead is in [docs/IMPROVEMENT-PLAN.md](docs/IMPROVEMENT-PLAN.md).
+> Two things below are out of date: the dream model default is now
+> **Qwen3-1.7B Q4_0** (a 4B only as an optional arm; §7 and §8 say 4B), and
+> the CPU is recorded as an **i5-3210M**, to be confirmed on the first boot.
+
+*Design and phased plan, written 2026-11-20 and budgeted for the 13-inch MacBookPro9,2. Building started the same day. The OS image now exists and runs in a virtual laptop on a development Mac; [README.md](README.md) says where it stands and [docs/LAB.md](docs/LAB.md) how. Nothing has been installed or measured on the real laptop yet. "BeingOS" is a working title.*
 
 ![The screen is the face](reference/mockup-face.webp)
 

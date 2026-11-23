@@ -1,5 +1,23 @@
 # Develop against the installed MacBook Pro
 
+> **Read this first (23 Nov 2026).** This guide assumes a **maintenance** build
+> with a shell and LAN access (`BEING_LAPTOP_MAINTENANCE=1`). The shipping
+> laptop image and the first-boot Try stick have no shell, no SSH and no
+> root login. For the first boot use [FIRST-BOOT.md](FIRST-BOOT.md), and read
+> its logs with `lab/try_timings.py`. Do not install to the internal SSD yet,
+> not even with the maintenance build (plan principle 3): the laptop does not
+> yet have its own RAUC compatible strings and release key (plan 1.2), so a
+> maintenance update could turn it back into the lab image.
+>
+> The CPU is recorded as an **i5-3210M** (2.5 GHz, 2 cores, 4 threads, AVX
+> without AVX2), to be confirmed from `/proc/cpuinfo` in the first boot's
+> `summary.txt`.
+>
+> **Before any wipe, under macOS (plan 0.7, owner):** install the last
+> firmware update; record the battery cycle count and condition here; run
+> `bclm read`, then `sudo bclm write 77`, charge, and look for "Not Charging"
+> at about 80%. Record the results in this file.
+
 Use the MacBookPro9,2 for the measurements that x86 emulation cannot
 answer. The Mac Studio runs the controller, stores the evidence and builds
 releases. The MacBook runs the candidate on its own CPU, screen, speakers,
@@ -37,7 +55,7 @@ A Linux live USB can establish a read-only hardware inventory first.
 | Power and cooling | Confirm the thermals follow `coretemp` and AppleSMC reports, with fan RPM, AC state and battery discharge where available. Take an idle and warm-voice capture on AC and battery, then check sustained clocks and throttle counters during a longer repeated-turn run. |
 
 Use `being-installer --check --json` for the kernel inventory when a
-BeingOS maintenance console is available. Use `lab.hardware collect`
+PipOS maintenance console is available. Use `lab.hardware collect`
 after installation and enrollment for the private baseline. Driver
 binding, PCM endpoint detection and software lid timing are reported
 separately from audible speaker output and visible panel wake. [First-boot
@@ -53,7 +71,7 @@ power inputs, the Linux lid reader with a virtual input device, and camera
 consent with a detector fixture. The observations below are pending on the
 physical MacBook. [Lid and body](LAB.md#try-the-lid-and-body) · [Camera fixture](LAB.md#try-camera-presence-and-gaze)
 
-From a local BeingOS maintenance shell, take a baseline before exercising
+From a local PipOS maintenance shell, take a baseline before exercising
 the controls. The sampler records named temperature channels and fan RPM,
 independent mains and battery state, requested panel brightness and power,
 and ALSA and lid capabilities. It samples the AppleSMC platform device
@@ -81,7 +99,7 @@ done
 | Temperature and fans | Record idle, successive voice turns and quiet recovery on AC and battery. Keep the hwmon driver, `temp*_label`, value in °C, fan RPM, CPU frequency, and throttle counts. Verify which `coretemp` package/core labels and AppleSMC keys actually change. | Compare Pip's temperature report with the hottest readable `coretemp` channel. The metrics collector also sees named AppleSMC temperatures and fan speeds. Their influence on behavior remains a separate check. Record absent or unreadable channels as unknown and record the sampling interval. |
 | Ambient light and panel | Read the available AppleSMC `light` channel under steady dim and bright conditions. Record the active `/sys/class/backlight` device, its `brightness`, `max_brightness` and `bl_power`, and observed panel glow. Check the built-in brightness keys through a lid cycle. | Verify lid close powers the backlight down and reopen restores the previous requested level after the first face frame. Ambient-driven brightness and drowsiness still need appliance acceptance once wired. |
 | Lid and wake | Compare `SW_LID` on the named input device with panel light and actual audio during close, open and rapid reclose. Observe wake once with Cortex stopped in a controlled lab session. | Closing during speech stops playback and microphone capture. On reopen, the closed first frame precedes the wake gesture. Log lid-open-to-visible-frame time, preserved mute, and any duplicate wake or backlight flash. |
-| Trackpad and keyboard | Identify the built-in trackpad and keyboard by name and event handler. On a live Linux image with `evtest`, observe `BTN_TOUCH` or `BTN_LEFT` from the intended gesture, then check whether the BeingOS face receives it. Test Esc during thinking and during a longer spoken reply. | A click or exposed touch should produce a glance. Esc is the current interrupt. The separate tap-to-interrupt gate passes when a tap cancels the turn and makes actual speaker output stop as well. Record touch, physical click and Esc independently. |
+| Trackpad and keyboard | Identify the built-in trackpad and keyboard by name and event handler. On a live Linux image with `evtest`, observe `BTN_TOUCH` or `BTN_LEFT` from the intended gesture, then check whether the PipOS face receives it. Test Esc during thinking and during a longer spoken reply. | A click or exposed touch should produce a glance. Esc is the current interrupt. The separate tap-to-interrupt gate passes when a tap cancels the turn and makes actual speaker output stop as well. Record touch, physical click and Esc independently. |
 | Microphone and speakers | Confirm the built-in ALSA capture/playback endpoints and mixer. Use a real spoken turn with “Hey Pip,” a follow-up, a nearby non-wake phrase and a long reply. Watch the chosen microphone's `/proc/asound/card*/pcm*c/sub*/status` while idle, speaking, muted and lid-closed. | Record audible output, wake and transcription success, and whether capture closes during speech, mute and lid close. Check M or F10 mute and Esc interrupt at the physical keyboard. Include a fan-noise run and measure stop time at the speakers. |
 | Camera and indicator | Match the FaceTime HD name and device path in `/sys/class/video4linux`. With the owner's opt-in in Try, observe the physical LED and capture handle through allow, revoke, lid close and reopen. | Confirm local face tracking, LED and handle release on revocation or lid close, and that face presence without “Hey Pip” leaves speech attention closed. Eye-contact attention and deliberate descriptions have separate acceptance. |
 | Balance and keyboard glow | Check whether AppleSMC exposes `position` and a keyboard-backlight LED class device. Observe the reported axes with a gentle stationary tilt and the LED level under built-in keyboard-light control. | Record any present kernel channels and whether the appliance exposes controls. Tilt response and asleep keyboard glow remain open. |
@@ -112,7 +130,7 @@ ssh-keygen -t ed25519 -N '' -f "$access/develop"
 Copy only `observe.pub`, `develop.pub` (if granting development access),
 and the repository's `mind/` source directory to a provisioning USB. Boot a Linux live USB
 on the MacBook. Confirm the disk, the installed ext4 partition labeled
-`mind`, and the radio device before mounting anything. If a BeingOS Try
+`mind`, and the radio device before mounting anything. If a PipOS Try
 stick is attached, remove it to avoid choosing its disk. The examples
 below assume the MacBook is reserved at `192.168.1.50`, the Mac Studio is
 reserved at `192.168.1.20`, and the Linux interface name for the MacBook
@@ -165,7 +183,7 @@ wired observation address for reconnect experiments.
 
 Enrollment prints the MacBook's SSH host-key lines, one per enabled port.
 Transfer those lines from the live console to
-`$HOME/.ssh/beingos/known_hosts` on the Mac Studio, then boot BeingOS.
+`$HOME/.ssh/beingos/known_hosts` on the Mac Studio, then boot PipOS.
 Use the same address in the commands below. If the address changes,
 re-enroll and update the pins from trusted output. The host key persists
 across re-enrollment and system updates.
@@ -202,7 +220,7 @@ window. Use the local controls when changing the mode that carries your
 current connection. When an existing pair or Wi-Fi profile needs changing
 without a reachable console, boot Linux live media and use the offline
 provisioning commands above. The selected mode takes effect on the next
-BeingOS boot. Set `local-only` to return to Offline.
+PipOS boot. Set `local-only` to return to Offline.
 
 The next rebuilt image can run the isolated simulated dual-stack check.
 That test uses synthetic addresses and QEMU. After physical authorization,

@@ -29,6 +29,10 @@ pub struct Life {
     pub body: String,
     /// Seconds asleep before this wake, when it went to sleep properly.
     pub slept: Option<u64>,
+    /// CLOCK_BOOTTIME at this wake, when known. "Awake N" is counted on it,
+    /// so a wall clock set (or corrected) after waking cannot stretch or
+    /// shrink how long it has been awake.
+    pub woke_boot_clock: Option<f64>,
     dir: PathBuf,
 }
 
@@ -71,7 +75,14 @@ fn new_id() -> io::Result<String> {
 impl Life {
     /// Wake. `boot` identifies this boot of the machine, and `body` describes
     /// the hardware. Restarting the brainstem within one boot is not a new wake.
+    #[cfg(test)]
     pub fn wake(dir: &Path, now: u64, boot: &str, body: &str) -> io::Result<Life> {
+        Life::wake_at(dir, now, None, boot, body)
+    }
+
+    /// Wake, with the boot clock read now (`boot_clock`, seconds since the
+    /// machine started, sleep included).
+    pub fn wake_at(dir: &Path, now: u64, boot_clock: Option<f64>, boot: &str, body: &str) -> io::Result<Life> {
         if dir.join(".being-restore-in-progress").try_exists()? {
             return Err(bad("The life record is waiting for a restore to finish"));
         }
@@ -88,7 +99,11 @@ impl Life {
         if !first && was_awake && record.get("boot").and_then(Value::as_str) == Some(boot) {
             // Same boot: only the brainstem restarted. The facts of this wake stand.
             let this = &record["this_wake"];
+            // The boot clock of this wake was written when it began. A record
+            // without one (an older brainstem) counts from the wall clock.
+            let woke_boot_clock = record.get("awake_since_boot_clock").and_then(Value::as_f64);
             return Ok(Life {
+                woke_boot_clock,
                 id,
                 born,
                 wakes: record["wakes"].as_u64().unwrap_or(1),
@@ -115,16 +130,30 @@ impl Life {
         record["body"] = json!(body);
         record["boot"] = json!(boot);
         record["awake_since"] = json!(now);
+        record["awake_since_boot_clock"] = json!(boot_clock);
         record["this_wake"] = json!({ "first": first, "lost_power": lost_power, "new_body": new_body, "slept": slept });
         write_whole(dir, &record)?;
 
-        Ok(Life { id, born, wakes, woke_at: now, first, lost_power, new_body, body: body.to_string(), slept, dir: dir.to_path_buf() })
+        Ok(Life {
+            id,
+            born,
+            wakes,
+            woke_at: now,
+            first,
+            lost_power,
+            new_body,
+            body: body.to_string(),
+            slept,
+            woke_boot_clock: boot_clock,
+            dir: dir.to_path_buf(),
+        })
     }
 
     /// Go to sleep properly. After this, the next wake knows it was not a power cut.
     pub fn sleep(&self, now: u64) -> io::Result<()> {
         let mut record = read(&self.dir)?.ok_or_else(|| bad(format!("{FILE} has gone")))?;
         record["awake_since"] = Value::Null;
+        record["awake_since_boot_clock"] = Value::Null;
         record["last_sleep"] = json!(now);
         write_whole(&self.dir, &record)
     }
@@ -147,8 +176,18 @@ impl Life {
     }
 
     /// A few true words about itself, for the senses line.
+    #[cfg(test)]
     pub fn senses(&self, now: u64) -> String {
-        let awake = now.saturating_sub(self.woke_at);
+        self.senses_at(now, None)
+    }
+
+    /// The same, counting time awake on the boot clock when both ends of it
+    /// are known.
+    pub fn senses_at(&self, now: u64, boot_clock: Option<f64>) -> String {
+        let awake = match (boot_clock, self.woke_boot_clock) {
+            (Some(clock), Some(woke)) if clock >= woke => (clock - woke) as u64,
+            _ => now.saturating_sub(self.woke_at),
+        };
         let mut parts = vec![format!("awake {}", span(awake))];
         // What happened on the way here is worth knowing for a while, not forever.
         if awake < 15 * 60 {
@@ -213,6 +252,26 @@ pub fn body() -> String {
         "an unknown machine".to_string()
     } else {
         parts.join(" / ")
+    }
+}
+
+/// Seconds on CLOCK_BOOTTIME: since the machine started, counting suspend,
+/// and never set by anyone. None where there is no such clock.
+pub fn boot_clock() -> Option<f64> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: an all-zero timespec is valid (some C libraries pad it),
+        // and clock_gettime writes only into it.
+        let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+        let status = unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) };
+        if status == 0 {
+            return Some(ts.tv_sec as f64 + ts.tv_nsec as f64 / 1e9);
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
     }
 }
 
@@ -325,5 +384,21 @@ mod tests {
         Life::wake(&d, T0, "boot-1", "b").unwrap().sleep(T0 + 5).unwrap();
         let later = Life::wake(&d, T0 + 12 * 86_400 + 50, "boot-2", "b").unwrap();
         assert!(later.senses(T0 + 12 * 86_400 + 5 * 3600).ends_with("awake 4 hours, 12 days old"));
+    }
+
+    #[test]
+    fn awake_time_follows_the_boot_clock_across_a_restart_and_a_clock_jump() {
+        let d = dir("boot-clock");
+        Life::wake_at(&d, T0, Some(5.0), "boot-1", "b").unwrap().sleep(T0 + 5).unwrap();
+        let a = Life::wake_at(&d, T0 + 100, Some(12.0), "boot-2", "b").unwrap();
+        // The wall clock is corrected by a day; the boot clock moved 10 minutes.
+        assert!(a.senses_at(T0 + 100 + 86_400, Some(612.0)).starts_with("awake 10 min"));
+        // The brainstem restarts within the boot: the same wake, the same clock.
+        let b = Life::wake_at(&d, T0 + 90_000, Some(700.0), "boot-2", "b").unwrap();
+        assert_eq!(b.woke_boot_clock, Some(12.0));
+        assert!(b.senses_at(T0 + 90_000, Some(3612.0)).starts_with("awake 1 hour"));
+        // Without a boot clock it falls back to the wall clock.
+        assert!(b.senses_at(T0 + 100 + 300, None).starts_with("awake 5 min"));
+        assert!(b.senses_at(T0 + 100 + 300, Some(1.0)).starts_with("awake 5 min"), "a clock that went back is not trusted");
     }
 }

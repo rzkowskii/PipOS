@@ -72,3 +72,27 @@ class DreamPolicyTests(unittest.TestCase):
               patch("mind.dream_policy.time.clock_gettime", return_value=123) as clock):
             self.assertEqual(telemetry_time(), 123)
             clock.assert_called_once_with(42)
+
+
+class DreamWindowTests(DreamPolicyTests):
+    """The owner's window from Care: night only, or whenever the lid is closed on AC."""
+
+    def test_closed_window_dreams_by_day_and_night_only_does_not(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            mind = Path(directory)
+            policy = DreamPolicy(True, settings_dir=mind)
+            policy.observe({"t": "body.lid", "closed": True})
+            policy.observe({"t": "state.changed", "state": "asleep"})
+            self.snapshot(policy, hour=14)
+            self.assertFalse(policy.eligible(now=10.0), "no consent file: night only")
+            (mind / "dreams-enabled").write_text(json.dumps({"version": 1, "window": "closed"}))
+            self.assertTrue(policy.eligible(now=10.0))
+            (mind / "dreams-enabled").write_text(json.dumps({"version": 1, "window": "night"}))
+            self.assertFalse(policy.eligible(now=10.0))
+            (mind / "dreams-enabled").write_text(json.dumps({"version": 1, "window": "always"}))
+            self.assertFalse(policy.eligible(now=10.0), "an unknown window falls back to night")
+            self.assertTrue(DreamPolicy(True, window="closed").window == "closed")

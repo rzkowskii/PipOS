@@ -48,7 +48,8 @@ class DeviceTzdataLayout(unittest.TestCase):
         self.assertFalse(any(key.startswith(("posix/", "right/")) for key in keys), keys)
         self.assertNotIn("zone1970.tab", keys)
         self.assertIsNone(skills.find_zone("Posix Australia Sydney"))
-        self.assertIsNone(skills.find_zone("Sydney"))
+        # A city on its own resolves when exactly one zone ends with it (task 1.10).
+        self.assertEqual(skills.find_zone("Sydney").key, "Australia/Sydney")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,277 @@
+From: PipOS <pipos@localhost>
+Date: Sun, 23 Nov 2026 00:00:00 +0000
+Subject: [PATCH] hwmon: applesmc: battery charge limit, LED and inhibit attributes
+
+Intel Macs without a T2 chip keep a charge limit in the SMC key BCLM
+(percent), the MagSafe LED threshold in BFCL, and on some models a charge
+inhibit in CH0B/CH0C. Expose them on the applesmc platform device:
+
+  /sys/devices/platform/applesmc.768/battery_charge_limit    BCLM, 20-100
+  /sys/devices/platform/applesmc.768/battery_charge_led      BFCL, 20-100
+  /sys/devices/platform/applesmc.768/battery_charge_inhibit  CH0B/CH0C, 0/1
+
+Each file is created only when its one-byte key exists. Probing reads key
+metadata only; nothing is written to the SMC until user space writes a
+file, so a boot never changes firmware state. Values outside 20-100 are
+refused with -EINVAL. 100 means no cap.
+
+PipOS carries this in-tree because applesmc is built in, so an
+out-of-tree replacement module (applesmc-next) can never load.
+
+Unverified on hardware: whether the MacBookPro9,2 honours BCLM under
+Linux (expect "Not charging" at about limit+3%), and the CH0B/CH0C value
+(0x02 inhibits, as applesmc-next writes it).
+---
+--- a/drivers/hwmon/applesmc.c
++++ b/drivers/hwmon/applesmc.c
+@@ -73,6 +73,19 @@
+ #define FANS_MANUAL		"FS! " /* r-w ui16 */
+ #define FAN_ID_FMT		"F%dID" /* r-o char[16] */
+ 
++/*
++ * Battery charging, on Intel Macs without a T2 chip. Each attribute exists
++ * only when its key does, and nothing is written at probe time: the SMC
++ * keeps its own value until user space writes one.
++ */
++#define BATTERY_CHARGE_LIMIT_KEY	"BCLM" /* r-w ui8, percent */
++#define BATTERY_CHARGE_LED_KEY		"BFCL" /* r-w ui8, percent (LED turns green) */
++#define BATTERY_CHARGE_INHIBIT_B_KEY	"CH0B" /* r-w hex_ (1 byte) */
++#define BATTERY_CHARGE_INHIBIT_C_KEY	"CH0C" /* r-w hex_ (1 byte) */
++#define BATTERY_CHARGE_PERCENT_MIN	20
++#define BATTERY_CHARGE_PERCENT_MAX	100
++#define BATTERY_CHARGE_INHIBIT_VALUE	0x02
++
+ #define TEMP_SENSOR_TYPE	"sp78"
+ 
+ /* List of keys used to read/write fan speeds */
+@@ -130,6 +143,10 @@
+ 	int num_light_sensors;		/* number of light sensors */
+ 	bool has_accelerometer;		/* has motion sensor */
+ 	bool has_key_backlight;		/* has keyboard backlight */
++	bool has_charge_limit;		/* has BCLM, one byte */
++	bool has_charge_led;		/* has BFCL, one byte */
++	bool has_charge_inhibit_b;	/* has CH0B, one byte */
++	bool has_charge_inhibit_c;	/* has CH0C, one byte */
+ 	bool init_complete;		/* true when fully initialized */
+ 	struct applesmc_entry *cache;	/* cached key entries */
+ 	const char **index;		/* temperature key index */
+@@ -493,6 +510,19 @@
+ 
+ 	*value = !IS_ERR(entry);
+ 	return 0;
++}
++
++/*
++ * applesmc_has_byte_key - Report whether an optional one-byte key exists.
++ * Only key metadata is read. A key that cannot be looked up is treated as
++ * absent rather than failing the whole driver.
++ */
++static void applesmc_has_byte_key(const char *key, bool *value)
++{
++	const struct applesmc_entry *entry;
++
++	entry = applesmc_get_entry_by_key(key);
++	*value = !IS_ERR(entry) && entry->len == 1;
+ }
+ 
+ /*
+@@ -621,6 +651,11 @@
+ 	ret = applesmc_has_key(BACKLIGHT_KEY, &s->has_key_backlight);
+ 	if (ret)
+ 		return ret;
++
++	applesmc_has_byte_key(BATTERY_CHARGE_LIMIT_KEY, &s->has_charge_limit);
++	applesmc_has_byte_key(BATTERY_CHARGE_LED_KEY, &s->has_charge_led);
++	applesmc_has_byte_key(BATTERY_CHARGE_INHIBIT_B_KEY, &s->has_charge_inhibit_b);
++	applesmc_has_byte_key(BATTERY_CHARGE_INHIBIT_C_KEY, &s->has_charge_inhibit_c);
+ 
+ 	s->num_light_sensors = left_light_sensor + right_light_sensor;
+ 	s->init_complete = true;
+@@ -630,6 +665,9 @@
+ 	       s->has_accelerometer,
+ 	       s->num_light_sensors,
+ 	       s->has_key_backlight);
++	pr_info("battery charge: limit=%d led=%d inhibit=%d\n",
++		s->has_charge_limit, s->has_charge_led,
++		s->has_charge_inhibit_b || s->has_charge_inhibit_c);
+ 
+ 	return 0;
+ }
+@@ -1072,6 +1110,89 @@
+ 	.brightness_set		= applesmc_brightness_set,
+ };
+ 
++static const char *const applesmc_charge_percent_keys[] = {
++	BATTERY_CHARGE_LIMIT_KEY,
++	BATTERY_CHARGE_LED_KEY,
++};
++
++static ssize_t applesmc_charge_percent_show(struct device *dev,
++				struct device_attribute *attr, char *sysfsbuf)
++{
++	u8 value;
++	int ret;
++
++	ret = applesmc_read_key(applesmc_charge_percent_keys[to_option(attr)],
++				&value, 1);
++	if (ret)
++		return ret;
++
++	return sysfs_emit(sysfsbuf, "%u\n", value);
++}
++
++static ssize_t applesmc_charge_percent_store(struct device *dev,
++				struct device_attribute *attr,
++				const char *sysfsbuf, size_t count)
++{
++	unsigned int percent;
++	u8 value;
++	int ret;
++
++	if (kstrtouint(sysfsbuf, 10, &percent) < 0)
++		return -EINVAL;
++	if (percent < BATTERY_CHARGE_PERCENT_MIN ||
++	    percent > BATTERY_CHARGE_PERCENT_MAX)
++		return -EINVAL;
++
++	value = percent;
++	ret = applesmc_write_key(applesmc_charge_percent_keys[to_option(attr)],
++				 &value, 1);
++	if (ret)
++		return ret;
++
++	return count;
++}
++
++static ssize_t applesmc_charge_inhibit_show(struct device *dev,
++				struct device_attribute *attr, char *sysfsbuf)
++{
++	u8 value;
++	int ret;
++
++	ret = applesmc_read_key(smcreg.has_charge_inhibit_b ?
++				BATTERY_CHARGE_INHIBIT_B_KEY :
++				BATTERY_CHARGE_INHIBIT_C_KEY, &value, 1);
++	if (ret)
++		return ret;
++
++	return sysfs_emit(sysfsbuf, "%d\n", value != 0);
++}
++
++static ssize_t applesmc_charge_inhibit_store(struct device *dev,
++				struct device_attribute *attr,
++				const char *sysfsbuf, size_t count)
++{
++	bool inhibit;
++	u8 value;
++	int ret;
++
++	if (kstrtobool(sysfsbuf, &inhibit) < 0)
++		return -EINVAL;
++
++	value = inhibit ? BATTERY_CHARGE_INHIBIT_VALUE : 0;
++	if (smcreg.has_charge_inhibit_b) {
++		ret = applesmc_write_key(BATTERY_CHARGE_INHIBIT_B_KEY, &value, 1);
++		if (ret)
++			return ret;
++	}
++	if (smcreg.has_charge_inhibit_c) {
++		ret = applesmc_write_key(BATTERY_CHARGE_INHIBIT_C_KEY, &value, 1);
++		if (ret)
++			return ret;
++	}
++
++	return count;
++}
++
+ static struct applesmc_node_group info_group[] = {
+ 	{ "name", applesmc_name_show },
+ 	{ "key_count", applesmc_key_count_show },
+@@ -1111,6 +1232,24 @@
+ 	{ }
+ };
+ 
++static struct applesmc_node_group charge_limit_group[] = {
++	{ "battery_charge_limit", applesmc_charge_percent_show,
++	  applesmc_charge_percent_store, 0 },
++	{ }
++};
++
++static struct applesmc_node_group charge_led_group[] = {
++	{ "battery_charge_led", applesmc_charge_percent_show,
++	  applesmc_charge_percent_store, 1 },
++	{ }
++};
++
++static struct applesmc_node_group charge_inhibit_group[] = {
++	{ "battery_charge_inhibit", applesmc_charge_inhibit_show,
++	  applesmc_charge_inhibit_store },
++	{ }
++};
++
+ /* Module stuff */
+ 
+ /*
+@@ -1231,6 +1370,29 @@
+ 		return;
+ 	input_unregister_device(applesmc_idev);
+ 	applesmc_destroy_nodes(accelerometer_group);
++}
++
++static void applesmc_release_battery_charge(void)
++{
++	applesmc_destroy_nodes(charge_inhibit_group);
++	applesmc_destroy_nodes(charge_led_group);
++	applesmc_destroy_nodes(charge_limit_group);
++}
++
++/* Create the battery charge files for the keys this SMC has */
++static int applesmc_create_battery_charge(void)
++{
++	int ret = 0;
++
++	if (smcreg.has_charge_limit)
++		ret = applesmc_create_nodes(charge_limit_group, 1);
++	if (!ret && smcreg.has_charge_led)
++		ret = applesmc_create_nodes(charge_led_group, 1);
++	if (!ret && (smcreg.has_charge_inhibit_b || smcreg.has_charge_inhibit_c))
++		ret = applesmc_create_nodes(charge_inhibit_group, 1);
++	if (ret)
++		applesmc_release_battery_charge();
++	return ret;
+ }
+ 
+ static int applesmc_create_light_sensor(void)
+@@ -1355,10 +1517,14 @@
+ 	if (ret)
+ 		goto out_fans;
+ 
+-	ret = applesmc_create_accelerometer();
++	ret = applesmc_create_battery_charge();
+ 	if (ret)
+ 		goto out_temperature;
+ 
++	ret = applesmc_create_accelerometer();
++	if (ret)
++		goto out_battery;
++
+ 	ret = applesmc_create_light_sensor();
+ 	if (ret)
+ 		goto out_accelerometer;
+@@ -1381,6 +1547,8 @@
+ 	applesmc_release_light_sensor();
+ out_accelerometer:
+ 	applesmc_release_accelerometer();
++out_battery:
++	applesmc_release_battery_charge();
+ out_temperature:
+ 	applesmc_destroy_nodes(temp_group);
+ out_fans:
+@@ -1406,6 +1574,7 @@
+ 	applesmc_release_key_backlight();
+ 	applesmc_release_light_sensor();
+ 	applesmc_release_accelerometer();
++	applesmc_release_battery_charge();
+ 	applesmc_destroy_nodes(temp_group);
+ 	applesmc_destroy_nodes(fan_group);
+ 	applesmc_destroy_nodes(info_group);

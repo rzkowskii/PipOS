@@ -69,3 +69,54 @@ class RemindersTest(unittest.TestCase):
             with self.subTest(text=text, due_at=due_at, kind=kind), self.assertRaises(ValueError):
                 self.reminders.add(text, due_at, kind=kind)
         self.assertEqual(self.reminders.upcoming(), [])
+
+
+class RingingTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.reminders = Reminders(self.root)
+        self.addCleanup(self.reminders.close)
+
+    def test_an_unanswered_item_rings_three_times_with_gaps(self):
+        from mind.reminders import MAX_RINGS, RING_GAP
+
+        entry = self.reminders.add("Tea", 100, kind="timer", duration=600, now=0)
+        self.assertEqual(self.reminders.delivery(entry.id).duration, 600)
+        now = 100
+        for ring in range(1, MAX_RINGS):
+            self.assertEqual(self.reminders.due(now), entry)
+            self.assertTrue(self.reminders.rang(entry.id, now))
+            self.assertIsNone(self.reminders.due(now + RING_GAP - 1), "waits between repeats")
+            now += RING_GAP
+            self.assertEqual(self.reminders.delivery(entry.id).rings, ring)
+        self.assertFalse(self.reminders.rang(entry.id, now), "the last ring ends it")
+        self.assertIsNone(self.reminders.due(now + 10_000))
+
+    def test_acknowledgement_stops_repeats(self):
+        entry = self.reminders.add("Call Sam", 10)
+        self.reminders.rang(entry.id, 10)
+        self.assertTrue(self.reminders.acknowledge(entry.id))
+        self.assertIsNone(self.reminders.due(10_000))
+
+    def test_forgetting_reaches_reminders_that_mention_it(self):
+        kept = self.reminders.add("Water the basil", 10)
+        self.reminders.add("Buy a present for Tom the cat", 20)
+        self.assertEqual(self.reminders.forget_mentioning(["tom the cat"]), 1)
+        self.assertEqual(self.reminders.upcoming(), [kept])
+
+    def test_an_older_queue_gains_the_new_columns(self):
+        import sqlite3
+
+        old = self.root / "old"
+        old.mkdir()
+        db = sqlite3.connect(old / "reminders.db")
+        db.executescript("CREATE TABLE reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, "
+                         "due_at REAL NOT NULL, kind TEXT NOT NULL); "
+                         "INSERT INTO reminders (text, due_at, kind) VALUES ('Tea', 5, 'timer');")
+        db.close()
+        upgraded = Reminders(old)
+        self.addCleanup(upgraded.close)
+        self.assertEqual(upgraded.due(10).text, "Tea")
+        self.assertEqual(upgraded.delivery(1).rings, 0)

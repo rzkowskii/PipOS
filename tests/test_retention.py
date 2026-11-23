@@ -46,6 +46,16 @@ class RetentionCase(MindCase):
                     self.assertNotIn(needle.encode(), contents, f"{needle!r} reached {path.name}")
 
 
+class ExplicitOnlyForgetting(RetentionCase):
+    async def test_forget_that_drops_the_last_live_exchange_when_nothing_is_archived(self):
+        await self.restart(MemoryPolicy(mode="explicit-only"))
+        await self.say("My neighbour is called Quillonmarker")
+        self.assertIn("Quillonmarker", json.dumps(self.mind.messages))
+        self.assertEqual(await self.say("Forget that"), "Okay. That's forgotten.")
+        self.assertNotIn("Quillonmarker", json.dumps(self.mind.messages))
+        self.assert_not_persisted("Quillonmarker")
+
+
 class RetentionConversation(RetentionCase):
     async def test_default_persistent_mode_recalls_ordinary_history_after_restart(self):
         await self.seed_owner()

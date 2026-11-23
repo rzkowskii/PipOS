@@ -267,3 +267,94 @@ def inventory(*, min_size_bytes=MIN_SIZE_BYTES):
         disks.append(disk)
     return {"boot_disk": whole[boot].device if boot else None,
             "model_disk": whole[models].device if models else None, "disks": disks}
+
+
+# --- what a disk already holds (read-only) ------------------------------------
+
+APFS_TYPE = "7c3457ef-0000-11aa-aa11-00306543ecac"
+HFS_TYPE = "48465300-0000-11aa-aa11-00306543ecac"
+APPLE_BOOT_TYPE = "426f6f74-0000-11aa-aa11-00306543ecac"
+CORE_STORAGE_TYPE = "53746f72-6167-11aa-aa11-00306543ecac"
+MACOS_TYPES = frozenset((APFS_TYPE, HFS_TYPE, APPLE_BOOT_TYPE, CORE_STORAGE_TYPE))
+BEING_NAMES = ("esp", "system-a", "system-b", "models", "mind")
+GPT_ENTRY_LIMIT = 256
+
+
+def _read_at(fd, size, offset):
+    data = b""
+    while len(data) < size:
+        chunk = os.pread(fd, size - len(data), offset + len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
+def gpt_partitions(fd, sector):
+    """(type, name, first_lba, last_lba) for each used GPT entry, or None without a GPT."""
+    import struct
+    import uuid
+
+    header = _read_at(fd, 92, sector)
+    if len(header) < 92 or header[:8] != b"EFI PART":
+        return None
+    entries_lba, count, size = struct.unpack_from("<QII", header, 72)
+    if not 128 <= size <= 4096 or count > GPT_ENTRY_LIMIT or size % 8:
+        return None
+    table = _read_at(fd, count * size, entries_lba * sector)
+    found = []
+    for index in range(len(table) // size):
+        entry = table[index * size:(index + 1) * size]
+        if not any(entry[:16]):
+            continue
+        kind = str(uuid.UUID(bytes_le=bytes(entry[:16])))
+        first, last = struct.unpack_from("<QQ", entry, 32)
+        name = entry[56:128].decode("utf-16le", "replace").split("\0", 1)[0]
+        found.append((kind, name, first, last))
+    return found
+
+
+def filesystem_signature(fd, offset):
+    """apfs, hfs or None, from the first bytes of a partition."""
+    head = _read_at(fd, 1536, offset)
+    if head[32:36] == b"NXSB":
+        return "apfs"
+    if head[1024:1026] in (b"H+", b"HX"):
+        return "hfs"
+    return None
+
+
+def disk_contents(device, sector=512):
+    """What an install would erase, read without changing anything.
+
+    Returns {"macos": bool, "being": bool, "partitions": int, "readable": bool}.
+    A disk that cannot be read is reported as unreadable, never as empty.
+    """
+    result = {"macos": False, "being": False, "partitions": 0, "readable": False}
+    try:
+        fd = os.open(device, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return result
+    try:
+        sizes = (sector,) + tuple(size for size in (512, 4096) if size != sector)
+        parts = None
+        for size in sizes:
+            parts = gpt_partitions(fd, size)
+            if parts is not None:
+                sector = size
+                break
+        result["readable"] = True
+        if not parts:
+            return result
+        result["partitions"] = len(parts)
+        names = tuple(name for _, name, _, _ in parts)
+        result["being"] = names[:len(BEING_NAMES)] == BEING_NAMES
+        for kind, _, first, _ in parts:
+            if kind in MACOS_TYPES or filesystem_signature(fd, first * sector):
+                result["macos"] = True
+                break
+    except (OSError, ValueError):
+        result["readable"] = False
+    finally:
+        os.close(fd)
+    return result

@@ -1,0 +1,14 @@
+{
+  "name": "guess",
+  "aliases": [
+    "guess",
+    "guess the number",
+    "a number game",
+    "number guessing"
+  ],
+  "summary": "Guess the number from 1 to 100.",
+  "keys": "Type a number, then Enter.",
+  "entry": "main.py",
+  "size": 1192,
+  "sha256": "a9c46adb3e1e761c34a28968dc810d0caf82e0d59314e0134831dd7849a4820a"
+}

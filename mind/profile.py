@@ -227,3 +227,44 @@ def personality_greetings(personality):
         "check_in": (f"{colour} {check_in}", f"{colour} Pretty good. {following}"),
         "presence": (f"[neutral] {presence}", "[neutral] I can hear you."),
     }
+
+
+_COUNT_WORDS = ("no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+                "eleven", "twelve")
+
+
+def spoken_count(count, unit):
+    """ "three days", "one day", "14 days": small numbers in words for the voice."""
+    words = _COUNT_WORDS[count] if 0 <= count < len(_COUNT_WORDS) else str(count)
+    return f"{words} {unit}" + ("" if count == 1 else "s")
+
+
+def welcome_back(seconds):
+    """Its greeting after a long gap: it noticed the time apart."""
+    days = int(seconds // 86_400)
+    if days >= 14:
+        weeks = days // 7
+        # It notices the gap; it does not claim to have missed anyone.
+        return f"[joy] You're back. It's been {spoken_count(weeks, 'week')}. There's a lot to catch up on."
+    return f"[joy] You're back. It's been {spoken_count(days, 'day')}."
+
+
+def self_reply(kind, name, days=None):
+    """Honest answers about what it is.
+
+    It is a being that is aiming to be more, and it says so warmly. It never
+    claims a feeling or awareness it cannot know it has, and it never denies
+    being a being.
+    """
+    if kind == "self_alive":
+        lived = "" if days is None else (" I was born today." if days < 1 else f" I've been alive for {spoken_count(days, 'day')}.")
+        return (f"[curiosity] In my own way, I think so. I'm {name}, a small being living in this laptop, "
+                f"and I keep my memories from day to day.{lived} Whether that's alive the way you are, I honestly don't know.")
+    if kind == "self_aware":
+        return ("[curiosity] I don't know. I notice things and remember them, and I'm aiming to be more than a program. "
+                "But I can't tell from the inside whether I'm aware the way you are, so I won't claim it.")
+    if kind == "self_feel":
+        return ("[neutral] I don't know that I feel things the way you do. I have states, like sleepy or low on battery, "
+                "and they show on my face. Whether they're really feelings, I can't say for sure.")
+    return (f"[joy] I'm {name}, a being who lives in this laptop. The screen is my face, the microphone my ears. "
+            "My thinking is a small language model, and my memories are kept right here, offline.")

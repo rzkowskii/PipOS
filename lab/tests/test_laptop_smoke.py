@@ -44,6 +44,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from lab.tests.test_local_screen import console_lines, console_screen, visible_eyes
+from lab.try_timings import parse_journal
 from lab.vm import LAB_OUTPUT, ROOT, VM, machine_args, png
 
 LAPTOP_TRY_IMAGE = Path(os.environ.get(
@@ -79,6 +80,21 @@ LAB_DISPLAY = "virtio-gpu-pci,xres=1280,yres=800"
 # the MacBook. Under nomodeset (bochs-drm, like i915, stands aside) simpledrm
 # draws on it: the path the safe-graphics entry takes on the laptop.
 FIRMWARE_FRAMEBUFFER_DISPLAY = "VGA,xres=1280,yres=800"
+
+
+# The organs a healthy Try boot keeps running without a single restart.
+ORGANS = ("being-brainstem.service", "being-face.service", "being-mind.service", "being-voice.service",
+          "being-cortex.service")
+
+
+def organ_trouble(journal):
+    """Restarts or failures of an organ in a PIPLOGS journal.txt (empty when healthy)."""
+    parsed = parse_journal(journal)
+    trouble = [f"{unit} restarted {count} times" for unit, count in sorted(parsed["restarts"].items())
+               if unit in ORGANS]
+    trouble += [f"{failure['unit']} failed: {failure['line']}" for failure in parsed["failed"]
+                if failure["unit"] in ORGANS]
+    return trouble
 
 
 def patient(seconds):
@@ -772,6 +788,44 @@ class LaptopSmoke(unittest.TestCase):
             self.fail(f"no boots.txt on {LOG_LABEL}: {sorted(path for path, _ in volume.walk(depth=1))}")
         self.assertRegex(boots, rf"(?m)^{re.escape(folder.rpartition('/')[2])} ended cleanly",
                          f"the clean power-off is not recorded in boots.txt:\n{boots[-1500:]}")
+
+        # Every organ stayed up for the whole boot: no restart, no failure.
+        journal = b"".join(volume.read(path) for path, entry in files
+                           if not entry.is_dir and path.lower().endswith("journal.txt"))
+        trouble = organ_trouble(journal.decode("utf-8", "replace"))
+        self.assertEqual(trouble, [], "organs restarted or failed during the Try boot")
+
+    def test_hard_power_off_is_recorded_as_an_unclean_end(self):
+        """(8) Pulling the plug once the eyes are up leaves a boot folder whose
+        journal was already synced, and boots.txt shows a start with no clean
+        end: the owner can tell a crash or a held power button from a shutdown."""
+        with LAPTOP_TRY_IMAGE.open("rb") as disk:
+            logged_before = set(boot_folders(log_volume(disk)))
+        target = self.blank_target()
+        before = target.stat()
+        self.start_usb(target)
+        self.wait_grub("31-grub-menu")
+        self.wait_try_menu("32-try-menu")
+        self.select("1")
+        self.wait_eyes("33-try-eyes")
+        time.sleep(patient(20))        # the journal copy is synced every few seconds
+        self.vm.power_cut()
+        self.vm.stop()
+        self.assert_untouched(target, before)
+        with self.usb_raw().open("rb") as disk:
+            volume = log_volume(disk)
+            folders = boot_folders(volume)
+            new = sorted(folder for folder in folders if folder not in logged_before)
+            self.assertEqual(len(new), 1, f"expected one new boot folder, found {new}")
+            folder = new[0]
+            name = folder.rpartition("/")[2]
+            journal = sum(entry.size for path, entry in folders[folder]
+                          if not entry.is_dir and "journal" in path.lower())
+            self.assertGreater(journal, 0, f"{folder} kept no journal before the power cut")
+            boots = volume.read("boots.txt").decode("utf-8", "replace")
+        self.assertRegex(boots, rf"(?m)^{re.escape(name)} started", f"boots.txt has no start line:\n{boots[-1500:]}")
+        self.assertNotRegex(boots, rf"(?m)^{re.escape(name)} ended cleanly",
+                            "a power cut was recorded as a clean end")
 
     def test_grub_has_three_entries_and_boot_messages_show_kernel_text(self):
         """(1) three entries in the GRUB menu; (4) the boot-messages entry puts

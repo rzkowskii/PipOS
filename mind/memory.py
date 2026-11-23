@@ -24,6 +24,9 @@ CLOCK_STEP = 86_400.0  # after a step forward larger than this, expiry counts fr
 CLOCK_HOLD = 86_400.0  # until the new time has held this long
 CLOCK_SUSPECT = 60 * 86_400.0  # how long rows written after a clock went back stay protected
 CLOCK_NOTE = 300.0  # how often the believed time is written down
+# Fact matches whose relevance is within this fraction of the best are ranked
+# by recency instead (relevance first, then the newest telling).
+RECALL_BAND = 0.8
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -78,6 +81,16 @@ CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE OF text ON facts BEGIN
     INSERT INTO facts_fts (rowid, text) VALUES (new.id, new.text);
 END;
 
+-- Every time a fact was told. The first telling is also facts.source; a
+-- retelling moves facts.source forward so the fact ages from its latest
+-- telling, and forgetting the fact still finds every sentence that told it.
+CREATE TABLE IF NOT EXISTS fact_tellings (
+    fact_id    INTEGER NOT NULL REFERENCES facts (id) ON DELETE CASCADE,
+    episode_id INTEGER NOT NULL REFERENCES episodes (id) ON DELETE CASCADE,
+    PRIMARY KEY (fact_id, episode_id)
+);
+CREATE INDEX IF NOT EXISTS fact_tellings_episode ON fact_tellings (episode_id);
+
 CREATE TABLE IF NOT EXISTS dream_checkpoints (
     owner      TEXT PRIMARY KEY,
     through_id INTEGER NOT NULL,
@@ -121,20 +134,31 @@ CREATE TRIGGER IF NOT EXISTS episodes_dream_delete AFTER DELETE ON episodes BEGI
 END;
 """
 
-# Words too common to search on.
+# Words too common to search on, with spoken contractions and fillers.
 _STOP = frozenset(
     """a about again all also am an and any are as at be been but by can could did do does
     for from had has have he her him his how i if in is it its just know like me my no not
     of on or our please remember said say she so some tell than that the their them then
     there these they thing things this to told too us was we were what when where which
-    who why will with would you your yours anything something everything""".split()
+    who why will with would you your yours anything something everything
+    i'm i've i'll i'd you're you've you'll you'd it's that's what's where's who's how's
+    there's here's let's don't doesn't didn't isn't aren't wasn't weren't can't couldn't
+    won't wouldn't shouldn't haven't hasn't he's she's we're they're
+    um uh er erm hmm hm oh ah okay ok yeah yes yep well really actually
+    hey hi hello thanks thank""".split()
 )
 _WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)*")
+# "My cat's name" searches for "cat": the possessive never matches the fact.
+_POSSESSIVE = re.compile(r"(?<=\w)'s$")
 
+# Conversation that can be looked back on. Canned replies (greetings, clock
+# answers, memory read-backs) are not conversation and are never recalled.
 _HISTORY = """e.kind IN ('heard', 'said') AND e.text NOT IN ('', '[forgotten]')
-              AND NOT coalesce(json_extract(e.meta, '$.memory_reply'), 0)"""
+              AND NOT coalesce(json_extract(e.meta, '$.memory_reply'), 0)
+              AND NOT coalesce(json_extract(e.meta, '$.canned'), 0)"""
 _HISTORY_SCORE = "bm25(episodes_fts) * CASE e.kind WHEN 'heard' THEN 1.25 ELSE 1 END"
 _DELETION_ID = re.compile(r"[0-9a-f]{32}")
+_TOMBSTONE_TS = "ts = CAST(ts / 86400 AS INTEGER) * 86400.0"
 _EPISODE_SOURCE_LINKS = """
     SELECT e.id AS episode, link.value AS source
     FROM episodes e, json_each(e.meta, '$.episodes') link
@@ -182,7 +206,13 @@ class MemoryEdit:
 def search_terms(query):
     """The words in `query` worth searching for."""
     words = _WORD.findall(query.lower().replace("’", "'"))
+    words = [w if w in _STOP else _POSSESSIVE.sub("", w) for w in words]
     return [w for w in words if len(w) > 1 and w not in _STOP]
+
+
+def normalize(text):
+    """Case, curly apostrophes and spacing folded, for comparing wordings."""
+    return " ".join(text.casefold().replace("’", "'").replace("‘", "'").split())
 
 
 class Memory:
@@ -311,7 +341,7 @@ class Memory:
             facts = sorted({ref for _, _, refs in newer for ref in refs})
             self._begin_deletion_batch()
             self.db.execute(
-                "UPDATE episodes SET text = '[forgotten]', meta = NULL "
+                f"UPDATE episodes SET text = '[forgotten]', meta = NULL, speaker = NULL, {_TOMBSTONE_TS} "
                 "WHERE deletion_ref IN (SELECT value FROM json_each(?))",
                 (json.dumps(episodes),),
             )
@@ -454,6 +484,23 @@ class Memory:
         with self.db:
             return self._clock(time.time() if reading is None else reading)
 
+    def owner_set_clock(self, reading):
+        """The clock was set by hand (Setup, or "set the time to" by voice).
+
+        A time set back is believed at once: stamps later than it were made
+        by the wrong clock and come down to it, so the being does not doubt
+        the clock it was just given. A time set forward is treated like any
+        other step: a mistyped year must not let expiry run early.
+        """
+        if reading < CLOCK_FLOOR:
+            raise ValueError("a time before this software existed cannot be right")
+        with self.db:
+            noted, newest = self._meta_number("clock_seen"), self.newest_timestamp()
+            known = max((value for value in (noted, newest) if value is not None), default=None)
+            if known is not None and reading < known - CLOCK_SLACK:
+                self._lower_to(reading)
+            return self._clock(reading)
+
     def _clock(self, reading):
         noted = self._meta_number("clock_seen")
         newest = self.newest_timestamp()
@@ -527,8 +574,11 @@ class Memory:
         return self.clock()[1]
 
     def facts_between(self, start, end):
-        """Ids of facts first told in a time range."""
-        return [row[0] for row in self.db.execute("SELECT id FROM facts WHERE ts >= ? AND ts < ? ORDER BY id", (start, end))]
+        """Ids of facts told, or told again, in a time range: forgetting a day
+        takes what was said that day, even a fact first told earlier."""
+        return [row[0] for row in self.db.execute(
+            "SELECT id FROM facts WHERE (ts >= ? AND ts < ?) OR (confirmed >= ? AND confirmed < ?) ORDER BY id",
+            (start, end, start, end))]
 
     def woke(self, wake):
         """True if wake number `wake` is already in the log."""
@@ -550,7 +600,7 @@ class Memory:
 
     def recall_history(
         self, query, *, limit=3, start=None, end=None, all_terms=False, for_edit=False, kind=None,
-        include_fact_sources=True, journal_owner=None,
+        include_fact_sources=True, journal_owner=None, speaker=None,
     ):
         """Search retained conversations by relevance or a date range."""
         terms = list(dict.fromkeys(search_terms(query)))
@@ -575,6 +625,9 @@ class Memory:
         if kind is not None:
             conditions.append("e.kind = ?")
             params.append(kind)
+        if speaker is not None:
+            conditions.append("e.speaker = ?")
+            params.append(speaker)
         if for_edit:
             conditions.append("e.kind = 'heard'")
             # Outside date-scoped searches, the fact query covers these.
@@ -675,22 +728,81 @@ class Memory:
         return [self._fact(r) for r in rows]
 
     def remember(self, text, speaker=None, source=None, confidence=1.0):
-        """Keep a fact. Telling it the same thing twice confirms the first."""
+        """Keep a fact. Telling it the same thing twice confirms the first.
+
+        Every telling is linked to the fact, and the latest becomes its
+        source, so a fact retold yesterday does not age out with the first
+        telling a month ago, and forgetting it takes every telling.
+        """
         text = " ".join(text.split())
         now = self.now()
         with self.db:
-            row = self.db.execute("SELECT id FROM facts WHERE lower(text) = lower(?)", (text,)).fetchone()
+            row = None
+            for fact_id, existing in self.db.execute("SELECT id, text FROM facts"):
+                if normalize(existing) == normalize(text):
+                    row = (fact_id,)
+                    break
             if row:
+                if source is not None:
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO fact_tellings (fact_id, episode_id) "
+                        "SELECT id, source FROM facts WHERE id = ? AND source IS NOT NULL", (row[0],))
+                    self.db.execute("INSERT OR IGNORE INTO fact_tellings VALUES (?, ?)", (row[0], source))
                 self.db.execute(
-                    "UPDATE facts SET confirmed = ?, confidence = max(confidence, ?) WHERE id = ?",
-                    (now, confidence, row[0]),
+                    "UPDATE facts SET confirmed = ?, confidence = max(confidence, ?), "
+                    "source = coalesce(?, source) WHERE id = ?",
+                    (now, confidence, source, row[0]),
                 )
                 return row[0]
             cur = self.db.execute(
                 "INSERT INTO facts (ts, text, speaker, source, confidence) VALUES (?, ?, ?, ?, ?)",
                 (now, text, speaker, source, confidence),
             )
+            if source is not None:
+                self.db.execute("INSERT OR IGNORE INTO fact_tellings VALUES (?, ?)", (cur.lastrowid, source))
         return cur.lastrowid
+
+    def latest_facts(self, limit=5, speaker=None):
+        """The most recently told or confirmed facts, newest first."""
+        rows = self.db.execute(
+            "SELECT id, ts, text, speaker, confidence FROM facts "
+            "WHERE (? IS NULL OR speaker = ?) ORDER BY max(ts, coalesce(confirmed, ts)) DESC, id DESC LIMIT ?",
+            (speaker, speaker, limit),
+        )
+        return [self._fact(r) for r in rows]
+
+    def same_subject(self, text, subject_of, *, exclude=None):
+        """Other facts about the same thing: "my cat is called Tom" for
+        "my cat is called Jim". `subject_of` divides a fact's wording."""
+        head = subject_of(text)
+        if head is None:
+            return []
+        wanted = normalize(head)
+        found = []
+        for row in self.db.execute(
+                "SELECT id, ts, text, speaker, confidence FROM facts WHERE id IS NOT ? ORDER BY id", (exclude,)):
+            other = subject_of(row[2])
+            if normalize(row[2]) != normalize(text) and other is not None and normalize(other) == wanted:
+                found.append(self._fact(row))
+        return found
+
+    def owner_lines(self, speaker, *, limit=3, before=None):
+        """What `speaker` said most recently in conversation, newest first."""
+        rows = self.db.execute(
+            f"SELECT e.id, e.ts, e.kind, e.speaker, e.text FROM episodes e WHERE {_HISTORY} "
+            "AND e.kind = 'heard' AND e.speaker = ? AND (? IS NULL OR e.id < ?) "
+            "AND NOT coalesce(json_extract(e.meta, '$.command'), 0) "
+            "AND NOT coalesce(json_extract(e.meta, '$.greeting'), 0) ORDER BY e.id DESC LIMIT ?",
+            (speaker, before, before, limit),
+        )
+        return [Episode(*row) for row in rows]
+
+    def last_heard(self, speaker, *, before=None):
+        """When `speaker` last said anything at all, or None."""
+        row = self.db.execute(
+            "SELECT max(ts) FROM episodes WHERE kind IN ('heard', 'command') AND speaker = ? "
+            "AND (? IS NULL OR id < ?)", (speaker, before, before)).fetchone()
+        return row[0] if row else None
 
     def recall(self, query, limit=3, all_terms=False):
         """Facts that share a meaningful word with `query`, best match first.
@@ -703,11 +815,23 @@ class Memory:
             return []
         match = (" AND " if all_terms else " OR ").join(f'"{t}"' for t in terms)
         rows = self.db.execute(
-            "SELECT f.id, f.ts, f.text, f.speaker, f.confidence FROM facts_fts "
+            "SELECT f.id, f.ts, f.text, f.speaker, f.confidence, bm25(facts_fts), "
+            "max(f.ts, coalesce(f.confirmed, f.ts)) FROM facts_fts "
             "JOIN facts f ON f.id = facts_fts.rowid WHERE facts_fts MATCH ? "
             "ORDER BY bm25(facts_fts), f.ts DESC LIMIT ?",
-            (match, limit),
+            (match, -1 if limit < 0 else max(limit * 4, 8)),
         ).fetchall()
+        if rows:
+            # Matches about as good as the best are told newest first: a fact
+            # told or confirmed last week beats an older one that is merely
+            # shorter. bm25 is negative; nearer zero is a weaker match.
+            best = rows[0][5]
+            band = [r for r in rows if r[5] <= best * RECALL_BAND]
+            rest = [r for r in rows if r[5] > best * RECALL_BAND]
+            band.sort(key=lambda r: (r[6], r[0]), reverse=True)
+            rows = band + rest
+        if limit >= 0:
+            rows = rows[:limit]
         return [self._fact(r) for r in rows]
 
     def forget(self, fact_ids):
@@ -765,7 +889,7 @@ class Memory:
                         SELECT 'episode', id FROM episodes
                         WHERE ts < ? AND kind <> 'life' AND (text <> '[forgotten]' OR meta IS NOT NULL)
                         UNION
-                        SELECT 'fact', id FROM facts WHERE ts < ?
+                        SELECT 'fact', id FROM facts WHERE max(ts, coalesce(confirmed, ts)) < ?
                         UNION
                         SELECT target_kind, target_id FROM links
                         JOIN expired ON source_kind = expired.kind AND source_id = expired.id
@@ -780,8 +904,10 @@ class Memory:
         ).fetchall()
 
     def _redact_episodes(self, episode_ids):
+        # A tombstone keeps only that something was said on that day: not who
+        # said it, nor the moment.
         self.db.execute(
-            "UPDATE episodes SET text = '[forgotten]', meta = NULL "
+            f"UPDATE episodes SET text = '[forgotten]', meta = NULL, speaker = NULL, {_TOMBSTONE_TS} "
             "WHERE id IN (SELECT value FROM json_each(?))",
             (json.dumps(episode_ids),),
         )
@@ -798,12 +924,18 @@ class Memory:
             self.db.execute("BEGIN IMMEDIATE")
             facts = self.db.execute(
                 "SELECT id, text, source FROM facts WHERE id IN (SELECT value FROM json_each(?)) "
-                "OR source IN (SELECT value FROM json_each(?)) ORDER BY id",
-                (json.dumps(tuple(fact_ids)), json.dumps(sorted(episode_ids))),
+                "OR source IN (SELECT value FROM json_each(?)) "
+                "OR id IN (SELECT fact_id FROM fact_tellings WHERE episode_id IN (SELECT value FROM json_each(?))) "
+                "ORDER BY id",
+                (json.dumps(tuple(fact_ids)), json.dumps(sorted(episode_ids)), json.dumps(sorted(episode_ids))),
             ).fetchall()
             fact_ids = tuple(row[0] for row in facts)
             fact_texts = tuple(row[1] for row in facts)
             episode_ids.update(row[2] for row in facts if row[2] is not None)
+            # Every sentence that told a fact goes with it, or is corrected with it.
+            episode_ids.update(row[0] for row in self.db.execute(
+                "SELECT episode_id FROM fact_tellings WHERE fact_id IN (SELECT value FROM json_each(?))",
+                (json.dumps(fact_ids),)))
             sources = self.db.execute(
                 "SELECT id, text FROM episodes WHERE id IN (SELECT value FROM json_each(?)) "
                 "AND text NOT IN ('', '[forgotten]') ORDER BY id",
@@ -834,17 +966,24 @@ class Memory:
                     if source in stale or (whole is not None and whole.search(text))
                 ))))
             self._begin_deletion_batch()
-            self._redact_episodes(stale)
             if replacement is None:
+                self._redact_episodes(stale)
                 self._delete_facts(fact_ids)
             else:
+                # The corrected sentences keep who said them and when; only
+                # what was derived from the old wording becomes a tombstone.
+                self._redact_episodes(tuple(row for row in stale if row not in episode_ids))
                 corrected = " ".join(replacement.split())
                 self.db.execute(
                     "UPDATE facts SET text = ?, confirmed = ? WHERE id IN (SELECT value FROM json_each(?))",
                     (corrected, stamp, json.dumps(fact_ids)),
                 )
                 self.db.execute(
-                    "UPDATE episodes SET text = ? WHERE id IN (SELECT value FROM json_each(?))",
+                    # The old wording's excerpt and links go; that it was a
+                    # command ("remember that ...") stays, so the corrected
+                    # telling is still not taken for conversation.
+                    "UPDATE episodes SET text = ?, meta = CASE WHEN coalesce(json_extract(meta, '$.command'), 0) "
+                    "THEN json_object('command', json('true')) END WHERE id IN (SELECT value FROM json_each(?))",
                     (corrected, json.dumps(episode_ids)),
                 )
             self._rebuild_search()
@@ -862,15 +1001,35 @@ class Memory:
     def _verbatim_copies(self, texts):
         """Episodes that repeat forgotten wording as whole words, not as letters
         inside other words: forgetting "I like her" leaves "herbs" alone."""
+        # A blank wording would match everywhere: it is never a copy of anything.
+        texts = [text for text in texts if normalize(text)]
         if not texts:
             return []
-        whole = self._whole_words(texts)
-        rows = self.db.execute(
-            "SELECT e.id, e.text FROM episodes e WHERE EXISTS "
-            "(SELECT 1 FROM json_each(?) WHERE instr(lower(e.text), lower(value)) > 0)",
-            (json.dumps(texts),),
-        )
-        return [episode for episode, text in rows if whole.search(text)]
+        # Compared with case, apostrophes and spacing folded, so "Tom’s  bike"
+        # is a copy of "tom's bike". SQLite only narrows the rows down, by the
+        # longest word of each wording; Python decides.
+        wordings = [normalize(text) for text in texts]
+        whole = re.compile("|".join(rf"(?<!\w){re.escape(text)}(?!\w)" for text in wordings))
+        # SQLite's lower() folds ASCII only, so only an ASCII word can narrow
+        # the search; a wording with none ("Zoë") makes Python read every row.
+        keys = set()
+        for text in texts:
+            # From the original wording: "Straße" folds to an ASCII "strasse"
+            # that SQLite would never find in "straße".
+            ascii_words = [word.lower() for word in re.findall(r"[^\W_]+", text) if word.isascii()]
+            if not ascii_words:
+                keys = None
+                break
+            keys.add(max(ascii_words, key=len))
+        if keys is None:
+            rows = self.db.execute("SELECT e.id, e.text FROM episodes e WHERE e.text NOT IN ('', '[forgotten]')")
+        else:
+            rows = self.db.execute(
+                "SELECT e.id, e.text FROM episodes e WHERE e.text NOT IN ('', '[forgotten]') AND EXISTS "
+                "(SELECT 1 FROM json_each(?) WHERE instr(lower(e.text), value) > 0)",
+                (json.dumps(sorted(keys)),),
+            )
+        return [episode for episode, text in rows if whole.search(normalize(text))]
 
     def _stale_episodes(self, fact_ids, episode_ids, texts):
         """Follow derived replies and find verbatim copies in older history."""

@@ -41,6 +41,17 @@ RestartMaxDelaySec=30s
 WatchdogSec=10s
 TimeoutAbortSec=5s
 NotifyAccess=main
+# The hub reads the body (sysfs, input devices) and owns the bus socket. It
+# never needs a network or a new privilege.
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+ProtectKernelModules=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=sysinit.target

@@ -1,0 +1,29 @@
+#!/bin/sh
+# Installed beings only (being-installed-generator): make the journal's home
+# on the mind partition and add one line per boot to /mind/log/boots.txt, so
+# a boot that failed can be read later from F2 or a backup. The time is the
+# hardware clock's, which may be wrong after a dead RTC cell; the boot id and
+# the slot are always right.
+set -eu
+
+log=${BEING_LOG_DIR:-/mind/log}
+mkdir -p -m 0755 "$log"
+mkdir -p -m 2755 "$log/journal"
+
+IFS= read -r cmdline </proc/cmdline || cmdline=
+IFS= read -r boot </proc/sys/kernel/random/boot_id || boot=unknown
+fields=
+set -f
+for argument in $cmdline; do
+    case "$argument" in
+        rauc.slot=*|being.trial=*|being.verbose=*|panic=*|nomodeset) fields="$fields $argument" ;;
+    esac
+done
+printf '%s boot=%s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$boot" "$fields" >> "$log/boots.txt"
+
+# Keep the last 400 boots.
+lines=$(wc -l < "$log/boots.txt")
+if [ "$lines" -gt 400 ]; then
+    tail -n 400 "$log/boots.txt" > "$log/boots.txt.new"
+    mv -f "$log/boots.txt.new" "$log/boots.txt"
+fi

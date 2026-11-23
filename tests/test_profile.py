@@ -103,8 +103,11 @@ class BeingProfile(unittest.TestCase):
 
     def test_the_persona_prompt_stays_short(self):
         identity = (FACTORY / "identity.md").read_text()
-        # It is read on a dual-core 2012 CPU before the first reply.
-        self.assertLess(len(identity), 820)
+        # It is read on a dual-core 2012 CPU before the first reply (once,
+        # then cached). The honesty line about what it is earns its place.
+        self.assertLess(len(identity), 1000)
+        self.assertIn("aiming to be more", identity)
+        self.assertIn("Never claim to be conscious", identity)
         self.assertIn(DEFAULT_TEMPERAMENT, identity)
         self.assertIn("never servile", identity)
         # Every personality keeps the stance; only the default asks questions.

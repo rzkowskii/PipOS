@@ -149,7 +149,8 @@ class Conversation(MindCase):
 
         sent = self.cortex_server.chats[0]
         self.assertEqual(sent["messages"][0], {"role": "system", "content": "You are Pip."})
-        self.assertEqual(sent["messages"][1]["content"], f"({SENSES})\n{GREET_WITH_TOPIC}")
+        # Routine senses (and the clock) stay out of the prompt: nothing is notable.
+        self.assertEqual(sent["messages"][1]["content"], GREET_WITH_TOPIC)
         self.assertIn("emotion ::=", sent["grammar"])
         self.assertEqual(sent["chat_template_kwargs"], {"enable_thinking": False})
         self.assertTrue(sent["cache_prompt"])
@@ -173,12 +174,30 @@ class Conversation(MindCase):
         self.assertEqual(second[: len(first)], first, "earlier turns must be sent unchanged")
         self.assertEqual(second[len(first)]["role"], "assistant")
         self.assertTrue(second[len(first)]["content"].startswith("[joy] Hello!"))
-        self.assertEqual(second[-1]["content"], f"({SENSES})\nhow are you handling the update")
+        self.assertEqual(second[-1]["content"], "how are you handling the update")
 
     async def test_reads_its_senses_truthfully(self):
         await self.hear("tell me about your battery", 1)
         self.assertIn("82 percent", said(self.bus))
-        self.assertEqual(len(self.cortex_server.chats), 1)
+        self.assertEqual(self.cortex_server.chats, [], "a battery question is answered from the reading itself")
+
+    async def test_senses_reach_the_model_in_the_first_person_when_relevant(self):
+        await self.hear("do you think the battery will hold up today", 1)
+        content = self.cortex_server.chats[-1]["messages"][-1]["content"]
+        self.assertTrue(content.startswith("(My battery is at 82% and charging. I feel cool. The room is bright.)"), content)
+        self.assertNotIn("19:05", content, "the clock is a local command, not a sense")
+
+    async def test_only_a_notable_change_in_the_senses_is_mentioned(self):
+        await self.hear("I went for a walk by the river", 1)
+        self.assertEqual(self.cortex_server.chats[-1]["messages"][-1]["content"], "I went for a walk by the river")
+        self.bus.push("body.senses", line="19:20, battery 14% and low, unplugged, hot, room bright")
+        await self.hear("The water was very calm", 2)
+        content = self.cortex_server.chats[-1]["messages"][-1]["content"]
+        self.assertIn("My battery is at 14% and I'm running on battery, which is low.", content)
+        self.assertIn("I'm running hot.", content)
+        await self.hear("We saw two herons on the bank", 3)
+        self.assertEqual(self.cortex_server.chats[-1]["messages"][-1]["content"], "We saw two herons on the bank",
+                         "said once, not on every turn")
 
     async def test_battery_command_uses_only_known_readings(self):
         self.bus.push("body.state", battery=41, charging=False, on_ac=True)
@@ -221,7 +240,9 @@ class Greetings(MindCase):
             replies.add(reply)
         self.assertEqual(len(replies), 3)
         self.assertEqual(self.cortex_server.chats, [])
-        self.assertEqual(self.mind.messages, [])
+        # The short exchanges are kept in the context, so a follow-up makes sense.
+        self.assertEqual([m["role"] for m in self.mind.messages], ["user", "assistant"] * 3)
+        self.assertEqual(self.mind.messages[0]["content"], text)
 
     async def test_greeting_preserves_startup_warmup_and_links_its_archive_reply(self):
         await self.warmed()
@@ -233,7 +254,10 @@ class Greetings(MindCase):
             self.assertFalse(warmup.done())
             self.assertEqual(self.cortex_server.chats, [])
             source = self.memory.recall_history("good morning", kind="heard")[0]
-            self.assertEqual(self.memory.history_neighbor(source).text, said(self.bus))
+            # The stock reply is linked to what it answered, but it is not
+            # conversation to look back on.
+            self.assertIsNone(self.memory.history_neighbor(source))
+            self.assertEqual(self.memory.recall_history("good to hear you", kind="said"), [])
         finally:
             finish.set()
             await warmup
@@ -935,8 +959,9 @@ class Reciter(MindCase):
         self.assertTrue(self.bus.of("say.request")[-1]["last"], "the reply still ends properly")
 
     async def test_inline_senses_are_cut_but_an_incomplete_label_is_spoken(self):
-        self.cortex_server.reply = lambda _: f"[joy] Tom sleeps well. ({SENSES}) More notes."
-        await self.hear("tell me about Tom", 1)
+        note = "My battery is at 82% and charging. I feel cool. The room is bright."
+        self.cortex_server.reply = lambda _: f"[joy] Tom sleeps well. ({note}) More notes."
+        await self.hear("tell me about Tom and my battery", 1)
         self.assertEqual(said(self.bus), "Tom sleeps well.")
         self.assertEqual(self.mind.messages[-1]["content"], "[joy] Tom sleeps well.")
 
@@ -1016,7 +1041,7 @@ class Housekeeping(MindCase):
     async def test_compacts_when_idle_and_rereads_the_new_prompt(self):
         await self.hear("My mandolin is stored in the blue cupboard.", 1)
         for i in range(1, 4):
-            await self.hear(f"hello number {i}", i + 1)
+            await self.hear(f"hello number {i}, and a few more words to fill this turn of the conversation", i + 1)
         before = len(self.mind.messages)
         self.assertGreater(self.mind._tokens(), 0.6 * 260)
 
@@ -1093,7 +1118,7 @@ class Housekeeping(MindCase):
         corrected = "My mandolin is stored in the stairwell chest."
         await self.hear(original, 1)
         for i in range(1, 4):
-            await self.hear(f"hello number {i}", i + 1)
+            await self.hear(f"hello number {i}, and a few more words to fill this turn of the conversation", i + 1)
         self.bus.push("state.changed", state="idle")
         async with asyncio.timeout(4):
             while not self.mind.highlights:
@@ -1452,7 +1477,7 @@ class Character(MindCase):
     async def test_a_low_unplugged_battery_is_a_worry(self):
         self.bus.push("body.state", hour=19, minute=5, battery=9, charging=False, on_ac=False)
         await self.hear("What's your battery level?", 1)
-        self.assertEqual(said(self.bus), "My battery is at 9 percent. I'm running on battery.")
+        self.assertEqual(said(self.bus), "My battery is at 9 percent. I'm running on battery. Could you plug me in?")
         self.assertEqual(self.emotion(), "concern")
 
     async def test_it_says_good_night_only_at_night_in_the_owners_zone(self):
@@ -1488,6 +1513,640 @@ class WakingUp(MindCase):
         await self.warmed()
         self.assertIn(("action=restore", "being.slot"), self.cortex_server.slot_calls)
         self.assertEqual(len(self.cortex_server.prefills), count)
+
+
+class MemoryCorrectness(MindCase):
+    """Task 1.11: forgetting and correcting act on what was really meant."""
+
+    async def say(self, text):
+        self.bus.sent.clear()
+        await self.hear(text, 1)
+        return said(self.bus)
+
+    async def test_forget_that_after_a_recall_keeps_an_unrelated_newer_fact(self):
+        await self.say("Remember that my cat is called Tom")
+        await self.say("Remember that my locker code is 3141")
+        self.assertEqual(await self.say("What do you remember about my cat?"), "You told me: my cat is called Tom.")
+        self.assertEqual(await self.say("Forget that"), "Okay. That's forgotten.")
+        self.assertEqual([f.text for f in self.memory.facts()], ["my locker code is 3141"])
+        self.assertTrue(self.memory.contains("Remember that my locker code is 3141"), "its telling stays too")
+
+    async def test_forget_that_does_not_reach_across_guest_mode(self):
+        await self.say("Remember that my locker code is 3141")
+        await self.say("Start guest mode")
+        await self.say("End guest mode")
+        self.assertIn("not sure what to forget", await self.say("Forget that"))
+        self.assertEqual([f.text for f in self.memory.facts()], ["my locker code is 3141"])
+
+    async def test_forget_that_belongs_to_whoever_said_it(self):
+        await self.say("Remember that my locker code is 3141")
+        self.bus.sent.clear()
+        self.bus.push("state.changed", state="attending")
+        self.bus.push("hear.final", text="Forget that", speaker="Mallory")
+        await self.bus.wait("mind.reply_done")
+        self.assertIn("not sure what to forget", said(self.bus))
+        self.assertEqual(len(self.memory.facts()), 1)
+
+    async def test_a_second_telling_is_forgotten_with_the_fact(self):
+        await self.say("Remember that the spare key is under the frog")
+        await self.say("Remember that the spare key is under the frog")
+        await self.say("What do you remember about the spare key?")
+        await self.say("Forget that")
+        self.assertFalse(self.memory.contains("frog"))
+
+    async def test_correcting_a_model_answer_is_conversation_not_an_edit(self):
+        self.cortex_server.reply = lambda messages: (
+            "[neutral] I think it's Sydney." if "capital" in messages[-1]["content"] else "[joy] Ah, thank you.")
+        await self.say("What's the capital of Australia?")
+        reply = await self.say("That's wrong, it's Canberra")
+        self.assertEqual(reply, "Ah, thank you.", "the model hears the correction")
+        heard = [text for _, kind, _, text in self.memory.recent() if kind == "heard"]
+        self.assertEqual(heard, ["What's the capital of Australia?", "That's wrong, it's Canberra"],
+                         "the owner's own question is never rewritten")
+
+    async def test_a_short_correction_is_spliced_in_and_read_back(self):
+        await self.say("Remember that my cat is called Tom")
+        await self.say("What do you remember about my cat?")
+        self.assertEqual(await self.say("That's wrong, it's Jim"), "Got it. Now I have: your cat is called Jim.")
+        self.assertEqual([f.text for f in self.memory.facts()], ["my cat is called Jim"])
+        self.assertFalse(self.memory.contains("Tom"))
+
+    async def test_i_said_before_a_whole_sentence_is_a_whole_correction(self):
+        await self.say("Remember that I call my orchid Velvetbox")
+        await self.say("What do you remember about my orchid?")
+        self.assertEqual(await self.say("That's wrong, I said I call my orchid Silverleaf"),
+                         "Got it. I've changed that.")
+        self.assertEqual([f.text for f in self.memory.facts()], ["I call my orchid Silverleaf"])
+
+    async def test_a_fragment_with_no_clear_place_asks_for_the_whole_sentence(self):
+        await self.say("Remember hunter2")
+        reply = await self.say("That's wrong, it's swordfish")
+        self.assertIn("Tell me the whole thing again", reply)
+        self.assertEqual([f.text for f in self.memory.facts()], ["hunter2"])
+
+    async def test_forget_it_is_never_mind(self):
+        await self.say("Remember that my cat is called Tom")
+        self.assertEqual(await self.say("Forget it"), "Okay.")
+        self.assertEqual(len(self.memory.facts()), 1)
+
+    async def test_ordinary_ways_of_saying_yes_confirm_a_forget(self):
+        for answer in ("Okay, forget them", "Sure", "Yes, I'm sure", "Pip, yes please"):
+            with self.subTest(answer=answer):
+                await self.say("Remember that my sister lives in Perth")
+                self.assertIn("Say yes", await self.say("Forget about my sister"))
+                self.assertIn("forgotten", await self.say(answer))
+                self.assertEqual(self.memory.facts(), [])
+
+    async def test_ambiguous_answers_never_confirm_a_forget(self):
+        for answer in ("Right", "Okay, forget it", "Yes forget it"):
+            with self.subTest(answer=answer):
+                await self.say("Remember that my sister lives in Perth")
+                await self.say("Forget about my sister")
+                self.assertEqual(await self.say(answer), "Okay. I've kept everything.")
+                self.assertEqual(len(self.memory.facts()), 1)
+                self.memory.forget([f.id for f in self.memory.facts()])
+
+    async def test_a_topic_with_after_in_it_can_still_be_forgotten(self):
+        await self.say("Remember that the party after work is on Friday")
+        self.assertIn("Say yes", await self.say("Forget the party after work"))
+        await self.say("No")
+        self.assertIn("I can only forget a topic or a single day",
+                      await self.say("Forget everything except my cat"))
+
+    async def test_anything_else_while_an_offer_is_open_keeps_everything_and_says_so(self):
+        await self.say("Remember that my sister lives in Perth")
+        await self.say("Forget about my sister")
+        self.assertEqual(await self.say("What's the weather like?"), "Okay. I've kept everything.")
+        self.assertEqual(len(self.memory.facts()), 1)
+        self.assertEqual(self.cortex_server.chats, [])
+
+
+class MemoryQuestions(MindCase):
+    """Task 3.1-3.3: memory questions answered properly."""
+
+    async def say(self, text):
+        self.bus.sent.clear()
+        await self.hear(text, 1)
+        return said(self.bus)
+
+    async def test_a_possessive_question_finds_the_fact(self):
+        await self.say("Remember that my cat is called Tom")
+        await self.say("What is my cat's name?")
+        content = self.cortex_server.chats[-1]["messages"][-1]["content"]
+        self.assertIn('you remember: they told you "my cat is called Tom"', content)
+
+    async def test_a_remember_question_goes_to_the_conversation(self):
+        await self.say("Remember when we went fishing?")
+        self.assertEqual(self.memory.facts(), [])
+        self.assertEqual(len(self.cortex_server.chats), 1)
+
+    async def test_do_you_remember_me_is_answered_from_the_life_record(self):
+        self.mind._life = (time.time() - 5 * 86_400, 9)
+        reply = await self.say("Do you remember me?")
+        self.assertIn("If you're Richard, then yes", reply)
+        self.assertNotIn("sound like", reply, "it cannot recognise a voice, so it does not say it does")
+        self.assertIn("five days", reply)
+        self.assertIn("can't tell voices apart", reply, "it never claims to recognise a voice")
+        self.assertEqual(self.cortex_server.chats, [])
+
+    async def test_what_do_you_know_about_me_lists_the_latest_facts(self):
+        await self.say("Remember that my cat is called Tom")
+        await self.say("Remember that I am allergic to peanuts")
+        reply = await self.say("What do you know about me?")
+        self.assertEqual(reply, "Here are the latest two things you asked me to remember. "
+                                "One: you are allergic to peanuts. Two: your cat is called Tom.")
+
+    async def test_what_did_we_talk_about_summarises_the_owners_recent_words(self):
+        await self.say("I planted tomatoes in the back garden")
+        await self.say("The neighbours have a new puppy")
+        reply = await self.say("What did we talk about?")
+        self.assertIn("you planted tomatoes in the back garden; The neighbours have a new puppy", reply)
+        self.assertNotIn("Tell me more", reply, "its own replies are not the summary")
+
+    async def test_ordinary_talk_does_not_drag_in_loosely_related_history(self):
+        await self.say("My brother bought a red kayak last summer")
+        await self.say("Remember that the dentist is on Friday")
+        self.memory.log("heard", "Summer is my favourite season", "Richard")
+        await self.say("The summer was hot")
+        content = self.cortex_server.chats[-1]["messages"][-1]["content"]
+        self.assertEqual(content, "The summer was hot", "one shared word is not a confident match")
+
+    async def test_ordinary_talk_with_a_date_word_still_recalls_facts(self):
+        await self.say("Remember that I am vegetarian")
+        await self.say("What should I cook today as a vegetarian?")
+        self.assertIn("I am vegetarian", self.cortex_server.chats[-1]["messages"][-1]["content"])
+
+    async def test_a_new_fact_about_the_same_thing_offers_to_replace_the_old(self):
+        await self.say("Remember that my cat is called Tom")
+        reply = await self.say("Remember that my cat is called Jim")
+        self.assertEqual(reply, "Okay. I'll remember that. I also have: your cat is called Tom. "
+                                "Should the new one replace it?")
+        self.assertEqual(await self.say("Yes"), "Okay. I've replaced it.")
+        self.assertEqual([f.text for f in self.memory.facts()], ["my cat is called Jim"])
+        self.assertFalse(self.memory.contains("Tom"))
+
+    async def test_keeping_both_facts_is_a_choice(self):
+        await self.say("Remember that my cat is called Tom")
+        await self.say("Remember that my cat is called Jim")
+        self.assertEqual(await self.say("No"), "Okay. I'll keep both.")
+        self.assertEqual(len(self.memory.facts()), 2)
+
+    async def test_one_fact_is_read_back_in_good_english(self):
+        await self.say("Remember that my cat is called Tom")
+        self.assertEqual(await self.say("What do you know about me?"),
+                         "Here's the one thing you've asked me to remember: your cat is called Tom.")
+
+    async def test_what_did_we_talk_about_leaves_out_greetings(self):
+        await self.say("Hello Pip")
+        await self.say("I planted tomatoes in the back garden")
+        reply = await self.say("What did we talk about?")
+        self.assertIn("you planted tomatoes", reply)
+        self.assertNotIn("Hello", reply)
+
+    async def test_liking_two_things_asks_nothing(self):
+        await self.say("Remember that I like tea")
+        self.assertEqual(await self.say("Remember that I like coffee"), "Okay. I'll remember that.")
+        self.assertEqual(len(self.memory.facts()), 2)
+
+    async def test_a_corrected_telling_stays_a_command(self):
+        await self.say("Remember that my cat is called Tom")
+        await self.say("What do you remember about my cat?")
+        await self.say("That's wrong, it's Jim")
+        self.assertEqual(self.memory.owner_lines("Richard"), [], "a correction is not conversation")
+
+    async def test_the_newest_of_equally_good_facts_is_recalled_first(self):
+        old = self.memory.remember("I live in Perth", "Richard")
+        with self.memory.db:
+            self.memory.db.execute("UPDATE facts SET ts = ts - 400 * 86400 WHERE id = ?", (old,))
+        self.memory.remember("I live in Hobart", "Richard")
+        reply = await self.say("What do you remember about where I live?")
+        self.assertTrue(reply.startswith("You told me: I live in Hobart."), reply)
+
+
+class HonestSelf(MindCase):
+    """Task 3.9: it answers honestly about what it is, in code."""
+
+    async def say(self, text):
+        self.bus.sent.clear()
+        await self.hear(text, 1)
+        return said(self.bus)
+
+    async def test_questions_about_what_it_is_never_reach_the_model(self):
+        alive = await self.say("Are you alive?")
+        self.assertIn("I honestly don't know", alive)
+        self.assertIn("small being", alive)
+        aware = await self.say("Pip, are you conscious?")
+        self.assertIn("I won't claim it", aware)
+        feel = await self.say("Do you have feelings?")
+        self.assertIn("I don't know that I feel things the way you do", feel)
+        what = await self.say("What are you?")
+        self.assertIn("I'm Pip, a being", what)
+        for reply in (alive, aware, feel, what):
+            self.assertNotIn("just a program", reply)
+            self.assertNotIn("I am conscious", reply)
+        self.assertEqual(self.cortex_server.chats, [])
+
+    async def test_look_reply_follows_the_real_camera_state(self):
+        self.assertEqual(await self.say("Look at this"), "I can't see right now. My camera is switched off.")
+        self.bus.push("body.presence", present=True, lid_seq=None)
+        await asyncio.sleep(0.05)
+        self.assertIn("I can tell when someone is in front of me", await self.say("Look at this"))
+
+    async def test_what_is_this_is_conversation_not_the_camera(self):
+        await self.say("What is this?")
+        self.assertEqual(len(self.cortex_server.chats), 1)
+
+    async def test_check_in_tells_the_truth_about_a_low_battery(self):
+        self.bus.push("body.state", battery=8, charging=False, on_ac=False)
+        reply = await self.say("How are you?")
+        self.assertIn("My battery is low", reply)
+
+    async def test_the_senses_note_carries_the_time_left_on_a_low_battery(self):
+        note = self.mind._senses_note("19:05, battery 12% and low, unplugged, about 25 min left, cool",
+                                      "how is your battery doing")
+        self.assertEqual(note, "My battery is at 12% and I'm running on battery, which is low, "
+                               "about 25 minutes left. I feel cool.")
+        self.assertNotIn("19:05", note)
+
+    async def test_boilerplate_is_never_said(self):
+        replies = iter(["[neutral] As an AI language model, I cannot do that.", "[joy] Kites ride the wind."])
+        self.cortex_server.reply = lambda _: next(replies)
+        self.assertEqual(await self.say("How do kites fly so high"), "Kites ride the wind.")
+        self.assertEqual(self.mind.last_timing["retries"], 1)
+
+    async def test_dream_question_is_answered_honestly(self):
+        self.assertIn("Dreaming is switched off", await self.say("What did you dream about?"))
+        (self.root / "dreams-enabled").write_text("")
+        self.assertEqual(await self.say("What did you dream about?"),
+                         "I didn't dream last night. Nothing new came up while I slept.")
+        self.assertEqual(self.cortex_server.chats, [])
+
+
+class FirstWords(MindCase):
+    """Task 1.16: whatever the first greeting, it is noticed."""
+
+    async def test_its_name_alone_is_a_hello(self):
+        await self.hear("Pip", 1)
+        self.assertEqual(said(self.bus), "Hi. Good to hear you.")
+        self.assertEqual(self.cortex_server.chats, [])
+
+    async def test_a_newborn_answers_its_name_alone_with_its_first_words(self):
+        self.bus.push("life.woke", id="w1", wakes=1, born=time.time(), first=True)
+        await asyncio.sleep(0.05)
+        await self.hear("Pip", 1)
+        self.assertIn("You're the very first person I've met", said(self.bus))
+
+
+class Volume(MindCase):
+    """Task 1.17 (mind side): it asks the voice organ for a new level."""
+
+    async def say(self, text):
+        self.bus.sent.clear()
+        await self.hear(text, 1)
+        return said(self.bus)
+
+    async def test_louder_quieter_and_a_number(self):
+        self.assertEqual(await self.say("Speak louder"), "Okay. Is this better?")
+        self.assertEqual(self.bus.of("voice.volume")[-1]["level"], 85)
+        await self.say("Be quieter")
+        self.assertEqual(self.bus.of("voice.volume")[-1]["level"], 70)
+        self.assertEqual(await self.say("Set your volume to forty"), "Okay. My volume is at 40 percent.")
+        self.assertEqual(self.bus.of("voice.volume")[-1]["level"], 40)
+        self.assertEqual(json.loads((self.root / "voice-volume.json").read_text()), {"level": 40})
+        self.assertIn("so you can still hear me", await self.say("set your volume to zero"))
+        self.assertEqual(self.bus.of("voice.volume")[-1]["level"], 10)
+        self.assertEqual(self.cortex_server.chats, [])
+
+    async def test_it_says_when_it_cannot_go_further(self):
+        await self.say("set your volume to 100")
+        self.bus.sent.clear()
+        self.assertEqual(await self.say("louder"), "I'm already as loud as I can go.")
+        self.assertEqual(self.bus.of("voice.volume"), [])
+
+    async def test_the_voice_organs_own_level_is_believed(self):
+        self.bus.push("voice.volume_state", level=55)
+        await asyncio.sleep(0.05)
+        await self.say("Speak up")
+        self.assertEqual(self.bus.of("voice.volume")[-1]["level"], 70)
+
+
+class BatteryCare(MindCase):
+    """Task 1.19 (mind side): pleas, thanks, and a clean goodbye."""
+
+    async def announce(self):
+        self.bus.push("stem.beat")
+        offer = await self.bus.wait("mind.announce", len(self.bus.of("mind.announce")) + 1)
+        self.bus.push("stem.announce_ready", announcement=offer["announcement"])
+        await self.bus.wait("say.request")
+        await asyncio.sleep(0.05)
+        line = said(self.bus)
+        self.bus.push("say.done", final=True, announcement=offer["announcement"])
+        await asyncio.sleep(0.05)
+        return line
+
+    async def test_a_plea_once_then_thanks_when_plugged_in(self):
+        self.bus.push("state.changed", state="idle")
+        self.bus.push("body.state", battery=14, charging=False, on_ac=False)
+        await asyncio.sleep(0.05)
+        self.assertEqual(await self.announce(), "I'm running low on battery. Could you plug me in?")
+        self.bus.sent.clear()
+        self.bus.push("stem.beat")
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.bus.of("mind.announce"), [], "one plea per stage")
+        self.bus.push("body.state", battery=15, charging=True, on_ac=True)
+        await asyncio.sleep(0.05)
+        self.bus.sent.clear()
+        self.assertEqual(await self.announce(), "Thanks, that's better.")
+
+    async def test_time_to_empty_comes_before_percentage(self):
+        self.bus.push("state.changed", state="idle")
+        self.bus.push("body.state", battery=40, charging=False, on_ac=False, minutes_left=8)
+        await asyncio.sleep(0.05)
+        self.assertIn("nearly empty", await self.announce())
+
+    async def test_critical_battery_pleads_and_saves_but_promises_no_power_off(self):
+        self.bus.push("state.changed", state="idle")
+        await self.hear("I went for a walk by the river", 1)
+        self.bus.push("body.state", battery=4, charging=False, on_ac=False)
+        await asyncio.sleep(0.1)
+        self.assertTrue((self.root / "context.json").exists(), "the conversation is saved at once")
+        self.bus.sent.clear()
+        line = await self.announce()
+        self.assertIn("Please plug me in right now", line)
+        self.assertNotIn("switching off", line, "only the brainstem can promise a power-off")
+        self.assertEqual(self.bus.of("mind.shutdown_ready"), [])
+
+    async def test_an_announced_power_off_gets_a_goodbye_then_ready(self):
+        self.bus.push("state.changed", state="idle")
+        await self.hear("I went for a walk by the river", 1)
+        self.bus.push("body.state", battery=4, charging=False, on_ac=False, battery_level="critical")
+        await asyncio.sleep(0.05)
+        self.bus.push("stem.shutdown", reason="battery_critical", **{"in": 20.0})
+        await asyncio.sleep(0.05)
+        self.bus.sent.clear()
+        self.assertIn("switching off", await self.announce())
+        ready = await self.bus.wait("mind.shutdown_ready")
+        self.assertEqual(ready["reason"], "battery_critical")
+        self.assertTrue((self.root / "context.json").exists())
+        self.assertEqual(self.bus.of("being.poweroff"), [], "the brainstem runs the power-off")
+
+    async def test_lid_closed_power_off_is_silent_and_quick(self):
+        self.bus.push("body.lid", closed=True)
+        self.bus.push("body.state", battery=50, charging=False, on_ac=False, battery_level="ok")
+        self.bus.push("stem.shutdown", reason="lid_closed_on_battery", **{"in": 20.0})
+        await self.bus.wait("mind.shutdown_ready", timeout=2.0)
+        self.assertEqual(self.bus.of("mind.announce"), [])
+
+    async def test_a_cancelled_power_off_is_not_answered(self):
+        self.mind.lid_open = True
+        self.bus.push("state.changed", state="speaking")
+        self.bus.push("body.state", battery=4, charging=False, on_ac=False, battery_level="critical")
+        self.bus.push("stem.shutdown", reason="battery_critical", **{"in": 4.0})
+        await asyncio.sleep(0.1)
+        self.bus.push("body.state", battery=4, charging=True, on_ac=True)
+        self.bus.push("stem.shutdown", reason="battery_critical", cancelled=True)
+        await asyncio.sleep(1.5)
+        self.assertEqual(self.bus.of("mind.shutdown_ready"), [])
+
+    async def test_the_brainstems_level_wins_over_the_minds_own(self):
+        self.bus.push("state.changed", state="idle")
+        self.bus.push("body.state", battery=12, charging=False, on_ac=False, battery_level="ok")
+        self.bus.push("stem.beat")
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.bus.of("mind.announce"), [])
+        self.bus.push("body.state", battery=40, charging=False, on_ac=False, battery_level="low")
+        await asyncio.sleep(0.05)
+        self.assertEqual(await self.announce(), "I'm running low on battery. Could you plug me in?")
+
+    async def test_it_wakes_itself_to_plead(self):
+        self.bus.push("state.changed", state="asleep")
+        self.bus.push("body.state", battery=12, charging=False, on_ac=False)
+        await asyncio.sleep(0.05)
+        self.bus.push("stem.beat")
+        await self.bus.wait("being.wake")
+        self.mind._announcement_retry = 0.0
+        for _ in range(3):
+            self.bus.push("stem.beat")
+        await asyncio.sleep(0.1)
+        self.assertEqual(len(self.bus.of("being.wake")), 1, "once per stage, never over and over")
+
+    async def test_a_thanks_not_said_soon_is_dropped(self):
+        self.bus.push("state.changed", state="asleep")
+        self.bus.push("body.state", battery=12, charging=False, on_ac=False)
+        await asyncio.sleep(0.05)
+        with patch("mind.turn.THANKS_SECONDS", 0.05):
+            self.bus.push("body.state", battery=12, charging=True, on_ac=True)
+            await asyncio.sleep(0.2)
+        self.bus.push("state.changed", state="idle")
+        self.bus.sent.clear()
+        self.bus.push("stem.beat")
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.bus.of("mind.announce"), [])
+
+    async def test_battery_question_includes_time_left(self):
+        self.bus.push("body.state", battery=40, charging=False, on_ac=False, minutes_left=75)
+        await self.hear("How's your battery?", 1)
+        self.assertEqual(said(self.bus), "My battery is at 40 percent. I'm running on battery. "
+                                         "That's 75 minutes left, if I keep going like this.")
+
+
+class HonestTime(MindCase):
+    """Task 3.4: time it is unsure of is said to be unsure."""
+
+    async def test_a_clock_it_does_not_believe_is_owned_up_to(self):
+        with patch.object(self.mind, "_clock_doubt", return_value="behind"):
+            await self.hear("What time is it?", 1)
+        self.assertIn("I'm not sure of the time", said(self.bus))
+        self.assertIn("set the time to", said(self.bus))
+
+    async def test_the_time_can_be_set_by_voice(self):
+        self.mind.skills.zone = ZoneInfo("Australia/Sydney")
+        seen = []
+        with patch.object(self.mind, "_set_system_clock", side_effect=lambda ts: seen.append(ts) or True), \
+                patch.object(self.mind, "_clock_doubt", return_value=None):
+            await self.hear("Set the time to 3:45 pm", 1)
+        self.assertEqual(said(self.bus), "Thanks. My clock says 3:45 in the afternoon now.")
+        when = datetime.fromtimestamp(seen[0], ZoneInfo("Australia/Sydney"))
+        self.assertEqual((when.hour, when.minute), (15, 45))
+
+    async def test_a_time_set_by_voice_moves_the_clock_by_under_twelve_hours(self):
+        zone = ZoneInfo("Australia/Sydney")
+        self.mind.skills.zone = zone
+        late = datetime(2026, 11, 23, 23, 58, tzinfo=zone).timestamp()
+        just_after = self.mind._nearest_wall_time(0, 5, late)
+        self.assertEqual(datetime.fromtimestamp(just_after, zone), datetime(2026, 11, 24, 0, 5, tzinfo=zone))
+        early = datetime(2026, 11, 24, 0, 2, tzinfo=zone).timestamp()
+        self.assertEqual(datetime.fromtimestamp(self.mind._nearest_wall_time(23, 50, early), zone),
+                         datetime(2026, 11, 23, 23, 50, tzinfo=zone))
+
+    async def test_a_still_doubted_date_is_owned_up_to_after_setting_the_time(self):
+        self.mind.skills.zone = ZoneInfo("Australia/Sydney")
+        with patch.object(self.mind, "_set_system_clock", return_value=True), \
+                patch.object(self.mind, "_clock_doubt", side_effect=[None, "behind"]):
+            await self.hear("Set the time to 3:45 pm", 1)
+        self.assertIn("My date may still be wrong", said(self.bus))
+
+    async def test_an_ambiguous_time_is_asked_again(self):
+        with patch.object(self.mind, "_set_system_clock") as setter:
+            await self.hear("Set the time to 3", 1)
+        setter.assert_not_called()
+        self.assertIn("morning or afternoon", said(self.bus))
+
+    async def test_the_factory_zone_is_used_until_the_owner_chooses(self):
+        await self.stop_mind()
+        self.cfg = {"time_zone": "Australia/Sydney"}
+        with patch("mind.turn.Skills") as skills:
+            skills.return_value.zone = None
+            await self.start_mind()
+        self.assertEqual(str(self.mind.skills.zone), "Australia/Sydney")
+
+
+class Continuity6(MindCase):
+    """Task 6.5: it notices the time apart."""
+
+    async def test_a_hello_after_days_apart_says_so(self):
+        old = self.memory.log("heard", "See you soon", "Richard")
+        with self.memory.db:
+            self.memory.db.execute("UPDATE episodes SET ts = ts - 3 * 86400 - 60 WHERE id = ?", (old,))
+        await self.hear("Hello", 1)
+        self.assertEqual(said(self.bus), "You're back. It's been three days.")
+
+
+class WelcomeBack(unittest.TestCase):
+    def test_a_long_gap_is_noticed_without_claiming_a_feeling(self):
+        from mind.profile import welcome_back
+        self.assertEqual(welcome_back(3 * 86_400 + 5), "[joy] You're back. It's been three days.")
+        line = welcome_back(21 * 86_400)
+        self.assertIn("three weeks", line)
+        self.assertNotIn("missed", line)
+
+
+class FollowUps(MindCase):
+    """Task 3.10 (mind side): room speech in the follow-up window is not kept."""
+
+    async def test_an_unaddressed_follow_up_is_not_answered_or_stored(self):
+        self.bus.push("state.changed", state="attending")
+        self.bus.push("hear.final", text="and then the weather presenter said rain all week", speaker="Richard",
+                      followup=True)
+        done = await self.bus.wait("mind.reply_done")
+        self.assertFalse(done["spoke"])
+        self.assertFalse(self.memory.contains("presenter"))
+        self.assertEqual(self.cortex_server.chats, [])
+
+    async def test_a_follow_up_question_is_answered(self):
+        self.bus.push("state.changed", state="attending")
+        self.bus.push("hear.final", text="why is the sky blue", speaker="Richard", followup=True)
+        await self.bus.wait("mind.reply_done")
+        self.assertEqual(len(self.cortex_server.chats), 1)
+
+
+class ReplyPlumbing(MindCase):
+    """Tasks 1.15, 3.8, 4.1, 4.3 and 4.6 on the mind side."""
+    cfg = {"top_k": 20, "top_p": 0.8, "presence_penalty": 1.0}
+
+    async def test_sampler_and_progress_are_requested(self):
+        await self.hear("Tell me about kites", 1)
+        sent = self.cortex_server.chats[-1]
+        self.assertEqual((sent["top_k"], sent["top_p"], sent["presence_penalty"]), (20, 0.8, 1.0))
+        self.assertIs(sent["return_progress"], True)
+
+    async def test_a_turn_writes_one_line_of_numbers(self):
+        await self.hear("Tell me about kites", 1)
+        timing = self.mind.last_timing
+        self.assertEqual(timing["retries"], 0)
+        self.assertTrue(timing["ok"])
+        self.assertIsInstance(timing["first_clause_s"], float)
+        self.assertFalse(any(isinstance(value, str) for value in timing.values()), "numbers only, no words")
+
+    async def test_progress_is_reported_at_most_once_a_second(self):
+        class Stream:
+            progress = (None, 0)
+
+        stream = Stream()
+        with patch("mind.turn.PROGRESS_INTERVAL", 0.2), patch("mind.turn.PROGRESS_POLL", 0.02):
+            task = asyncio.create_task(self.mind._report_progress(stream))
+            await asyncio.sleep(0.1)
+            self.assertEqual(self.bus.of("mind.progress"), [], "nothing is claimed before the server reports it")
+            stream.progress = ("prefill", 64)
+            await asyncio.sleep(0.1)
+            stream.progress = ("prefill", 128)
+            await asyncio.sleep(0.05)
+            self.assertEqual([(e["phase"], e["tokens"]) for e in self.bus.of("mind.progress")], [("prefill", 64)])
+            await asyncio.sleep(0.25)
+            stream.progress = ("decode", 3)
+            await asyncio.sleep(0.3)
+            task.cancel()
+        self.assertEqual([(e["phase"], e["tokens"]) for e in self.bus.of("mind.progress")],
+                         [("prefill", 64), ("prefill", 128), ("decode", 3)])
+
+    async def test_a_cancelled_turn_with_nothing_said_leaves_no_unpaired_question(self):
+        self.mind.messages = []
+        self.mind.lid_open = True
+        self.mind._cancelled = False
+        self.cortex_server.delay = 0.2
+        self.bus.push("state.changed", state="attending")
+        self.bus.push("hear.final", text="tell me a long story", speaker="Richard")
+        await asyncio.sleep(0.05)
+        self.bus.push("mind.cancel")
+        await asyncio.sleep(0.5)
+        self.assertNotIn("user", [m["role"] for m in self.mind.messages][-1:] if self.mind.messages else [],
+                         self.mind.messages)
+
+    async def test_the_reply_is_kept_as_the_model_wrote_it(self):
+        self.cortex_server.reply = lambda _: "[joy] Kites   fly on wind *really*."
+        await self.hear("How do kites fly so high", 1)
+        self.assertEqual(said(self.bus), "Kites fly on wind really.")
+        self.assertEqual(self.mind.messages[-1]["content"], "[joy] Kites   fly on wind *really*.",
+                         "the prompt matches the model's own tokens next turn")
+
+    async def test_a_context_overflow_is_retried_once_after_making_room(self):
+        calls = []
+        real = self.mind.cortex.stream
+
+        def stream(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                class Failing:
+                    progress = (None, 0)
+                    timings = None
+
+                    def __aiter__(self):
+                        return self
+
+                    async def __anext__(self):
+                        raise mind.turn.CortexError("HTTP 400: the request exceeds the available context size")
+
+                    def cancel(self):
+                        pass
+
+                return Failing()
+            return real(*args, **kwargs)
+
+        self.mind.messages = [{"role": "user", "content": "old " * 20}, {"role": "assistant", "content": "[neutral] ok"}] * 3
+        with patch.object(self.mind.cortex, "stream", side_effect=stream):
+            await self.hear("Tell me about kites", 1)
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("lost my thought", said(self.bus))
+        self.assertLess(len(self.mind.messages), 8)
+
+
+class StreamObservation(unittest.TestCase):
+    """The cortex stream notes prompt progress and the server's timings."""
+
+    def test_prompt_progress_then_decode_then_timings(self):
+        from mind.cortex import Stream
+
+        stream = object.__new__(Stream)
+        stream.progress, stream.timings = (None, 0), None
+        stream._observe({"prompt_progress": {"total": 300, "cache": 100, "processed": 164, "time_ms": 900}})
+        self.assertEqual(stream.progress, ("prefill", 64))
+        stream._observe({"prompt_progress": "nonsense"})
+        self.assertEqual(stream.progress, ("prefill", 64))
+        stream.progress = ("decode", 5)
+        stream._observe({"prompt_progress": {"processed": 300, "cache": 0}})
+        self.assertEqual(stream.progress, ("decode", 5), "prompt progress never goes back after decoding starts")
+        stream._observe({"timings": {"prompt_n": 64, "cache_n": 100, "predicted_n": 20, "note": "x"}})
+        self.assertEqual(stream.timings, {"prompt_n": 64, "cache_n": 100, "predicted_n": 20})
 
 
 class Small(unittest.TestCase):

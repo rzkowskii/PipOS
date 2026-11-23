@@ -14,6 +14,18 @@ Restart=always
 RestartSec=1
 # On the way down it saves the conversation and the model's cache.
 TimeoutStopSec=20
+# Light limits only: the mind still sets the clock, reaches the cortex and,
+# in Internet mode, the weather service (plan task 3.14 moves that fetch to
+# its own sandboxed helper).
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

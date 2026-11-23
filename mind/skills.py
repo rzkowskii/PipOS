@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 import zoneinfo
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -38,6 +39,53 @@ def speakable_duration(seconds):
     parts = [f"{count} {unit}{'s' if count != 1 else ''}"
              for count, unit in ((hours, "hour"), (minutes, "minute"), (seconds, "second")) if count]
     return " and ".join(parts)
+
+
+_ONES = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
+         "sixteen seventeen eighteen nineteen").split()
+_TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
+
+
+def number_words(number):
+    """0 to 999 in words, as Flite should say them in a sentence."""
+    if not 0 <= number < 1000:
+        return str(number)
+    if number < 20:
+        return _ONES[number]
+    if number < 100:
+        tens, ones = divmod(number, 10)
+        return _TENS[tens] + (f"-{_ONES[ones]}" if ones else "")
+    hundreds, rest = divmod(number, 100)
+    return f"{_ONES[hundreds]} hundred" + (f" and {number_words(rest)}" if rest else "")
+
+
+def timer_name(seconds):
+    """'thirty-minute timer', 'two-hour timer', or 'timer for one hour and ten minutes'."""
+    if not seconds or seconds <= 0:
+        return "timer"
+    hours, rest = divmod(int(seconds), 3600)
+    minutes, secs = divmod(rest, 60)
+    units = [(count, unit) for count, unit in ((hours, "hour"), (minutes, "minute"), (secs, "second")) if count]
+    if len(units) == 1:
+        count, unit = units[0]
+        return f"{number_words(count)}-{unit} timer"
+    spoken = " and ".join(f"{number_words(count)} {unit}{'s' if count != 1 else ''}" for count, unit in units)
+    return f"timer for {spoken}"
+
+
+def lateness(seconds):
+    """'12 minutes', 'an hour', for how late a delivery is."""
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return "a minute" if minutes <= 1 else f"{number_words(minutes)} minutes"
+    hours = round(minutes / 60)
+    if hours < 24:
+        return "an hour" if hours == 1 else f"{number_words(hours)} hours"
+    days = round(hours / 24)
+    return "a day" if days == 1 else f"{number_words(min(days, 999))} days"
+
+
+LATE_AFTER = 90.0  # seconds past due before a delivery is worded as late
 
 
 @lru_cache(maxsize=1)
@@ -84,8 +132,27 @@ def find_zone(value):
         return ZoneInfo(value)
     except (ZoneInfoNotFoundError, ValueError):
         wanted = words(value)
+        if not wanted:
+            return None
         matches = [key for key in zone_keys() if words(key) == wanted]
+        if not matches:
+            # A city on its own ("Sydney") when exactly one zone ends with it.
+            # Legacy aliases (Australia/NSW, Etc/...) never make a city ambiguous.
+            matches = [key for key in zone_keys() if "/" in key and not key.startswith(("Etc/", "SystemV/"))
+                       and words(key.rsplit("/", 1)[1]) == wanted]
         return ZoneInfo(matches[0]) if len(matches) == 1 else None
+
+
+def factory_zone(config_dir=None):
+    """The owner's city from the factory configuration, if the image sets one."""
+    from .profile import FACTORY_CONFIG
+
+    try:
+        settings = json.loads((Path(config_dir or FACTORY_CONFIG) / "being.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    zone = settings.get("time_zone") if isinstance(settings, dict) else None
+    return find_zone(zone) if isinstance(zone, str) and zone else None
 
 
 class Skills:
@@ -98,7 +165,12 @@ class Skills:
         if not isinstance(settings, dict):
             settings = {}
         zone = settings.get("time_zone")
-        self.zone = find_zone(zone) if isinstance(zone, str) else None
+        self.zone = find_zone(zone) if isinstance(zone, str) and zone else None
+        # The owner's own choice wins; otherwise the zone the image was built for.
+        self.zone_known = self.zone is not None
+        if self.zone is None and not (isinstance(zone, str) and "time_zone" in settings and zone == ""):
+            self.zone = factory_zone()
+            self.zone_known = self.zone is not None
         self.location = normalize_location(settings.get("weather_location", ""))
         self.weather = Weather(permitted=self._web_lookups_permitted)
         self._reminders = None
@@ -132,6 +204,11 @@ class Skills:
         settings = {"weather_location": location, "time_zone": zone.key if zone else ""}
         atomic_write(self.path, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
         self.location, self.zone = location, zone
+        self.zone_known = zone is not None
+
+    def set_zone(self, zone):
+        """Save the owner's time zone (a ZoneInfo, or None for the device clock)."""
+        self._save(self.location, zone)
 
     def _due_description(self, timestamp):
         due = datetime.fromtimestamp(timestamp, self.zone)
@@ -183,15 +260,52 @@ class Skills:
                 return WEATHER_PERMISSION
         return self._reminder_reply(command.reminder)
 
+    def announcement(self, entry, owner, *, now=None, rings=0, slept=False):
+        """What to say when a reminder or timer is due: human, honest about lateness.
+
+        `rings` is how many times it was already said; `slept` says the delay
+        came from the lid being closed or the being asleep.
+        """
+        now = time.time() if now is None else now
+        delivery = self.reminders.delivery(entry.id)
+        late = now - entry.due_at
+        name = f"{owner}, " if owner else ""
+        again = "Again: " if rings else ""
+        if entry.kind == "timer":
+            what = timer_name(delivery.duration if delivery else None)
+            if late > LATE_AFTER:
+                why = " while my lid was closed" if slept else ""
+                return f"{again}{name}your {what} finished {lateness(late)} ago{why}. Sorry I'm late."
+            return f"{again}{name}your {what} is done."
+        if late > LATE_AFTER:
+            due = datetime.fromtimestamp(entry.due_at, self.zone)
+            why = ", because my lid was closed" if slept else ""
+            return (f"{again}{name}this is {lateness(late)} late{why}. At {speakable_time(due.hour, due.minute)} "
+                    f"you wanted me to remind you: {entry.text}.")
+        return f"{again}{name}you asked me to remind you: {entry.text}."
+
+    def _delivery_note(self, due_at):
+        """Say at creation if the reminder will not be spoken when it is due."""
+        from .initiative import load_policy as load_initiative
+
+        policy = load_initiative(self.path.parent)
+        if not policy.reminders:
+            return " Automatic reminders are switched off, so I'll only tell you if you ask."
+        if policy.is_quiet(datetime.fromtimestamp(due_at, self.zone)):
+            return " That's in your quiet hours, so I'll say it when they end."
+        return ""
+
     def _reminder_reply(self, request):
         if request.kind == "clarify":
             return request.message
         if request.kind in ("create", "timer"):
             kind = "timer" if request.kind == "timer" else "reminder"
-            entry = self.reminders.add(request.task, request.due_at, kind=kind)
+            duration = request.duration_seconds if kind == "timer" and request.duration_seconds else None
+            entry = self.reminders.add(request.task, request.due_at, kind=kind, duration=duration)
+            note = self._delivery_note(entry.due_at)
             if kind == "timer":
-                return f"Timer {entry.id} started for {speakable_duration(request.duration_seconds)}."
-            return f"Reminder {entry.id} set for {self._due_description(entry.due_at)}."
+                return f"Timer {entry.id} started for {speakable_duration(request.duration_seconds)}.{note}"
+            return f"Reminder {entry.id} set for {self._due_description(entry.due_at)}.{note}"
         kind = request.item_kind
         if request.kind == "list":
             entries = self.reminders.upcoming(6, kind=kind)

@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 # --slot-save-path directory.
 SLOT_FILE = "being.slot"
 CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
+SAMPLER_KEYS = ("top_k", "top_p", "min_p", "presence_penalty", "repeat_penalty")
 
 
 class CortexError(Exception):
@@ -58,6 +59,13 @@ class Stream:
         self._queue = asyncio.Queue()
         self._disconnect = Disconnect()
         self._error = None
+        # Written by the reading thread, read by the event loop: plain values.
+        # (phase, tokens): ("prefill", prompt tokens read so far) while the
+        # server reports prompt progress, then ("decode", pieces written).
+        self.progress = (None, 0)
+        # The server's own numbers for the finished reply (llama-server's
+        # "timings": prompt_n, cache_n, predicted_n and their rates).
+        self.timings = None
         thread = threading.Thread(target=self._run, args=(cortex, payload), daemon=True)
         thread.start()
 
@@ -88,11 +96,15 @@ class Stream:
                 if data == "[DONE]":
                     break
                 try:
-                    choice = (json.loads(data).get("choices") or [{}])[0]
-                except ValueError:
+                    chunk = json.loads(data)
+                    choice = (chunk.get("choices") or [{}])[0]
+                except (ValueError, AttributeError):
                     continue
-                text = (choice.get("delta") or {}).get("content")
+                self._observe(chunk)
+                text = (choice.get("delta") or {}).get("content") if isinstance(choice, dict) else None
                 if text:
+                    phase, tokens = self.progress
+                    self.progress = ("decode", tokens + 1 if phase == "decode" else 1)
                     self._put(text)
         except Exception as exc:  # the thread must always hand back an ending
             if not self._disconnect.cancelled:
@@ -101,6 +113,20 @@ class Stream:
             if conn is not None:
                 conn.close()
             self._put(None)
+
+    def _observe(self, chunk):
+        """Note prompt progress and final timings, when the server sends them."""
+        if not isinstance(chunk, dict):
+            return
+        prompt = chunk.get("prompt_progress")
+        if isinstance(prompt, dict) and self.progress[0] != "decode":
+            processed, cache = prompt.get("processed"), prompt.get("cache")
+            if type(processed) is int:
+                read = processed - cache if type(cache) is int and cache <= processed else processed
+                self.progress = ("prefill", max(0, read))
+        timings = chunk.get("timings")
+        if isinstance(timings, dict):
+            self.timings = {key: value for key, value in timings.items() if type(value) in (int, float)}
 
     def _put(self, item):
         try:
@@ -141,7 +167,7 @@ class Cortex:
     def _connection(self):
         return http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
 
-    def _payload(self, messages, max_tokens, temperature, grammar=None, stream=False):
+    def _payload(self, messages, max_tokens, temperature, grammar=None, stream=False, sampler=None):
         payload = {
             "model": self.model,
             "messages": messages,
@@ -149,8 +175,15 @@ class Cortex:
             "temperature": temperature,
             "stream": stream,
         }
+        for key, value in (sampler or {}).items():
+            if key in SAMPLER_KEYS and type(value) in (int, float):
+                payload[key] = value
         if self.llama:
             payload["cache_prompt"] = True
+            if stream:
+                # Prompt-reading progress in the stream, so a long cold read
+                # can be told from a hang; the server's timings come at the end.
+                payload["return_progress"] = True
             # No hidden "thinking" before the answer. It must be switched off in
             # the chat template itself: a model that opens a thinking block
             # collides with the grammar below and returns nothing to say.
@@ -203,8 +236,9 @@ class Cortex:
                 continue
         return False
 
-    def stream(self, messages, grammar=None, max_tokens=96, temperature=0.7):
-        return Stream(self, self._payload(messages, max_tokens, temperature, grammar, stream=True))
+    def stream(self, messages, grammar=None, max_tokens=96, temperature=0.7, **sampler):
+        """Stream a reply. `sampler` may hold top_k, top_p and presence_penalty."""
+        return Stream(self, self._payload(messages, max_tokens, temperature, grammar, stream=True, sampler=sampler))
 
     async def complete(self, messages, max_tokens=160, temperature=0.3):
         """A whole reply at once, for background work such as summaries."""

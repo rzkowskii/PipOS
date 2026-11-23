@@ -97,12 +97,18 @@ def check_page(page, stale_only):
     name = page.relative_to(ROOT)
     if header is None:
         return [f"{name}: missing doc header"]
+    stamp = header.get("verified", "")
     try:
-        verified = dt.date.fromisoformat(header.get("verified", ""))
+        if "T" in stamp:
+            # YYYY-MM-DDTHH:MM (local time): the page covers changes up to that minute.
+            verified = dt.datetime.fromisoformat(stamp)
+            cutoff = verified if verified.tzinfo else verified.astimezone()
+        else:
+            # A bare date covers changes made up to the end of that local day.
+            verified = dt.date.fromisoformat(stamp)
+            cutoff = dt.datetime.combine(verified + dt.timedelta(days=1), dt.time()).astimezone()
     except ValueError:
         return [f"{name}: bad or missing 'verified:' date"]
-    # A page verified on a day covers changes made up to the end of that local day.
-    cutoff = dt.datetime.combine(verified + dt.timedelta(days=1), dt.time()).astimezone()
     for source in header.get("sources", "").split():
         path = ROOT / source
         if not path.exists():

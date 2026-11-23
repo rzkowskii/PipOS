@@ -1,0 +1,51 @@
+[Unit]
+Description=Being: hands (the workshop terminal and apps)
+# The workshop is on by default on Try and installed beings alike, and Setup
+# can switch it off (docs/design/voice-apps.md, Decisions 1; mind/care.py
+# writes /mind/apps.disabled). hands always runs and refuses every request
+# while that marker exists, so switching it back on needs no restart.
+ConditionPathExists=!/mind/.being-restore-in-progress
+After=being-brainstem.service being-mind.service
+RequiresMountsFor=/workshop
+StartLimitIntervalSec=0
+
+[Service]
+EnvironmentFile=/etc/being/env
+Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m mind.hands --bus ${BEING_BUS}
+# Renderer frames, owned by being-panel; hands' own key socket, root only.
+RuntimeDirectory=being-hands being-panel
+RuntimeDirectoryMode=0700
+ExecStartPre=/bin/chown being-panel:being-panel /run/being-panel
+ExecStartPre=/bin/chmod 0750 /run/being-panel
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+# Typing and relaying must never take the CPU from the face or the voice.
+Nice=10
+MemoryHigh=96M
+MemoryMax=128M
+# hands starts the caged shells as transient units (systemd-run), reaches
+# only the cortex on loopback for code, and writes only /workshop and its
+# runtime directories.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/workshop
+ReadOnlyPaths=/mind
+PrivateTmp=yes
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

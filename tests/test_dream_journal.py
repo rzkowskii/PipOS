@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import closing, redirect_stderr
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -98,3 +98,40 @@ class DreamJournalTests(unittest.TestCase):
         self.assertTrue(excerpt.endswith("…"))
         self.assertTrue(excerpt.isprintable())
         self.assertLessEqual(len(excerpt), 240)
+
+
+class DreamReportTests(DreamJournalTests):
+    def test_report_quotes_the_journal_or_says_plainly_there_was_no_dream(self):
+        memory = self.open_memory()
+        store = DreamStore(memory)
+        with closing(sqlite3.connect(self.mind / "mind.db")) as db:
+            line, sources = dream_journal.dream_report(db, "Richard", enabled=False)
+            self.assertIn("switched off", line)
+            line, sources = dream_journal.dream_report(db, "Richard")
+            self.assertTrue(line.startswith("I didn't dream last night"))
+            self.assertEqual(sources, ())
+            self.assertIsNone(dream_journal.morning_remark(db, "Richard"))
+        memory.log("heard", "I finally fixed the garden gate today", speaker="Richard")
+        self.publish(store, "Richard")
+        with closing(sqlite3.connect(self.mind / "mind.db")) as db:
+            line, sources = dream_journal.dream_report(db, "Richard")
+            self.assertIn('"I finally fixed the garden gate today"', line)
+            self.assertEqual(len(sources), 1)
+            remark = dream_journal.morning_remark(db, "Richard")
+            self.assertIn("I might have that wrong", remark)
+
+    def test_a_dream_that_kept_nothing_is_not_called_no_dream(self):
+        memory = self.open_memory()
+        memory.close()
+        now = 1_800_000_000
+        today = datetime.fromtimestamp(now).date()
+        with closing(sqlite3.connect(self.mind / "mind.db")) as db:
+            db.execute("INSERT INTO dream_checkpoints (owner, through_id, night, batches) VALUES (?, 0, ?, 2)",
+                       ("Richard", (today - timedelta(days=1)).isoformat()))
+            db.commit()
+            line, sources = dream_journal.dream_report(db, "Richard", now=now)
+            self.assertTrue(line.startswith("I dreamt last night, but nothing"), line)
+            self.assertEqual(sources, ())
+            db.execute("UPDATE dream_checkpoints SET night = ?", ((today - timedelta(days=5)).isoformat(),))
+            line, _ = dream_journal.dream_report(db, "Richard", now=now)
+            self.assertTrue(line.startswith("I didn't dream last night"), line)

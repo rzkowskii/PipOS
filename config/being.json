@@ -2,10 +2,21 @@
   "name": "Pip",
   "wake_word": "Hey Pip",
   "owner": "Richard",
+  "time_zone": "Australia/Sydney",
   "cortex_url": "http://127.0.0.1:8080",
   "model": "default",
   "ctx_tokens": 4096,
   "max_tokens": 96,
   "temperature": 0.7,
-  "prefill": false
+  "top_k": 20,
+  "top_p": 0.8,
+  "presence_penalty": 1.0,
+  "reply_shape": "open",
+  "prefill": false,
+  "battery_plea_percent": 15,
+  "battery_plea_minutes": 30,
+  "battery_second_plea_percent": 10,
+  "battery_second_plea_minutes": 10,
+  "battery_critical_percent": 5,
+  "battery_critical_minutes": 5
 }

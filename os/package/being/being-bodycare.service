@@ -1,0 +1,53 @@
+[Unit]
+Description=Being: bodycare (charge limit, fan floor and CPU caps)
+# The only writer of power and thermal state (plan task 2.8). It starts in
+# observe mode and publishes body.care; writes are enabled by the owner's
+# choice, never by default. On any exit the factory fan minimum, CPU limits
+# and turbo are restored by ExecStopPost.
+After=being-brainstem.service
+StartLimitIntervalSec=0
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+EnvironmentFile=/etc/being/env
+ExecStart=/usr/bin/being-bodycare --bus ${BEING_BUS}
+ExecStopPost=/usr/bin/being-bodycare --restore
+WatchdogSec=30s
+Restart=always
+RestartSec=2
+RestartSteps=5
+RestartMaxDelaySec=30s
+TimeoutStopSec=10
+# Its own work is tiny; it must still run when the model has every core.
+Nice=-5
+# It writes sysfs power knobs (applesmc, hwmon, intel_pstate, the HDA power
+# save parameter) and, only in battery-out mode, /dev/cpu/*/msr. Nothing else.
+# ProtectKernelTunables is deliberately off: it would make /sys read-only.
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_RAWIO
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/mind
+PrivateTmp=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+DevicePolicy=closed
+DeviceAllow=char-cpu/msr rw
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+MemoryMax=32M
+
+[Install]
+WantedBy=multi-user.target

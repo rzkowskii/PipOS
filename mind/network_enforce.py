@@ -29,6 +29,11 @@ OBSERVE = "being-lab-observe.service"
 DEV = "being-lab-dev.service"
 RECONCILE = "being-network-reconcile.service"
 NETWORK_UNITS = (DEV, OBSERVE, WIFI, TIMESYNC, RESOLVED, NETWORKD, *NETWORKD_SOCKETS)
+# Where systemd looks for unit files. The laptop image ships without the lab
+# maintenance units, so every unit list is filtered through these first.
+UNIT_DIRS = (Path("/etc/systemd/system"), Path("/run/systemd/system"), Path("/usr/lib/systemd/system"),
+             Path("/lib/systemd/system"))
+ETHERNET_FILE = Path("/run/systemd/network/02-being-ethernet.network")
 OFFLINE = {"mode": LOCAL_ONLY, "effective_time_server": None, "paired": False}
 IFNAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,14}")
 PRIVATE4 = "{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }"
@@ -156,6 +161,28 @@ def lockdown():
     write_state(OFFLINE)
 
 
+def installed(*units, unit_dirs=None):
+    """The given units that have a unit file on this image, in order."""
+    dirs = UNIT_DIRS if unit_dirs is None else unit_dirs
+    return tuple(unit for unit in units if any((directory / unit).exists() for directory in dirs))
+
+
+def configure_owner_ethernet(mind, mode):
+    """Wired Ethernet the owner switched on in Care: DHCP in Internet mode, no pairing."""
+    from .wifi import ethernet_config, load_ethernet
+
+    try:
+        wanted = load_ethernet(mind)
+    except (OSError, ValueError):
+        wanted = False  # an unreadable switch never opens a link
+    if mode != INTERNET or not wanted:
+        ETHERNET_FILE.unlink(missing_ok=True)
+        return False
+    ETHERNET_FILE.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(ETHERNET_FILE, ethernet_config(), mode=0o644)
+    return True
+
+
 def apply(mind=MIND):
     from .lab_access import configure_ethernet, load_pair
 
@@ -164,20 +191,26 @@ def apply(mind=MIND):
     pair = load_pair(mind) if mode != LOCAL_ONLY else None
     server = policy.time_server if mode == INTERNET else None
     configure_ethernet(pair, mode)
+    configure_owner_ethernet(mind, mode)
     write_time_config(server)
     install_rules(mode, pair, server)
     write_state({"mode": mode, "effective_time_server": server, "paired": pair is not None})
 
 
 def systemctl(action, *units, timeout=35, wait=True):
+    if not units:
+        return
     options = [] if wait else ["--no-block"]
     subprocess.run(["/usr/bin/systemctl", *options, action, *units], timeout=timeout, check=True)
 
 
 def reconcile(mind=MIND):
+    # Only units this image ships: the laptop image has no lab maintenance
+    # units, and systemctl stop or start of a missing unit fails the change.
+    present = installed(*NETWORK_UNITS)
     try:
         lockdown()
-        systemctl("stop", *NETWORK_UNITS)
+        systemctl("stop", *present)
         apply(mind)
         state = runtime_state()
         if state["mode"] == LOCAL_ONLY:
@@ -189,12 +222,12 @@ def reconcile(mind=MIND):
             units.append(RESOLVED)
         if state["effective_time_server"]:
             units.append(TIMESYNC)
-        systemctl("start", *units)
+        systemctl("start", *(unit for unit in units if unit in present))
     except (OSError, ValueError, subprocess.SubprocessError):
         try:
             lockdown()
         finally:
-            systemctl("stop", *NETWORK_UNITS, wait=False)
+            systemctl("stop", *present, wait=False)
         raise
 
 

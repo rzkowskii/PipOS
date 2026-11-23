@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from . import console_ui as ui
-from .install_disks import inventory
+from .install_disks import disk_contents, inventory
 from .install_hardware import hardware_report
 from .try_mode import is_try_boot
 
@@ -45,6 +45,15 @@ FRIENDLY_REASONS = {
 }
 TRANSPORTS = {"sata": "Internal drive", "ata": "Internal drive", "nvme": "Internal drive", "usb": "USB drive",
               "sd": "SD card", "mmc": "SD card"}
+# What to do in macOS before its disk is replaced. These steps are impossible
+# afterwards (docs/IMPROVEMENT-PLAN.md task 0.7).
+MACOS_CHECKLIST = (
+    "Back up anything you want to keep from macOS.",
+    "Install the last firmware update macOS offers.",
+    "Note the battery cycle count and condition (System Information, Power).",
+    "Set the battery charge limit while macOS can still do it.",
+    "Keep a macOS installer stick if you may want macOS back.",
+)
 INSTALL_STAGES = (
     ("Preparing the installation files in RAM.", "Preparing the being's files", 18),
     ("Writing installation data.", "Writing PipOS to the disk", 44),
@@ -257,14 +266,16 @@ def show_hardware(report):
     print("Try a conversation and the lid and input controls to check them in use.")
 
 
-def install_summary(plan, *, profile=None, initiative=None, restore=None):
+def install_summary(plan, *, profile=None, initiative=None, restore=None, skills=None, carried=False):
     """What installing does, in plain words."""
     disk = plan["target"]
     model = " ".join(display_text(disk.get("model") or "").split()) or display_text(disk["device"])
     rows = [ui.mark("accent", f"Makes {model} ({ui.size(disk['size_bytes'])}) the being's home.")]
     rows.append(ui.mark("accent", "Two copies of the system, so an update can always roll back."))
     rows.append(ui.mark("accent", "The language model, so the being thinks on this Mac."))
-    if restore is not None:
+    if carried:
+        rows.append(ui.mark("accent", "The being you met in Try, with what you talked about and its settings."))
+    elif restore is not None:
         rows.append(ui.mark("accent", "The being from your backup, checked before anything is written."))
     else:
         rows.append(ui.mark("accent", "A new being with fresh, empty memory."))
@@ -272,16 +283,43 @@ def install_summary(plan, *, profile=None, initiative=None, restore=None):
             rows.append(ui.mark("accent", f"Keeps the name, voice and personality of {display_text(profile.name)}."))
         if initiative is not None:
             rows.append(ui.mark("accent", "Keeps your quiet hours and announcement settings."))
+        if skills and skills.get("time_zone"):
+            rows.append(ui.mark("accent", f"Uses the time zone {display_text(skills['time_zone'])}."))
     return rows
 
 
+def contents_warning(contents):
+    """Card rows for a target that already holds something, or None."""
+    if contents.get("being"):
+        return [ui.paint("This drive holds a PipOS being and its memories.", "text", "bold"),
+                "Installing erases that being for good. To keep its memory, start it from this drive "
+                "and use F2, Update from a USB stick, instead."], "being"
+    if contents.get("macos"):
+        rows = [ui.paint("This drive holds macOS.", "text", "bold"), "Before it is erased, in macOS:"]
+        rows += [f"{ui.glyph('•', '-')} {item}" for item in MACOS_CHECKLIST]
+        return rows, "macos"
+    if not contents.get("readable", True):
+        # Never treat a drive that could not be read as empty.
+        return [ui.paint("I couldn't read what this drive holds.", "text", "bold"),
+                "It may hold macOS or a being. Installing erases whatever is on it."], "unknown"
+    return None, None
+
+
+def second_confirmation(kind):
+    """A distinct second challenge for a drive that holds macOS or a being."""
+    word = {"macos": "MACOS", "being": "BEING", "unknown": "DRIVE"}[kind]
+    what = {"macos": "macOS", "being": "the being on it", "unknown": "whatever is on it"}[kind]
+    if input(ui.prompt(f"Type ERASE {word} to erase {what}: ")) != f"ERASE {word}":
+        raise ValueError("Confirmation did not match. The disk was left untouched.")
+
+
 def show_confirmation(plan, device, flow, **choices):
-    name, number, total = flow or ("Restore" if choices.get("restore") is not None else "Install", None, None)
+    restoring = choices.get("restore") is not None and not choices.get("carried")
+    name, number, total = flow or ("Restore" if restoring else "Install", None, None)
     context = ui.step(number, total, name) if number else name
-    ui.screen("Ready to restore" if choices.get("restore") is not None else "Ready to install", context=context,
+    ui.screen("Ready to restore" if restoring else "Ready to install", context=context,
               subtitle="Here is what happens next. Nothing is written until you confirm.")
-    ui.card(install_summary(plan, **choices),
-            title="Restoring" if choices.get("restore") is not None else "Installing")
+    ui.card(install_summary(plan, **choices), title="Restoring" if restoring else "Installing")
     ui.para(layout_summary(plan), "muted", indent="  ")
     ui.line()
     disk = plan["target"]
@@ -294,29 +332,47 @@ def show_confirmation(plan, device, flow, **choices):
     ui.para("Type the words below exactly, or press Enter to keep the disk safe.", "muted")
 
 
-def show_finish(restored):
-    ui.screen(ui.mark("success", ui.paint("Installation complete.", "success", "bold")),
-              context="Restored" if restored else "Installed")
-    ui.para("Your being has been brought back." if restored else "Your being has a home now.", "text")
+def wake_phrase(profile=None):
+    if profile is not None:
+        return profile.wake_word
+    try:
+        from .profile import FACTORY_CONFIG, load_profile
+
+        return load_profile(FACTORY_CONFIG, Path("/mind")).wake_word
+    except Exception:  # the finish screen must never fail on a profile problem
+        return "Hey Pip"
+
+
+def show_finish(restored, *, carried=False, wake_word="Hey Pip"):
+    ui.screen(ui.mark("success", ui.paint("Restore complete." if restored and not carried else "Installation complete.",
+                                          "success", "bold")),
+              context="Restored" if restored and not carried else "Installed")
+    ui.para("Your being has been brought back." if restored and not carried else
+            "The being you met in Try has a home now." if carried else "Your being has a home now.", "text")
     ui.line()
     for number, text in enumerate((
         "Press Enter, then press the power button to shut down.",
         "Remove the USB stick.",
         "Turn the Mac on again. Your being will wake and remember you." if restored
         else "Turn the Mac on again. Your being will wake for the first time.",
+        "If the Mac shows a folder with a question mark, hold Option at power-on, highlight EFI Boot, "
+        "then press Control-Enter to start from it every time.",
     ), 1):
         first, *rest = ui.wrap(text, ui.width() - 4)
         ui.line(f" {ui.paint(str(number), 'accent', 'bold')}  {first}")
         for part in rest:
             ui.line(f"    {part}")
     ui.line()
-    ui.para("Say hello when the eyes open.", "muted")
+    # A restored being keeps its own wake phrase, which this Try session cannot read.
+    ui.para(f'Say "{display_text(wake_word)}", wait for the eyes to brighten, then talk.' if wake_word else
+            "Say its wake phrase, wait for the eyes to brighten, then talk.", "muted")
 
 
-def confirm_installation(device, *, expected_plan=None, profile=None, initiative=None, restore=None, flow=None):
+def confirm_installation(device, *, expected_plan=None, profile=None, initiative=None, restore=None, flow=None,
+                         skills=None, carried=False):
     if not is_try_boot() or os.geteuid() != 0 or not sys.stdin.isatty():
         raise ValueError("Install from an interactive root console in Try PipOS.")
-    if restore is not None and (profile is not None or initiative is not None):
+    if restore is not None and (profile is not None or initiative is not None or skills is not None):
         raise ValueError("Choose trial settings or a backup for the new installation.")
     from .install_apply import apply_installation
 
@@ -327,16 +383,25 @@ def confirm_installation(device, *, expected_plan=None, profile=None, initiative
     if not any(disk["device"] == plan["boot_disk"] and disk["transport"] == "usb" for disk in report["disks"]):
         raise ValueError("The running Try media must be an identifiable USB disk.")
     if ui.enabled():
-        show_confirmation(plan, device, flow, profile=profile, initiative=initiative, restore=restore)
+        show_confirmation(plan, device, flow, profile=profile, initiative=initiative, restore=restore,
+                          skills=skills, carried=carried)
     else:
         show_plan(plan)
         if restore is None:
             print("Installing creates a new being with fresh memory. Back up anything you want to keep.", flush=True)
         else:
             print("The backup will be restored and checked before writing to the selected disk.", flush=True)
+    warning, kind = contents_warning(disk_contents(device, plan["target"].get("logical_sector_bytes") or 512))
+    if warning:
+        if ui.enabled():
+            ui.card(warning, title=ui.paint("Look first", "warning", "bold"), tone="warning")
+        else:
+            print("\n".join(ui.plain(row) for row in warning), flush=True)
     challenge = f"ERASE {device}"
     if input(ui.prompt(f"Type {challenge} to install: ")) != challenge:
         raise ValueError("Confirmation did not match. The disk was left untouched.")
+    if kind:
+        second_confirmation(kind)
 
     def recheck():
         latest, model_bytes = scan()
@@ -352,18 +417,36 @@ def confirm_installation(device, *, expected_plan=None, profile=None, initiative
         seed["initiative"] = initiative
     if restore is not None:
         seed["restore"] = restore
+    if skills is not None:
+        seed["skills"] = skills
     stages = INSTALL_STAGES
-    if restore is not None:
+    if restore is not None and not carried:
         stages = (("Preparing the installation files in RAM.", "Unlocking and checking your backup", 18), *stages[1:])
     model = " ".join(display_text(plan["target"].get("model") or "").split()) or device
+    restoring = restore is not None and not carried
     view = ui.StageProgress(
-        f"{'Restoring your being' if restore is not None else 'Installing PipOS'} on {model}", stages,
-        context="Restore" if restore is not None else "Install",
+        f"{'Restoring your being' if restoring else 'Installing PipOS'} on {model}", stages,
+        context="Restore" if restoring else "Install",
         footer="Keep the Mac plugged in and the USB stick in place. This takes a few minutes.")
-    with view:
-        apply_installation(plan, recheck, progress=view.stage, meter=view.advance, **seed)
+    erased = []
+
+    def stage(message):
+        # From this stage on the old boot records are gone.
+        if message == INSTALL_STAGES[1][0]:
+            erased.append(True)
+        view.stage(message)
+
+    try:
+        with view:
+            apply_installation(plan, recheck, progress=stage, meter=view.advance, **seed)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        if erased:
+            raise ValueError(f"The installation stopped after {device} was erased ({error}). "
+                             "It no longer starts and holds no being. Run the installation again.") from error
+        raise
     if ui.enabled():
-        show_finish(restore is not None)
+        show_finish(restore is not None, carried=carried,
+                    wake_word=None if restore is not None and not carried else wake_phrase(profile))
         return
     print("Installation complete.", flush=True)
     print("Power off, remove the Try USB, then start the Mac from the installed drive.", flush=True)

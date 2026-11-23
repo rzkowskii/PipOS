@@ -67,6 +67,9 @@ class InstallConfirmation(unittest.TestCase):
         self.enterContext(patch.object(installer.os, "geteuid", return_value=0))
         self.input_is_tty = self.enterContext(patch.object(installer.sys.stdin, "isatty", return_value=True))
         self.scan = self.enterContext(patch.object(installer, "scan", return_value=(self.report, 0)))
+        # A blank, readable target unless a test says otherwise.
+        self.enterContext(patch.object(installer, "disk_contents", return_value={
+            "macos": False, "being": False, "partitions": 0, "readable": True}))
         self.write = Mock(side_effect=lambda plan, recheck, *, progress, meter: recheck())
         self.enterContext(patch.dict("sys.modules", {"mind.install_apply": SimpleNamespace(apply_installation=self.write)}))
         self.output = self.enterContext(redirect_stdout(StringIO()))
@@ -128,6 +131,94 @@ class InstallConfirmation(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "left untouched"):
                 installer.confirm_installation("/dev/sdb")
         self.write.assert_not_called()
+
+
+class TargetSafety(InstallConfirmation):
+    """A drive that holds macOS or a being needs a second, distinct confirmation."""
+
+    def contents(self, **found):
+        value = {"macos": False, "being": False, "partitions": 1, "readable": True, **found}
+        self.enterContext(patch.object(installer, "disk_contents", return_value=value))
+
+    def test_unreadable_target_is_never_treated_as_empty(self):
+        self.contents(readable=False, partitions=0)
+        with patch("builtins.input", side_effect=["ERASE /dev/sdb", ""]):
+            with self.assertRaisesRegex(ValueError, "left untouched"):
+                installer.confirm_installation("/dev/sdb")
+        self.write.assert_not_called()
+        self.assertIn("couldn't read what this drive holds", self.output.getvalue())
+        with patch("builtins.input", side_effect=["ERASE /dev/sdb", "ERASE DRIVE"]):
+            installer.confirm_installation("/dev/sdb")
+        self.write.assert_called_once()
+
+    def test_macos_target_shows_the_checklist_and_needs_erase_macos(self):
+        self.contents(macos=True)
+        with patch("builtins.input", side_effect=["ERASE /dev/sdb", "ERASE /dev/sdb"]):
+            with self.assertRaisesRegex(ValueError, "left untouched"):
+                installer.confirm_installation("/dev/sdb")
+        self.write.assert_not_called()
+        self.assertIn("This drive holds macOS.", self.output.getvalue())
+        self.assertIn("battery cycle count", self.output.getvalue())
+        with patch("builtins.input", side_effect=["ERASE /dev/sdb", "ERASE MACOS"]) as confirm:
+            installer.confirm_installation("/dev/sdb")
+        self.assertEqual(confirm.call_args.args[0], "Type ERASE MACOS to erase macOS: ")
+        self.write.assert_called_once()
+
+    def test_being_target_points_to_an_update_and_needs_erase_being(self):
+        self.contents(being=True, macos=False)
+        with patch("builtins.input", side_effect=["ERASE /dev/sdb", "ERASE BEING"]) as confirm:
+            installer.confirm_installation("/dev/sdb")
+        self.assertIn("Update from a USB stick", self.output.getvalue())
+        self.assertEqual(confirm.call_args.args[0], "Type ERASE BEING to erase the being on it: ")
+
+    def test_failure_after_the_erase_says_the_disk_no_longer_starts(self):
+        self.contents()
+
+        def write(plan, recheck, *, progress, meter):
+            progress(installer.INSTALL_STAGES[0][0])
+            progress(installer.INSTALL_STAGES[1][0])
+            raise OSError("Short write to the target.")
+
+        self.write.side_effect = write
+        with patch("builtins.input", return_value="ERASE /dev/sdb"):
+            with self.assertRaisesRegex(ValueError, "no longer starts and holds no being"):
+                installer.confirm_installation("/dev/sdb")
+
+    def test_failure_before_the_erase_is_reported_unchanged(self):
+        self.contents()
+
+        def write(plan, recheck, *, progress, meter):
+            progress(installer.INSTALL_STAGES[0][0])
+            raise ValueError("Insufficient free RAM to stage this installation. The target is untouched.")
+
+        self.write.side_effect = write
+        with patch("builtins.input", return_value="ERASE /dev/sdb"):
+            with self.assertRaisesRegex(ValueError, "target is untouched"):
+                installer.confirm_installation("/dev/sdb")
+
+    def test_finish_screen_gives_the_wake_phrase_and_startup_disk_hint(self):
+        self.contents()
+        self.write.side_effect = lambda plan, recheck, **_: recheck()
+        self.enterContext(patch.dict(installer.os.environ, {"BEING_CONSOLE_UI": "1", "COLUMNS": "68"}))
+        with patch("builtins.input", return_value="ERASE /dev/sdb"):
+            installer.confirm_installation("/dev/sdb", skills={"time_zone": "Australia/Sydney"})
+        text = installer.ui.plain(self.output.getvalue())
+        self.assertIn("Control-Enter", text)
+        self.assertIn("wait for the eyes to brighten", text)
+        self.assertIn("Australia/Sydney", text)
+        self.assertEqual(self.write.call_args.kwargs["skills"], {"time_zone": "Australia/Sydney"})
+
+
+    def test_a_restore_finishes_without_naming_the_try_wake_phrase(self):
+        self.contents()
+        self.write.side_effect = lambda plan, recheck, **_: recheck()
+        self.enterContext(patch.dict(installer.os.environ, {"BEING_CONSOLE_UI": "1", "COLUMNS": "68"}))
+        with patch("builtins.input", return_value="ERASE /dev/sdb"):
+            installer.confirm_installation("/dev/sdb", restore=lambda target: None)
+        text = installer.ui.plain(self.output.getvalue())
+        self.assertIn("Restore complete.", text)
+        self.assertIn("Say its wake phrase", text)
+        self.assertNotIn('Say "Hey', text)
 
 
 class DiskWording(unittest.TestCase):

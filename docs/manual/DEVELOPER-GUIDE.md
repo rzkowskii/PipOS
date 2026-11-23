@@ -1,7 +1,7 @@
 <!--
 doc: developer-guide
-verified: 2026-11-23
-sources: lab/build.sh lab/vm.py lab/cortex-dev.sh scripts/run-sim.sh lab/candidate-build.sh lab/candidate_tests.py lab/soak.py lab/builder/Dockerfile os/configs/beingos_x86_64_defconfig os/configs/beingos_laptop_defconfig Cargo.toml
+verified: 2026-11-23T22:20
+sources: lab/build.sh lab/vm.py lab/cortex-dev.sh scripts/run-sim.sh lab/candidate-build.sh lab/candidate_tests.py lab/soak.py lab/builder/Dockerfile os/configs/beingos_x86_64_defconfig os/configs/beingos_laptop_defconfig Cargo.toml sim/fake_cortex.py sim/body.py mind/mic_port.py lab/mic_bridge.py mind/lab_access.py lab/model_audition.py lab/decision_eval.py lab/dream_recall_eval.py lab/recall_second_opinion.py mind/bus.py
 -->
 
 # PipOS developer guide
@@ -50,12 +50,25 @@ In the text modes you type to Pip. Slash commands simulate the body:
 Development memory lives in `~/.local/share/being/mind`. Set `BEING_MIND`
 to use another directory.
 
+The simulator is made of these pieces:
+
+- **`--fake` replies** come from `sim/fake_cortex.py`. It serves the
+  llama-server HTTP API with scripted text, and can run alone:
+  `python3 sim/fake_cortex.py --port 8080`.
+- **The slash commands** are implemented in `sim/body.py`.
+- **With `lab/vm.py --sound`**, the Mac microphone reaches the guest
+  through `lab/mic_bridge.py` and a virtio-serial port named
+  `org.beingos.microphone` (`mind/mic_port.py`). Speaker output goes
+  through CoreAudio.
+
 Two caveats:
 
-- `lab/cortex-dev.sh` builds the same llama.cpp v1.0.0 natively for the
-  Mac, with 4 threads. Its speed tells you nothing about the laptop. It
-  also needs an image build to have downloaded the llama.cpp tarball
-  first.
+- `lab/cortex-dev.sh` builds the same llama.cpp v1.0.0 inside the builder
+  container: an arm64 Linux VM in Colima, not emulated. It serves
+  `out/models/reflex.gguf` with 4 threads. Its speed tells you nothing
+  about the laptop. It needs three things in place first: the builder, a
+  model staged with `lab/build.sh model`, and an image build that has
+  downloaded the llama.cpp tarball.
 - QEMU timings also predict nothing. The CPU is emulated and the face is
   software-rendered at quarter scale.
 
@@ -91,13 +104,14 @@ The build details:
 
 ```bash
 cargo test --workspace                                  # Rust: bus, brainstem, face
-python3 -m unittest discover -s tests -t .              # host Python (≈ 500 tests, < 1 min)
+python3 -m unittest discover -s tests -t .              # host Python (≈ 520 tests, about 1.5 min)
 python3 -m unittest discover -s lab/tests -t . -v       # QEMU guest suites (slow)
 ```
 
-- `tests/test_real_cortex.py` runs only when `lab/cortex-dev.sh` is up on
-  port 8377, or when `BEING_TEST_CORTEX_PORT` is set.
-- 16 backup tests need `age` on `PATH`.
+- `tests/test_real_cortex.py` runs only when a llama-server answers on
+  `127.0.0.1:8377` (for example after `lab/cortex-dev.sh start`), or on
+  the port named by `BEING_TEST_CORTEX_PORT`.
+- 16 backup tests need both `age` and `age-keygen` on `PATH`.
 
 | Guest suite | Proves |
 |---|---|
@@ -121,13 +135,40 @@ python3 -m lab.candidate_tests --manifest ../release.json --output ../guest-evid
 python3 -m lab.soak --image ../media/beingos.img --seconds 300 --interval 30
 ```
 
+### Evaluating models and memory
+
+The model is chosen by benchmark, not by taste:
+
+| Tool | Measures |
+|---|---|
+| `lab/model_audition.py`, `lab/turn_latency.py`, `lab/voice_latency_qemu.py` | Replies and latency |
+| `lab/decision_eval.py` (fixtures in `decision_fixtures.py`) | Recall routing decisions |
+| `lab/dream_recall_eval.py` (scored on `dream_recall_holdout.py`) | Recall across an overnight pass |
+| `lab/recall_second_opinion.py` (scored on `decision_holdout.py`) | The optional OpenJev second opinion (see [LAB.md](../LAB.md#compare-local-recall-decisions)) |
+
+Keep holdout sets out of prompt tuning.
+
+### Reaching a running Pip
+
+Lab images have a root console (`python3 lab/vm.py --shell`). For a
+laptop, the maintenance build (`BEING_LAPTOP_MAINTENANCE=1`) is needed:
+
+1. In `paired-lan` mode, enroll the Mac's public key with
+   `being-lab-access` (`mind/lab_access.py`).
+2. Port 2222 is a read-only observe listener (`being-lab-observe`).
+3. Port 2223 is a development login (`being-lab-dev`). You open it
+   explicitly, and it closes after at most 30 minutes.
+
+[HARDWARE.md](../HARDWARE.md#enroll-the-laptop-once) has the enrollment
+steps.
+
 ## 5. Where to change things
 
 | You want to… | Edit |
 |---|---|
 | Add a spoken command | `mind/commands.py` (pattern) and `mind/turn.py` (handler). Add a test in `tests/`. Update [REFERENCE.md](REFERENCE.md#spoken-commands) and [USER-GUIDE.md](USER-GUIDE.md) |
 | Change the personality or prompt | `config/identity.md`, `mind/profile.py` |
-| Add a bus topic | The sending organ and `docs/PROTOCOL.md`. If only one sender is allowed, also edit the per-sender checks in `crates/brainstem/src/main.rs` |
+| Add a bus topic | Edit these places:<ul><li>the sending organ;</li><li>`docs/PROTOCOL.md`;</li><li>the receiver's subscription list (`SUBS` in `mind/turn.py`, the voice and eyes equivalents, or `crates/face/src/link.rs`);</li><li>the per-sender checks in `crates/brainstem/src/main.rs`, if only one sender is allowed.</li></ul>`mind/bus.py` duplicates the Rust socket-path rule in `crates/bus`, so change both together. A topic that must preempt a running turn, as `mind.cancel` does, belongs in the bus's `urgent` callback |
 | Change a state or timer | `crates/brainstem/src/machine.rs`. Update [ARCHITECTURE.md §4](ARCHITECTURE.md#4-states) |
 | Change the face | `crates/face/src/{anim,eye,render}.rs`, `eye.frag` |
 | Add a service or package | `os/package/being/` (`being.mk`, the unit file, `50-being.preset`) |

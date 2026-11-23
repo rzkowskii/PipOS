@@ -52,12 +52,14 @@ class MemoryRetentionTests(unittest.TestCase):
 
             expiry = memory.expire_before(20)
 
-            self.assertEqual(expiry.fact_ids, (fact, standalone, later_fact))
+            # The tea was told again at 30: a reaffirmed fact ages from its latest telling.
+            self.assertEqual(expiry.fact_ids, (fact, later_fact))
+            self.assertEqual(memory.fact(standalone).text, "The anise tea is violet.")
             self.assertEqual(expiry.episode_ids, (source, private_metadata, reply, transitive, later_reply))
             self.assertEqual(memory.fact(boundary).text, "The campsite is the Oak Patch.")
             self.assertEqual([row.id for row in memory.recall_history("obsidian")], [independent])
             self.assertEqual(memory.recall_history("helpful"), [])
-            self.assertEqual(memory.recall("violet"), [])
+            self.assertEqual([f.id for f in memory.recall("violet")], [standalone])
             self.assertEqual(memory.db.execute("SELECT meta FROM episodes WHERE id = ?", (private_metadata,)).fetchone(), (None,))
             self.assertTrue(memory.woke(1))
             self.assertEqual(memory.db.execute("SELECT text FROM episodes WHERE id = ?", (life,)).fetchone(), ("First wake.",))
@@ -67,7 +69,7 @@ class MemoryRetentionTests(unittest.TestCase):
             proof = memory.deletion_ledger()
             self.assertEqual(len(proof["edits"]), 1)
             _, episodes, facts = proof["edits"][0]
-            self.assertEqual((len(episodes), len(facts)), (5, 3))
+            self.assertEqual((len(episodes), len(facts)), (5, 2))
             self.assertNotIn("Tadpole Cove", str(proof))
             self.assertNotIn("obsidian", str(proof))
 

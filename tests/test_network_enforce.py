@@ -68,6 +68,14 @@ class NetworkTransitionTests(unittest.TestCase):
         self.time_conf = self.directory / "timesyncd.conf.d/99-being-network.conf"
         self.enterContext(patch.object(network, "RUN", self.run))
         self.enterContext(patch.object(network, "TIME_CONF", self.time_conf))
+        self.ethernet_file = self.directory / "02-being-ethernet.network"
+        self.enterContext(patch.object(network, "ETHERNET_FILE", self.ethernet_file))
+        # The lab image ships every unit; tests that model the laptop remove some.
+        self.units = self.directory / "units"
+        self.units.mkdir()
+        for unit in network.NETWORK_UNITS:
+            (self.units / unit).write_text("[Unit]\n")
+        self.enterContext(patch.object(network, "UNIT_DIRS", (self.units,)))
 
     def test_legacy_skill_authorization_boots_offline_with_no_time_fallback(self):
         save_policy(self.directory, NetworkPolicy(INTERNET, True))
@@ -122,6 +130,57 @@ class NetworkTransitionTests(unittest.TestCase):
         self.assertIn("NTP=2001:db8::60\nFallbackNTP=\n", self.time_conf.read_text())
         self.assertTrue(network.allows("require-time", network.runtime_state()))
         self.assertTrue(network.allows("require-pair", network.runtime_state()))
+
+    def test_laptop_reconcile_names_only_units_that_exist(self):
+        # The laptop image has no lab maintenance units: stop or start of a
+        # missing unit fails, so they are never named.
+        for unit in (network.DEV, network.OBSERVE):
+            (self.units / unit).unlink()
+        save_policy(self.directory, NetworkPolicy(INTERNET, True, True))
+        calls = []
+        with (patch.object(network, "install_rules"), patch.object(network, "lower_external_links"),
+              patch.object(network, "systemctl", side_effect=lambda action, *units, **_: calls.append((action, units))),
+              patch("mind.lab_access.load_pair", return_value=PAIR),
+              patch("mind.lab_access.configure_ethernet")):
+            network.reconcile(self.directory)
+        for _, units in calls:
+            self.assertNotIn(network.DEV, units)
+            self.assertNotIn(network.OBSERVE, units)
+        self.assertEqual(calls[-1], ("start", (network.NETWORKD, network.WIFI, network.RESOLVED)))
+
+    def test_systemctl_with_no_units_runs_nothing(self):
+        with patch.object(network.subprocess, "run") as invoke:
+            network.systemctl("stop")
+        invoke.assert_not_called()
+
+    def test_owner_ethernet_comes_up_only_in_internet_mode(self):
+        from mind import wifi
+
+        wifi.save_ethernet(self.directory, True)
+        for mode, expected in ((LOCAL_ONLY, False), (PAIRED_LAN, False), (INTERNET, True)):
+            with self.subTest(mode=mode):
+                save_policy(self.directory, NetworkPolicy(mode, system_network=mode != LOCAL_ONLY))
+                with (patch.object(network, "install_rules"), patch("mind.lab_access.load_pair", return_value=None),
+                      patch("mind.lab_access.configure_ethernet")):
+                    network.apply(self.directory)
+                self.assertEqual(self.ethernet_file.exists(), expected)
+        text = self.ethernet_file.read_text()
+        self.assertIn("Type=ether", text)
+        self.assertIn("SendHostname=no", text)
+        self.assertIn("IPv6PrivacyExtensions=yes", text)
+        wifi.save_ethernet(self.directory, False)
+        with (patch.object(network, "install_rules"), patch("mind.lab_access.load_pair", return_value=None),
+              patch("mind.lab_access.configure_ethernet")):
+            network.apply(self.directory)
+        self.assertFalse(self.ethernet_file.exists())
+
+    def test_unreadable_ethernet_switch_never_opens_a_link(self):
+        (self.directory / "network").mkdir(mode=0o700)
+        damaged = self.directory / "network/ethernet.json"
+        damaged.write_text("{not json")
+        damaged.chmod(0o600)
+        self.assertFalse(network.configure_owner_ethernet(self.directory, INTERNET))
+        self.assertFalse(self.ethernet_file.exists())
 
     def test_online_rule_failure_leaves_mode_offline_and_services_stopped(self):
         save_policy(self.directory, NetworkPolicy(PAIRED_LAN, False, True))

@@ -1,8 +1,13 @@
 # The lab
 
-The lab builds the real BeingOS disk image and raises it in a virtual machine.
-A Linux container builds the image; QEMU emulates a 2012-class laptop for it to
-wake in. The same image is meant for a USB stick and the real laptop later.
+The lab builds the real PipOS disk images and raises them in a virtual machine.
+A Linux container builds the images; QEMU emulates a 2012-class laptop for them
+to wake in. The lab image (`beingos_x86_64_defconfig`) keeps a serial console,
+a root login and the lab body for these tests. **The MacBook gets a separate
+laptop image** (`beingos_laptop_defconfig`: no shell, no sshd, no lab body),
+built with `lab/build.sh laptop` or `laptop-try`. Never write the lab image to
+a stick for the Mac. The first hardware boot is described in
+[FIRST-BOOT.md](FIRST-BOOT.md); current status is in [STATUS.md](../STATUS.md).
 
 ## What it needs
 
@@ -10,13 +15,17 @@ Already on this Mac: QEMU, Colima and Docker. Nothing else is installed on
 macOS. The build lives in one Colima profile, `beingos` (12 CPUs, 24 GB RAM,
 100 GB sparse disk), which mounts only this project folder.
 
-To remove everything the lab created:
+To stop the lab:
 
 ```bash
-colima delete --profile beingos
+colima stop --profile beingos
 ```
 
-and delete `out/` in the project.
+Do not delete `out/` or the Colima profile to tidy up. `out/` holds the frozen
+first-boot stick, sealed candidates and the evidence that STATUS.md links to,
+and the profile's Docker volume holds the only copy of the lab signing key
+(plan task 0.8). Free space by moving old images and candidates to the NVMe
+archive disk, never by deleting them.
 
 ## Build
 
@@ -38,7 +47,7 @@ Apache-2.0 licence provenance. The full licence is installed under
 `/usr/share/being/default-model/LICENSE`. Host model auditions can still
 use other weights. [Qualified descriptor](../os/package/being/default-model/pack.json)
 
-An older BeingOS model partition can already contain these exact weights
+An older PipOS model partition can already contain these exact weights
 and only the historical `manifest.json`. Provision it **before** installing
 a system update that requires signed packs. On trusted Linux maintenance
 media, mount the intended legacy model partition read-write at
@@ -76,7 +85,7 @@ Other commands:
 | Command | What it does |
 |---|---|
 | `lab/build.sh build being-rebuild all` | Rebuild the organs after changing their code, then the image |
-| `lab/build.sh try-image` | Build the standalone Try BeingOS image |
+| `lab/build.sh try-image` | Build the standalone Try PipOS image |
 | `lab/build.sh try-screen` | Build a separate Try USB with the local keyboard menu |
 | `lab/build.sh build PACKAGE-dirclean all` | Rebuild one package from clean, then the image |
 | `lab/build.sh bundle` | Sign the current system as `out/images/beingos.raucb` |
@@ -208,7 +217,7 @@ PocketSphinx handles keyword spotting, endpointing, and streaming English
 transcription in the guest. Flite synthesizes replies locally and defaults to SLT.
 During synthesis and playback the voice closes its microphone input,
 which keeps it from hearing its own replies. Audio stays out of the
-BeingOS event bus and captured audio is never written to the mind
+PipOS event bus and captured audio is never written to the mind
 partition. The lab stack uses the existing wake, transcription, and speech
 events while the laptop's production speech stack remains a benchmark
 decision.
@@ -280,7 +289,7 @@ separate disposable SATA disk:
 BEING_INSTALLER_IMAGE=out/images/beingos-installer.img python3 -m unittest lab.tests.test_installer -v
 ```
 
-## Try BeingOS
+## Try PipOS
 
 `out/images/beingos-try.img` boots straight into a temporary session.
 Use the usual QEMU launcher to talk from the serial console:
@@ -307,8 +316,8 @@ BEING_TRY_EXISTING_IMAGE=out/images/beingos-installer.img python3 -m unittest la
 
 ## Install from the Try USB in the lab
 
-The local-screen candidate starts with **Try BeingOS**, **Install
-BeingOS**, **Restore a being**, **Setup**, and **Check hardware**. Use
+The local-screen candidate starts with **Try PipOS**, **Install
+PipOS**, **Restore a being**, **Setup**, and **Check hardware**. Use
 number keys and **Enter**. **F2** opens setup from the eyes. In Setup,
 **F10** mutes the microphone for the **P** speaker preview. **F9**
 recovers the screen when the lid reading is unavailable.
@@ -334,7 +343,7 @@ announcement-settings prompt. Installed systems also offer
 
 The install-capable Try image uses the same temporary session. Boot it from
 USB and open a root maintenance console. Run `being-installer`, choose
-**Install BeingOS**, and review the exact whole-disk path, model, serial
+**Install PipOS**, and review the exact whole-disk path, model, serial
 when available, capacity and layout. The device-specific `ERASE` challenge
 authorizes erasing that drive. A blank confirmation returns without writes.
 The equivalent console command is `being-installer --install DEVICE`.
@@ -395,7 +404,7 @@ bundle and an unsigned test file are rejected without changing slot B or
 its boot state. It then installs the signed installed-channel bundle and
 boots slot B without the USB to check health confirmation, the life ID
 and a remembered fact. A further boot with the USB reattached checks disk
-binding. The Try USB and the other attached BeingOS disk are compared byte
+binding. The Try USB and the other attached PipOS disk are compared byte
 for byte against their original images. The fixture uses the same system
 payload for both slots. Failed-trial rollback, interruption during a RAUC
 update, and upgrading a historical unsigned model partition are separate
@@ -416,7 +425,7 @@ BEING_FACE_USB_IMAGE="$candidate" python3 -m unittest -v lab.tests.test_face_usb
 ```
 
 The check uses a disposable overlay and boots through QEMU USB storage.
-On menu-enabled media it selects **Try BeingOS** with the guest keyboard
+On menu-enabled media it selects **Try PipOS** with the guest keyboard
 before inspecting the rendered 1280×800 panel. Legacy Try media boots
 directly to the face. The test looks for idle motion, low battery, AC
 recovery and mute. The emulated software renderer targets 20 fps at
@@ -488,7 +497,7 @@ lid reader the appliance uses.
 
 ## Try camera presence and gaze
 
-The camera starts disabled. From the BeingOS maintenance shell as root,
+The camera starts disabled. From the PipOS maintenance shell as root,
 `being-camera enable` records the owner's preference on `/mind` and starts
 the eyes service. `being-camera status` displays permission and service
 status. `being-camera disable` removes permission and stops the service.
@@ -670,7 +679,7 @@ destination. Retry the same authenticated inputs on the same inactive
 partition. The installed services defer using its memory until the marker
 clears. Appliance plaintext scratch files use `/run` and require room for
 several temporary copies of the archive. Development runs via `python3 -m
-mind.backup` use the host's temporary directory unless run on BeingOS.
+mind.backup` use the host's temporary directory unless run on PipOS.
 
 The host fixtures cover export and restore. A disposable QEMU overlay
 also ran the candidate Python files and pinned Linux age binary against
@@ -951,7 +960,7 @@ Start with read-only inventory from a Linux development USB. Record the
 board and EFI revision, exact CPU and microcode, DIMM sizes and speeds,
 the CPU frequency and idle drivers, and the SSD model and negotiated
 AHCI link speed. A general-purpose Linux live USB can supply `dmidecode`,
-`lspci -nnk`, `lsblk -D`, and SMART tools. On BeingOS the kernel's
+`lspci -nnk`, `lsblk -D`, and SMART tools. On PipOS the kernel's
 readings are available locally through sysfs and the journal.
 
 ```sh
@@ -1019,7 +1028,7 @@ so collect warm and cold quality as well as wait time on the MacBook.
 ### Prompt-only cache warmup
 
 The pinned Cortex server samples one token per warmup request even when
-BeingOS requests zero. An experimental llama.cpp patch skips sampling for
+PipOS requests zero. An experimental llama.cpp patch skips sampling for
 the simple native completion used to warm the single CPU-only Qwen3.5 slot.
 In four alternating pairs on the ARM development Mac, median warmup of
 187 prompt tokens in six requests fell from 752 ms to 712 ms (5.27%).
@@ -1424,7 +1433,7 @@ Keep the remaining design options outside the first latency matrix. TEN VAD and 
    Create both simulated radios in the guest's initial network namespace
    so they share a simulated medium. Move the access-point radio into an
    isolated namespace that runs its DHCP and test services. Have the
-   BeingOS station use `wpa_supplicant` and the
+   PipOS station use `wpa_supplicant` and the
    planned address service, with Ethernet disconnected. Verify the SSID,
    negotiated security, address, route through the station, and a request
    to a service reachable through the access point. Use WPA2-Personal
@@ -1445,7 +1454,7 @@ The transition and WPA3-only profiles each negotiated SAE and carried a
 test request. The case ran in about 71 seconds. WAN and update-download
 fixtures are separate follow-up tests. Wi-Fi result (`out/logs/wifi-qemu.log`).
 
-Reproduce with an existing BeingOS Buildroot cache. The builder creates
+Reproduce with an existing PipOS Buildroot cache. The builder creates
 the separately named Wi-Fi image with the simulator tools for this test.
 
 ```bash
@@ -1455,7 +1464,7 @@ python3 -m unittest -v lab.tests.test_wifi.Wifi.test_authentication_dhcp_and_rec
 
 #### Owner-managed Wi-Fi
 
-On a BeingOS shell, `iw dev` shows the available Wi-Fi interfaces. Use
+On a PipOS shell, `iw dev` shows the available Wi-Fi interfaces. Use
 the actual interface name and the access point's network name.
 
 ```sh

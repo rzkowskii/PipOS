@@ -1,0 +1,26 @@
+# Pip's workshop shell start file. Installed as /usr/lib/being/workshop/shellrc
+# and loaded through ENV= by the caged interactive /bin/sh (BusyBox ash) that
+# mind/hands.py starts as being-shell. See docs/design/voice-apps.md 5.2.
+#
+# The prompt carries an invisible marker, OSC 7771 with the last exit status.
+# hands strips every 7770/7771 sequence the shell side writes and believes a
+# marker only while the shell itself is in the foreground (tcgetpgrp).
+PS1="$(printf '\033]7771;')\$?$(printf '\007')pip:~\$ "
+PS2='> '
+umask 077
+# Redirects never overwrite: Pip names new files spiral.py, spiral-2.py, ...
+set -C
+# No history file in the workshop: a forgotten script must not survive in
+# ~/.ash_history. (hands restarts the shell to drop the in-memory history.)
+HISTFILE=/dev/null
+export HISTFILE
+PATH="${PIP_PATH:-/usr/lib/being/workshop/bin:/usr/bin:/bin}"
+export PATH
+PYTHONDONTWRITEBYTECODE=1
+PYTHONNOUSERSITE=1
+LANG=C.UTF-8
+TERM=dumb
+BEING_SHELF="${BEING_SHELF:-/usr/share/being/workshop/shelf}"
+export PYTHONDONTWRITEBYTECODE PYTHONNOUSERSITE LANG TERM BEING_SHELF
+unset PIP_PATH
+cd "${HOME:-/workshop}" 2>/dev/null

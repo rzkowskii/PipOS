@@ -8,6 +8,13 @@ OnFailure=being-trial-reboot.service
 EnvironmentFile=/etc/being/env
 Environment=PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/bin/python3 -m mind.boot_health
+# A healthy boot clears GRUB's count of unconfirmed boots of the confirmed
+# slot (grub.cfg, PIP_UNSEEN), so only three failed boots in a row switch to
+# the show-messages boot. Written only when it is not already 0.
+ExecStopPost=-/bin/sh -c '[ -f /run/being-slot-good ] || exit 0; \
+    env=/bootstate/EFI/BOOT/grubenv; \
+    case "$$(grub-editenv "$$env" list)" in *PIP_UNSEEN=[1-9]*) ;; *) exit 0 ;; esac; \
+    grub-editenv "$$env" set PIP_UNSEEN=0 && sync'
 
 [Install]
 WantedBy=multi-user.target

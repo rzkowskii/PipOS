@@ -1,0 +1,17 @@
+# Everything Pip runs in its workshop, as a peer of system.slice that only
+# gets the CPU nobody else wants, capped at half of one logical CPU, so the
+# face, the voice and the model never wait for a caged program. The memory
+# and task limits need the memcg and pids controllers (linux.config); on an
+# older kernel without them systemd ignores those lines and the per-session
+# rlimits in being-hands still apply.
+[Unit]
+Description=Pip's workshop programs
+Before=slices.target
+
+[Slice]
+CPUWeight=idle
+CPUQuota=50%
+MemoryHigh=192M
+MemoryMax=256M
+MemorySwapMax=0
+TasksMax=64

@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Print, or write into STATUS.md, the facts about PipOS that a script can know.
+
+    scripts/status            # print the generated block
+    scripts/status --write    # replace the block between the markers in STATUS.md
+    scripts/status --verify   # also re-hash the frozen first-boot image (about 1 GB)
+
+The block holds: the tree's source-id (lab/source_id.py), the git commit and
+tags, the frozen first-boot stick and its SHA-256, every image in out/images
+with whether it was built from this tree, and the sealed candidates. Everything
+else in STATUS.md is written by hand. Standard library only; it writes nothing
+but STATUS.md, and only with --write.
+"""
+
+import argparse
+import hashlib
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+STATUS = ROOT / "STATUS.md"
+BEGIN = "<!-- BEGIN GENERATED (scripts/status --write) -->"
+END = "<!-- END GENERATED -->"
+FROZEN = ROOT / "out/hardware-usb/pipos-laptop-try-20261123"
+FROZEN_SHA = "8de540df7b99ac86cedb1ecb374c885041f6b1bcfe482ac950c2fdfa6588e612"
+
+
+def git(*args):
+    try:
+        return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, timeout=10,
+                              check=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1 << 22):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def block(verify=False):
+    sys.path.insert(0, str(ROOT))
+    from lab import source_id
+    lines = [BEGIN, f"Generated {time.strftime('%Y-%m-%d %H:%M %Z')}.", ""]
+    try:
+        tree = source_id.tree_id()
+        lines.append(f"- **Tree source-id:** `{tree}`")
+    except OSError as error:
+        tree = None
+        lines.append(f"- **Tree source-id:** unavailable ({error})")
+    head = git("log", "-1", "--format=%h %s (%ci)")
+    tags = git("tag", "--points-at", "HEAD") or "none on HEAD"
+    dirty = git("status", "--porcelain")
+    lines.append(f"- **Git:** {head or 'no commits'}; tags: {tags}; "
+                 f"{len(dirty.splitlines())} changed or untracked paths" if head else "- **Git:** no commits")
+    image = FROZEN / "pipos-laptop-try.img"
+    if image.is_file():
+        recorded = (FROZEN / "SHA256SUMS").read_text().split()[0] if (FROZEN / "SHA256SUMS").is_file() else "?"
+        state = "matches the plan" if recorded == FROZEN_SHA else "DIFFERS from the plan's hash"
+        if verify:
+            actual = sha256(image)
+            state += "; re-hashed: " + ("OK" if actual == FROZEN_SHA else f"MISMATCH {actual}")
+        lines.append(f"- **Frozen first-boot stick:** `{image.relative_to(ROOT)}`, {image.stat().st_size:,} bytes, "
+                     f"SHA-256 `{recorded}` ({state}). Never rebuild it.")
+    else:
+        lines.append("- **Frozen first-boot stick:** not found")
+    images = sorted((ROOT / "out/images").glob("*.img"))
+    if images:
+        lines += ["", "| Image in out/images | Built | Source-id |", "|---|---|---|"]
+        for path in images:
+            status, _ = source_id.check(path) if tree else ("unknown", "")
+            built = time.strftime("%Y-%m-%d %H:%M", time.localtime(path.stat().st_mtime))
+            lines.append(f"| `{path.name}` | {built} | {status} |")
+    candidates = sorted((ROOT / "out/candidates").glob("*/release.json"))
+    if candidates:
+        lines += ["", "| Sealed candidate | Laptop media | Source-id |", "|---|---|---|"]
+        for release in candidates[-8:]:
+            try:
+                data = json.loads(release.read_text())
+            except ValueError:
+                continue
+            laptop = "yes" if "laptop_try" in data.get("artifacts", {}) else "no"
+            ident = data.get("source_id")
+            lines.append(f"| `{release.parent.name}` | {laptop} | "
+                         f"{('`' + ident[:12] + '`') if ident else 'not recorded'} |")
+    lines.append(END)
+    return "\n".join(lines)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--write", action="store_true")
+    parser.add_argument("--verify", action="store_true")
+    args = parser.parse_args(argv)
+    text = block(args.verify)
+    if not args.write:
+        print(text)
+        return 0
+    current = STATUS.read_text()
+    if BEGIN not in current or END not in current:
+        print("STATUS.md has no generated block markers", file=sys.stderr)
+        return 1
+    before, _, rest = current.partition(BEGIN)
+    _, _, after = rest.partition(END)
+    STATUS.write_text(before + text + after)
+    print(f"updated {STATUS}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

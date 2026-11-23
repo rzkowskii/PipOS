@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""PipOS checks in three tiers.
+
+    scripts/check fast                  # host only, about 2 minutes; lists every skip
+    scripts/check boot-gate [--jobs 3]  # must-pass QEMU suites, about 40 minutes
+    scripts/check full --manifest out/candidates/NAME/release.json
+                                        # the whole candidate controller, before any SSD install
+    scripts/check boot-gate --dry-run   # show what would run
+
+fast     cargo test --workspace, the Mac-side Python suite (tests/), the host
+         checks of the lab tools (lab/tests/host/), the manual's link and
+         staleness check and whether docs/media/ matches the face and console
+         sources (both advisory: reported, never blocking). Skips are printed
+         with their reasons, never hidden.
+boot-gate
+         Runs with BEING_GATE=1: a skip or a missing image fails, and every
+         image must carry a source-id equal to this tree (lab/source_id.py;
+         BEING_ALLOW_STALE=1 overrides). Suites: laptop smoke, L0, L1, L5,
+         Try, local screen, install/apply, setup and one real-model L2 turn
+         (test_l2.Thinking), in --jobs parallel QEMU lanes. Image variables
+         (BEING_FACTORY_IMAGE, BEING_TRY_IMAGE, BEING_LAPTOP_TRY_IMAGE, ...)
+         pass through; with --manifest they are taken from a sealed candidate.
+full     python3 -m lab.candidate_tests --manifest ... (every guest suite in
+         series, installed recovery included), with BEING_GATE=1.
+
+Exit status is 0 only when every step passed. A summary is written to
+out/logs/check-TIER-TIME/summary.json.
+"""
+
+import argparse
+import concurrent.futures
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+BOOT_GATE = (
+    "lab.tests.test_laptop_smoke",
+    "lab.tests.test_l0",
+    "lab.tests.test_l1",
+    "lab.tests.test_l5",
+    "lab.tests.test_try",
+    "lab.tests.test_local_screen",
+    "lab.tests.test_install_apply",
+    "lab.tests.test_setup",
+    "lab.tests.test_l2.Thinking",
+)
+# unittest -v: "test_x (pkg.mod.Class.test_x) ... skipped 'why'", or with the
+# docstring's first line on the next line before " ... skipped".
+SKIP_LINE = re.compile(r"^(test\w*) \(([\w.]+)\)(?:\n[^\n]*?)? \.\.\. skipped '(.*)'$", re.M)
+
+
+def step(name, command, *, env=None, log_dir, timeout=None):
+    started = time.monotonic()
+    log = log_dir / (re.sub(r"[^\w.-]+", "_", name) + ".log")
+    print(f"--> {name}: {' '.join(command)}", flush=True)
+    with log.open("w") as stream:
+        try:
+            code = subprocess.run(command, cwd=ROOT, env=env, stdout=stream, stderr=subprocess.STDOUT,
+                                  timeout=timeout).returncode
+        except subprocess.TimeoutExpired:
+            code = "timeout"
+        except FileNotFoundError as error:
+            code = f"missing: {error.filename}"
+    text = log.read_text(errors="replace")
+    skips = [{"test": where if where.endswith("." + test) else f"{where}.{test}", "reason": reason}
+             for test, where, reason in SKIP_LINE.findall(text)]
+    tail = re.findall(r"^(Ran \d+ tests? in .*|OK.*|FAILED.*|test result: .*)$", text, re.M)
+    result = {"name": name, "status": "passed" if code == 0 else f"failed ({code})",
+              "seconds": round(time.monotonic() - started, 1), "log": str(log), "skips": skips,
+              "summary": tail[-3:]}
+    print(f"    {result['status']} in {result['seconds']} s" + (f"; {tail[-1]}" if tail else ""), flush=True)
+    return result
+
+
+def fast(args, log_dir):
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    steps = []
+    if shutil.which("cargo"):
+        steps.append(("rust", ["cargo", "test", "--workspace", "--quiet"]))
+    else:
+        steps.append(("rust", ["cargo"]))       # reported as missing, never silently passed
+    steps += [
+        ("python-host", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", ".", "-v"]),
+        ("lab-host", [sys.executable, "-m", "unittest", "discover", "-s", "lab/tests/host", "-t", ".", "-v"]),
+        ("manual-links", [sys.executable, "scripts/check-docs.py"]),
+        ("media-gallery", ["bash", "lab/media.sh", "--check"]),
+    ]
+    # Stale manual pages and an out-of-date gallery (rebuild with lab/media.sh)
+    # are reported, never block the code gate.
+    advisory = {"manual-links", "media-gallery"}
+    if args.dry_run:
+        return [{"name": name, "status": "dry run", "command": command} for name, command in steps]
+    results = [step(name, command, env=env, log_dir=log_dir, timeout=900) for name, command in steps]
+    for result in results:
+        if result["name"] in advisory and result["status"] != "passed":
+            result["status"] = "advisory: " + result["status"]
+    return results
+
+
+def manifest_env(manifest):
+    """The image variables lab.candidate_tests would bind for a sealed candidate."""
+    sys.path.insert(0, str(ROOT))
+    from lab import candidate_tests
+    release, _ = candidate_tests.read_release(manifest)
+    env = {}
+    for role, names in candidate_tests.BINDINGS.items():
+        key = candidate_tests.RELEASE_ROLES.get(role, role)
+        record = release["artifacts"].get(key)
+        if record:
+            env.update(dict.fromkeys(names, str(manifest.parent / record["path"])))
+    return env
+
+
+def boot_gate(args, log_dir):
+    env = dict(os.environ, BEING_GATE="1", PYTHONUNBUFFERED="1")
+    if args.manifest:
+        env.update(manifest_env(args.manifest))
+    suites = list(args.suite or BOOT_GATE)
+    if args.dry_run:
+        return [{"name": suite, "status": "dry run", "env": {k: v for k, v in env.items() if k.startswith("BEING_")}}
+                for suite in suites]
+
+    def run(suite):
+        scratch = tempfile.mkdtemp(prefix="bgate-", dir="/tmp")    # short socket paths for QEMU
+        try:
+            lane_env = dict(env, TMPDIR=scratch, BEING_LAB_OUTPUT=str(log_dir / "lab" / suite))
+            return step(suite, [sys.executable, "-m", "unittest", "-v", suite], env=lane_env,
+                        log_dir=log_dir, timeout=args.suite_timeout)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+        return list(pool.map(run, suites))
+
+
+def full(args, log_dir):
+    if not args.manifest:
+        raise SystemExit("full needs --manifest out/candidates/NAME/release.json")
+    command = [sys.executable, "-m", "lab.candidate_tests", "--manifest", str(args.manifest),
+               "--output", str(log_dir / "candidate")]
+    if args.wifi_image:
+        command += ["--wifi-image", str(args.wifi_image)]
+    if args.dry_run:
+        return [{"name": "candidate-controller", "status": "dry run", "command": command}]
+    return [step("candidate-controller", command, env=dict(os.environ, BEING_GATE="1"), log_dir=log_dir)]
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("tier", choices=("fast", "boot-gate", "full"))
+    parser.add_argument("--manifest", type=Path, help="sealed candidate release.json")
+    parser.add_argument("--jobs", type=int, default=3, help="parallel QEMU lanes for boot-gate (default 3)")
+    parser.add_argument("--suite", action="append", help="boot-gate: run only this suite (repeatable)")
+    parser.add_argument("--suite-timeout", type=int, default=3600)
+    parser.add_argument("--wifi-image", type=Path)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+    if args.manifest:
+        args.manifest = args.manifest.resolve()
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    log_dir = ROOT / "out/logs" / f"check-{args.tier}-{stamp}"
+    if not args.dry_run:
+        log_dir.mkdir(parents=True)
+    results = {"fast": fast, "boot-gate": boot_gate, "full": full}[args.tier](args, log_dir)
+    ok = all(result["status"] in ("passed", "dry run") or result["status"].startswith("advisory")
+             for result in results)
+    for result in results:
+        if result["status"].startswith("advisory"):
+            print(f"note: {result['name']} {result['status']} (see {result.get('log')})")
+    skips = [skip for result in results for skip in result.get("skips", [])]
+    if skips:
+        print(f"\n{len(skips)} skipped tests:")
+        for skip in skips:
+            print(f"  {skip['test']}: {skip['reason']}")
+    if args.dry_run:
+        print(json.dumps(results, indent=1))
+    else:
+        summary = {"tier": args.tier, "ok": ok, "steps": results, "skipped": len(skips)}
+        (log_dir / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
+        print(f"\n{args.tier}: {'PASSED' if ok else 'FAILED'} ({log_dir / 'summary.json'})")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

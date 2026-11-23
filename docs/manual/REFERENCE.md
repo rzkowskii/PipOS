@@ -1,7 +1,7 @@
 <!--
 doc: reference
-verified: 2026-11-23
-sources: mind/commands.py mind/reminder_language.py mind/turn.py mind/skills.py mind/profile.py mind/setup.py mind/local_menu.py mind/retention.py mind/backup.py mind/dream_journal.py mind/network_enforce.py mind/network_policy.py mind/initiative.py mind/voice.py mind/tts.py mind/eyes.py mind/__main__.py crates/face/src/main.rs crates/brainstem/src/main.rs sim/body.py lab/vm.py lab/build.sh scripts/run-sim.sh os/package/being/being.env os/package/being/being-camera config/being.json
+verified: 2026-11-23T22:20
+sources: mind/commands.py mind/reminder_language.py mind/turn.py mind/skills.py mind/profile.py mind/setup.py mind/local_menu.py mind/retention.py mind/backup.py mind/dream_journal.py mind/network_enforce.py mind/network_policy.py mind/initiative.py mind/voice.py mind/tts.py mind/eyes.py mind/__main__.py crates/face/src/main.rs crates/brainstem/src/main.rs sim/body.py lab/vm.py lab/build.sh scripts/run-sim.sh os/package/being/being.env os/package/being/being-camera config/being.json mind/wifi.py mind/reminders.py os/package/being/being-usb-logs os/package/being/being-hardware-report
 -->
 
 # PipOS reference
@@ -60,7 +60,7 @@ permission for web lookups in setup."
 
 | Say | Behaviour |
 |---|---|
-| "Remind me to call Mum tomorrow at nine A.M." | One-off reminder. The time can be given as follows: <ul><li>"in N minutes / hours / days"</li><li>"at 7:30 pm", "noon" or "midnight"</li><li>a day: "today", "tonight", "tomorrow", "(next) Friday" or "2026-12-01"</li></ul> |
+| "Remind me to call Mum tomorrow at nine A.M." | One-off reminder. The time can be given as follows: <ul><li>"in N minutes / hours / days"</li><li>"at 7:30 pm", "noon" or "midnight"</li><li>a day: "today", "tonight", "tomorrow", "(next) Friday" or "2026-12-01". A day word also needs a full time, as in "next Friday at 9 am"</li></ul> |
 | "Remind me in ten minutes to check the oven" | Relative reminder |
 | "Set a timer for five minutes" / "Start a 10 minute timer" | Countdown |
 | "What are my reminders?" / "List my timers" | Reads up to five pending items with their numbers |
@@ -79,7 +79,7 @@ it says "Reminder N. *task*".
 | Say | Behaviour |
 |---|---|
 | "Remember that my orchid is called Silverleaf" / "Don't forget that …" | Stores a fact. "Okay. I'll remember that." |
-| "What do you remember about my orchid?" / "Do you remember what I said about …?" | Searches facts first, then the conversation archive. Quotes the words and the date |
+| "What do you remember about my orchid?" / "Do you remember what I said about …?" | Searches facts first ("You told me: …"). Then it searches the conversation archive and quotes the single best match with its date ("On November 20, 2026, you said: …") |
 | "What did I say about the café?" / "What have I told you about …?" | Searches only what you said |
 | "What did you say about …?" | Searches only what Pip said |
 | "What did we talk about last Friday?" / "… yesterday" / "… on 2026-11-20" | Searches a single day in your time zone |
@@ -97,7 +97,7 @@ it says "Reminder N. *task*".
 | "How old are you?" / "When were you born?" | Its age and wake count from the life record |
 | "How is your battery?" / "How much charge do you have?" | Its battery percentage, and whether it is charging, plugged in or on battery |
 | "What can you do?" | A short list of skills |
-| "Go to sleep" / "Good night" | "Okay. Good night." Pip then sleeps until you say the wake phrase or open the lid |
+| "Go to sleep" / "Good night" | "Okay. Good night." Between 5 a.m. and 6 p.m. it says "Okay. I'll rest my eyes for a while." instead. Pip then sleeps until you say the wake phrase (not while muted) or open the lid |
 | "What do you see?" / "Look at this" | "I can't see yet. My eyes aren't connected." (Deliberate vision is not built yet) |
 
 ### Greetings (local replies, no model)
@@ -111,11 +111,30 @@ Pip answers short greetings, check-ins and presence questions locally:
 The replies rotate with the chosen personality. A greeting with a topic
 goes to the model.
 
+### Replies when something goes wrong
+
+| Pip says | Meaning |
+|---|---|
+| "I can't think right now. My language model isn't answering." | The model server is down or loading. Direct commands still work |
+| "Sorry. I lost my thought." | The model produced nothing usable, or failed before saying anything. A reply that only repeats the question is retried once first |
+| "I can't read my battery level right now." | The battery reading is unknown |
+| "I don't remember anything about that." | Recall found no fact or archive match |
+| "I'm not sure which memory you mean." | "That's wrong, …" had no recent memory to correct |
+| "I'm not sure what to forget. Tell me what it was about." | "Forget that" had nothing to act on |
+| "I don't have anything like that to forget." | Topic or day forgetting found no match |
+| "Okay. I'll remember that for this session." | Session-only or guest mode. The fact is not kept |
+| "Private conversations need my local language model." | Guest, session-only or explicit-only mode, and the model server is not on this machine, so open conversation is refused |
+| "Use a time zone name, for example Australia slash Sydney." | The zone was not recognized. Say region and city |
+| "Use a city name, for example Sydney, Australia." | The weather city was not usable |
+| "I couldn't access my local settings or reminders." | A file on `/mind` could not be read or written |
+| "Did you mean a.m. or p.m.? …" / "What time on that day?" / "That time has already passed." | Say the whole reminder again with a full, future time |
+| "More than one reminder matches. Say the reminder number to cancel it." | Cancel by number |
+
 ### Private modes
 
 In guest mode or `session-only` memory, only these commands work: time,
-date, day, tomorrow, the memory commands, name, age, battery, sleep and
-the guest commands. Anything else gets "I can tell you the time, date, or
+date, day, tomorrow, the memory commands, name, age, battery, sleep,
+"What do you see?" and the guest commands. Anything else gets "I can tell you the time, date, or
 battery level in a private conversation."
 
 ## Keys and touch
@@ -128,7 +147,7 @@ Sources: `crates/face/src/main.rs`, `os/package/being/being-console.c`
 | **M** | Mute or unmute the microphone | Typed as text |
 | **F10** | Mute or unmute the microphone | Mute (for the **P** speaker preview) |
 | **F9** | Recover the face when the lid reading is unknown | Same |
-| **F2** | Open setup | — |
+| **F2** | Open setup on an installed Pip, or the start menu in Try | — |
 | **Click or tap** | Pip glances down | — |
 | **Page Up / Page Down** | — | Scroll the history |
 | **Number keys, Enter** | — | Choose menu items |
@@ -172,26 +191,31 @@ Sources: `mind/local_menu.py`, `mind/setup.py`, `mind/initiative_setup.py`
 | K | Keep (asks to confirm) |
 | Q | Cancel |
 
-On an installed system, changes apply after a reboot. In Try they apply
-immediately.
+On an installed system, profile changes (keys 1–7) apply after a reboot.
+Network and announcement changes (keys 8 and 9) apply at once. In Try,
+everything applies immediately.
 
 ## Maintenance commands
 
-These commands run at a root console on the device. The laptop image has
-no console login unless it was built with `BEING_LAPTOP_MAINTENANCE=1`
-(see the [user guide](USER-GUIDE.md#settings-you-cannot-reach-yet)).
+These commands run as root on the device. Lab and QEMU images have a
+root console. The laptop image has no console login in any build. An
+image built with `BEING_LAPTOP_MAINTENANCE=1` adds key-only SSH from a
+paired Mac (`being-lab-access`), and its root development login lasts at
+most 30 minutes (see the
+[user guide](USER-GUIDE.md#settings-you-cannot-reach-yet)).
 
 | Command | Purpose |
 |---|---|
 | `being-setup [--show] [--dry-run] [--network] [--initiative]` | Personalization, network mode, announcements |
-| `being-memory status` / `being-memory set persistent\|explicit-only\|session-only [--expiry-days N]` | Retention policy. Takes effect when the mind next starts: `systemctl restart being-mind.service` |
-| `being-camera enable\|disable\|status` | Camera permission (the marker `/mind/camera.enabled`) |
+| `being-memory status` / `being-memory set persistent\|explicit-only\|session-only [--expiry-days N]` | Retention policy. `--expiry-days` (1–36500) works only with `persistent`. Nothing is expired while the clock is not trusted. Refused while a restore is unfinished. Takes effect when the mind next starts: `systemctl restart being-mind.service` |
+| `being-camera enable\|disable\|status` | Camera permission (the root-owned 0600 marker `/mind/camera.enabled`). Must run as root. Starts or stops `being-eyes.service`. `status` shows both the permission and the service state |
 | `being-dream-journal [--limit N]` | Read the overnight journal |
 | `being-network status [--json]` / `being-network set MODE [--web-lookups] [--time-server IP]` | Network policy |
-| `being-wifi …` | Save or forget the single Wi-Fi profile |
+| `being-wifi configure IFACE SSID [--security wpa2\|wpa3] [--password-stdin] [--offline-mind PATH]` / `status` / `forget` / `scan [IFACE]` / `ethernet on\|off\|status` | Manage networking:<ul><li>save, show or remove the single Wi-Fi profile;</li><li>list nearby networks as JSON;</li><li>switch wired Ethernet (used in Internet mode).</li></ul>Without `--password-stdin` it asks for the password. `--offline-mind` saves to an installed mind partition mounted from a Linux live system. WPA2 or WPA3 personal only; no open or enterprise networks. Wi-Fi is used only outside Offline mode. Example: `printf '%s' "$PASS" \| being-wifi configure wlan0 "Home WiFi" --security wpa2 --password-stdin` |
 | `being-backup keygen\|create\|export-deletions\|checkpoint\|restore` | Encrypted backup and restore (see the [user guide](USER-GUIDE.md#backing-up-pip)) |
 | `being-installer [--check\|--list\|--plan DEV\|--install DEV] [--json]` | Hardware check, disk listing, layout preview, install |
-| `being-hardware-report`, `being-usb-logs` | Diagnostics on the `PIPLOGS` partition of a laptop Try stick |
+| `being-hardware-report [--save]` | Print the hardware report. With `--save` it instead saves the summary and report (MAC addresses masked) to this boot's folder on the `PIPLOGS` partition of a laptop Try stick, and prints only where it saved. It exits 1 when no stick is in use |
+| `being-usb-logs run\|report\|summary\|check` | Manage Try boot diagnostics on the `PIPLOGS` partition |
 | `touch /mind/dreams-enabled` / `rm /mind/dreams-enabled` | Opt in to or out of overnight journal work |
 | `rauc install BUNDLE.raucb` | Install a signed OS update to the inactive slot |
 
@@ -203,7 +227,7 @@ Sources: `README.md`, `mind/*.py`, `crates/brainstem/src/life.rs`
 |---|---|---|---|
 | `life.json` | brainstem | ID, birth, wake count, body, how the last wake ended | Yes |
 | `profile.json` | setup | Name, owner, wake phrase, voice, rate, traits | Yes |
-| `mind.db` | mind | Episodes, facts, FTS indexes, dream journal, deletion ledger, believed-clock state | Yes (compacted; dream tables cleared) |
+| `mind.db` | mind | Episodes, facts, FTS indexes, dream journal, deletion ledger, believed-clock state | Yes. The copy is compacted, dream tables are cleared and expired memory is dropped. Episodes are kept only in persistent mode, and facts are dropped in session-only mode |
 | `memory-policy.json` | `being-memory` | Retention mode and expiry | Yes |
 | `skills.json` | mind | Time zone and weather city | Time zone only |
 | `reminders.db` | mind | Pending reminders and timers, greeting days | No |
@@ -256,7 +280,9 @@ Source: `os/package/being/*.service`, `os/package/cortex/being-cortex.service`
 | `being-network-{lockdown,policy,reconcile}`, `being-wifi` | `being-network`, `being-wifi` | Firewall and links |
 | `being-usb-logs` | `python3 -m mind.usb_logs run` | Try boots only |
 
-Every unit reads `/etc/being/env`:
+The organ units read `/etc/being/env`: brainstem, face, mind, voice,
+eyes, boot health and local screen. The cortex, network, Wi-Fi and
+USB-log units do not.
 
 ```
 BEING_BUS=/run/being/bus.sock
@@ -268,9 +294,9 @@ BEING_REQUIRE=face,mind,voice
 
 | Variable | Default | Used by |
 |---|---|---|
-| `BEING_BUS` | `$XDG_RUNTIME_DIR/being/bus.sock`, then `/tmp/being-$USER/bus.sock` | All organs |
-| `BEING_MIND` | `/mind` if writable, else `~/.local/share/being/mind` | brainstem, mind, eyes |
-| `BEING_REQUIRE` | `face,mind,voice` | brainstem |
+| `BEING_BUS` | `$XDG_RUNTIME_DIR/being/bus.sock`, then `/tmp/being-$USER/bus.sock`. `being-setup` and the local screen default to `/run/being/bus.sock` | All organs, `being-setup`, local screen |
+| `BEING_MIND` | The default depends on the organ:<ul><li>mind: `/mind` if writable, else `~/.local/share/being/mind`</li><li>eyes: `/mind`</li><li>brainstem: none. Without this or `--mind-dir`, it keeps no life record</li></ul> | brainstem, mind, eyes, voice, and tools that default to the mind directory (`being-memory`, `being-setup`, `being-dream-journal`) |
+| `BEING_REQUIRE` | `face,mind,voice` (the `--require` default) | The brainstem unit, which passes it as `--require` |
 | `BEING_CORTEX` | `cortex_url`, then `http://127.0.0.1:8080` | mind |
 | `BEING_LOG` | off | brainstem (event trace to stderr) |
 | `BEING_BODY`, `BEING_BOOT_ID` | DMI string and kernel boot ID | brainstem (testing identity and power-loss detection) |
@@ -286,7 +312,7 @@ BEING_REQUIRE=face,mind,voice
 | Argument | Effect |
 |---|---|
 | `being.try=1` | Try session: RAM `/mind`, updates off, USB logs on |
-| `being.screen=1` | Show the USB menu before the face |
+| `being.screen=1` | With `being.try=1` (Try-screen images), show the USB menu before the face. The face waits until the menu is dismissed |
 | `being.trial=1` | Set by GRUB on an unconfirmed slot. A failed health check reboots |
 | `being.installed=1 being.esp=… being.slot_a=… being.slot_b=… being.models=… being.mind=…` | Installed-disk partition binding |
 | `being.verbose=1`, `being.verbose_hold=SECS` | Keep boot messages visible (default 20 s; 0 waits for a key) |

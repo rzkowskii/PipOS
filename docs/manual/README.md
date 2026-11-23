@@ -1,6 +1,6 @@
 <!--
 doc: index
-verified: 2026-11-23
+verified: 2026-11-23T22:20
 sources:
 -->
 
@@ -42,14 +42,16 @@ Each page starts with a comment header:
 ```
 <!--
 doc: user-guide
-verified: 2026-11-23
+verified: 2026-11-23T22:20
 sources: mind/commands.py mind/turn.py …
 -->
 ```
 
 - **`sources`** lists the files whose behaviour the page describes.
-- **`verified`** is the date someone last checked the page against those
-  files.
+- **`verified`** is when someone last checked the page against those
+  files. It is either a date (`2026-11-23`) or a local time
+  (`2026-11-23T22:20`). Use the time form when other work is landing the
+  same day.
 
 Run the checker from the repository root:
 
@@ -76,3 +78,34 @@ When a feature lands:
 3. Bump `verified:` on each page you re-checked.
 4. At milestones (first physical boot, internal install, model choice),
    add a dated row to the assessment history and revise its verdict.
+
+## Baseline and pending work
+
+The manual was written and checked by independent reviewers on
+23 November 2026, against the source as it stood at about 22:20:
+
+- commit `b1fbeea`, the source of the first laptop Try image;
+- a few later changes that the second review round picked up: the
+  `ERASE MACOS` / `ERASE BEING` confirmation, the hidden boot menu on
+  installed disks, the `being-wifi scan` and `ethernet` commands, and the
+  `mind.progress` think timeout.
+
+Other sessions were landing a large change set at the same time. As of
+22:40 on 23 November, these changes are **not yet documented**:
+
+- **The `hands` organ** (`mind/hands.py`, designed in
+  `docs/design/voice-apps.md`). This is a voice-driven "workshop
+  terminal". It runs as an unprivileged `being-shell` user, in a RAM-only
+  `/workshop`, with no network.
+- **The `bodycare` crate** (`crates/bodycare`). This is a power and
+  thermal controller: charge limit, fan floor, CPU caps and a restore
+  journal.
+- **Brainstem resume.** A restarted brainstem picks up its coarse state,
+  mute and sleep from `/run` instead of re-waking.
+- **Further changes** in `mind/turn.py`, `mind/voice.py`, `mind/tts.py`,
+  `mind/recognition.py`, `mind/commands.py`, the installer, GRUB and the
+  console.
+
+Run `python3 scripts/check-docs.py` to see exactly which pages these
+changes affect. Once that work is committed, re-verify those pages and
+move each item into the right document.

@@ -467,3 +467,122 @@ class PlainConsole(unittest.TestCase):
             text = self.ui.plain(output.getvalue())
             for number in range(1, 12):
                 self.assertIn(f"{number}  Entry {number}", text)
+
+
+class TryHomecoming(LocalMenuTests):
+    """Bring Pip home, the time zone, the Try profile default and the checkpoint record."""
+
+    # Inherited flows are covered above.
+    for _name in [name for name in dir(LocalMenuTests) if name.startswith("test_")]:
+        locals()[_name] = None
+    del _name
+
+    def test_bring_pip_home_carries_the_try_being_through_the_restore_path(self):
+        save_profile(self.mind_path, replace(Profile(), name="Clover"))
+        carried = []
+        with (patch("mind.backup.has_conversation", return_value=True),
+              patch("mind.backup.carry", side_effect=lambda source, target: carried.append((source, target)))):
+            code, text, _, keyboard = self.run_keys(["2", "1", "y", ""])
+            self.assertEqual(code, 0)
+            kwargs = self.confirm.call_args.kwargs
+            self.assertTrue(kwargs["carried"])
+            self.assertIsNone(kwargs["profile"])
+            kwargs["restore"](Path("/staged"))
+        self.assertEqual(carried, [(self.mind_path, Path("/staged"))])
+        self.assertIn("Keep what you and Pip talked about? [y/N] ", [call.args[0] for call in keyboard.call_args_list])
+
+    def test_declining_bring_pip_home_offers_the_profile_with_yes_as_default(self):
+        save_profile(self.mind_path, replace(Profile(), name="Clover"))
+        with patch("mind.backup.has_conversation", return_value=True):
+            code, _, _, keyboard = self.run_keys(["2", "1", "n", "", ""])
+        self.assertEqual(code, 0)
+        prompts = [call.args[0] for call in keyboard.call_args_list]
+        self.assertIn("Keep this Try profile? [Y/n] ", prompts)
+        self.assertEqual(self.confirm.call_args.kwargs["profile"].name, "Clover")
+        self.assertNotIn("carried", self.confirm.call_args.kwargs)
+
+    def test_try_time_zone_is_offered_and_seeded(self):
+        self.mind_path.mkdir()
+        (self.mind_path / "skills.json").write_text('{"time_zone": "Australia/Sydney"}')
+        code, _, _, _ = self.run_keys(["2", "1", "", ""])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.confirm.call_args.kwargs["skills"], {"time_zone": "Australia/Sydney"})
+
+    def test_checkpoint_record_is_confirmed_by_its_fingerprint(self):
+        from mind import backup
+
+        picked, staged, _, run = self.media_fixture()
+        record = picked[0].parent.parent / "pip-checkpoint.txt"
+        record.write_text(backup.checkpoint_text("2b" * 16, "c" * 64, 1))
+        with (patch.object(local_menu.subprocess, "run", side_effect=run) as backend,
+              patch.object(local_menu.getpass, "getpass") as hidden):
+            # Archive restore, media 1, backup 1, key 2, proof 4, record 5, confirm, disk 1, Enter.
+            files = local_menu.media_files(picked[0].parent.parent)
+            number = str(files.index(record) + 1)
+            code, text, errors, _ = self.run_keys(["3", "1", "1", "1", "2", "3", number, "y", "1", ""])
+        self.assertEqual((code, errors), (0, ""))
+        hidden.assert_not_called()
+        self.assertIn("cccccccc…cccccccc", text)
+        self.assertIn("same stick", text)
+        restore = backend.call_args_list[-1].args[0]
+        self.assertEqual(restore[-2:], ["--current-checkpoint", "c" * 64])
+
+    def test_a_wrong_record_file_is_asked_again(self):
+        from mind import backup
+
+        picked, staged, _, run = self.media_fixture()
+        record = picked[0].parent.parent / "pip-checkpoint.txt"
+        record.write_text(backup.checkpoint_text("2b" * 16, "d" * 64, 1))
+        with (patch.object(local_menu.subprocess, "run", side_effect=run) as backend,
+              patch.object(local_menu.getpass, "getpass") as hidden):
+            files = local_menu.media_files(picked[0].parent.parent)
+            wrong, number = str(files.index(picked[0]) + 1), str(files.index(record) + 1)
+            code, text, errors, _ = self.run_keys(["3", "1", "1", "1", "2", "3", wrong, number, "y", "1", ""])
+        self.assertEqual((code, errors), (0, ""))
+        hidden.assert_not_called()
+        self.assertIn("not a checkpoint record", text)
+        self.assertEqual(backend.call_args_list[-1].args[0][-2:], ["--current-checkpoint", "d" * 64])
+
+    def test_a_passphrase_key_is_unlocked_into_ram_before_any_progress_screen(self):
+        from mind.backup_crypto import BackupCryptoError
+
+        folder = self.mind_path.parent
+        key = folder / "key.age"
+        key.write_text("-----BEGIN AGE ENCRYPTED FILE-----\nYWdl\n-----END AGE ENCRYPTED FILE-----\n")
+
+        def unlock(path, destination):
+            Path(destination).write_text("AGE-SECRET-KEY-1" + "Q" * 58 + "\n")
+            return Path(destination)
+
+        with patch("mind.backup_crypto.unlock_identity", side_effect=unlock) as opened, \
+                redirect_stdout(io.StringIO()) as output:
+            path, holder = local_menu.unlock_if_protected(key)
+        opened.assert_called_once()
+        self.assertIn("passphrase", output.getvalue())
+        self.assertNotEqual(path, key)
+        self.assertTrue(path.is_file())
+        holder.cleanup()
+        self.assertFalse(path.exists(), "the unlocked key does not outlive the restore")
+        plain = folder / "plain.key"
+        plain.write_text("AGE-SECRET-KEY-1" + "Q" * 58 + "\n")
+        self.assertEqual(local_menu.unlock_if_protected(plain), (plain, None))
+        with (patch("mind.backup_crypto.unlock_identity", side_effect=BackupCryptoError("Wrong passphrase.")),
+              redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "Nothing was restored")):
+            local_menu.unlock_if_protected(key)
+
+    def test_try_hint_follows_whether_diagnostics_are_really_kept(self):
+        for logged, expected in ((True, local_menu.TRY_HINT_LOGGED), (False, local_menu.TRY_HINT),
+                                 (None, local_menu.TRY_HINT)):
+            with self.subTest(logged=logged), patch.object(local_menu.usb_logs, "logging_enabled",
+                                                           return_value=logged):
+                self.assertEqual(local_menu.menu_entries()[0][2], expected)
+
+    def test_try_menu_offers_backup_and_says_what_diagnostics_keep(self):
+        folder = self.mind_path.parent / "boot-0001"
+        folder.mkdir()
+        with (patch.object(local_menu.usb_logs, "current_folder", return_value=folder),
+              patch("mind.care.backup_menu") as backup_menu):
+            code, text, _, _ = self.run_keys(["6", "q"])
+        self.assertEqual(code, 0)
+        backup_menu.assert_called_once_with(self.mind_path, temporary=True)
+        self.assertIn("6  Back up to a USB stick", text)

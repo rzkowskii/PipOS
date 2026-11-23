@@ -104,7 +104,9 @@ class WakeAudio(unittest.TestCase):
         recognizer.lib = Mock()
         recognizer.lib.ps_activate_search.return_value = 0
         recognizer.lib.ps_start_utt.return_value = 0
+        recognizer.lib.ps_endpointer_speech_start.return_value = 40 * 0.03
         recognizer.decoder = Mock()
+        recognizer.endpoint = None
         recognizer.mode = None
         recognizer.wake_preroll = deque(maxlen=WAKE_PREROLL_FRAMES + 1)
         decoded, tracked = [], []

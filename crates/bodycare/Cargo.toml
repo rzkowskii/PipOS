@@ -1,0 +1,9 @@
+[package]
+name = "bodycare"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bus = { path = "../bus" }
+serde_json.workspace = true
+libc = "0.2"

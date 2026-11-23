@@ -1,0 +1,14 @@
+# Pip's workshop: where the caged shell's scripts live. RAM only, so it is
+# empty after every restart, it can never fill /mind, and forgetting a script
+# really deletes it. noexec: scripts run through python3 or sh.
+[Unit]
+Description=Pip's workshop (RAM only)
+DefaultDependencies=no
+Conflicts=umount.target
+Before=umount.target
+
+[Mount]
+What=tmpfs
+Where=/workshop
+Type=tmpfs
+Options=size=64M,nr_inodes=4096,mode=0700,nosuid,nodev,noexec,X-mount.owner=being-shell,X-mount.group=being-shell

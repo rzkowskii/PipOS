@@ -18,9 +18,10 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 
 from .backup_crypto import BackupCryptoError, decrypt, encrypt, generate_key
+from .initiative import POLICY_PATH as INITIATIVE_PATH, load_policy as load_initiative, save_policy as save_initiative
 from .memory import Memory
 from .profile import FACTORY_CONFIG, PROFILE_FILE, load_profile, save_profile
-from .retention import POLICY_FILE, MemoryPolicy, load_policy, save_policy
+from .retention import POLICY_FILE, MemoryPolicy, load_policy, read_policy, save_policy
 from .storage import atomic_write, private_directory, sync_directory
 
 
@@ -28,10 +29,15 @@ VERSION = 1
 LIFE_FILE = "life.json"
 DB_FILE = "mind.db"
 SKILLS_FILE = "skills.json"
+INITIATIVE_FILE = str(INITIATIVE_PATH)
+CHECKPOINT_KIND = "pipos-deletion-checkpoint"
 MANIFEST = "manifest.json"
 RESTORE_MARKER = ".being-restore-in-progress"
 RESTORE_STAGE = ".being-restore-stage"
-SETTINGS = (LIFE_FILE, PROFILE_FILE, SKILLS_FILE, POLICY_FILE)
+# Reminders, Wi-Fi, lab access, the weather city, caches and anything derived
+# (core.md) are left out: a backup holds who the being is, how it is set up,
+# and its archive, and forgetting must still reach everything restored.
+SETTINGS = (LIFE_FILE, PROFILE_FILE, SKILLS_FILE, POLICY_FILE, INITIATIVE_FILE)
 SNAPSHOT_FILES = {*SETTINGS, DB_FILE}
 METADATA_LIMIT = 64 * 1024
 DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -89,6 +95,10 @@ def copy_eligible_settings(source, target, life):
     if profile.exists() or profile.is_symlink():
         read_metadata(profile)
     save_profile(target, load_profile(FACTORY_CONFIG, source))
+    initiative = source / INITIATIVE_FILE
+    if initiative.exists() or initiative.is_symlink():
+        # Strict: a damaged announcement policy fails the backup loudly.
+        save_initiative(target, load_initiative(source, strict=True))
     try:
         settings = read_metadata(source / SKILLS_FILE)
     except FileNotFoundError:
@@ -155,7 +165,7 @@ def checkpoint_id(proof):
 def deletion_checkpoint(root):
     root = source_directory(root)
     life = life_record(root)
-    policy = load_policy(root)
+    policy = read_policy(root)
     if policy.mode == "session-only" and not (root / DB_FILE).exists():
         raise ValueError("This life has no durable archive to checkpoint.")
     with regular_file(root / DB_FILE):
@@ -190,7 +200,8 @@ def write_encrypted(output, recipient, source, *, outside):
 def create(mind_dir, output, recipient):
     root = source_directory(mind_dir)
     life = life_record(root)
-    policy = load_policy(root)
+    # A damaged policy must fail the backup, not quietly back up nothing.
+    policy = read_policy(root)
     with working_directory() as directory:
         stage = Path(directory)
         copy_eligible_settings(root, stage, life)
@@ -232,7 +243,8 @@ def extract_snapshot(plaintext, stage):
                     or entry.size <= 0 or (entry.name != DB_FILE and entry.size > METADATA_LIMIT)):
                 raise ValueError("Invalid file in the encrypted snapshot.")
             seen.add(entry.name)
-            with archive.extractfile(entry) as source, (stage / entry.name).open("xb") as output:
+            descriptor = os.open(stage / entry.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with archive.extractfile(entry) as source, os.fdopen(descriptor, "wb") as output:
                 shutil.copyfileobj(source, output)
     if not required <= seen:
         raise ValueError("The encrypted snapshot is incomplete.")
@@ -352,6 +364,92 @@ def restore(mind_dir, input_path, identity, deletions=None, current_checkpoint=N
         token = {"snapshot": snapshot_hash, "proof": proof_hash, "version": VERSION}
         publish(target, prepared, token)
     return {"life_id": life["id"], "history_restored": deletions is not None and policy.mode != "session-only"}
+
+
+# --- the owner's USB stick ---------------------------------------------------
+
+def fingerprint(checkpoint):
+    """The first and last 8 characters, for the owner to compare by eye."""
+    if not isinstance(checkpoint, str) or not DIGEST.fullmatch(checkpoint):
+        raise ValueError("Not a deletion checkpoint.")
+    return f"{checkpoint[:8]}…{checkpoint[-8:]}"
+
+
+def checkpoint_text(life_id, checkpoint, created):
+    return json_text({"kind": CHECKPOINT_KIND, "version": VERSION, "life_id": life_id,
+                      "checkpoint": checkpoint, "created": created})
+
+
+def read_checkpoint_file(path):
+    """(life_id, checkpoint) from a file written by backup_to_folder."""
+    value = read_metadata(Path(path))
+    if (not isinstance(value, dict) or value.get("kind") != CHECKPOINT_KIND or value.get("version") != VERSION
+            or not isinstance(value.get("life_id"), str) or not LIFE_ID.fullmatch(value["life_id"])
+            or not isinstance(value.get("checkpoint"), str) or not DIGEST.fullmatch(value["checkpoint"])):
+        raise ValueError("That file is not a PipOS deletion checkpoint.")
+    return value["life_id"], value["checkpoint"]
+
+
+def backup_to_folder(mind_dir, folder, recipient, *, now=None):
+    """Snapshot, deletion proof and checkpoint file, side by side in one folder.
+
+    The checkpoint comes from the same proof that was written, so a restore can
+    check the pair. Returns the three paths and the checkpoint.
+    """
+    folder = Path(folder)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(time.time() if now is None else now))
+    snapshot = folder / f"pip-{stamp}.age"
+    proof = folder / f"pip-{stamp}-deletions.age"
+    record = folder / f"pip-{stamp}-checkpoint.txt"
+    if any(path.exists() or path.is_symlink() for path in (snapshot, proof, record)):
+        raise ValueError("A backup with this time already exists. Wait a second and try again.")
+    created = create(mind_dir, snapshot, recipient)
+    exported = export_deletions(mind_dir, proof, recipient)
+    if exported["life_id"] != created["life_id"]:
+        raise ValueError("The being changed while it was backed up.")
+    atomic_write(record, checkpoint_text(created["life_id"], exported["checkpoint"], created["created"]), mode=0o600)
+    return {"snapshot": snapshot, "deletions": proof, "checkpoint_file": record,
+            "checkpoint": exported["checkpoint"], "life_id": created["life_id"]}
+
+
+def has_conversation(mind_dir):
+    """Whether an archive holds anything the owner said: facts or heard lines."""
+    database = Path(mind_dir) / DB_FILE
+    try:
+        if not stat.S_ISREG(database.lstat().st_mode):
+            return False
+        with closing(sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)) as db:
+            facts, = db.execute("SELECT EXISTS (SELECT 1 FROM facts)").fetchone()
+            heard, = db.execute("SELECT EXISTS (SELECT 1 FROM episodes WHERE kind = 'heard' "
+                                "AND text <> '[forgotten]')").fetchone()
+        return bool(facts or heard)
+    except (OSError, sqlite3.Error):
+        return False
+
+
+def carry(mind_dir, target):
+    """Bring a Try being into a fresh install: its life record, settings and archive.
+
+    It follows the restore path (the same eligible settings and publish step)
+    without encryption, because nothing leaves this machine's RAM. Expiry and
+    the memory policy apply to the carried copy, and the dream journal is not
+    carried, exactly as for a backup.
+    """
+    root = source_directory(mind_dir)
+    life = life_record(root)
+    policy = read_policy(root)
+    target = Path(target).resolve(strict=True)
+    with working_directory() as directory:
+        prepared = Path(directory) / "prepared"
+        prepared.mkdir(mode=0o700)
+        copy_eligible_settings(root, prepared, life)
+        database_snapshot(root, prepared / DB_FILE, policy)
+        if (prepared / DB_FILE).exists():
+            compact_archive(prepared, policy, apply_expiry=True)
+        if (root / POLICY_FILE).exists() or policy != MemoryPolicy():
+            save_policy(prepared, policy)
+        publish(target, prepared, {"carry": life["id"], "version": VERSION})
+    return {"life_id": life["id"]}
 
 
 def main(argv=None):

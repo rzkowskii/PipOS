@@ -18,9 +18,17 @@ BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_18=y
 BR2_CCACHE=y
 BR2_PER_PACKAGE_DIRECTORIES=y
 BR2_CCACHE_DIR="/work/ccache"
+# One cache serves every tree; the default 5 GB evicts the LLVM build.
+BR2_CCACHE_INITIAL_SETUP="--max-size=40G"
+# The top-level make runs several packages at once (lab/build.sh -j4), so
+# each package gets fewer jobs: 4 x 6 instead of 12 x 13 on 12 CPUs.
+BR2_JLEVEL=6
 
 # Our own fixes to other people's packages live in os/patches/.
 BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_BEINGOS_PATH)/patches"
+# Every download must match a known hash, including the custom kernel
+# version (os/patches/linux/linux.hash) and the cortex source.
+BR2_DOWNLOAD_FORCE_CHECK_HASHES=y
 
 # System
 BR2_INIT_SYSTEMD=y
@@ -37,6 +45,8 @@ BR2_PACKAGE_SYSTEMD_NETWORKD=y
 BR2_PACKAGE_SYSTEMD_RESOLVED=y
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_BEINGOS_PATH)/board/beingos/post-build.sh"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_BEINGOS_PATH)/board/beingos/post-image.sh"
+# No setuid or setgid file in the image (BusyBox is setuid by default).
+BR2_ROOTFS_POST_FAKEROOT_SCRIPT="$(BR2_EXTERNAL_BEINGOS_PATH)/board/beingos/post-fakeroot.sh"
 # Tells the board scripts to drop the serial console and every getty.
 BR2_ROOTFS_POST_SCRIPT_ARGS="laptop"
 
@@ -79,6 +89,10 @@ BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
 BR2_PACKAGE_WPA_SUPPLICANT_WPA3=y
 BR2_PACKAGE_WPA_SUPPLICANT_CLI=y
 BR2_PACKAGE_NFTABLES=y
+# Lets systemd enforce SystemCallFilter=, RestrictAddressFamilies= and
+# RestrictNamespaces= in the organ and workshop sandboxes. Without it they
+# are skipped silently.
+BR2_PACKAGE_LIBSECCOMP=y
 # No SSH server. Paired LAN maintenance is an owner opt-in at build time:
 # BEING_LAPTOP_MAINTENANCE=1 lab/build.sh laptop (a separate output tree).
 # BR2_PACKAGE_OPENSSH is not set

@@ -5,7 +5,8 @@ StartLimitIntervalSec=0
 RequiresMountsFor=/models /mind
 
 [Service]
-ExecStartPre=/bin/mkdir -p /mind/cortex
+# Outside the sandbox (+): the sandbox below makes /mind read-only.
+ExecStartPre=+/bin/mkdir -p /mind/cortex
 # Start with one inference worker per physical core. Prompt processing and
 # generation can be measured independently with a runtime service drop-in.
 Environment=BEING_CORTEX_THREADS=2 BEING_CORTEX_PROMPT_THREADS=2
@@ -26,6 +27,32 @@ Restart=always
 RestartSec=1
 # Thinking must never take the CPU from the face or the voice.
 Nice=5
+# The model server reads /models, writes only its saved slots, and is
+# reachable only on loopback: it has no authentication, so nothing but the
+# organs on this machine may talk to it, and it may talk to nothing else.
+# IPAddressDeny needs cgroup BPF and RestrictAddressFamilies needs libseccomp
+# (both in the next image; linux.config, the defconfigs).
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_IPC_LOCK
+ProtectSystem=strict
+ReadWritePaths=-/mind/cortex
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

@@ -12,6 +12,15 @@ the laptop's GL path uploads. --window opens the real GL window instead.
 --feed types into the child after half a second (\\r is Enter). --text prints
 what lab.tests.test_local_screen.console_lines reads back off the picture.
 
+    python3 -m lab.console_preview panel [--size 1280x640] [--wait 1.5] [--feed 'ls\\r']
+                                         [--control 'pip=typing'] [--out panel.png] -- COMMAND [ARGS...]
+
+Panel mode, as the workshop terminal runs it: COMMAND gets a pty here, this
+script relays its output to `being-console --panel` the way hands does
+(stripping the program's own OSC strings, adding --control as OSC 7770), and
+the frame file it writes is read back under its seqlock and saved as a PNG.
+The frame file and its format are described in being-console-panel.h.
+
     python3 -m lab.console_preview font WOFF_DIRECTORY
 
 Regenerates os/package/being/being-console-font.h from JetBrains Mono (SIL Open
@@ -29,6 +38,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zlib
 from pathlib import Path
 
@@ -36,7 +46,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "os/package/being"
 FONT_HEADER = PACKAGE / "being-console-font.h"
 SOURCES = [PACKAGE / name for name in ("being-console.c", "being-console-gl.h", "being-console-font.h",
-                                         "being-console-draw.h")]
+                                         "being-console-draw.h", "being-console-panel.h")]
 
 # Cell faces: (name, cell width, cell height, pixel size, baseline, cursor band).
 # Keep in step with being-console-draw.h and CONSOLE_FACES in test_local_screen.
@@ -530,8 +540,219 @@ def capture(command, size=(1280, 800), wait=1.5, feed="", window=False, build_di
         return read_ppm(shot.read_bytes())
 
 
+# -- panel mode ----------------------------------------------------------------
+
+PANEL_HEADER = 128
+PANEL_FLAGS = ("visible", "focus", "pip_typing", "pip_paused", "job_busy", "human_typing", "scrolled")
+
+
+def parse_panel_header(data):
+    """The fields of a frame file's 128-byte header (see being-console-panel.h)."""
+    if len(data) < PANEL_HEADER or data[:4] != b"BPN1":
+        raise ValueError("not a panel frame")
+    width, height, stride = struct.unpack_from("<III", data, 4)
+    (sequence,) = struct.unpack_from("<Q", data, 16)
+    dirty_first, dirty_count, flags = struct.unpack_from("<III", data, 24)
+    cursor_x, cursor_y = struct.unpack_from("<ii", data, 36)
+    beat, columns, rows = struct.unpack_from("<III", data, 44)
+    (newest_y,) = struct.unpack_from("<i", data, 56)
+    cell_width, cell_height = struct.unpack_from("<HH", data, 60)
+    (pid,) = struct.unpack_from("<I", data, 64)
+    title = data[96:128].split(b"\0", 1)[0].decode("utf-8", "replace")
+    return {
+        "width": width, "height": height, "stride": stride, "sequence": sequence, "dirty_first": dirty_first,
+        "dirty_count": dirty_count, "flags": {name for bit, name in enumerate(PANEL_FLAGS) if flags >> bit & 1},
+        "cursor": (cursor_x, cursor_y), "beat": beat, "columns": columns, "rows": rows, "newest_y": newest_y,
+        "cell": (cell_width, cell_height), "pid": pid, "title": title,
+    }
+
+
+def read_panel_frame(path, attempts=200):
+    """(header, rgba) from a frame file, read the way the face reads it: header,
+    rows, then the sequence again, retrying while a frame is being written."""
+    with open(path, "rb") as file:
+        for _ in range(attempts):
+            head = os.pread(file.fileno(), PANEL_HEADER, 0)
+            header = parse_panel_header(head)
+            size = header["stride"] * header["height"]
+            pixels = os.pread(file.fileno(), size, PANEL_HEADER)
+            (again,) = struct.unpack("<Q", os.pread(file.fileno(), 8, 16))
+            if header["sequence"] % 2 == 0 and again == header["sequence"] and len(pixels) == size:
+                return header, pixels
+            time.sleep(0.002)
+    raise TimeoutError(f"{path}: the frame never settled")
+
+
+def rgba_to_rgb(width, height, rgba):
+    rgb = bytearray(width * height * 3)
+    rgb[0::3], rgb[1::3], rgb[2::3] = rgba[0::4], rgba[1::4], rgba[2::4]
+    return width, height, bytes(rgb)
+
+
+def strip_osc(data, state):
+    """Drops every OSC string a program writes, as hands does before relaying,
+    so only the relay's own OSC 7770 reaches the renderer. `state` carries a
+    string split across reads."""
+    out = bytearray()
+    for byte in data:
+        if state["osc"]:
+            if byte == 0x07 or (state["escape"] and byte == 0x5c):
+                state["osc"] = state["escape"] = False
+            else:
+                state["escape"] = byte == 0x1b
+            continue
+        if state["escape"]:
+            state["escape"] = False
+            if byte == 0x5d:
+                state["osc"] = True
+                continue
+            out += b"\x1b"
+        if byte == 0x1b:
+            state["escape"] = True
+            continue
+        out.append(byte)
+    return bytes(out)
+
+
+def control_osc(pairs):
+    """An OSC 7770 control string from 'key=value' pairs."""
+    return b"\x1b]7770;" + ";".join(pairs).encode() + b"\x07"
+
+
+class PanelSession:
+    """being-console --panel NAME with COMMAND on a pty, relayed like hands does."""
+
+    def __init__(self, command, size=(1280, 640), name="terminal", build_dir=None, directory=None, extra=()):
+        import pty
+        self.binary = build(build_dir or ROOT / "out/console-preview")
+        self._scratch = None
+        if directory is None:
+            self._scratch = tempfile.TemporaryDirectory(prefix="being-panel-preview-")
+            directory = self._scratch.name
+        self.directory = Path(directory)
+        self.frame = self.directory / f"{name}.frame"
+        self._read, self._write = os.pipe()
+        self.renderer = subprocess.Popen(
+            [str(self.binary), "--panel", name, "--size", f"{size[0]}x{size[1]}", "--io", "-",
+             "--dir", str(self.directory), *extra],
+            stdin=self._read, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        os.close(self._read)
+        deadline = time.monotonic() + 10
+        while not self.frame.exists():
+            if self.renderer.poll() is not None or time.monotonic() > deadline:
+                raise RuntimeError("being-console --panel did not write a frame: " +
+                                   self.renderer.stderr.read().decode(errors="replace"))
+            time.sleep(0.01)
+        header, _ = read_panel_frame(self.frame)
+        self.columns, self.rows = header["columns"], header["rows"]
+        self.master, slave = pty.openpty()
+        import fcntl
+        import termios
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", self.rows, self.columns, 0, 0))
+        environment = {key: value for key, value in os.environ.items() if key != "BEING_CONSOLE_UI"}
+        environment["TERM"] = "dumb"
+        self.child = None
+        if command:
+            self.child = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, env=environment,
+                                          start_new_session=True,
+                                          preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0))
+        os.close(slave)
+        self._osc = {"osc": False, "escape": False}
+
+    def send(self, data):
+        """Bytes to the renderer as hands sends them (control strings, say)."""
+        os.write(self._write, data)
+
+    def control(self, *pairs):
+        self.send(control_osc(pairs))
+
+    def type(self, text):
+        os.write(self.master, text.encode() if isinstance(text, str) else text)
+
+    def pump(self, seconds):
+        """Relays the program's output for `seconds`, OSC stripped."""
+        import select
+        deadline = time.monotonic() + seconds
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return
+            ready, _, _ = select.select([self.master], [], [], left)
+            if not ready:
+                continue
+            try:
+                data = os.read(self.master, 65536)
+            except OSError:
+                data = b""
+            if not data:
+                time.sleep(left)
+                return
+            self.send(strip_osc(data, self._osc))
+
+    def read(self):
+        return read_panel_frame(self.frame)
+
+    def close(self):
+        """Ends the input, as hands does when the session closes; returns the exit status."""
+        if self.child and self.child.poll() is None:
+            self.child.kill()
+            self.child.wait()
+        for fd in (self.master, self._write):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            status = self.renderer.wait(timeout=10)
+        finally:
+            self.renderer.stderr.close()
+            if self._scratch:
+                self._scratch.cleanup()
+        return status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if self.renderer.stderr.closed:
+            return  # already closed
+        self.close()
+
+
+def panel_main(argv):
+    parser = argparse.ArgumentParser(prog="python3 -m lab.console_preview panel")
+    parser.add_argument("--size", default="1280x640", help="frame size, WIDTHxHEIGHT")
+    parser.add_argument("--wait", type=float, default=1.5, help="seconds before the frame is read")
+    parser.add_argument("--feed", default="", help="keys to type after half a second (\\r is Enter)")
+    parser.add_argument("--control", action="append", default=[], help="an OSC 7770 pair, e.g. pip=typing")
+    parser.add_argument("--out", type=Path, default=Path("panel-preview.png"))
+    parser.add_argument("--build-dir", type=Path, default=None)
+    parser.add_argument("command", nargs="*")
+    options = parser.parse_args(argv)
+    width, height = (int(value) for value in options.size.lower().split("x"))
+    feed = options.feed.encode().decode("unicode_escape")
+    with PanelSession(options.command, (width, height), build_dir=options.build_dir) as session:
+        if options.control:
+            session.control(*options.control)
+        session.pump(min(0.5, options.wait))
+        if feed:
+            session.type(feed)
+        session.pump(max(options.wait - 0.5, 0.1))
+        header, rgba = session.read()
+        session.close()
+    from lab.vm import png
+    options.out.parent.mkdir(parents=True, exist_ok=True)
+    options.out.write_bytes(png(*rgba_to_rgb(header["width"], header["height"], rgba)))
+    print(options.out)
+    print(f"{header['columns']}x{header['rows']} cells, flags {sorted(header['flags'])}, "
+          f"cursor {header['cursor']}, title {header['title']!r}")
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["panel"]:
+        return panel_main(argv[1:])
     if argv[:1] == ["font"]:
         if len(argv) != 2:
             raise SystemExit("usage: python3 -m lab.console_preview font WOFF_DIRECTORY")

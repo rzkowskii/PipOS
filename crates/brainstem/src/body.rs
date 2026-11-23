@@ -3,6 +3,7 @@
 //! Simulated readings start with lab defaults. Hardware readings stay unknown
 //! until the relevant device reports a value.
 
+use crate::battery::{self, Battery};
 use bus::Event;
 
 /// Publish at least this often, and at once when a reading changes.
@@ -12,10 +13,19 @@ pub struct Body {
     battery: Option<f64>,
     charging: Option<bool>,
     on_ac: Option<bool>,
+    /// Energy left (Wh), draw (W) and pack voltage (V), when the battery says.
+    energy_wh: Option<f64>,
+    power_w: Option<f64>,
+    voltage_v: Option<f64>,
     temp: Option<f64>,
     lux: Option<f64>,
     lid_closed: Option<bool>,
     lid_seq: u64,
+    /// The battery's keeper: pleas, time to empty and the clean power-off.
+    pub care: Battery,
+    /// The mind has said it has saved, so a pending power-off need not wait.
+    mind_saved: bool,
+    power_off_due: bool,
     recover_panel: bool,
     panel_ready: bool,
     /// A pretend hour of the day, for testing night behaviour.
@@ -38,10 +48,16 @@ impl Body {
             battery: Some(100.0),
             charging: Some(true),
             on_ac: Some(true),
+            energy_wh: None,
+            power_w: None,
+            voltage_v: None,
             temp: Some(45.0),
             lux: Some(150.0),
             lid_closed: Some(false),
             lid_seq: 0,
+            care: Battery::new(battery::Thresholds::default()),
+            mind_saved: false,
+            power_off_due: false,
             recover_panel: false,
             panel_ready: false,
             hour: None,
@@ -94,6 +110,9 @@ impl Body {
     #[cfg(any(target_os = "linux", test))]
     pub fn sense(&mut self, reading: &sysfs::Reading) {
         self.set_power(reading.battery, reading.charging, reading.on_ac);
+        // Energy and draw change every reading; they are published with the
+        // next periodic state, not as a change of their own.
+        (self.energy_wh, self.power_w, self.voltage_v) = (reading.energy_wh, reading.power_w, reading.voltage_v);
         self.set_temperature(reading.temp);
         self.set_lux(reading.lux);
     }
@@ -131,6 +150,46 @@ impl Body {
         self.lid_seq
     }
 
+    /// After a restart, carry on numbering lid readings past the last one
+    /// organs may still hold, so an old `lid_seq` can never match a new one.
+    pub fn continue_lid_seq(&mut self, after: u64) {
+        if after >= self.lid_seq {
+            self.lid_seq = after.saturating_add(1);
+            self.panel_ready = false;
+            self.dirty = true;
+        }
+    }
+
+    /// The lid reading: closed, open or unknown.
+    pub fn lid(&self) -> Option<bool> {
+        self.lid_closed
+    }
+
+    /// The mind has saved its context before a power-off.
+    /// Only an answer to a shutdown already announced counts: a stray or
+    /// early receipt must never cut a later notice's grace short.
+    pub fn mind_saved(&mut self) {
+        if self.care.shutting_down().is_some() {
+            self.mind_saved = true;
+        }
+    }
+
+    /// True once, when the battery's keeper decides the power must go.
+    pub fn take_power_off(&mut self) -> bool {
+        std::mem::take(&mut self.power_off_due)
+    }
+
+    fn power_sample(&self) -> battery::Sample {
+        battery::Sample {
+            percent: self.battery,
+            charging: self.charging,
+            on_ac: self.on_ac,
+            energy_wh: self.energy_wh,
+            power_w: self.power_w,
+            voltage_v: self.voltage_v,
+        }
+    }
+
     pub fn lid_blocked(&self) -> bool {
         self.lid_closed != Some(false)
     }
@@ -164,6 +223,16 @@ impl Body {
                 }
                 if let Some(v) = ev.f64("lux") {
                     self.lux = Some(v.max(0.0));
+                }
+                // A pretend battery draw, so the lab can rehearse time to empty.
+                if let Some(v) = ev.f64("energy_wh") {
+                    self.energy_wh = Some(v.max(0.0));
+                }
+                if let Some(v) = ev.f64("power_w") {
+                    self.power_w = Some(v.max(0.0));
+                }
+                if let Some(v) = ev.f64("voltage") {
+                    self.voltage_v = Some(v.max(0.0));
                 }
                 match ev.data.get("lid_closed") {
                     Some(serde_json::Value::Null) => self.set_lid(None),
@@ -212,7 +281,9 @@ impl Body {
     }
 
     fn low_battery(&self) -> bool {
-        self.on_ac == Some(false) && self.battery.is_some_and(|battery| battery <= 15.0)
+        self.on_ac == Some(false)
+            && (self.battery.is_some_and(|battery| battery <= self.care.th.low_pct)
+                || self.care.level() >= battery::Level::Low)
     }
 
     /// One short line of true facts, for the mind to show the model.
@@ -223,6 +294,9 @@ impl Body {
             line.push_str(&format!(", battery {battery:.0}%"));
             if self.low_battery() {
                 line.push_str(" and low, unplugged");
+                if let Some(minutes) = self.care.minutes_left() {
+                    line.push_str(&format!(", about {minutes:.0} min left"));
+                }
             } else if self.charging == Some(true) {
                 line.push_str(" charging");
             } else if let Some(on_ac) = self.on_ac {
@@ -244,6 +318,18 @@ impl Body {
 
     pub fn tick(&mut self, now: f64) -> Vec<Event> {
         let mut out = Vec::new();
+        let level = self.care.level();
+        let (said, power_off) = self.care.update(&self.power_sample(), self.lid_closed, self.mind_saved, now);
+        if power_off {
+            self.power_off_due = true;
+        }
+        if self.care.shutting_down().is_none() {
+            // Cancelled, done or never begun: the next notice needs a new receipt.
+            self.mind_saved = false;
+        }
+        if self.care.level() != level {
+            self.dirty = true;
+        }
         if self.dirty || now - self.last_pub >= PERIOD {
             self.dirty = false;
             self.last_pub = now;
@@ -258,6 +344,7 @@ impl Body {
                     .with("comfort", self.temp.map(|v| round(1.0 - (v - 50.0) / 40.0))),
             );
         }
+        out.extend(said);
         out
     }
 
@@ -266,6 +353,8 @@ impl Body {
         Event::new("body.state")
             .with("battery", self.battery)
             .with("battery_low", self.low_battery())
+            .with("battery_level", if self.on_ac == Some(false) { Some(self.care.level().name()) } else { None })
+            .with("minutes_left", self.care.minutes_left().map(f64::round))
             .with("charging", self.charging)
             .with("on_ac", self.on_ac)
             .with("temp", self.temp)
@@ -328,6 +417,12 @@ pub mod sysfs {
         pub on_ac: Option<bool>,
         pub temp: Option<f64>,
         pub lux: Option<f64>,
+        /// Energy left in the battery, watt-hours.
+        pub energy_wh: Option<f64>,
+        /// The battery's draw, watts (only meaningful while discharging).
+        pub power_w: Option<f64>,
+        /// The pack voltage, volts.
+        pub voltage_v: Option<f64>,
     }
 
     impl Reading {
@@ -402,6 +497,26 @@ pub mod sysfs {
         pub battery: Option<f64>,
         pub charging: Option<bool>,
         pub on_ac: Option<bool>,
+        pub energy_wh: Option<f64>,
+        pub power_w: Option<f64>,
+        pub voltage_v: Option<f64>,
+    }
+
+    /// Energy left, draw and voltage, from energy_* and power_now, or from
+    /// charge_* and current_now times the voltage. Units in sysfs are micro
+    /// (µWh, µW, µV, µAh, µA). Some batteries sign the current; its size is
+    /// what matters.
+    fn battery_energy(dir: &Path) -> (Option<f64>, Option<f64>, Option<f64>) {
+        let micro = |name: &str| read_number(&dir.join(name)).map(|v| v as f64 / 1e6);
+        let volts = micro("voltage_now").filter(|v| *v > 0.0 && *v < 30.0);
+        let energy = micro("energy_now")
+            .filter(|e| *e >= 0.0)
+            .or_else(|| Some(micro("charge_now")? * volts?).filter(|e| *e >= 0.0));
+        let power = micro("power_now")
+            .map(f64::abs)
+            .or_else(|| Some(micro("current_now")?.abs() * volts?))
+            .filter(|w| *w < 200.0);
+        (energy.filter(|e| *e < 500.0), power, volts)
     }
 
     /// Percent charge from `capacity`, or from energy or charge now and full.
@@ -443,6 +558,7 @@ pub mod sysfs {
                         continue;
                     }
                     power.battery = battery_percent(&path);
+                    (power.energy_wh, power.power_w, power.voltage_v) = battery_energy(&path);
                     if power.battery.is_none() {
                         notes.once(format!("power:{name}:unreadable"), || {
                             format!("power: battery {name} reports no readable charge")
@@ -715,11 +831,25 @@ pub mod sysfs {
         on_ac: Option<(bool, Instant)>,
         temp: Option<(f64, Instant)>,
         lux: Option<(f64, Instant)>,
+        energy: Option<(f64, Instant)>,
+        draw: Option<(f64, Instant)>,
+        volts: Option<(f64, Instant)>,
     }
 
     impl Sensors {
         pub fn new(root: PathBuf) -> Self {
-            Self { root, notes: Notes::default(), battery: None, charging: None, on_ac: None, temp: None, lux: None }
+            Self {
+                root,
+                notes: Notes::default(),
+                battery: None,
+                charging: None,
+                on_ac: None,
+                temp: None,
+                lux: None,
+                energy: None,
+                draw: None,
+                volts: None,
+            }
         }
 
         pub fn read(&mut self, now: Instant) -> Reading {
@@ -742,6 +872,9 @@ pub mod sysfs {
                 on_ac: hold(power.on_ac, &mut self.on_ac, now),
                 temp: hold(temp, &mut self.temp, now),
                 lux: hold(lux, &mut self.lux, now),
+                energy_wh: hold(power.energy_wh, &mut self.energy, now),
+                power_w: hold(power.power_w, &mut self.draw, now),
+                voltage_v: hold(power.voltage_v, &mut self.volts, now),
             }
         }
 
@@ -936,7 +1069,6 @@ mod tests {
 
     #[test]
     fn battery_low_requires_a_known_low_charge_and_confirmed_disconnection() {
-        let mut b = Body::physical(0.0);
         for (battery, on_ac, low) in [
             (Some(15.0), Some(false), true),
             (Some(16.0), Some(false), false),
@@ -944,11 +1076,23 @@ mod tests {
             (Some(9.0), None, false),
             (None, Some(false), false),
         ] {
+            let mut b = Body::physical(0.0);
             b.set_power(battery, Some(false), on_ac);
             let event = b.tick(1.0).into_iter().find(|e| e.topic == "body.state").unwrap();
             assert_eq!(event.bool("battery_low"), Some(low));
             assert_eq!(b.snapshot().bool("battery_low"), Some(low));
         }
+        // Once low on battery, a reading that wobbles back up does not clear
+        // it; plugging in does.
+        let mut b = Body::physical(0.0);
+        b.set_power(Some(15.0), Some(false), Some(false));
+        b.tick(1.0);
+        b.set_power(Some(16.0), Some(false), Some(false));
+        b.tick(2.0);
+        assert_eq!(b.snapshot().bool("battery_low"), Some(true));
+        b.set_power(Some(16.0), Some(true), Some(true));
+        b.tick(3.0);
+        assert_eq!(b.snapshot().bool("battery_low"), Some(false));
     }
 
     #[test]
@@ -1116,7 +1260,16 @@ mod tests {
         let reading = sensors.read(Instant::now());
         assert_eq!(
             reading,
-            Reading { battery: Some(87.0), charging: Some(true), on_ac: Some(true), temp: Some(52.0), lux: Some(12.0) }
+            Reading {
+                battery: Some(87.0),
+                charging: Some(true),
+                on_ac: Some(true),
+                temp: Some(52.0),
+                lux: Some(12.0),
+                energy_wh: Some(52.2),
+                power_w: None,
+                voltage_v: None,
+            }
         );
         let notes = sensors.notes.take().join("\n");
         assert!(notes.contains("found battery BAT0") && notes.contains("found AC adapter ADP1"), "{notes}");
@@ -1170,6 +1323,7 @@ mod tests {
         let mut sensors = Sensors::new(tree.0.clone());
         let reading = sensors.read(Instant::now());
         assert_eq!(reading.battery, Some(87.0), "energy_now / energy_full");
+        assert_eq!(reading.energy_wh, Some(52.2));
         assert_eq!((reading.charging, reading.on_ac, reading.lux), (None, None, None));
 
         tree.remove(&format!("{bat}/energy_now"));
@@ -1281,5 +1435,83 @@ mod tests {
         drop(tx);
         assert!(feed.update(&mut body, 43.0).is_some_and(|line| line.contains("stopped")));
         assert!(body.snapshot().data["battery"].is_null());
+    }
+
+    #[test]
+    fn energy_and_draw_come_from_energy_or_from_charge_and_current() {
+        let tree = macbook_pro_9_2("energy");
+        let bat = "sys/class/power_supply/BAT0";
+        tree.file(&format!("{bat}/status"), "Discharging\n");
+        tree.file("sys/class/power_supply/ADP1/online", "0\n");
+        tree.file(&format!("{bat}/power_now"), "12500000\n");
+        tree.file(&format!("{bat}/voltage_now"), "11400000\n");
+        let power = sysfs::read_power(tree.root(), &mut sysfs::Notes::default());
+        assert_eq!((power.energy_wh, power.power_w, power.voltage_v), (Some(52.2), Some(12.5), Some(11.4)));
+        // A battery that counts charge and signs its current.
+        tree.remove(&format!("{bat}/energy_now"));
+        tree.remove(&format!("{bat}/power_now"));
+        tree.file(&format!("{bat}/charge_now"), "2000000\n");
+        tree.file(&format!("{bat}/current_now"), "-1000000\n");
+        let power = sysfs::read_power(tree.root(), &mut sysfs::Notes::default());
+        assert!((power.energy_wh.unwrap() - 22.8).abs() < 1e-9);
+        assert!((power.power_w.unwrap() - 11.4).abs() < 1e-9);
+        // Nonsense voltage: no derived figures.
+        tree.file(&format!("{bat}/voltage_now"), "0\n");
+        let power = sysfs::read_power(tree.root(), &mut sysfs::Notes::default());
+        assert_eq!((power.energy_wh, power.power_w, power.voltage_v), (None, None, None));
+    }
+
+    #[test]
+    fn the_body_publishes_its_battery_level_and_asks_for_the_power_off() {
+        let mut b = Body::physical(0.0);
+        b.set_power(Some(40.0), Some(false), Some(false));
+        let state = b.tick(0.0).into_iter().find(|e| e.topic == "body.state").unwrap();
+        assert_eq!(state.str("battery_level"), Some("ok"));
+        assert!(state.data["minutes_left"].is_null());
+        // The draw climbs and the energy runs down: a plea, then a goodbye.
+        b.sense(&Reading { battery: Some(30.0), charging: Some(false), on_ac: Some(false), energy_wh: Some(5.0), power_w: Some(15.0), voltage_v: Some(10.9), ..Reading::default() });
+        let mut out = Vec::new();
+        for i in 1..=40 {
+            out.extend(b.tick(f64::from(i)));
+        }
+        let pleas: Vec<_> = out.iter().filter(|e| e.topic == "body.battery").filter_map(|e| e.str("level")).collect();
+        assert_eq!(pleas, ["low"], "20 minutes left at 30%");
+        let state = out.iter().rev().find(|e| e.topic == "body.state").unwrap();
+        assert_eq!(state.bool("battery_low"), Some(true));
+        assert_eq!(state.f64("minutes_left"), Some(20.0));
+        assert!(b.senses_line().contains("battery 30% and low, unplugged, about 20 min left"), "{}", b.senses_line());
+        b.sense(&Reading { battery: Some(4.0), charging: Some(false), on_ac: Some(false), ..Reading::default() });
+        let out = b.tick(41.0);
+        assert!(out.iter().any(|e| e.topic == "stem.shutdown"));
+        assert!(!b.take_power_off());
+        b.mind_saved();
+        b.tick(42.0);
+        assert!(b.take_power_off());
+        assert!(!b.take_power_off(), "said once");
+    }
+
+    #[test]
+    fn an_early_save_receipt_does_not_cut_a_later_grace_short() {
+        let mut b = Body::physical(0.0);
+        b.set_power(Some(40.0), Some(false), Some(false));
+        b.tick(0.0);
+        b.mind_saved(); // stray: no shutdown announced
+        b.sense(&Reading { battery: Some(4.0), charging: Some(false), on_ac: Some(false), ..Reading::default() });
+        assert!(b.tick(1.0).iter().any(|e| e.topic == "stem.shutdown"));
+        b.tick(2.0);
+        assert!(!b.take_power_off(), "the grace still runs");
+        b.tick(22.0);
+        assert!(b.take_power_off(), "then the power goes");
+    }
+
+    #[test]
+    fn a_restarted_body_numbers_lid_readings_past_the_old_ones() {
+        let mut b = Body::physical(0.0);
+        b.continue_lid_seq(7);
+        assert_eq!(b.lid_seq(), 8);
+        b.set_lid(Some(false));
+        assert_eq!((b.lid_seq(), b.lid()), (9, Some(false)));
+        b.continue_lid_seq(3);
+        assert_eq!(b.lid_seq(), 9, "never goes backwards");
     }
 }

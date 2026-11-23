@@ -1,0 +1,3 @@
+#!/bin/sh
+# Pip's shelf helper (offline). Copies programs from the read-only shelf into the workshop.
+exec python3 "${BEING_SHELF:-/usr/share/being/workshop/shelf}/shelf.py" run "$@"

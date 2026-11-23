@@ -44,6 +44,74 @@ class MemoryPolicy:
         return cls(value["mode"], value["expiry_days"])
 
 
+EXPIRY_BATCH = 200
+EXPIRY_STATES = ("asleep", "idle")  # expiry runs only while resting, never mid-conversation
+
+
+def local_cutoff(sure, expiry_days, zone=None):
+    """The start of the owner's local day `expiry_days` before the day `sure` falls on.
+
+    Counting whole days in the owner's zone means nothing from "today" is ever
+    expired and a day goes all at once, instead of the archive being trimmed
+    every day at the hour UTC midnight lands on.
+    """
+    from datetime import datetime, time as clock, timedelta
+
+    if expiry_days is None or sure is None:
+        return None
+    day = datetime.fromtimestamp(sure, zone).date() - timedelta(days=expiry_days)
+    return datetime.combine(day, clock(0), tzinfo=zone).timestamp() if zone is not None else \
+        datetime.combine(day, clock(0)).timestamp()
+
+
+def expiry_allowed(state, *, lid_open=True, busy=False):
+    """Expiry is a quiet chore: only while resting and with no turn in progress."""
+    return state in EXPIRY_STATES and not busy
+
+
+def expiry_steps(db, cutoff, batch=EXPIRY_BATCH):
+    """Sub-cutoffs that each expire at most about `batch` episodes, oldest first."""
+    steps = []
+    bound = None
+    while True:
+        row = db.execute(
+            "SELECT ts FROM episodes WHERE ts < ? AND kind <> 'life' AND (text <> '[forgotten]' OR meta IS NOT NULL) "
+            + ("AND ts >= ? " if bound is not None else "") + "ORDER BY ts LIMIT 1 OFFSET ?",
+            (cutoff, bound, batch) if bound is not None else (cutoff, batch)).fetchone()
+        if row is None or row[0] <= (bound if bound is not None else float("-inf")):
+            break
+        steps.append(row[0])
+        bound = row[0]
+        if len(steps) > 10_000:
+            break
+    steps.append(cutoff)
+    return steps
+
+
+def expire_gently(mind_dir, cutoff, *, batch=EXPIRY_BATCH, keep_going=lambda: True, memory_factory=None):
+    """Expire in batches with a fresh connection, for a worker thread.
+
+    Between batches `keep_going()` is asked whether the being is still
+    resting; a wake stops the work and the rest waits for the next rest.
+    Returns the MemoryEdit of every batch that ran.
+    """
+    from contextlib import closing
+
+    if cutoff is None:
+        return []
+    if memory_factory is None:
+        from .memory import Memory as memory_factory
+    edits = []
+    with closing(memory_factory(Path(mind_dir))) as memory:
+        for step in expiry_steps(memory.db, cutoff, batch):
+            if not keep_going():
+                break
+            change = memory.expire_before(step)
+            if change:
+                edits.append(change)
+    return edits
+
+
 def read_policy(root):
     path = Path(root) / POLICY_FILE
     try:

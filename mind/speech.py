@@ -14,6 +14,33 @@ GRAMMAR = (
     "text ::= [^\\x00]*\n"
 )
 
+# The tighter reply shape (task 4.6): the tag, then one or two sentences of
+# bounded length that end in . ! or ?, with no new lines, brackets or markup.
+# A full stop inside a sentence is allowed only before a digit ("3.5").
+# Measure with lab/model_audition.py before making it the default.
+SENTENCE_CHARS = 160
+STRICT_GRAMMAR = (
+    'root ::= "[" emotion "] " sentence (" " sentence)?\n'
+    "emotion ::= " + " | ".join(f'"{e}"' for e in EMOTIONS) + "\n"
+    f"sentence ::= [A-Za-z0-9\"'] part{{0,{SENTENCE_CHARS}}} [.!?] [\"']?\n"
+    "part ::= [^\\x00\\n\\r()\\[\\]{}<>*_#`~|.!?] | \".\" [0-9]\n"
+)
+
+# Assistant boilerplate a small model falls back on. A reply that opens with
+# it is not said and is asked for again, like a parrot.
+_BOILERPLATE = re.compile(
+    r"\b(?:as an ai|as a language model|i(?:'| a)m (?:just )?an ai|i(?:'| a)m (?:just )?a (?:large )?language model"
+    r"|i am an artificial intelligence|how (?:can|may) i (?:help|assist)(?: you)?(?: today)?"
+    r"|i(?:'m| am) here to (?:help|assist)|i don't have (?:personal )?(?:feelings|emotions|a body)"
+    r"|i(?:'m| am) (?:just )?a (?:computer )?program)\b",
+    re.I,
+)
+
+
+def boilerplate(text):
+    """True for assistant boilerplate that does not belong in its voice."""
+    return bool(_BOILERPLATE.search(text.replace("’", "'")))
+
 
 class ThinkFilter:
     """Drops <think>...</think> from a stream, even when tags arrive in pieces."""

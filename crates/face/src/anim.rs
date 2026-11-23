@@ -2,7 +2,8 @@
 //! blinks and the speech envelope have their own timing.
 
 use crate::eye::{self, Eye, Pose, M};
-use std::f32::consts::TAU;
+use crate::pace::Activity;
+use std::f64::consts::TAU;
 
 /// Small deterministic random source; the face needs no more than this.
 struct Rng(u32);
@@ -82,6 +83,16 @@ impl Spring {
 }
 
 const WAKE_DURATION: f32 = 1.23;
+/// The birth ceremony on the very first power-on (task 7.1).
+const BIRTH: f32 = 7.6;
+/// How long a birth cut short by someone speaking takes to hand over.
+const BIRTH_HANDOVER: f32 = 0.4;
+/// Where the birth's slow looks begin, after the flicker and the opening.
+const BIRTH_LOOKS: f32 = 3.9;
+/// A birth asked for while the panel is dark waits this long for it to light.
+const BIRTH_PENDING: f64 = 600.0;
+/// At most one reunion greeting in this long.
+const REUNION_GAP: f64 = 600.0;
 /// How long a yawn holds the eyes open before the squeeze.
 const YAWN_STRETCH: f32 = 0.9;
 /// Spring damping for ordinary moves; lively arrivals overshoot a touch.
@@ -225,6 +236,127 @@ impl Gaze {
 struct LidWake {
     started: f64,
     dreamed: bool,
+}
+
+struct Birth {
+    started: f64,
+    /// Someone spoke to it: hand over to the live face from here.
+    cut: Option<f64>,
+}
+
+/// The slow internal numbers the brainstem publishes as `body.drives`, each
+/// 0 to 1 (absent when the body cannot tell).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Drives {
+    /// Battery charge (1 on mains power).
+    pub energy: Option<f32>,
+    /// Recent stimulation: falls over about a minute of quiet.
+    pub arousal: Option<f32>,
+    /// Recent company: falls over about an hour alone.
+    pub social: Option<f32>,
+    /// Cool enough: falls as the body heats past 50 C.
+    pub comfort: Option<f32>,
+}
+
+impl Drives {
+    /// Lid weight from a flat battery or a hot body, alone at idle. It stays
+    /// under the yawn threshold: tiredness is not sleepiness.
+    fn tiredness(self) -> f32 {
+        let flat = self.energy.map_or(0.0, |e| ((0.6 - e) / 0.5).clamp(0.0, 1.0));
+        let hot = self.comfort.map_or(0.0, |c| ((0.6 - c) / 0.6).clamp(0.0, 1.0));
+        (0.20 * flat + 0.08 * hot).min(0.26)
+    }
+
+    /// How long idle looks linger: slower after a long quiet, brisker just
+    /// after something happened.
+    fn gaze_tempo(self) -> f32 {
+        self.arousal.map_or(1.0, |a| mix(1.4, 0.85, a.clamp(0.0, 1.0)))
+    }
+
+    /// How keen it is to see someone again: zero after recent company,
+    /// rising after about half an hour alone.
+    fn eagerness(self) -> f32 {
+        self.social.map_or(0.0, |s| ((0.6 - s) / 0.6).clamp(0.0, 1.0))
+    }
+}
+
+/// What the eyes do while an app panel is open (voice-apps.md section 3.2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FocusKind {
+    /// Pip is typing: follow the cursor with small reading saccades.
+    Typing,
+    /// A job is running: watch the newest output.
+    Watching,
+    /// Pip paused: look up at the person and hold.
+    Paused,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Focus {
+    pub kind: FocusKind,
+    /// Where on the panel, as a gaze target.
+    pub at: [f32; 2],
+}
+
+/// The lamp-warming flicker of a first power-on: brightness steps.
+fn flicker(t: f32) -> f32 {
+    const STEPS: [(f32, f32); 12] = [
+        (0.0, 0.0),
+        (0.35, 0.55),
+        (0.42, 0.0),
+        (0.80, 0.0),
+        (0.86, 0.8),
+        (0.93, 0.25),
+        (1.18, 0.0),
+        (1.26, 0.9),
+        (1.33, 0.45),
+        (1.52, 1.0),
+        (1.58, 0.7),
+        (1.80, 1.0),
+    ];
+    STEPS.iter().rev().find(|(at, _)| t >= *at).map_or(0.0, |&(_, v)| v)
+}
+
+/// The first power-on: a line of light that flickers on, opens slowly,
+/// looks slowly one way and the other, tilts curiously, and settles into
+/// the live face (`ready`).
+fn birth_pose(t: f32, ready: Pose) -> Pose {
+    let sleepy = eye::preset("sleepy").unwrap();
+    let curious = eye::preset("curiosity").unwrap();
+    let line = Eye { h: 0.016 + 0.012 * ease(t, 0.3, 2.4), glow: 0.42 * flicker(t), ..Eye::OPEN };
+    let lines = Pose::sym(line);
+    let mut out = [lines.l, lines.r];
+    let readies = [ready.l, ready.r];
+    let sleepies = [sleepy.l, sleepy.r];
+    let curiouses = [curious.l, curious.r];
+    let look = -ease(t, 3.9, 4.7) * (1.0 - ease(t, 4.9, 5.6)) + ease(t, 5.5, 6.2) * (1.0 - ease(t, 6.3, 7.0));
+    let tilt = ease(t, 6.5, 6.95) * (1.0 - ease(t, 7.05, BIRTH));
+    let head = -0.08 * tilt;
+    for (i, e) in out.iter_mut().enumerate() {
+        let lag = 0.1 * i as f32;
+        let opened = blend_eye(*e, sleepies[i], ease(t, 2.4 + lag, 3.1 + lag));
+        *e = blend_eye(opened, readies[i], ease(t, 3.0 + lag, 3.9 + lag));
+        *e = blend_eye(*e, curiouses[i], 0.55 * tilt);
+        e.x += 0.30 * look;
+        e.y -= 0.03 * look.abs();
+        e.tilt += 0.05 * look;
+        // The near eye grows a little as it turns, as a real gaze does.
+        let near = 1.0 + 0.06 * (2.0 * i as f32 - 1.0) * look;
+        e.w *= near;
+        e.h *= near;
+        // One slow blink between the two looks.
+        close_lids(e, blink_closure(t - 5.05, 0.13, 0.07, 0.22));
+        if head != 0.0 {
+            let (sin, cos) = head.sin_cos();
+            (e.x, e.y) = (e.x * cos - e.y * sin, e.x * sin + e.y * cos);
+            e.tilt += head;
+        }
+    }
+    Pose { l: out[0], r: out[1] }
+}
+
+fn blend_pose(a: Pose, b: Pose, amount: f32) -> Pose {
+    Pose { l: blend_eye(a.l, b.l, amount), r: blend_eye(a.r, b.r, amount) }
 }
 
 fn dream_flutter(eye: &mut Eye, amount: f32) {
@@ -404,7 +536,9 @@ pub struct Anim {
     blink: Option<Blink>,
     blink_next: f64,
     blink_repeat: bool,
-    breath_phase: f32,
+    /// Kept in f64 and advanced by real elapsed time, so breathing stays
+    /// smooth after days awake and in step after a slow frame.
+    breath_phase: f64,
     breath_depth: f32,
 
     level: f32,
@@ -432,6 +566,24 @@ pub struct Anim {
     search_next: f64,
     /// The current idle look is a slow look around the room.
     surveying: bool,
+
+    drives: Drives,
+    /// The next attentive arrival is a reunion: a bigger hop.
+    reunion: f32,
+    reunited_at: f64,
+    birth: Option<Birth>,
+    /// A birth asked for while dark, and when.
+    birth_pending: Option<f64>,
+    /// When the panel last lit up.
+    lit_at: f64,
+    /// No brainstem yet at power-on: a calm waiting look instead of dazed.
+    loading: bool,
+    focus: Option<Focus>,
+    /// The cursor point the eyes are heading for, and when they get there.
+    focus_seen: [f32; 2],
+    focus_next: f64,
+    /// Pip is typing with the terminal minimised: no idle performances.
+    typing_hidden: bool,
 }
 
 impl Anim {
@@ -483,6 +635,97 @@ impl Anim {
             thought_spot: CENTER,
             search_next: 0.0,
             surveying: false,
+            drives: Drives::default(),
+            reunion: 0.0,
+            reunited_at: f64::NEG_INFINITY,
+            birth: None,
+            birth_pending: None,
+            lit_at: 0.0,
+            loading: false,
+            focus: None,
+            focus_seen: CENTER,
+            focus_next: 0.0,
+            typing_hidden: false,
+        }
+    }
+
+    /// The very first power-on (`life.woke` with `first`). Plays now if the
+    /// panel is lit, else on the next lighting within ten minutes.
+    pub fn born(&mut self) {
+        if self.panel_blank {
+            self.birth_pending = Some(self.t);
+        } else if self.birth.is_none() {
+            // Eyes that have been up a while do not drop back to a dark line:
+            // they go straight to the first slow looks.
+            let skip = if self.t - self.lit_at > 1.5 { BIRTH_LOOKS } else { 0.0 };
+            self.start_birth(skip);
+        }
+    }
+
+    fn start_birth(&mut self, skip: f32) {
+        self.birth_pending = None;
+        self.birth = Some(Birth { started: self.t - f64::from(skip), cut: None });
+        self.lid_wake = None;
+        self.blink = None;
+        self.blink_repeat = false;
+        self.double_blink = false;
+        self.gesture = None;
+        self.blink_next = self.t + f64::from(BIRTH) + 0.8;
+        self.quiet_since = self.t;
+    }
+
+    #[cfg(test)]
+    pub fn being_born(&self) -> bool {
+        self.birth.is_some()
+    }
+
+    pub fn set_drives(&mut self, drives: Drives) {
+        self.drives = drives;
+    }
+
+    /// The brainstem has never answered since the face started on the
+    /// appliance: look like waiting, not like illness.
+    pub fn set_loading(&mut self, loading: bool) {
+        self.loading = loading;
+    }
+
+    /// The app panel's focus, or None with no panel shown.
+    pub fn set_focus(&mut self, focus: Option<Focus>) {
+        if focus.map(|f| f.kind) != self.focus.map(|f| f.kind) {
+            self.focus_next = self.t;
+            if focus.is_none() {
+                self.reset_fixation();
+            }
+        }
+        self.focus = focus;
+    }
+
+    pub fn set_typing_hidden(&mut self, on: bool) {
+        self.typing_hidden = on;
+    }
+
+    /// How fast the face needs drawing right now (task 2.1).
+    pub fn activity(&self) -> Activity {
+        if self.panel_blank {
+            return Activity::Blank;
+        }
+        let gaze_moving = ((self.t - self.gaze.start) as f32) < self.gaze.duration;
+        let busy = self.lid_wake.is_some()
+            || self.birth.is_some()
+            || self.blink.is_some()
+            || self.gesture.is_some()
+            || !self.spring.settled
+            || self.level > 0.0
+            || self.touch.is_some()
+            || gaze_moving
+            || self.head_v.abs() > 0.002
+            || (self.engaged() && !self.muted);
+        if busy {
+            Activity::Active
+        } else if self.asleep() {
+            Activity::Asleep
+        } else {
+            Activity::Calm
         }
     }
 
@@ -520,6 +763,21 @@ impl Anim {
             }
             if state == "drowsy" && !muted && !unwell && !self.link_lost && !self.panel_blank {
                 self.start_gesture(Gesture::Yawn);
+            }
+            // Someone it has not seen for a long while: a keener hello.
+            self.reunion = 0.0;
+            let from_rest = matches!(self.state.as_str(), "idle" | "drowsy" | "waking" | "asleep");
+            if state == "attending" && from_rest && !muted && !unwell {
+                let eager = self.drives.eagerness();
+                if eager > 0.0 && self.t - self.reunited_at >= REUNION_GAP {
+                    self.reunion = eager;
+                    self.reunited_at = self.t;
+                }
+            }
+            if matches!(state, "attending" | "listening" | "speaking") {
+                if let Some(birth) = &mut self.birth {
+                    birth.cut.get_or_insert(self.t);
+                }
             }
             if state == "idle" {
                 self.gesture_next = self.t + f64::from(self.rng.range(12.0, 24.0));
@@ -612,6 +870,12 @@ impl Anim {
         if self.follows_presence() && self.presence.is_none_or(|(old, _)| old != point) {
             self.gaze_next = self.t;
         }
+        let arriving = self.presence.is_none() && self.state == "idle" && self.follows_presence();
+        if arriving && self.drives.eagerness() > 0.5 && self.t - self.reunited_at >= REUNION_GAP {
+            // Someone sits down after a long time alone: a moment of delight.
+            self.reunited_at = self.t;
+            self.express("joy", 1.2);
+        }
         self.presence = Some((point, self.t + 2.0));
         self.quiet_since = self.t;
     }
@@ -636,6 +900,9 @@ impl Anim {
         let open = closed == Some(false);
         let was_blank = self.panel_blank;
         self.panel_blank = !(open || (closed.is_none() && show_face));
+        if was_blank && !self.panel_blank {
+            self.lit_at = self.t;
+        }
         if self.panel_blank {
             if !was_blank {
                 self.spring = Spring::new("asleep");
@@ -658,7 +925,16 @@ impl Anim {
             self.heaviness = 0.0;
             self.head = 0.0;
             self.head_v = 0.0;
+            if let Some(birth) = self.birth.take() {
+                // Dark before the ceremony finished: play it again next time.
+                if birth.cut.is_none() {
+                    self.birth_pending = Some(self.t);
+                }
+            }
             self.reset_fixation();
+        } else if self.birth_pending.is_some_and(|at| self.t - at <= BIRTH_PENDING) {
+            self.lit_at = self.t;
+            self.start_birth(0.0);
         } else if open && !self.lid_open && !snapshot {
             self.quiet_since = self.t;
             self.lid_wake = Some(LidWake { started: self.t, dreamed: false });
@@ -744,6 +1020,10 @@ impl Anim {
         self.state == "asleep"
     }
 
+    pub fn muted(&self) -> bool {
+        self.muted
+    }
+
     fn dazed(&self) -> bool {
         self.unwell || self.link_lost
     }
@@ -754,7 +1034,7 @@ impl Anim {
             return if self.preview_dream { "dreaming" } else { "asleep" };
         }
         if self.dazed() {
-            return "dazed";
+            return if self.loading && !self.unwell { "loading" } else { "dazed" };
         }
         if self.muted {
             return "muted";
@@ -850,7 +1130,7 @@ impl Anim {
         }
 
         let asleep = self.asleep();
-        let t = self.t as f32;
+        let t = self.t;
         let gaze = self.step_gaze();
         let wake = self
             .lid_wake
@@ -859,6 +1139,16 @@ impl Anim {
             .filter(|(elapsed, _)| *elapsed < WAKE_DURATION);
         if wake.is_none() {
             self.lid_wake = None;
+        }
+        let birth = self
+            .birth
+            .as_ref()
+            .map(|b| ((self.t - b.started) as f32, b.cut.map(|at| (self.t - at) as f32)))
+            .filter(|&(age, cut)| age < BIRTH && cut.is_none_or(|c| c < BIRTH_HANDOVER));
+        if birth.is_none() {
+            self.birth = None;
+        }
+        if wake.is_none() && birth.is_none() {
             self.step_blink();
         }
         if self.lid_open
@@ -878,15 +1168,22 @@ impl Anim {
         // Carry phase across state changes so a breath never jumps mid-cycle.
         let depth = if asleep { 1.0 } else { 0.0 };
         self.breath_depth += (depth - self.breath_depth) * dt;
-        self.breath_phase = (self.breath_phase + TAU * mix(0.22, 0.13, self.breath_depth) * dt) % TAU;
-        let breath = self.breath_phase.sin();
+        let rate = f64::from(mix(0.22, 0.13, self.breath_depth));
+        self.breath_phase = (self.breath_phase + TAU * rate * f64::from(elapsed)) % TAU;
+        let mut breath = self.breath_phase.sin() as f32;
+        // Unwell in its sleep: an uneven, unsettled breath.
+        let restless = asleep && self.dazed() && !self.loading;
+        if restless {
+            breath *= 0.65 + 0.35 * (t * 0.37).sin() as f32;
+        }
 
         let expressive = !asleep && !self.muted && !self.dazed();
         let life = self.step_life(elapsed, dt, expressive, wake.is_none());
         let engaged = self.engaged() && expressive;
         let speech = if expressive { self.level } else { 0.0 };
         let age = (self.t - self.state_at) as f32;
-        let drift = [0.006 * (t * 0.081).sin(), 0.004 * (t * 0.107 + 1.0).sin()];
+        let drift = [0.006 * (t * 0.081).sin() as f32, 0.004 * (t * 0.107 + 1.0).sin() as f32];
+        let wave = |rate: f64, phase: f64| (rate * t + phase).sin() as f32;
         for (side, e) in [(-1.0f32, &mut p.l), (1.0f32, &mut p.r)] {
             e.h *= 1.0 + mix(0.011, 0.045, self.breath_depth) * breath;
             e.y += mix(0.003, 0.012, self.breath_depth) * breath;
@@ -910,8 +1207,20 @@ impl Anim {
             life.apply(e, side, self.heaviness, self.head);
 
             if !asleep && self.dazed() {
-                e.tilt += 0.038 * (1.65 * t + side).sin();
-                e.glow *= 0.94 + 0.055 * (2.2 * t + 2.0 * side).sin();
+                if self.loading && !self.unwell {
+                    // Waiting for the body: a slow, even glow, both eyes together.
+                    e.glow *= 0.88 + 0.12 * wave(1.6, 0.0);
+                } else {
+                    e.tilt += 0.038 * wave(1.65, f64::from(side));
+                    e.glow *= 0.94 + 0.055 * wave(2.2, 2.0 * f64::from(side));
+                }
+            }
+            if restless {
+                // A dazed sleep: lids a little uneven, the face slightly askew.
+                e.tilt += 0.05 * side + 0.02 * wave(0.29, f64::from(side));
+                e.y += 0.010 * side;
+                e.top += 0.05 * (side + 1.0) * 0.5;
+                e.glow *= 0.92 + 0.06 * wave(0.53, 1.0 + f64::from(side));
             }
 
             if self.preview_dream {
@@ -926,7 +1235,12 @@ impl Anim {
                 close_lids(e, blink.closure(self.t, side));
             }
         }
-        wake.map_or(p, |(elapsed, dreamed)| lid_wake_pose(elapsed, p, dreamed))
+        let p = wake.map_or(p, |(elapsed, dreamed)| lid_wake_pose(elapsed, p, dreamed));
+        match birth {
+            Some((age, None)) => birth_pose(age, p),
+            Some((age, Some(cut))) => blend_pose(birth_pose(age, p), p, ease(cut, 0.0, BIRTH_HANDOVER)),
+            None => p,
+        }
     }
 
     /// Everything that makes it seem alive between events: the acting of an
@@ -944,7 +1258,8 @@ impl Anim {
         // for company. A yawn marks the first real heaviness.
         let alone = self.state == "idle" && expressive && awake && self.emotion.is_none();
         let heavy = if alone && self.presence.is_none() && self.touch.is_none() {
-            0.42 * ease((self.t - self.quiet_since) as f32, 150.0, 480.0)
+            let quiet = 0.42 * ease((self.t - self.quiet_since) as f32, 150.0, 480.0);
+            (quiet + self.drives.tiredness()).min(0.42)
         } else {
             0.0
         };
@@ -953,7 +1268,7 @@ impl Anim {
         if heavy == 0.0 && self.heaviness < 0.05 {
             self.yawned = false;
         }
-        if alone && self.gesture.is_none() && self.blink.is_none() {
+        if alone && self.gesture.is_none() && self.blink.is_none() && !self.typing_hidden && self.focus.is_none() {
             if self.heaviness > 0.3 && !self.yawned {
                 self.yawned = true;
                 self.start_gesture(Gesture::Yawn);
@@ -1009,7 +1324,9 @@ impl Anim {
         let bounce = match self.acting {
             _ if !expressive => 0.0,
             "joy" => 0.042 * hop(age - 0.07, 0.24, 2.0),
-            "attentive" if matches!(self.acted_from, "neutral" | "sleepy" | "tired") => 0.036 * hop(age - 0.04, 0.26, 1.0),
+            "attentive" if matches!(self.acted_from, "neutral" | "sleepy" | "tired") => {
+                0.036 * (1.0 + 1.2 * self.reunion) * hop(age - 0.04, 0.26, 1.0)
+            }
             _ => 0.0,
         };
         let pop = if expressive && self.acting == "surprise" {
@@ -1046,6 +1363,10 @@ impl Anim {
             }
         }
 
+        if let Some(focus) = self.focus.filter(|_| self.follows_focus()) {
+            return self.step_focus(focus);
+        }
+
         if self.t >= self.gaze_next {
             let subject = self.presence.map_or(CENTER, |(point, _)| point);
             let returning = self.surveying && self.gaze_away;
@@ -1074,7 +1395,7 @@ impl Anim {
                 // Come back from a look around the room as unhurriedly.
                 self.surveying = returning;
                 (CENTER, self.rng.range(2.5, 5.3))
-            } else if self.state == "idle" && self.rng.next() < 0.28 {
+            } else if self.state == "idle" && !self.typing_hidden && self.rng.next() < 0.28 {
                 self.survey();
                 (self.fixation, (self.gaze_next - self.t) as f32)
             } else {
@@ -1083,7 +1404,10 @@ impl Anim {
                 ([side * self.rng.range(0.24, 0.51), self.rng.range(-0.22, 0.29)], self.rng.range(0.75, 1.55))
             };
             self.fixation = point.map(|x| x.clamp(-1.0, 1.0));
-            self.gaze_next = self.t + f64::from(wait);
+            // Idle looks linger after a long quiet and quicken after news.
+            let wandering = self.state == "idle" && self.presence.is_none() && !self.surveying;
+            let tempo = if wandering { self.drives.gaze_tempo() } else { 1.0 };
+            self.gaze_next = self.t + f64::from(wait * tempo);
         } else if self.state == "thinking"
             && self.gaze_away
             && !self.muted
@@ -1104,6 +1428,41 @@ impl Anim {
         }
         let unhurried = if self.surveying && self.touch.is_none() { 0.62 } else { 0.0 };
         self.gaze.track(self.touch.map_or(self.fixation, |(point, _)| point), self.t, unhurried)
+    }
+
+    /// The panel's focus wins over camera presence and idle looks, but not
+    /// over someone talking to Pip, sleep or illness.
+    fn follows_focus(&self) -> bool {
+        !self.muted && !self.dazed() && !self.asleep() && matches!(self.state.as_str(), "idle" | "thinking")
+    }
+
+    fn step_focus(&mut self, focus: Focus) -> [f32; 2] {
+        self.surveying = false;
+        self.gaze_away = false;
+        self.gaze_next = self.t + 0.5;
+        match focus.kind {
+            FocusKind::Paused => self.fixation = [0.0, 0.12],
+            FocusKind::Typing | FocusKind::Watching => {
+                let target = focus.at.map(|v| v.clamp(-1.0, 1.0));
+                if distance(target, self.focus_seen) > 0.015 {
+                    // A new line after Enter: the cursor drops and swings back left.
+                    let enter = target[1] < self.focus_seen[1] - 0.004 && target[0] < self.focus_seen[0] - 0.3;
+                    self.focus_seen = target;
+                    // Reading saccades land 80-160 ms after the cursor jumps.
+                    self.focus_next = self.t + f64::from(self.rng.range(0.08, 0.16));
+                    if enter && focus.kind == FocusKind::Typing && self.blink.is_none() {
+                        self.blink_next = self.blink_next.min(self.t + 0.12);
+                    }
+                }
+                if self.t >= self.focus_next {
+                    self.fixation = self.focus_seen;
+                }
+            }
+        }
+        if self.touch.is_some_and(|(_, until)| self.t >= until) {
+            self.touch = None;
+        }
+        self.gaze.track(self.touch.map_or(self.fixation, |(point, _)| point), self.t, 0.0)
     }
 
     fn step_blink(&mut self) {
@@ -1127,6 +1486,9 @@ impl Anim {
                 self.rng.range(0.14, 0.23)
             } else if self.state == "listening" {
                 self.rng.range(3.8, 6.8)
+            } else if self.focus.is_some_and(|f| f.kind == FocusKind::Typing) {
+                // Reading what it types: blinks come further apart.
+                self.rng.range(4.0, 8.5)
             } else {
                 self.rng.range(2.5, 5.6)
             };
@@ -1818,6 +2180,229 @@ mod tests {
         assert!(a.gesture.is_some(), "company does not cut a gesture off");
         a.express("concern", 1.0);
         assert!(a.gesture.is_none(), "news does");
+    }
+
+    #[test]
+    fn the_birth_flickers_on_looks_both_ways_tilts_and_settles() {
+        let mut a = Anim::new(7);
+        a.set_lid(Some(false), false, true);
+        a.set_state("idle", false, false);
+        a.frame(0.0, |a| a.born());
+        assert!(a.birth.is_some() && a.lid_wake.is_none());
+        let mut glows = Vec::new();
+        for _ in 0..(2.3 * 60.0) as usize {
+            let p = a.frame(1.0 / 60.0, |_| {});
+            assert!(p.l.h < 0.04, "a line of light while it flickers on");
+            glows.push(p.l.glow);
+        }
+        let changes = glows.windows(2).filter(|w| (w[0] - w[1]).abs() > 0.05).count();
+        assert!(changes >= 6, "the power-on flickers: {changes} steps");
+        assert!(a.activity() == Activity::Active, "drawn smoothly");
+        let opened = run(&mut a, 1.8); // t = 4.1
+        assert!(opened.l.h > 0.2 && opened.l.glow > 0.8, "{opened:?}");
+        let mut xs = Vec::new();
+        for _ in 0..(3.0 * 60.0) as usize {
+            let p = a.frame(1.0 / 60.0, |_| {});
+            xs.push((p.l.x + p.r.x) / 2.0);
+        }
+        let (left, right) = xs.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &x| (lo.min(x), hi.max(x)));
+        assert!(left < -0.10 && right > 0.10, "two slow looks: {left} {right}");
+        assert!(a.blink.is_none(), "no ordinary blinks during the ceremony");
+        run(&mut a, 0.9); // t = 8.0, past the end
+        assert!(a.birth.is_none());
+        let settled = run(&mut a, 0.2);
+        assert!(settled.l.x.abs() > 0.7 && settled.l.h > 0.25);
+    }
+
+    #[test]
+    fn being_spoken_to_cuts_the_birth_short_and_a_dark_panel_saves_it_for_later() {
+        let mut a = Anim::new(7);
+        a.set_lid(Some(false), false, true);
+        a.set_state("idle", false, false);
+        a.frame(0.0, |a| a.born());
+        run(&mut a, 3.0);
+        a.set_state("attending", false, false);
+        run(&mut a, BIRTH_HANDOVER + 0.05);
+        assert!(a.birth.is_none(), "handed over to the live face");
+
+        let mut b = Anim::new(7);
+        b.set_lid(None, false, true);
+        b.set_state("idle", false, false);
+        b.frame(0.0, |b| b.born());
+        assert!(b.birth.is_none() && b.birth_pending.is_some(), "waits for the panel to light");
+        b.frame(5.0, |b| {
+            b.set_lid(Some(false), false, true);
+        });
+        assert!(b.birth.is_some(), "plays on the first lighting");
+        run(&mut b, 1.0);
+        b.set_lid(Some(true), false, false);
+        assert!(b.birth.is_none() && b.birth_pending.is_some(), "closed half-way: kept for next time");
+
+        // Eyes that have been lit a while skip the dark flicker.
+        let mut c = awake(4);
+        c.frame(0.0, |c| c.born());
+        let p = c.frame(1.0 / 60.0, |_| {});
+        assert!(p.l.h > 0.2, "no drop back to a line of light");
+    }
+
+    #[test]
+    fn waiting_for_the_brainstem_looks_calm_not_sick() {
+        let mut a = awake(3);
+        a.set_link_lost(true);
+        a.set_loading(true);
+        assert_eq!(a.target_name(), "loading");
+        let p = run(&mut a, 1.0);
+        assert!(p.l.tilt.abs() < 0.4 && p.l.glow > 0.5, "{p:?}");
+        a.set_loading(false);
+        assert_eq!(a.target_name(), "dazed", "a minute on, it is unwell");
+        a.set_loading(true);
+        a.set_state("idle", false, true);
+        assert_eq!(a.target_name(), "dazed", "a brainstem that says unwell is believed");
+    }
+
+    #[test]
+    fn a_dazed_sleep_is_uneven() {
+        let mut calm = awake(3);
+        let mut sick = awake(3);
+        for a in [&mut calm, &mut sick] {
+            a.set_state("asleep", false, false);
+            run(a, 3.0);
+        }
+        sick.set_link_lost(true);
+        let (p, q) = (run(&mut calm, 0.5), run(&mut sick, 0.5));
+        assert_eq!(sick.target_name(), "asleep");
+        assert!((q.l.tilt - q.r.tilt).abs() > (p.l.tilt - p.r.tilt).abs() + 0.02, "askew: {q:?}");
+    }
+
+    #[test]
+    fn breathing_stays_smooth_after_days_awake() {
+        let mut a = awake(3);
+        a.set_state("asleep", false, false);
+        a.frame(3.0 * 86400.0, |_| {});
+        let mut heights = Vec::new();
+        for _ in 0..120 {
+            heights.push(a.frame(1.0 / 60.0, |_| {}).l.h);
+        }
+        let jumps = heights.windows(2).map(|w| (w[0] - w[1]).abs()).fold(0.0, f32::max);
+        assert!(jumps < 0.002, "breath jumped by {jumps}");
+        assert!(heights.iter().any(|&h| (h - heights[0]).abs() > 0.0005), "still breathing");
+    }
+
+    #[test]
+    fn a_flat_battery_weighs_on_the_lids_without_a_yawn_and_company_lifts_them() {
+        let mut a = awake(9);
+        a.set_drives(Drives { energy: Some(0.1), ..Default::default() });
+        a.blink_next = a.t + 30.0;
+        a.gesture_next = a.t + 60.0;
+        run(&mut a, 20.0);
+        assert!(a.heaviness > 0.15 && a.heaviness < 0.3, "{}", a.heaviness);
+        assert!(!a.yawned, "tired is not sleepy");
+        a.set_gaze(0.1, 0.0);
+        run(&mut a, 1.0);
+        assert!(a.heaviness < 0.05);
+        a.clear_gaze();
+        a.set_drives(Drives { energy: Some(1.0), comfort: Some(1.0), ..Default::default() });
+        run(&mut a, 20.0);
+        assert!(a.heaviness < 0.02, "a full battery leaves the lids alone");
+    }
+
+    #[test]
+    fn idle_looks_linger_after_a_long_quiet() {
+        let count = |arousal: f32| {
+            let mut a = awake(13);
+            a.set_drives(Drives { arousal: Some(arousal), ..Default::default() });
+            let mut moves = 0;
+            let mut last = a.fixation;
+            for _ in 0..600 {
+                run(&mut a, 0.1);
+                if a.fixation != last {
+                    moves += 1;
+                    last = a.fixation;
+                }
+            }
+            moves
+        };
+        let (sleepy, lively) = (count(0.0), count(1.0));
+        assert!(lively as f32 > sleepy as f32 * 1.2, "lively {lively} vs quiet {sleepy}");
+    }
+
+    #[test]
+    fn a_reunion_after_a_long_time_alone_gets_a_bigger_hello() {
+        let hop = |social: f32| {
+            let mut a = awake(3);
+            a.set_drives(Drives { social: Some(social), ..Default::default() });
+            a.set_state("attending", false, false);
+            run(&mut a, 0.17);
+            (a.step_life(0.0, 0.0, true, true).bounce, a.target_name())
+        };
+        let (usual, _) = hop(1.0);
+        let (keen, _) = hop(0.05);
+        assert!(keen > usual * 1.5, "{keen} vs {usual}");
+        // Someone sits down after an hour alone: a moment of joy, once.
+        let mut a = awake(3);
+        a.set_drives(Drives { social: Some(0.1), ..Default::default() });
+        a.set_gaze(0.2, 0.0);
+        assert_eq!(a.target_name(), "joy");
+        a.clear_gaze();
+        run(&mut a, 2.0);
+        a.set_gaze(0.2, 0.0);
+        assert_eq!(a.target_name(), "neutral", "not twice in ten minutes");
+    }
+
+    #[test]
+    fn typing_eyes_follow_the_cursor_and_look_up_when_paused() {
+        let mut a = awake(5);
+        a.set_gaze(0.8, 0.3); // someone is there, but Pip is busy typing
+        a.set_focus(Some(Focus { kind: FocusKind::Typing, at: [-0.5, -0.7] }));
+        run(&mut a, 0.4);
+        let p = a.gaze.position(a.t);
+        assert!((p[0] + 0.5).abs() < 0.03 && (p[1] + 0.7).abs() < 0.03, "{p:?}");
+        // The cursor moves on: the eyes follow after a short reading delay.
+        a.set_focus(Some(Focus { kind: FocusKind::Typing, at: [-0.2, -0.7] }));
+        a.frame(1.0 / 60.0, |_| {});
+        assert!((a.fixation[0] + 0.5).abs() < 1e-6, "not before the saccade delay");
+        run(&mut a, 0.4);
+        assert!((a.gaze.position(a.t)[0] + 0.2).abs() < 0.03);
+        a.set_focus(Some(Focus { kind: FocusKind::Paused, at: [0.0, 0.1] }));
+        run(&mut a, 0.4);
+        assert!(a.gaze.position(a.t)[1] > 0.0, "looks up at the person");
+        // Someone talking to Pip wins over the panel.
+        a.set_state("listening", false, false);
+        run(&mut a, 0.6);
+        assert!(a.gaze.position(a.t)[0] > 0.6, "looks at the speaker");
+        a.set_state("idle", false, false);
+        a.set_focus(None);
+        run(&mut a, 0.1);
+        assert!(a.focus.is_none());
+    }
+
+    #[test]
+    fn typing_behind_a_minimised_terminal_holds_back_idle_performances() {
+        let mut a = awake(21);
+        a.set_typing_hidden(true);
+        for _ in 0..1200 {
+            run(&mut a, 0.1);
+            assert!(a.gesture.is_none() && !a.surveying);
+        }
+    }
+
+    #[test]
+    fn the_frame_rate_follows_what_is_happening() {
+        let mut a = Anim::new(5);
+        a.set_lid(Some(true), false, true);
+        assert_eq!(a.activity(), Activity::Blank);
+        let mut a = awake(5);
+        a.set_state("speaking", false, false);
+        assert_eq!(a.activity(), Activity::Active);
+        a.set_state("idle", false, false);
+        a.blink_next = a.t + 60.0;
+        a.gesture_next = a.t + 60.0;
+        a.gaze_next = a.t + 60.0;
+        run(&mut a, 3.0);
+        assert_eq!(a.activity(), Activity::Calm);
+        a.set_state("asleep", false, false);
+        run(&mut a, 6.0);
+        assert_eq!(a.activity(), Activity::Asleep);
     }
 
     #[test]

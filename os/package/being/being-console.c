@@ -7,6 +7,9 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
+#include <poll.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -14,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
@@ -24,9 +29,13 @@
 #else
 #include <pty.h>
 #endif
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 #include "being-console-gl.h"
 #include "being-console-draw.h"
+#include "being-console-panel.h"
 
 /* The child's terminal. Escape sequences understood (the console contract with
  * mind/console_ui.py, which only sends them when BEING_CONSOLE_UI=1):
@@ -54,6 +63,11 @@ struct terminal {
     int utf8_tail;
     struct cell pen;
     bool cursor_hidden;
+    /* Panel mode only (NULL otherwise): OSC 7770 from hands, a real ED 3. */
+    struct panel_control *control;
+    char osc[PANEL_OSC];
+    size_t osc_length;
+    bool osc_overflow;
 };
 
 struct layout {
@@ -245,8 +259,38 @@ static bool row_used(struct terminal *terminal, int row)
     return false;
 }
 
+/* Forgets everything: screen, scrollback, pen and cursor (panel wipe=1). */
+static void wipe_terminal(struct terminal *terminal)
+{
+    memset(terminal->cells, 0, sizeof(terminal->cells));
+    terminal->top = 0;
+    terminal->row = terminal->column = 0;
+    terminal->scroll = 0;
+    terminal->pen = (struct cell){0};
+    terminal->cursor_hidden = false;
+}
+
+/* ED 3 in panel mode: the scrollback goes for real; the screen stays. */
+static void wipe_scrollback(struct terminal *terminal)
+{
+    static struct cell screen[MAX_ROWS][COLUMNS];
+    for (int row = 0; row < terminal->rows; ++row)
+        memcpy(screen[row], line_at(terminal, terminal->top + (size_t)row), sizeof(screen[0]));
+    memset(terminal->cells, 0, sizeof(terminal->cells));
+    terminal->top = 0;
+    for (int row = 0; row < terminal->rows; ++row)
+        memcpy(terminal->cells[row], screen[row], sizeof(screen[0]));
+    memset(screen, 0, sizeof(screen));
+    terminal->scroll = 0;
+}
+
 static void erase_display(struct terminal *terminal, int mode)
 {
+    if (mode == 3 && terminal->control) {
+        wipe_scrollback(terminal);
+        terminal->control->wiped = true; /* scrolled-back pixels go from the frame too */
+        return;
+    }
     if (mode == 2 || mode == 3) {
         /* Keep what was on the screen in the scrollback, then start clean. */
         int used = 0;
@@ -376,14 +420,37 @@ static void put_byte(struct terminal *terminal, unsigned char byte)
             terminal->private_mode = false;
         } else if (byte == ']') {
             terminal->state = OSC;
+            terminal->osc_length = 0;
+            terminal->osc_overflow = false;
         } else if (byte == '(' || byte == ')' || byte == '#' || byte == '%') {
             terminal->state = ESCAPE_SKIP;
         }
         return;
     case ESCAPE_SKIP:
-        terminal->state = GROUND;
+        /* Panel mode: a program that stops after ESC ( must not swallow the ESC
+         * of hands' next control string (a lost wipe=1 would not forget). */
+        terminal->state = terminal->control && byte == '\033' ? ESCAPE : GROUND;
         return;
     case OSC:
+        if (terminal->control) {
+            /* 0x9c is no terminator here: it is a UTF-8 continuation byte in titles. */
+            if (byte == '\a' || byte == '\033') {
+                terminal->state = byte == '\033' ? ESCAPE : GROUND;
+                if (!terminal->osc_overflow)
+                    panel_osc(terminal->control, terminal->osc, terminal->osc_length);
+                if (terminal->control->wipe_request) {
+                    /* In stream order: what came before is gone, what follows stays. */
+                    wipe_terminal(terminal);
+                    terminal->control->wipe_request = false;
+                    terminal->control->wiped = true;
+                }
+            } else if (terminal->osc_length < sizeof(terminal->osc)) {
+                terminal->osc[terminal->osc_length++] = (char)byte;
+            } else {
+                terminal->osc_overflow = true;
+            }
+            return;
+        }
         if (byte == '\a' || byte == '\033' || byte == 0x9c)
             terminal->state = byte == '\033' ? ESCAPE : GROUND;
         return;
@@ -946,6 +1013,489 @@ static bool run_console(struct display *display, struct session *session, int ga
     return ok;
 }
 
+/* -- panel mode -------------------------------------------------------------- */
+
+/* `being-console --panel NAME`: renders one app's bytes, read from --io, into
+ * the frame file the face composites (being-console-panel.h). No SDL video,
+ * no pty of its own, no keyboard: hands holds the pty and decides who types.
+ * The KMS console above is not used on this path at all. */
+struct panel_options {
+    const char *name, *directory, *io, *user, *title;
+    int width, height;
+    bool hidden;
+};
+
+struct panel {
+    struct layout geometry;
+    struct canvas canvas;
+    uint8_t *backdrop;
+    uint64_t hashes[MAX_ROWS], fills[MAX_ROWS];
+    bool hashes_valid;
+    char chrome[PANEL_TITLE + PANEL_STATUS + 16];
+    struct panel_control control;
+    struct panel_header header;
+    struct panel_file file;
+    const char *title;
+};
+
+static int panel_signals[2] = { -1, -1 };
+
+static void panel_signal(int signal_number)
+{
+    int saved = errno;
+    unsigned char byte = (unsigned char)signal_number;
+    ssize_t ignored = write(panel_signals[1], &byte, 1);
+    (void)ignored;
+    errno = saved;
+}
+
+static uint64_t panel_now(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+}
+
+static struct layout panel_layout(int width, int height)
+{
+    struct layout geometry = { .width = width, .height = height };
+    geometry.face = width >= 1480 && height >= 900 ? FACE_LARGE : width >= 750 && height >= 400 ? FACE_MEDIUM : FACE_SMALL;
+    geometry.cell_width = console_faces[geometry.face].width;
+    geometry.cell_height = console_faces[geometry.face].height;
+    geometry.header = PANEL_STATUS_BAR;
+    geometry.footer = PANEL_FOOTER;
+    /* 1280 wide in the medium face: 107 columns, as voice-apps.md 3.2 plans. */
+    geometry.pad_x = geometry.face == FACE_SMALL ? 16 : geometry.face == FACE_MEDIUM ? 50 : 64;
+    geometry.columns = SDL_clamp((width - 2 * geometry.pad_x) / geometry.cell_width, 1, COLUMNS);
+    geometry.rows = SDL_clamp((height - geometry.header - geometry.footer - PANEL_PAD_TOP - PANEL_PAD_BOTTOM) /
+                                  geometry.cell_height, 1, MAX_ROWS);
+    geometry.x0 = geometry.pad_x;
+    geometry.y0 = geometry.header + PANEL_PAD_TOP;
+    return geometry;
+}
+
+static uint64_t panel_row_hash(struct terminal *terminal, const struct layout *geometry, size_t line, int cursor)
+{
+    const uint8_t *bytes = (const uint8_t *)line_at(terminal, line);
+    uint64_t hash = 1469598103934665603u;
+    for (size_t i = 0; i < (size_t)geometry->columns * sizeof(struct cell); ++i)
+        hash = (hash ^ bytes[i]) * 1099511628211u;
+    return (hash ^ (uint64_t)(cursor + 2)) * 1099511628211u;
+}
+
+/* The row's background runs only: what its neighbours' rounded corners depend on. */
+static uint64_t panel_fill_hash(struct terminal *terminal, const struct layout *geometry, size_t line)
+{
+    const struct cell *cells = line_at(terminal, line);
+    uint64_t hash = 1469598103934665603u;
+    for (int column = 0; column < geometry->columns; ++column) {
+        struct rgb fg, bg;
+        bool has_bg;
+        cell_colors(cells[column], &fg, &bg, &has_bg);
+        uint32_t value = has_bg ? 0x1000000u | (uint32_t)bg.r << 16 | (uint32_t)bg.g << 8 | bg.b : 0;
+        hash = (hash ^ value) * 1099511628211u;
+    }
+    return hash;
+}
+
+static int panel_scroll(struct terminal *terminal)
+{
+    return SDL_min(terminal->scroll, max_scroll(terminal));
+}
+
+/* Redraws what changed since the last frame; returns the pixel rows touched
+ * as [*first, *last], or *last < *first when nothing changed. */
+static void panel_draw(struct panel *panel, struct terminal *terminal, bool full, int *first, int *last)
+{
+    const struct layout *geometry = &panel->geometry;
+    const struct canvas *canvas = &panel->canvas;
+    size_t pitch = (size_t)canvas->pitch;
+    int low = canvas->height, high = -1;
+    int scroll = panel_scroll(terminal);
+    const char *title = panel->control.title[0] ? panel->control.title : panel->title;
+    struct rgb dot;
+    char chrome[sizeof(panel->chrome)];
+    snprintf(chrome, sizeof(chrome), "%s\n%s\n%d%d%d%d", title, panel_status(&panel->control, &dot),
+             panel->control.pip_typing, panel->control.pip_paused, panel->control.job_busy, scroll > 0);
+    if (full) {
+        memcpy(canvas->pixels, panel->backdrop, pitch * (size_t)canvas->height);
+        panel->hashes_valid = false;
+        low = 0;
+        high = canvas->height - 1;
+    }
+    if (full || strcmp(chrome, panel->chrome) != 0) {
+        draw_panel_status(canvas, geometry->face, geometry->pad_x, title, &panel->control);
+        draw_panel_footer(canvas, geometry->face, geometry->pad_x, scroll > 0);
+        memcpy(panel->chrome, chrome, sizeof(chrome));
+        low = 0;
+        high = canvas->height - 1;
+    }
+    size_t view_top = terminal->top - (size_t)scroll;
+    bool cursor = !scroll && !terminal->cursor_hidden && terminal->row < geometry->rows;
+    int cursor_column = SDL_min(terminal->column, geometry->columns - 1);
+    bool changed[MAX_ROWS] = { false }, refilled[MAX_ROWS + 2] = { false };
+    for (int row = 0; row < geometry->rows; ++row) {
+        size_t line = view_top + (size_t)row;
+        uint64_t hash = panel_row_hash(terminal, geometry, line, cursor && row == terminal->row ? cursor_column : -1);
+        uint64_t fill = panel_fill_hash(terminal, geometry, line);
+        if (!panel->hashes_valid || hash != panel->hashes[row]) {
+            changed[row] = true;
+            panel->hashes[row] = hash;
+        }
+        if (!panel->hashes_valid || fill != panel->fills[row]) {
+            refilled[row + 1] = true;
+            panel->fills[row] = fill;
+        }
+    }
+    panel->hashes_valid = true;
+    int cw = geometry->cell_width, ch = geometry->cell_height;
+    for (int row = 0; row < geometry->rows; ++row) {
+        /* A neighbour's new background runs can round or square this row's corners. */
+        if (!changed[row] && !refilled[row] && !refilled[row + 2])
+            continue;
+        int y = geometry->y0 + row * ch;
+        if (y + ch > canvas->height - geometry->footer)
+            break;
+        memcpy(canvas->pixels + (size_t)y * pitch, panel->backdrop + (size_t)y * pitch, pitch * (size_t)ch);
+        draw_row(canvas, terminal, geometry, row, view_top);
+        if (cursor && row == terminal->row) {
+            int band = console_faces[geometry->face].cursor;
+            fill_rect(canvas, geometry->x0 + cursor_column * cw + 1, y + ch - band, cw - 2, band, accent);
+        }
+        low = SDL_min(low, y);
+        high = SDL_max(high, y + ch - 1);
+    }
+    *first = low;
+    *last = high;
+}
+
+static void panel_fill_header(struct panel *panel, struct terminal *terminal, bool visible)
+{
+    const struct layout *geometry = &panel->geometry;
+    struct panel_header *header = &panel->header;
+    int scroll = panel_scroll(terminal);
+    header->flags = panel_flags(&panel->control, visible, scroll > 0);
+    bool cursor = !scroll && !terminal->cursor_hidden && terminal->row < geometry->rows;
+    header->cursor_x = cursor ? geometry->x0 + SDL_min(terminal->column, geometry->columns - 1) * geometry->cell_width
+                              : -1;
+    header->cursor_y = cursor ? geometry->y0 + terminal->row * geometry->cell_height : -1;
+    header->newest_y = -1;
+    for (int row = SDL_min(terminal->row, geometry->rows - 1); !scroll && row >= 0; --row)
+        if (row_used(terminal, row)) {
+            header->newest_y = geometry->y0 + row * geometry->cell_height;
+            break;
+        }
+    const char *title = panel->control.title[0] ? panel->control.title : panel->title;
+    memset(header->title, 0, sizeof(header->title));
+    panel_copy_text(header->title, sizeof(header->title), title, strlen(title));
+}
+
+static bool panel_name_valid(const char *name)
+{
+    size_t length = strlen(name);
+    if (length < 1 || length > 24 || name[0] < 'a' || name[0] > 'z')
+        return false;
+    for (size_t i = 1; i < length; ++i)
+        if (!((name[i] >= 'a' && name[i] <= 'z') || (name[i] >= '0' && name[i] <= '9') || name[i] == '_' ||
+              name[i] == '-'))
+            return false;
+    return true;
+}
+
+/* --io: a file descriptor number, "-" for stdin, a Unix stream socket to
+ * connect to, or a FIFO to open. */
+static int panel_open_io(const char *io)
+{
+    if (strcmp(io, "-") == 0)
+        return STDIN_FILENO;
+    char *end;
+    errno = 0;
+    long number = strtol(io, &end, 10);
+    if (end != io && !*end && !errno && number >= 0 && number < 65536)
+        return fcntl((int)number, F_GETFD) < 0 ? -1 : (int)number;
+    struct stat status;
+    if (stat(io, &status) == 0 && S_ISSOCK(status.st_mode)) {
+        struct sockaddr_un address = { .sun_family = AF_UNIX };
+        if (strlen(io) >= sizeof(address.sun_path))
+            return -1;
+        strcpy(address.sun_path, io);
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd >= 0 && connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+            close(fd);
+            fd = -1;
+        }
+        return fd;
+    }
+    return open(io, O_RDONLY | O_NOCTTY | O_CLOEXEC);
+}
+
+/* The renderer parses bytes that caged programs wrote, so it never runs as
+ * root: started as root, it becomes the panel user or refuses to run. */
+static bool panel_drop_root(const char *user)
+{
+    if (geteuid() != 0 && getuid() != 0)
+        return true;
+    struct passwd *account = getpwnam(user);
+    if (!account || account->pw_uid == 0) {
+        fprintf(stderr, "being-console: no user %s; panel mode will not run as root\n", user);
+        return false;
+    }
+    uid_t uid = account->pw_uid;
+    gid_t gid = account->pw_gid;
+    if (setgroups(0, NULL) != 0 || setgid(gid) != 0 || setuid(uid) != 0 || setuid(0) == 0 || geteuid() == 0) {
+        fprintf(stderr, "being-console: could not become %s: %s\n", user, strerror(errno));
+        return false;
+    }
+#ifdef __linux__
+    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+#endif
+    return true;
+}
+
+static int run_panel(const struct panel_options *options)
+{
+    static struct panel panel;
+    struct terminal *terminal = &console_terminal;
+    terminal->control = &panel.control;
+    panel.file.fd = -1;
+    panel.file.directory = -1;
+    panel.title = options->title;
+    panel.geometry = panel_layout(options->width, options->height);
+    const struct layout *geometry = &panel.geometry;
+    resize_terminal(terminal, geometry->rows, geometry->columns);
+
+    int result = 1;
+    int input = panel_open_io(options->io);
+    if (input < 0) {
+        fprintf(stderr, "being-console: cannot read the panel input %s\n", options->io);
+        return 1;
+    }
+    panel.file.directory = open(options->directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (panel.file.directory < 0) {
+        fprintf(stderr, "being-console: panel directory %s: %s\n", options->directory, strerror(errno));
+        return 1;
+    }
+    if (!panel_drop_root(options->user))
+        return 1;
+    snprintf(panel.file.name, sizeof(panel.file.name), "%s.frame", options->name);
+    snprintf(panel.file.temporary, sizeof(panel.file.temporary), "%s.frame.tmp", options->name);
+    fcntl(input, F_SETFL, fcntl(input, F_GETFL) | O_NONBLOCK);
+    if (isatty(input)) {
+        /* A pty master handed over directly (lab previews): size it here. */
+        struct winsize size = { .ws_row = (unsigned short)geometry->rows, .ws_col = (unsigned short)geometry->columns };
+        ioctl(input, TIOCSWINSZ, &size);
+    }
+    if (!load_glyphs()) {
+        fprintf(stderr, "being-console: out of memory\n");
+        return 1;
+    }
+    if (pipe(panel_signals) != 0) {
+        perror("being-console signal pipe");
+        return 1;
+    }
+    for (int i = 0; i < 2; ++i) {
+        fcntl(panel_signals[i], F_SETFL, O_NONBLOCK);
+        fcntl(panel_signals[i], F_SETFD, FD_CLOEXEC);
+    }
+    struct sigaction action = { .sa_handler = panel_signal };
+    sigemptyset(&action.sa_mask);
+    const int handled[] = { SIGUSR1, SIGUSR2, SIGTERM, SIGINT, SIGHUP };
+    for (size_t i = 0; i < sizeof(handled) / sizeof(handled[0]); ++i)
+        sigaction(handled[i], &action, NULL);
+    signal(SIGPIPE, SIG_IGN);
+
+    size_t pitch = (size_t)options->width * 4, bytes = pitch * (size_t)options->height;
+    panel.canvas = (struct canvas){ malloc(bytes), (int)pitch, options->width, options->height };
+    panel.backdrop = malloc(bytes);
+    if (!panel.canvas.pixels || !panel.backdrop) {
+        fprintf(stderr, "being-console: out of memory\n");
+        goto done;
+    }
+    struct canvas backdrop = { panel.backdrop, (int)pitch, options->width, options->height };
+    paint_panel_backdrop(&backdrop);
+
+    struct panel_header *header = &panel.header;
+    *header = (struct panel_header){
+        .width = (uint32_t)options->width, .height = (uint32_t)options->height, .stride = (uint32_t)pitch,
+        .columns = (uint32_t)geometry->columns, .rows = (uint32_t)geometry->rows,
+        .cell_width = (uint16_t)geometry->cell_width, .cell_height = (uint16_t)geometry->cell_height,
+        .pid = (uint32_t)getpid(),
+    };
+    bool visible = !options->hidden;
+    int first, last;
+    panel_draw(&panel, terminal, true, &first, &last);
+    panel_fill_header(&panel, terminal, visible);
+    if (!panel_create(&panel.file, header, panel.canvas.pixels)) {
+        fprintf(stderr, "being-console: cannot write %s/%s: %s\n", options->directory, panel.file.name,
+                strerror(errno));
+        goto done;
+    }
+    fprintf(stderr, "being-console: panel %s %dx%d, %d columns by %d rows\n", options->name, options->width,
+            options->height, geometry->columns, geometry->rows);
+
+    uint64_t now = panel_now(), next_frame = now, next_beat = now + PANEL_BEAT_MS;
+    uint32_t written_flags = header->flags;
+    bool pending = false, full_due = false, header_due = false, quitting = false;
+    result = 0;
+    while (!quitting) {
+        int timeout = -1; /* hidden: sleep until there is input or a signal */
+        if (visible) {
+            uint64_t wake = pending || full_due ? SDL_min(next_beat, next_frame) : next_beat;
+            timeout = wake > now ? (int)(wake - now) : 0;
+        }
+        struct pollfd fds[2] = { { .fd = input, .events = POLLIN }, { .fd = panel_signals[0], .events = POLLIN } };
+        int ready = poll(fds, 2, timeout);
+        if (ready < 0 && errno != EINTR) {
+            perror("being-console poll");
+            result = 1;
+            break;
+        }
+        now = panel_now();
+        if (ready > 0 && fds[1].revents) {
+            unsigned char signals[16];
+            ssize_t count = read(panel_signals[0], signals, sizeof(signals));
+            for (ssize_t i = 0; i < count; ++i) {
+                if (signals[i] == SIGUSR1 && !visible) {
+                    visible = true;
+                    full_due = true;
+                    next_beat = now; /* a fresh beat with the first frame back */
+                } else if (signals[i] == SIGUSR2 && visible) {
+                    visible = false;
+                    header_due = true;
+                } else if (signals[i] != SIGUSR1 && signals[i] != SIGUSR2) {
+                    quitting = true;
+                }
+            }
+        }
+        if (ready > 0 && fds[0].revents && !quitting) {
+            unsigned char chunk[16384];
+            ssize_t count = read(input, chunk, sizeof(chunk));
+            if (count > 0) {
+                for (ssize_t i = 0; i < count; ++i)
+                    put_byte(terminal, chunk[i]);
+                pending = true;
+            } else if (count == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+                break; /* the session is over (EIO from a pty whose shell exited) */
+            }
+        }
+        /* Forgetting does not wait for the frame cap or for the panel to be
+         * shown: the old pixels leave the frame file at once, hidden or not. */
+        bool wipe_now = panel.control.wiped;
+        panel.control.wiped = false;
+        if (panel.control.scroll_request) {
+            int step = SDL_max(geometry->rows - 1, 1), request = panel.control.scroll_request;
+            int position = request == -2 ? 0 : terminal->scroll + request * step;
+            terminal->scroll = SDL_clamp(position, 0, max_scroll(terminal));
+            panel.control.scroll_request = 0;
+            pending = true;
+        }
+        if (panel.control.changed) {
+            panel.control.changed = false;
+            pending = true;
+            if (!visible)
+                header_due = true; /* a new title reaches the header while minimised */
+        }
+        if (panel_flags(&panel.control, visible, panel_scroll(terminal) > 0) != written_flags)
+            header_due = true;
+        bool frame_waiting = visible && (pending || full_due);
+        bool beat_due = visible && now >= next_beat;
+        bool wrote = false;
+        if (wipe_now) {
+            panel_draw(&panel, terminal, true, &first, &last);
+            panel_fill_header(&panel, terminal, visible);
+            wrote = panel_write_frame(&panel.file, header, panel.canvas.pixels, 0, header->height);
+            /* While hidden the pixels are now the wiped screen; SIGUSR1 still
+             * redraws in full when it shows the panel. */
+            pending = full_due = header_due = false;
+            if (visible)
+                next_frame = now + PANEL_FRAME_MS;
+        } else if (frame_waiting && now >= next_frame) {
+            panel_draw(&panel, terminal, full_due, &first, &last);
+            if (beat_due)
+                header->beat++;
+            panel_fill_header(&panel, terminal, visible);
+            wrote = panel_write_frame(&panel.file, header, panel.canvas.pixels, last >= first ? (uint32_t)first : 0,
+                                      last >= first ? (uint32_t)(last - first + 1) : 0);
+            pending = full_due = header_due = false;
+            next_frame = now + PANEL_FRAME_MS;
+            if (beat_due)
+                next_beat = now + PANEL_BEAT_MS;
+        } else if (beat_due || (header_due && !frame_waiting)) {
+            if (beat_due) {
+                header->beat++;
+                next_beat = now + PANEL_BEAT_MS;
+            }
+            panel_fill_header(&panel, terminal, visible);
+            wrote = panel_write_frame(&panel.file, header, panel.canvas.pixels, 0, 0);
+            header_due = false;
+        } else {
+            continue;
+        }
+        if (!wrote) {
+            fprintf(stderr, "being-console: cannot write the panel frame: %s\n", strerror(errno));
+            result = 1;
+            break;
+        }
+        written_flags = header->flags;
+    }
+
+done:
+    panel_remove(&panel.file);
+    if (panel.file.directory >= 0)
+        close(panel.file.directory);
+    free(panel.canvas.pixels);
+    free(panel.backdrop);
+    terminal->control = NULL;
+    return result;
+}
+
+static int panel_usage(const char *name)
+{
+    fprintf(stderr, "usage: %s --panel NAME [--size WIDTHxHEIGHT] [--io FD|-|PATH] [--dir DIRECTORY]\n"
+            "       [--title TEXT] [--user USER] [--hidden]\n", name);
+    return 2;
+}
+
+static int panel_main(int argc, char **argv)
+{
+    struct panel_options options = {
+        .name = argv[2], .io = "-", .user = "being-panel", .width = 1280, .height = 640,
+        .directory = getenv("BEING_PANEL_DIR") ? getenv("BEING_PANEL_DIR") : "/run/being-panel",
+    };
+    if (!panel_name_valid(options.name))
+        return panel_usage(argv[0]);
+    for (int i = 3; i < argc; ++i) {
+        const char *option = argv[i];
+        if (strcmp(option, "--hidden") == 0) {
+            options.hidden = true;
+            continue;
+        }
+        if (i + 1 >= argc)
+            return panel_usage(argv[0]);
+        const char *value = argv[++i];
+        if (strcmp(option, "--size") == 0) {
+            if (sscanf(value, "%dx%d", &options.width, &options.height) != 2 || options.width < 160 ||
+                options.width > 4096 || options.height < 120 || options.height > 4096)
+                return panel_usage(argv[0]);
+        } else if (strcmp(option, "--io") == 0) {
+            options.io = value;
+        } else if (strcmp(option, "--dir") == 0) {
+            options.directory = value;
+        } else if (strcmp(option, "--title") == 0) {
+            options.title = value;
+        } else if (strcmp(option, "--user") == 0) {
+            options.user = value;
+        } else {
+            return panel_usage(argv[0]);
+        }
+    }
+    if (!options.title)
+        options.title = strcmp(options.name, "terminal") == 0 ? "Terminal" :
+                        strcmp(options.name, "monitor") == 0 ? "Body monitor" :
+                        strcmp(options.name, "clock") == 0 ? "Clock" : options.name;
+    return run_panel(&options);
+}
+
 #ifdef __linux__
 #include <dirent.h>
 #include <linux/input.h>
@@ -1069,6 +1619,8 @@ static void usage(const char *name)
 
 int main(int argc, char **argv)
 {
+    if (argc >= 3 && strcmp(argv[1], "--panel") == 0)
+        return panel_main(argc, argv);
     /* Hidden options for lab/console_preview.py: a snapshot of the screen
      * after a while, drawn without a window if asked, with typed input. */
     struct options options = {0};

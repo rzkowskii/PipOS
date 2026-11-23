@@ -189,3 +189,78 @@ class PreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await asyncio.wait_for(setup.play_preview(self.directory / "sample.wav"), 2))
         self.assertTrue(self.started.is_set())
         self.assertTrue(self.stopped.is_set())
+
+
+class SystemEntries(unittest.TestCase):
+    def setUp(self):
+        work = self.enterContext(tempfile.TemporaryDirectory())
+        self.mind_dir = Path(work) / "mind"
+        self.mind_dir.mkdir()
+        self.args = ["--config", str(Path(__file__).resolve().parents[1] / "config"), "--mind-dir", str(self.mind_dir)]
+
+    def run_setup(self, keys, *args, try_boot=False):
+        with (patch("sys.stdin.isatty", return_value=True), patch("builtins.input", side_effect=keys),
+              patch.object(setup, "available_voices", return_value={"slt"}),
+              patch.object(setup, "APPLIANCE_MIND", self.mind_dir.resolve()),
+              patch.object(setup, "is_try_boot", return_value=try_boot),
+              redirect_stdout(io.StringIO()) as output):
+            return setup.main(self.args + list(args)), output.getvalue()
+
+    def test_installed_setup_offers_care_sound_zone_backup_and_update(self):
+        with (patch.object(setup.care, "care_menu") as care_menu, patch.object(setup.care, "update_menu") as update,
+              patch.object(setup.care, "backup_menu") as backup):
+            code, text = self.run_setup(["c", "u", "b", "q"])
+        self.assertEqual(code, 0)
+        for label in ("C  Senses and memory", "A  Volume and microphone", "T  Time zone",
+                      "B  Back up to a USB stick", "U  Update from a USB stick"):
+            self.assertIn(label, text)
+        care_menu.assert_called_once_with(self.mind_dir, temporary=False)
+        update.assert_called_once_with(try_boot=False)
+        backup.assert_called_once_with(self.mind_dir, temporary=False)
+
+    def test_try_setup_has_care_but_no_update_or_backup_entries(self):
+        with patch.object(setup.care, "care_menu") as care_menu:
+            code, text = self.run_setup(["c", "q"], try_boot=True)
+        self.assertEqual(code, 0)
+        self.assertIn("C  Senses and memory", text)
+        self.assertNotIn("Update from a USB stick", text)
+        care_menu.assert_called_once_with(self.mind_dir, temporary=True)
+
+    def test_off_appliance_setup_shows_only_the_profile(self):
+        with (patch("sys.stdin.isatty", return_value=True), patch("builtins.input", side_effect=["q"]),
+              patch.object(setup, "available_voices", return_value={"slt"}), redirect_stdout(io.StringIO()) as output):
+            setup.main(self.args)
+        self.assertNotIn("Senses and memory", output.getvalue())
+
+    def test_try_restart_names_only_installed_units(self):
+        from types import SimpleNamespace
+
+        calls = []
+
+        @asynccontextmanager
+        async def child(*command, **_):
+            calls.append(command)
+            yield SimpleNamespace(wait=AsyncMock(return_value=0))
+
+        class FakeBus:
+            def __init__(self, *_, **__):
+                self.events = iter([{"t": "state.changed"}, {"t": "organ.up", "name": "mind"},
+                                    {"t": "organ.up", "name": "voice"}])
+
+            async def start(self):
+                pass
+
+            async def stop(self):
+                pass
+
+            async def recv(self):
+                return next(self.events)
+
+        units = self.mind_dir / "units"
+        units.mkdir()
+        for unit in ("being-mind.service", "being-voice.service"):
+            (units / unit).write_text("")
+        with (patch.object(setup, "Bus", FakeBus), patch.object(setup, "child", child),
+              patch("mind.network_enforce.UNIT_DIRS", (units,))):
+            asyncio.run(setup.restart_try_organs())
+        self.assertEqual(calls, [("systemctl", "try-restart", "being-mind.service", "being-voice.service")])

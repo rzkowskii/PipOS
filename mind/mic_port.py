@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 
@@ -31,7 +31,9 @@ class MicrophonePort:
         try:
             yield self
         finally:
-            os.write(self.fd, b"stop\n")
+            # A vanished host must not hide the error that ended the recording.
+            with suppress(OSError):
+                os.write(self.fd, b"stop\n")
 
     async def readexactly(self, size):
         loop = asyncio.get_running_loop()
