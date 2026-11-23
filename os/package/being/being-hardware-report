@@ -1,0 +1,7 @@
+#!/bin/sh
+# Print what the kernel shows about this machine; "--save" also keeps it on the Try USB.
+export PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1
+if [ "${1:-}" = --save ]; then
+    exec /usr/bin/python3 -m mind.usb_logs check
+fi
+exec /usr/bin/python3 -m mind.usb_logs report

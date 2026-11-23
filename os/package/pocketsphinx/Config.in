@@ -1,0 +1,7 @@
+config BR2_PACKAGE_POCKETSPHINX
+	bool "PocketSphinx streaming English recognizer"
+	depends on !BR2_STATIC_LIBS
+	help
+	  Local keyword spotting, endpointing, and streaming recognition.
+
+	  https://github.com/cmusphinx/pocketsphinx

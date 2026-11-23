@@ -1,0 +1,10 @@
+[package]
+name = "face"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bus = { path = "../bus" }
+glow = "0.18"
+png = "0.18"
+sdl2 = { version = "0.39", features = ["use-pkgconfig"] }

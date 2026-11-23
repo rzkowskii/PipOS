@@ -1,0 +1,8 @@
+config BR2_PACKAGE_BEING_BACKUP_AGE
+	bool "age backup encryption"
+	depends on BR2_x86_64
+	help
+	  Native X25519 backup encryption and key tools from the upstream
+	  static amd64 Linux release of age.
+
+	  https://age-encryption.org/

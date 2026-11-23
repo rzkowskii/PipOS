@@ -1,0 +1,22 @@
+[Unit]
+Description=Being: face
+# The face is the first thing to start and waits for nothing: the eyes are up
+# while everything else is still loading.
+DefaultDependencies=no
+# An organ is restarted for as long as it takes. systemd must never give up.
+StartLimitIntervalSec=0
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+EnvironmentFile=/etc/being/env
+# Draw straight to the screen: there is no window system.
+Environment=SDL_VIDEODRIVER=kmsdrm
+Environment=BEING_LOCAL_SETUP=1
+ExecCondition=/usr/libexec/being-screen-mode face
+ExecStart=/usr/bin/being-face --fullscreen --bus ${BEING_BUS}
+Restart=always
+RestartSec=300ms
+
+[Install]
+WantedBy=sysinit.target

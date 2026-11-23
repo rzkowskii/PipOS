@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/bus", "crates/brainstem", "crates/face"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

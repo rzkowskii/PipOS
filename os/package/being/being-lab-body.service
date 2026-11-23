@@ -1,0 +1,21 @@
+[Unit]
+Description=Being: lab body (the second serial line is its ears and voice)
+ConditionPathExists=/sys/firmware/qemu_fw_cfg/by_name/opt/beingos/serial/raw
+RequiresMountsFor=/mind
+StartLimitIntervalSec=0
+After=being-brainstem.service
+
+[Service]
+EnvironmentFile=/etc/being/env
+Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /usr/lib/being/sim/body.py --silent --bus ${BEING_BUS} --config /etc/being
+StandardInput=tty
+StandardOutput=tty
+StandardError=journal
+TTYPath=/dev/ttyS1
+TTYReset=yes
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,27 @@
+[Unit]
+Description=Being: keep Try boot diagnostics on the USB stick (PIPLOGS)
+# Only Try boots, and only the try-logs partition on the disk that holds the
+# running root file system, attached over USB. No other disk is opened.
+ConditionKernelCommandLine=being.try=1
+DefaultDependencies=no
+# After= the mount this service makes itself (an ordering only, nothing is
+# started): at shutdown systemd then stops this service, which writes the
+# last summary and unmounts, before it tries to unmount /run/beinglogs.
+After=systemd-journald.service run-beinglogs.mount
+Before=sysinit.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m mind.usb_logs run
+ExecStopPost=-/bin/umount /run/beinglogs
+KillMode=mixed
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=2
+StartLimitBurst=3
+StartLimitIntervalSec=60
+
+[Install]
+WantedBy=sysinit.target

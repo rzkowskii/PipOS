@@ -1,0 +1,46 @@
+[Unit]
+Description=Being: brainstem (event hub and state)
+DefaultDependencies=no
+# A failed brainstem is restarted for as long as it takes, waiting longer each
+# time (0.3 s up to 30 s), while the face shows it dazed. systemd never gives
+# up on it, so there is no start-limit reboot.
+StartLimitIntervalSec=0
+# Its life record is in the mind partition. Start once that has been tried,
+# but do not depend on it: a being with a damaged mind still has a face.
+After=mind.mount
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+EnvironmentFile=/etc/being/env
+RuntimeDirectory=being
+RuntimeDirectoryPreserve=yes
+ExecStart=/usr/bin/being-brainstem --bus ${BEING_BUS} --require ${BEING_REQUIRE} \
+    --mind-dir ${BEING_MIND} --mind-is-a-mount --appliance-body
+# A crash loop that recovery cannot end reboots the machine, but never on a Try
+# or verbose boot (where a reboot would hide the failure), and no sooner than
+# five minutes after boot and eight failures in ten minutes, so the machine can
+# never reboot in a fast loop. A plain "systemctl stop" is not a failure.
+ExecStopPost=-/bin/sh -c 'case "$$SERVICE_RESULT" in success|"") exit 0 ;; esac; \
+    read -r cmdline </proc/cmdline; \
+    case " $$cmdline " in *" being.try=1 "*|*" being.verbose=1 "*) \
+        echo "being-brainstem: failed ($$SERVICE_RESULT); restarting, never rebooting on this boot"; exit 0 ;; esac; \
+    read -r up rest </proc/uptime; up=$${up%%.*}; log=/run/being/brainstem-failures; \
+    recent=; count=0; \
+    for t in $$(cat "$$log" 2>/dev/null) $$up; do \
+        if [ "$$t" -gt $$((up - 600)) ] 2>/dev/null; then recent="$$recent $$t"; count=$$((count + 1)); fi; \
+    done; \
+    printf "%%s\n" $$recent >"$$log"; \
+    echo "being-brainstem: failed ($$SERVICE_RESULT), $$count time(s) in ten minutes"; \
+    if [ "$$count" -ge 8 ] && [ "$$up" -ge 300 ]; then \
+        echo "being-brainstem: recovery is not working; rebooting"; systemctl --no-block reboot; fi'
+Restart=always
+RestartSec=300ms
+RestartSteps=6
+RestartMaxDelaySec=30s
+WatchdogSec=10s
+TimeoutAbortSec=5s
+NotifyAccess=main
+
+[Install]
+WantedBy=sysinit.target

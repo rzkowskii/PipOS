@@ -1,0 +1,125 @@
+# PipOS for the real 2012 MacBook Pro (MacBookPro9,2), with no lab access.
+#
+# This is beingos_x86_64_defconfig (the QEMU lab image) minus everything the
+# lab uses to get in or to fake a body: no login prompt on any terminal, a
+# locked root account, no serial console, no lab body, no OpenSSH or paired
+# LAN maintenance, and a kernel without serial, fw_cfg, virtio console/input/
+# net, uinput, test_power or snd-aloop. Keep the two files in step otherwise.
+# Build it with `lab/build.sh laptop` and `lab/build.sh laptop-try`.
+
+# Every binary is built for the laptop's CPU. Ivy Bridge has AVX but not AVX2,
+# so nothing in the image may use AVX2.
+BR2_x86_64=y
+BR2_x86_ivybridge=y
+
+# Toolchain
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_18=y
+BR2_CCACHE=y
+BR2_PER_PACKAGE_DIRECTORIES=y
+BR2_CCACHE_DIR="/work/ccache"
+
+# Our own fixes to other people's packages live in os/patches/.
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_BEINGOS_PATH)/patches"
+
+# System
+BR2_INIT_SYSTEMD=y
+BR2_TARGET_GENERIC_HOSTNAME="being"
+BR2_TARGET_GENERIC_ISSUE=""
+# No login prompt and no root password: maintenance never ships enabled.
+# BR2_TARGET_ENABLE_ROOT_LOGIN is not set
+# BR2_TARGET_GENERIC_GETTY is not set
+BR2_TARGET_TZ_INFO=y
+# BR2_TARGET_GENERIC_REMOUNT_ROOTFS_RW is not set
+# The login manager is what turns the power button into a shutdown.
+BR2_PACKAGE_SYSTEMD_LOGIND=y
+BR2_PACKAGE_SYSTEMD_NETWORKD=y
+BR2_PACKAGE_SYSTEMD_RESOLVED=y
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_BEINGOS_PATH)/board/beingos/post-build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_BEINGOS_PATH)/board/beingos/post-image.sh"
+# Tells the board scripts to drop the serial console and every getty.
+BR2_ROOTFS_POST_SCRIPT_ARGS="laptop"
+
+# Kernel: 6.18 long-term
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.18.64"
+BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="$(BR2_EXTERNAL_BEINGOS_PATH)/board/beingos/linux.config"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_BEINGOS_PATH)/board/beingos/linux-laptop.config"
+BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+BR2_LINUX_KERNEL_NEEDS_HOST_LIBELF=y
+
+# Disk image: UEFI, GRUB, GPT
+BR2_TARGET_ROOTFS_SQUASHFS=y
+# This SquashFS is also read by GRUB, which supports gzip.
+BR2_TARGET_ROOTFS_SQUASHFS4_GZIP=y
+# BR2_TARGET_ROOTFS_TAR is not set
+BR2_TARGET_GRUB2=y
+BR2_TARGET_GRUB2_X86_64_EFI=y
+BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI="boot linux fat squash4 part_gpt normal efi_gop loadenv regexp test echo"
+BR2_TARGET_GRUB2_INSTALL_TOOLS=y
+BR2_PACKAGE_DOSFSTOOLS=y
+BR2_PACKAGE_DOSFSTOOLS_FSCK_FAT=y
+BR2_PACKAGE_DOSFSTOOLS_MKFS_FAT=y
+BR2_PACKAGE_MTOOLS=y
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_E2FSPROGS=y
+BR2_PACKAGE_HOST_GENIMAGE=y
+BR2_PACKAGE_HOST_MTOOLS=y
+BR2_PACKAGE_RAUC=y
+BR2_PACKAGE_RAUC_DBUS=y
+BR2_PACKAGE_HOST_RAUC=y
+
+# Owner-configured Wi-Fi. The b43 firmware comes from the owner's overlay
+# (docs/HARDWARE.md); lab/build.sh laptop adds out/firmware-overlay when present.
+BR2_PACKAGE_IW=y
+BR2_PACKAGE_WPA_SUPPLICANT=y
+BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
+BR2_PACKAGE_WPA_SUPPLICANT_WPA3=y
+BR2_PACKAGE_WPA_SUPPLICANT_CLI=y
+BR2_PACKAGE_NFTABLES=y
+# No SSH server. Paired LAN maintenance is an owner opt-in at build time:
+# BEING_LAPTOP_MAINTENANCE=1 lab/build.sh laptop (a separate output tree).
+# BR2_PACKAGE_OPENSSH is not set
+
+# Graphics: the laptop's GPU driver (crocus), and a software renderer
+# (llvmpipe) for machines with no usable GPU, such as the lab's.
+BR2_PACKAGE_MESA3D=y
+BR2_PACKAGE_MESA3D_LLVM=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_CROCUS=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
+BR2_PACKAGE_MESA3D_OPENGL_EGL=y
+BR2_PACKAGE_MESA3D_OPENGL_ES=y
+BR2_PACKAGE_SDL2=y
+BR2_PACKAGE_SDL2_KMSDRM=y
+BR2_PACKAGE_SDL2_OPENGLES=y
+
+# The organs. Rust comes prebuilt for the build host.
+BR2_PACKAGE_HOST_RUSTC=y
+BR2_PACKAGE_HOST_RUST_BIN=y
+BR2_PACKAGE_PYTHON3=y
+BR2_PACKAGE_PYTHON3_SQLITE=y
+# OpenSSL supplies WPA2 key derivation and HTTPS weather lookups.
+BR2_PACKAGE_PYTHON3_SSL=y
+BR2_PACKAGE_LIBOPENSSL_BIN=y
+BR2_PACKAGE_CA_CERTIFICATES=y
+BR2_PACKAGE_BEING=y
+BR2_PACKAGE_BEING_BACKUP_AGE=y
+# The real body: microphone, speakers, lid and battery. No lab body.
+# BR2_PACKAGE_BEING_LAB_BODY is not set
+# BR2_PACKAGE_BEING_LAN_MAINTENANCE is not set
+
+# The language model server, built for this CPU.
+BR2_PACKAGE_CORTEX=y
+
+# The local audio loop.
+BR2_PACKAGE_POCKETSPHINX=y
+BR2_PACKAGE_ALSA_UTILS=y
+BR2_PACKAGE_ALSA_UTILS_APLAY=y
+BR2_PACKAGE_ALSA_UTILS_AMIXER=y
+# BR2_PACKAGE_ALSA_UTILS_ALSAMIXER is not set
+BR2_PACKAGE_FLITE=y
+
+# Checking the mind partition at boot (e2fsck).
+BR2_PACKAGE_E2FSPROGS=y

@@ -1,0 +1,71 @@
+#!/bin/sh
+# This is an early systemd generator so the Try mounts take precedence.
+set -ef
+IFS= read -r cmdline </proc/cmdline
+trying=
+models_guid=
+models_seen=
+for arg in $cmdline; do
+    case "$arg" in
+        being.try=1) trying=1 ;;
+        being.models|being.models=*)
+            if [ -n "$models_seen" ]; then
+                models_guid=
+            else
+                models_guid=${arg#being.models=}
+                models_seen=1
+            fi
+            ;;
+    esac
+done
+[ -n "$trying" ] || exit 0
+
+early=${2:?Missing early systemd generator directory}
+requires="$early/local-fs.target.requires"
+mkdir -p "$requires"
+for unit in bootstate.mount rauc.service being-boot-health.service being-trial-reboot.service; do
+    ln -s /dev/null "$early/$unit"
+done
+
+cat > "$early/mind.mount" <<'EOF'
+[Unit]
+Description=PipOS Try temporary memory
+
+[Mount]
+What=tmpfs
+Where=/mind
+Type=tmpfs
+Options=mode=0700,size=512M,noswap,nodev,nosuid,noexec
+EOF
+cat > "$early/var.mount" <<'EOF'
+[Unit]
+Description=PipOS Try temporary system state
+
+[Mount]
+What=tmpfs
+Where=/var
+Type=tmpfs
+Options=mode=0755,noswap,nosuid,nodev
+EOF
+ln -s ../mind.mount "$requires/mind.mount"
+ln -s ../var.mount "$requires/var.mount"
+
+if ! printf '%s\n' "$models_guid" | LC_ALL=C grep -Eq '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$' ||
+   [ "$models_guid" = 00000000-0000-0000-0000-000000000000 ]; then
+    ln -s /dev/null "$early/models.mount"
+    printf '%s\n' 'being-try-generator: Try mode requires one valid model partition GUID.' >&2
+    exit 0
+fi
+
+models_guid=$(printf '%s' "$models_guid" | LC_ALL=C tr A-F a-f)
+cat > "$early/models.mount" <<EOF
+[Unit]
+Description=PipOS Try model files
+
+[Mount]
+What=/dev/disk/by-partuuid/$models_guid
+Where=/models
+Type=ext4
+Options=ro,noload,nodev,nosuid,noexec
+EOF
+ln -s ../models.mount "$requires/models.mount"

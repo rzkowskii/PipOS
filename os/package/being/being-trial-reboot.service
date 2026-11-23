@@ -1,0 +1,7 @@
+[Unit]
+Description=Being: reboot after a trial health-check error
+ConditionKernelCommandLine=being.trial=1
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --no-block reboot

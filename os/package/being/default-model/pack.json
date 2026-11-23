@@ -1,0 +1,14 @@
+{
+  "format": "beingos-model-pack-v1",
+  "role": "conversation",
+  "model": "Qwen/Qwen3.5-0.8B",
+  "model_source": "https://huggingface.co/Qwen/Qwen3.5-0.8B/tree/2fc06364715b967f1860aea9cf38778875588b17",
+  "quantization": "Q4_K_M",
+  "artifact_source": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/blob/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-Q4_K_M.gguf",
+  "license": "Apache-2.0",
+  "license_source": "https://huggingface.co/Qwen/Qwen3.5-0.8B/blob/2fc06364715b967f1860aea9cf38778875588b17/LICENSE",
+  "license_sha256": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a",
+  "file": "reflex.gguf",
+  "bytes": 532517120,
+  "sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517"
+}

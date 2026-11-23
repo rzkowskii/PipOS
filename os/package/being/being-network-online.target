@@ -1,0 +1,6 @@
+[Unit]
+Description=Start permitted PipOS network services
+Wants=systemd-networkd.service systemd-resolved.service systemd-timesyncd.service
+
+[Install]
+WantedBy=multi-user.target

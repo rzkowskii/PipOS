@@ -1,0 +1,31 @@
+[Unit]
+Description=Being: cortex (language model)
+ConditionPathExists=!/mind/.being-restore-in-progress
+StartLimitIntervalSec=0
+RequiresMountsFor=/models /mind
+
+[Service]
+ExecStartPre=/bin/mkdir -p /mind/cortex
+# Start with one inference worker per physical core. Prompt processing and
+# generation can be measured independently with a runtime service drop-in.
+Environment=BEING_CORTEX_THREADS=2 BEING_CORTEX_PROMPT_THREADS=2
+# Qwen's recurrent context checkpoints are copied into each saved slot file.
+Environment=LLAMA_ARG_CTX_CHECKPOINTS=6
+# The active slot retains its prefix and can still be saved and restored.
+# Avoid the separate RAM cache for old prompt branches on this one-slot OS.
+ExecStart=/usr/bin/llama-server \
+    --model /models/reflex.gguf \
+    --host 127.0.0.1 --port 8080 \
+    --ctx-size 4096 --parallel 1 \
+    --threads ${BEING_CORTEX_THREADS} --threads-batch ${BEING_CORTEX_PROMPT_THREADS} \
+    --cache-ram 0 --no-cache-idle-slots \
+    --reasoning-budget 0 \
+    --slot-save-path /mind/cortex \
+    --no-webui
+Restart=always
+RestartSec=1
+# Thinking must never take the CPU from the face or the voice.
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

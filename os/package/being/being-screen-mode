@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+case "$1" in
+    face)
+        # Keep the boot menu on screen first on dedicated USB builds.
+        case " $(cat /proc/cmdline) " in
+            *" being.screen=1 "*) test -f /run/being-screen-dismissed ;;
+        esac
+        ;;
+    face-return)
+        # The console process and its renderer have both exited.
+        touch /run/being-screen-dismissed
+        if [ "$(systemctl is-system-running 2>/dev/null || true)" != stopping ]; then
+            systemctl --no-block start being-face.service
+        fi
+        ;;
+esac

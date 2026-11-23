@@ -1,0 +1,13 @@
+disable being-lab-dev.service
+disable sshd.service
+disable systemd-networkd.service
+disable systemd-networkd.socket
+disable systemd-networkd-varlink.socket
+disable systemd-networkd-wait-online.service
+disable systemd-resolved.service
+disable systemd-timesyncd.service
+enable being-network-online.target
+enable being-*.service
+enable rauc.service
+# being-wifi starts its own supplicant for the saved interface.
+disable wpa_supplicant.service

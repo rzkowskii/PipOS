@@ -1,0 +1,76 @@
+#!/usr/bin/python3
+"""Manage the owner's persistent permission for local camera capture."""
+
+import argparse
+import fcntl
+import os
+from pathlib import Path
+import stat
+import subprocess
+
+
+MIND = Path("/mind")
+MARKER = "camera.enabled"
+SERVICE = "being-eyes.service"
+
+
+def systemctl(*args, check=True):
+    return subprocess.run(["systemctl", *args, SERVICE], check=check, timeout=20).returncode
+
+
+def enabled(directory):
+    try:
+        marker = os.stat(MARKER, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(marker.st_mode) or marker.st_uid != 0 or stat.S_IMODE(marker.st_mode) != 0o600:
+        raise ValueError("camera permission marker must be a root-owned file with mode 0600")
+    return True
+
+
+def configure(directory, action):
+    if action == "enable":
+        if not enabled(directory):
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW
+            descriptor = os.open(MARKER, flags, 0o600, dir_fd=directory)
+            try:
+                os.fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.fsync(directory)
+        systemctl("start")
+    elif action == "disable":
+        try:
+            os.unlink(MARKER, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        else:
+            os.fsync(directory)
+        systemctl("stop")
+    allowed = enabled(directory)
+    active = systemctl("is-active", "--quiet", check=False) == 0
+    print(f"Camera permission {'enabled' if allowed else 'disabled'}. Eyes service {'active' if active else 'inactive'}.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("enable", "disable", "status"))
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        parser.error("camera permission is managed by the local owner as root")
+    if not MIND.is_mount():
+        parser.error("the persistent /mind partition is unavailable")
+    try:
+        directory = os.open(MIND, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            fcntl.flock(directory, fcntl.LOCK_EX)
+            configure(directory, args.action)
+        finally:
+            os.close(directory)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        parser.exit(1, f"being-camera: {error}\n")
+
+
+if __name__ == "__main__":
+    main()

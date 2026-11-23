@@ -1,0 +1,4 @@
+source "$BR2_EXTERNAL_BEINGOS_PATH/package/being/Config.in"
+source "$BR2_EXTERNAL_BEINGOS_PATH/package/being-backup-age/Config.in"
+source "$BR2_EXTERNAL_BEINGOS_PATH/package/cortex/Config.in"
+source "$BR2_EXTERNAL_BEINGOS_PATH/package/pocketsphinx/Config.in"

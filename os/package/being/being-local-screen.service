@@ -1,0 +1,15 @@
+[Unit]
+Description=PipOS local keyboard setup
+After=local-fs.target being-brainstem.service being-face.service
+Conflicts=being-face.service
+RequiresMountsFor=/mind
+
+[Service]
+EnvironmentFile=/etc/being/env
+Environment=SDL_VIDEODRIVER=kmsdrm PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+Environment=BEING_SCREEN_DIR=/run/being-screen
+RuntimeDirectory=being-screen
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/being-console /usr/bin/python3 -m mind.local_screen
+ExecStopPost=/usr/libexec/being-screen-mode face-return
+TimeoutStopSec=6

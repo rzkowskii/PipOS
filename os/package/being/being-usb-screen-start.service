@@ -1,0 +1,12 @@
+[Unit]
+Description=PipOS first USB screen
+ConditionKernelCommandLine=being.try=1
+ConditionKernelCommandLine=being.screen=1
+After=local-fs.target being-brainstem.service being-voice.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --no-block start being-local-screen.service
+
+[Install]
+WantedBy=multi-user.target

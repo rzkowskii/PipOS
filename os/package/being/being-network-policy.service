@@ -1,0 +1,17 @@
+[Unit]
+Description=PipOS owner-authorized device network policy
+DefaultDependencies=no
+Requires=being-network-lockdown.service
+RequiresMountsFor=/mind
+After=local-fs.target being-network-lockdown.service
+Before=network-pre.target sysinit.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/being-network apply
+RemainAfterExit=yes
+TimeoutStartSec=20
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=PipOS boot network lockdown
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=network-pre.target sysinit.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/being-network lockdown
+RemainAfterExit=yes
+TimeoutStartSec=20
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=PipOS time-limited owner-authorized LAN development
+Requires=being-network-policy.service
+After=being-network-policy.service
+RequiresMountsFor=/mind
+ConditionPathExists=/mind/lab-access/access.json
+ConditionKernelCommandLine=!being.try=1
+
+[Service]
+RuntimeDirectory=being-lab-dev
+LoadCredential=access:/mind/lab-access/access.json
+LoadCredential=host-key:/mind/lab-access/ssh_host_ed25519_key
+ExecCondition=/usr/sbin/being-network require-pair
+ExecStartPre=/bin/mkdir -p -m 0755 /var/empty
+ExecStart=/usr/sbin/being-lab-access listen dev
+ExecStartPost=/usr/sbin/being-lab-access wait-dev
+RuntimeMaxSec=30min
+TimeoutStartSec=12
+TimeoutStopSec=5

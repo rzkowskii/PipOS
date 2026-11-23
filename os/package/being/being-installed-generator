@@ -1,0 +1,147 @@
+#!/bin/sh
+# Bind an installed boot's mounts and update service to its own partition IDs.
+set -efu
+
+IFS= read -r cmdline </proc/cmdline
+installed=
+trying=
+try_active=
+seen=
+invalid=
+esp= a= b= models= mind= root= slot= fstab= gpt_auto=
+
+for arg in $cmdline; do
+    key=${arg%%=*}
+    value=${arg#*=}
+    case "$key" in
+        being.try)
+            trying=yes
+            if [ "$value" = 1 ]; then try_active=yes; fi
+            continue ;;
+        being.installed) field=installed; installed=$value ;;
+        being.esp) field=esp; esp=$value ;;
+        being.slot_a) field=a; a=$value ;;
+        being.slot_b) field=b; b=$value ;;
+        being.models) field=models; models=$value ;;
+        being.mind) field=mind; mind=$value ;;
+        root) field=root; root=$value ;;
+        rauc.slot) field=slot; slot=$value ;;
+        fstab) field=fstab; fstab=$value ;;
+        systemd.gpt_auto) field=gpt_auto; gpt_auto=$value ;;
+        *) continue ;;
+    esac
+    case " $seen " in *" $field "*) invalid=yes ;; esac
+    seen="$seen $field"
+done
+
+case " $seen " in *" installed "*) ;; *) exit 0 ;; esac
+# Try's own generator takes precedence and keeps state off disk.
+[ -z "$try_active" ] || exit 0
+early=${2:?Missing early systemd generator directory}
+requires="$early/local-fs.target.requires"
+binding=being-installed-bind.service
+mkdir -p "$requires"
+
+deny() {
+    for unit in bootstate.mount mind.mount models.mount rauc.service being-boot-health.service being-trial-reboot.service; do
+        ln -sf /dev/null "$early/$unit"
+    done
+    printf '%s\n' 'being-installed-generator: invalid installed boot identity; disk mounts and updates disabled.' >&2
+    exit 0
+}
+
+[ -z "$invalid$trying" ] && [ "$installed" = 1 ] && [ "$fstab" = no ] && [ "$gpt_auto" = no ] || deny
+
+validated=
+for id in "$esp" "$a" "$b" "$models" "$mind"; do
+    printf '%s\n' "$id" | LC_ALL=C grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' || deny
+    [ "$id" != 00000000-0000-0000-0000-000000000000 ] || deny
+    case " $validated " in *" $id "*) deny ;; esac
+    validated="$validated $id"
+done
+
+case "$slot" in A) active=$a ;; B) active=$b ;; *) deny ;; esac
+[ "$root" = "PARTUUID=$active" ] || deny
+
+template=/usr/share/being/installed-rauc.conf
+grep -qxF 'device=/dev/disk/by-partuuid/SLOT_A_UUID' "$template" &&
+    grep -qxF 'device=/dev/disk/by-partuuid/SLOT_B_UUID' "$template" || deny
+
+devices=
+for id in $validated; do
+    unit=$(systemd-escape --path --suffix=device "/dev/disk/by-partuuid/$id") || deny
+    devices="$devices $unit"
+done
+
+mind_path="/dev/disk/by-partuuid/$mind"
+check=$(systemd-escape --path --template=systemd-fsck@.service "$mind_path") || deny
+esp_path="/dev/disk/by-partuuid/$esp"
+esp_check=$(systemd-escape --path --template=systemd-fsck@.service "$esp_path") || deny
+mkdir -p "$early/being-installed" "$early/rauc.service.d" "$early/$check.d" "$early/$esp_check.d" \
+    "$early/bootstate.mount.d"
+config="$early/being-installed/rauc.conf"
+sed -e "s/SLOT_A_UUID/$a/g" -e "s/SLOT_B_UUID/$b/g" "$template" > "$config"
+
+cat > "$early/$binding" <<EOF
+[Unit]
+Description=Verify PipOS installed disk identity
+DefaultDependencies=no
+Requires=$devices
+After=systemd-udev-trigger.service $devices
+Before=local-fs-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m mind.install_binding
+EOF
+
+# The fsck job can write to its device. Verify the disk before it can run.
+for unit in "$check" "$esp_check"; do
+    cat > "$early/$unit.d/being-installed.conf" <<EOF
+[Unit]
+Requires=$binding
+After=$binding
+EOF
+done
+
+# A power cut can leave the FAT boot-state volume dirty. The kernel then
+# remounts it read-only on the first bad chain and RAUC and the boot health
+# check can no longer record slot state. Repair it before mounting. A failed
+# check still mounts the volume so the confirmed slot keeps running.
+cat > "$early/bootstate.mount.d/being-esp-fsck.conf" <<EOF
+[Unit]
+Wants=$esp_check
+After=$esp_check
+EOF
+
+write_mount() {
+    cat > "$early/$1.mount" <<EOF
+[Unit]
+Before=local-fs.target
+Requires=${5:-}
+After=${5:-}
+
+[Mount]
+What=$2
+Where=/$1
+Type=$3
+Options=$4
+EOF
+    ln -sf "../$1.mount" "$requires/$1.mount"
+}
+
+write_mount var tmpfs tmpfs mode=0755,nosuid,nodev
+write_mount bootstate "$esp_path" vfat rw,umask=0077,nodev,nosuid,noexec "$binding"
+write_mount models "/dev/disk/by-partuuid/$models" ext4 ro,noload,noatime,nodev,nosuid,noexec "$binding"
+write_mount mind "$mind_path" ext4 rw,noatime,nodev,nosuid,noexec,discard "$binding $check"
+
+cat > "$early/rauc.service.d/being-installed.conf" <<EOF
+[Unit]
+RequiresMountsFor=/bootstate /mind /models
+
+[Service]
+ExecStart=
+ExecStart=/usr/bin/rauc --conf=$config --mount=/run/rauc/mnt service
+EOF

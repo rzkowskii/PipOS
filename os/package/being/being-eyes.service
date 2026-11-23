@@ -1,0 +1,26 @@
+[Unit]
+Description=Being: local camera presence and gaze
+RequiresMountsFor=/mind
+After=being-brainstem.service
+ConditionPathExists=/mind/camera.enabled
+
+[Service]
+EnvironmentFile=/etc/being/env
+Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m mind.eyes
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=3
+Nice=10
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/mind
+PrivateTmp=yes
+DevicePolicy=closed
+DeviceAllow=char-video4linux rw
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,18 @@
+[Unit]
+Description=Being: local ears and voice
+ConditionPathExists=!/mind/.being-restore-in-progress
+ConditionPathExists=!/sys/firmware/qemu_fw_cfg/by_name/opt/beingos/serial/raw
+RequiresMountsFor=/mind
+After=being-brainstem.service sound.target
+StartLimitIntervalSec=0
+
+[Service]
+EnvironmentFile=/etc/being/env
+Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m mind.voice
+Restart=always
+RestartSec=1
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target

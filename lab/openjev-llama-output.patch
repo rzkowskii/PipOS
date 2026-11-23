@@ -1,0 +1,26 @@
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -2171,8 +2171,8 @@
+ 
+     const int64_t n_vocab = vocab.n_tokens();
+ 
+-    // when computing embeddings, all tokens are output
+-    const bool output_all   = cparams.embeddings;
++    // This dedicated build retains explicitly selected output rows for causal unpooled embeddings.
++    const bool output_all   = cparams.embeddings && (!cparams.causal_attn || cparams.pooling_type != LLAMA_POOLING_TYPE_NONE);
+     // non-causal attention needs the whole sequence in one ubatch
+     const bool embd_all     = output_all || !cparams.causal_attn;
+     const bool has_samplers = !sampling.samplers.empty();
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -4432,8 +4432,8 @@
+ }
+ 
+ void llm_graph_context::build_logits() const {
+-    // a pooled embeddings context outputs one vector per sequence, so its graph skips the LM head
+-    if (cparams.embeddings && pooling_type != LLAMA_POOLING_TYPE_NONE) {
++    // OpenJev reads hidden states only. Avoid the entire tied vocabulary projection.
++    if (cparams.embeddings) {
+         res->t_logits = nullptr;
+     }
+ 

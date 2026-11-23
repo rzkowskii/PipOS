@@ -1,0 +1,61 @@
+{
+  "runtime_release": "v2.0.2",
+  "runtime_license": "Apache-2.0",
+  "checkpoint": "csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17",
+  "checkpoint_revision": "d42f2d9f7ca24806fb667456a18a9f1b60f70d16",
+  "checkpoint_license_card": "apache-2.0",
+  "checksum_sources": {
+    "runtime": "https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/tags/v2.0.2",
+    "checkpoint": "https://huggingface.co/api/models/csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17/revision/d42f2d9f7ca24806fb667456a18a9f1b60f70d16?blobs=true"
+  },
+  "assets": [
+    {
+      "path": "models/encoder-epoch-99-avg-1.onnx",
+      "url": "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17/resolve/d42f2d9f7ca24806fb667456a18a9f1b60f70d16/encoder-epoch-99-avg-1.onnx",
+      "bytes": 88804590,
+      "sha256": "f77a22f4ff94604e1afb2aeb13504d7699363528c047c97d3436087c95c9b659"
+    },
+    {
+      "path": "models/encoder-epoch-99-avg-1.int8.onnx",
+      "url": "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17/resolve/d42f2d9f7ca24806fb667456a18a9f1b60f70d16/encoder-epoch-99-avg-1.int8.onnx",
+      "bytes": 42845182,
+      "sha256": "3810755ce7c3ab26b42a8bcf39d191308fa27fb0f53358823ba46141d03b7eb3"
+    },
+    {
+      "path": "models/decoder-epoch-99-avg-1.onnx",
+      "url": "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17/resolve/d42f2d9f7ca24806fb667456a18a9f1b60f70d16/decoder-epoch-99-avg-1.onnx",
+      "bytes": 2092272,
+      "sha256": "45a7f940ecfb53d89fa270ad11b88b961e53a317203eb24b1c8e95ed208b0f30"
+    },
+    {
+      "path": "models/joiner-epoch-99-avg-1.onnx",
+      "url": "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17/resolve/d42f2d9f7ca24806fb667456a18a9f1b60f70d16/joiner-epoch-99-avg-1.onnx",
+      "bytes": 1026462,
+      "sha256": "343e17dffa4f386ca206e00d3c406908f68f473c3d35968d6c3cddd5b8559a94"
+    },
+    {
+      "path": "models/joiner-epoch-99-avg-1.int8.onnx",
+      "url": "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17/resolve/d42f2d9f7ca24806fb667456a18a9f1b60f70d16/joiner-epoch-99-avg-1.int8.onnx",
+      "bytes": 259572,
+      "sha256": "e085d73b593cf9b0707f370dbd656d58327d3fe36d80d849202ef81df02cb01e"
+    },
+    {
+      "path": "sherpa-onnx-v2.0.2-linux-x64-shared-no-tts.tar.bz2",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.2/sherpa-onnx-v2.0.2-linux-x64-shared-no-tts.tar.bz2",
+      "bytes": 27230798,
+      "sha256": "c6725b8994a5e559678f72ddffbf1c14b41fc3f6f650618b98eeb61581b63da2"
+    },
+    {
+      "path": "models/tokens.txt",
+      "url": "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17/resolve/d42f2d9f7ca24806fb667456a18a9f1b60f70d16/tokens.txt",
+      "bytes": 5048,
+      "sha256": "49e3c2646595fd907228b3c6787069658f67b17377c60aeb8619c4551b2316fb"
+    },
+    {
+      "path": "fixtures/0.wav",
+      "url": "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17/resolve/d42f2d9f7ca24806fb667456a18a9f1b60f70d16/test_wavs/0.wav",
+      "bytes": 212044,
+      "sha256": "6bc58a4efdf20daac252b6b1502632601a71efe0308f6757dc1eda34891a7e4f"
+    }
+  ]
+}

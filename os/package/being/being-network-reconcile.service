@@ -1,0 +1,9 @@
+[Unit]
+Description=Apply a PipOS network mode or maintenance pairing change
+Requires=being-network-policy.service
+After=being-network-policy.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/being-network reconcile
+TimeoutStartSec=90

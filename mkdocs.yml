@@ -1,0 +1,79 @@
+# The documentation website: https://rzkowskii.github.io/PipOS/
+# Build: python3 scripts/build-docs-site.py && mkdocs build
+site_name: PipOS
+site_description: Documentation for PipOS, the Persistent Intelligence Platform Operating System, and Pip, the being who lives in it.
+site_url: https://rzkowskii.github.io/PipOS/
+repo_url: https://github.com/rzkowskii/PipOS
+repo_name: rzkowskii/PipOS
+edit_uri: ""
+docs_dir: out/docs-site/src
+site_dir: out/docs-site/site
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: black
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - scheme: default
+      primary: black
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+  icon:
+    logo: material/eye-outline
+    repo: fontawesome/brands/github
+  features:
+    - navigation.tabs
+    - navigation.top
+    - navigation.footer
+    - search.highlight
+    - content.code.copy
+    - toc.follow
+
+extra:
+  social:
+    - icon: material/web
+      link: https://pipos.pages.dev/
+      name: PipOS website
+    - icon: fontawesome/brands/github
+      link: https://github.com/rzkowskii/PipOS
+      name: PipOS on GitHub
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - sane_lists
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.magiclink
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Manual:
+      - Overview: manual/README.md
+      - User guide: manual/USER-GUIDE.md
+      - Reference: manual/REFERENCE.md
+      - Architecture: manual/ARCHITECTURE.md
+      - Developer guide: manual/DEVELOPER-GUIDE.md
+      - Assessment: manual/ASSESSMENT.md
+  - Design:
+      - Design and plan: DESIGN-AND-PLAN.md
+      - Bus protocol: PROTOCOL.md
+      - Voice and apps: design/voice-apps.md
+      - Improvement plan: IMPROVEMENT-PLAN.md
+      - Design coverage: DESIGN-COVERAGE.md
+  - Lab and hardware:
+      - Lab guide: LAB.md
+      - Hardware guide: HARDWARE.md
+      - USB readiness: USB-READINESS.md
+  - Research:
+      - Tiny models and dreaming: research/2026-11-23-tiny-models-and-dreaming.md
+      - Dream model sizing: research/2026-11-23-dream-model-sizing.md

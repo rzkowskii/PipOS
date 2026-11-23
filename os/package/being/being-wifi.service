@@ -1,0 +1,22 @@
+[Unit]
+Description=Being: configured Wi-Fi connection
+RequiresMountsFor=/mind
+Requires=being-network-policy.service
+After=being-network-policy.service systemd-networkd.service systemd-resolved.service
+ConditionPathExists=/mind/network/wifi.json
+StartLimitIntervalSec=0
+
+[Service]
+RuntimeDirectory=being-wifi
+RuntimeDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ExecCondition=/usr/sbin/being-network require-link
+ExecStart=/usr/sbin/being-wifi serve
+ExecStopPost=/usr/sbin/being-wifi cleanup
+Restart=always
+RestartSec=4
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

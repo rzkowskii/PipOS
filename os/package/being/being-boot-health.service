@@ -1,0 +1,13 @@
+[Unit]
+Description=Being: confirm the booted system slot
+RequiresMountsFor=/bootstate /mind /models
+After=being-brainstem.service
+OnFailure=being-trial-reboot.service
+
+[Service]
+EnvironmentFile=/etc/being/env
+Environment=PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m mind.boot_health
+
+[Install]
+WantedBy=multi-user.target

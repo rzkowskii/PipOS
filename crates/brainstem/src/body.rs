@@ -1,0 +1,1285 @@
+//! The body's readings and the slow drives built on them.
+//!
+//! Simulated readings start with lab defaults. Hardware readings stay unknown
+//! until the relevant device reports a value.
+
+use bus::Event;
+
+/// Publish at least this often, and at once when a reading changes.
+const PERIOD: f64 = 5.0;
+
+pub struct Body {
+    battery: Option<f64>,
+    charging: Option<bool>,
+    on_ac: Option<bool>,
+    temp: Option<f64>,
+    lux: Option<f64>,
+    lid_closed: Option<bool>,
+    lid_seq: u64,
+    recover_panel: bool,
+    panel_ready: bool,
+    /// A pretend hour of the day, for testing night behaviour.
+    hour: Option<u32>,
+    /// The owner's time zone as seconds east of UTC, told by the mind. The
+    /// image itself keeps UTC, so without this "night" would be UTC's night.
+    utc_offset: Option<i64>,
+    /// True words about its own life (how long awake, how old), added to the
+    /// senses line. Set by the brainstem from the life record.
+    pub note: String,
+    dirty: bool,
+    last_pub: f64,
+    last_contact: f64,
+    last_stimulus: f64,
+}
+
+impl Body {
+    pub fn new(now: f64) -> Body {
+        Body {
+            battery: Some(100.0),
+            charging: Some(true),
+            on_ac: Some(true),
+            temp: Some(45.0),
+            lux: Some(150.0),
+            lid_closed: Some(false),
+            lid_seq: 0,
+            recover_panel: false,
+            panel_ready: false,
+            hour: None,
+            utc_offset: None,
+            note: String::new(),
+            dirty: true,
+            last_pub: now - PERIOD,
+            last_contact: now,
+            last_stimulus: now,
+        }
+    }
+
+    pub fn physical(now: f64) -> Body {
+        Body {
+            battery: None,
+            charging: None,
+            on_ac: None,
+            temp: None,
+            lux: None,
+            lid_closed: None,
+            ..Body::new(now)
+        }
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub fn set_power(&mut self, battery: Option<f64>, charging: Option<bool>, on_ac: Option<bool>) {
+        if (self.battery, self.charging, self.on_ac) != (battery, charging, on_ac) {
+            (self.battery, self.charging, self.on_ac) = (battery, charging, on_ac);
+            self.dirty = true;
+        }
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub fn set_temperature(&mut self, temp: Option<f64>) {
+        if self.temp != temp {
+            self.temp = temp;
+            self.dirty = true;
+        }
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub fn set_lux(&mut self, lux: Option<f64>) {
+        if self.lux != lux {
+            self.lux = lux;
+            self.dirty = true;
+        }
+    }
+
+    /// Take one reading from the hardware sensor thread.
+    #[cfg(any(target_os = "linux", test))]
+    pub fn sense(&mut self, reading: &sysfs::Reading) {
+        self.set_power(reading.battery, reading.charging, reading.on_ac);
+        self.set_temperature(reading.temp);
+        self.set_lux(reading.lux);
+    }
+
+    pub fn set_lid(&mut self, closed: Option<bool>) {
+        if closed != self.lid_closed {
+            self.lid_closed = closed;
+            self.recover_panel = false;
+            self.lid_seq += 1;
+            self.panel_ready = false;
+            self.dirty = true;
+        }
+    }
+
+    pub fn recover_panel(&mut self) {
+        if self.lid_closed.is_none() && !self.recover_panel {
+            self.lid_seq += 1;
+            self.recover_panel = true;
+            self.panel_ready = false;
+        }
+    }
+
+    pub fn panel_ready(&mut self, seq: u64) {
+        if seq == self.lid_seq && (!self.lid_blocked() || self.recover_panel) {
+            self.panel_ready = true;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn panel_blank(&self) -> bool {
+        !self.panel_ready
+    }
+
+    pub fn lid_seq(&self) -> u64 {
+        self.lid_seq
+    }
+
+    pub fn lid_blocked(&self) -> bool {
+        self.lid_closed != Some(false)
+    }
+
+    pub fn lid_confirmed_closed(&self) -> bool {
+        self.lid_closed == Some(true)
+    }
+
+    pub fn lid_event(&self) -> Event {
+        Event::new("body.lid")
+            .with("closed", self.lid_closed)
+            .with("seq", self.lid_seq)
+            .with("show_face", self.recover_panel)
+    }
+
+    pub fn on_event(&mut self, ev: &Event, now: f64) {
+        match ev.topic.as_str() {
+            "sim.body" => {
+                if let Some(v) = ev.f64("battery") {
+                    self.battery = Some(v.clamp(0.0, 100.0));
+                }
+                if let Some(v) = ev.bool("charging") {
+                    self.charging = Some(v);
+                    self.on_ac = Some(v);
+                }
+                if let Some(v) = ev.bool("on_ac") {
+                    self.on_ac = Some(v);
+                }
+                if let Some(v) = ev.f64("temp") {
+                    self.temp = Some(v.clamp(-20.0, 120.0));
+                }
+                if let Some(v) = ev.f64("lux") {
+                    self.lux = Some(v.max(0.0));
+                }
+                match ev.data.get("lid_closed") {
+                    Some(serde_json::Value::Null) => self.set_lid(None),
+                    Some(serde_json::Value::Bool(closed)) => self.set_lid(Some(*closed)),
+                    _ => {}
+                }
+                if let Some(v) = ev.f64("hour") {
+                    self.hour = if (0.0..24.0).contains(&v) { Some(v as u32) } else { None };
+                }
+                self.dirty = true;
+            }
+            "hear.final" | "say.started" => {
+                self.last_contact = now;
+                self.last_stimulus = now;
+            }
+            "hear.wake" | "hear.speech_start" | "key.interrupt" => self.last_stimulus = now,
+            _ => {}
+        }
+    }
+
+    pub fn dark(&self) -> bool {
+        self.lux.is_some_and(|lux| lux < 5.0)
+    }
+
+    pub fn clock(&self) -> (u32, u32) {
+        let (h, m) = match self.utc_offset {
+            Some(offset) => offset_time(unix_seconds(), offset),
+            None => local_time(),
+        };
+        (self.hour.unwrap_or(h), m)
+    }
+
+    /// The mind knows the owner's time zone; `None` returns to the system's.
+    /// Offsets beyond any real zone are refused.
+    pub fn set_utc_offset(&mut self, offset: Option<i64>) {
+        let offset = offset.filter(|seconds| seconds.abs() <= 16 * 3600);
+        if offset != self.utc_offset {
+            self.utc_offset = offset;
+            self.dirty = true;
+        }
+    }
+
+    pub fn night(&self) -> bool {
+        let (h, _) = self.clock();
+        !(7..22).contains(&h)
+    }
+
+    fn low_battery(&self) -> bool {
+        self.on_ac == Some(false) && self.battery.is_some_and(|battery| battery <= 15.0)
+    }
+
+    /// One short line of true facts, for the mind to show the model.
+    pub fn senses_line(&self) -> String {
+        let (h, m) = self.clock();
+        let mut line = format!("{h:02}:{m:02}");
+        if let Some(battery) = self.battery {
+            line.push_str(&format!(", battery {battery:.0}%"));
+            if self.low_battery() {
+                line.push_str(" and low, unplugged");
+            } else if self.charging == Some(true) {
+                line.push_str(" charging");
+            } else if let Some(on_ac) = self.on_ac {
+                line.push_str(if on_ac { " plugged in" } else { " unplugged" });
+            }
+        }
+        if let Some(temp) = self.temp {
+            line.push_str(if temp < 55.0 { ", cool" } else if temp < 75.0 { ", warm" } else { ", hot" });
+        }
+        if let Some(lux) = self.lux {
+            line.push_str(if self.dark() { ", room dark" } else if lux < 50.0 { ", room dim" } else { ", room bright" });
+        }
+        if !self.note.is_empty() {
+            line.push_str(", ");
+            line.push_str(&self.note);
+        }
+        line
+    }
+
+    pub fn tick(&mut self, now: f64) -> Vec<Event> {
+        let mut out = Vec::new();
+        if self.dirty || now - self.last_pub >= PERIOD {
+            self.dirty = false;
+            self.last_pub = now;
+            out.push(self.snapshot());
+            out.push(self.senses());
+            let round = |v: f64| (v.clamp(0.0, 1.0) * 100.0).round() / 100.0;
+            out.push(
+                Event::new("body.drives")
+                    .with("energy", if self.on_ac == Some(true) { Some(1.0) } else { self.battery.map(|v| round(v / 100.0)) })
+                    .with("arousal", round((-(now - self.last_stimulus) / 60.0).exp()))
+                    .with("social", round((-(now - self.last_contact) / 3600.0).exp()))
+                    .with("comfort", self.temp.map(|v| round(1.0 - (v - 50.0) / 40.0))),
+            );
+        }
+        out
+    }
+
+    pub fn snapshot(&self) -> Event {
+        let (h, m) = self.clock();
+        Event::new("body.state")
+            .with("battery", self.battery)
+            .with("battery_low", self.low_battery())
+            .with("charging", self.charging)
+            .with("on_ac", self.on_ac)
+            .with("temp", self.temp)
+            .with("lux", self.lux)
+            .with("lid_closed", self.lid_closed)
+            .with("hour", h)
+            .with("minute", m)
+    }
+
+    pub fn senses(&self) -> Event {
+        Event::new("body.senses").with("line", self.senses_line())
+    }
+}
+
+/// The hardware body as Linux shows it in sysfs, written for the 13-inch
+/// mid-2012 MacBook Pro (MacBookPro9,2) and tolerant of anything else:
+///
+/// - power: ACPI battery `BAT0` (type Battery) and AC adapter `ADP1` (type
+///   Mains) under /sys/class/power_supply. Some ACPI batteries have no
+///   `capacity`, so energy_* or charge_* are used instead.
+/// - temperature: Intel `coretemp` under /sys/class/hwmon, or failing that the
+///   CPU keys (labels TC*) of `applesmc`.
+/// - light: applesmc at /sys/devices/platform/applesmc.768/light, "(left,right)".
+/// - lid: the ACPI "Lid Switch" input device, which reports SW_LID.
+/// - panel: intel_backlight (raw), acpi_video0 (firmware), gmux_backlight or
+///   apple_backlight (platform) under /sys/class/backlight.
+/// - keyboard light: /sys/class/leds/smc::kbd_backlight.
+///
+/// Every file may be missing, malformed, unreadable (EIO from a busy SMC) or
+/// slow (an ACPI battery read waits on the embedded controller). Nothing here
+/// panics; the readings run on their own thread, never on the hub's.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub mod sysfs {
+    use std::collections::HashSet;
+    use std::fs;
+    use std::io::Read;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    /// A sysfs value larger than this is not a sensor value.
+    const MAX_VALUE: u64 = 4096;
+    /// More entries than this in one sysfs directory is not a laptop.
+    const MAX_ENTRIES: usize = 256;
+    /// A reading that fails briefly keeps its last good value this long, so a
+    /// busy SMC or embedded controller does not make the body flicker.
+    const HOLD: Duration = Duration::from_secs(10);
+    /// Approximate lux for one applesmc light-sensor step. The sensor is not
+    /// calibrated; this only has to tell a dark room (0 or 1) from a lit one.
+    pub const LUX_PER_STEP: f64 = 4.0;
+    /// A pass over every sensor slower than this is worth one log line.
+    const SLOW_PASS: Duration = Duration::from_millis(500);
+    /// The device survey is logged at start and once more this much later.
+    #[cfg(target_os = "linux")]
+    const RESURVEY: Duration = Duration::from_secs(20);
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Reading {
+        pub battery: Option<f64>,
+        pub charging: Option<bool>,
+        pub on_ac: Option<bool>,
+        pub temp: Option<f64>,
+        pub lux: Option<f64>,
+    }
+
+    impl Reading {
+        pub fn describe(&self) -> String {
+            fn yes(value: Option<bool>) -> &'static str {
+                match value {
+                    Some(true) => "yes",
+                    Some(false) => "no",
+                    None => "unknown",
+                }
+            }
+            let or_unknown = |value: Option<f64>, unit: &str| {
+                value.map_or("unknown".to_owned(), |v| format!("{v:.0}{unit}"))
+            };
+            format!(
+                "battery {}, charging {}, on AC {}, CPU {}, light {}",
+                or_unknown(self.battery, "%"),
+                yes(self.charging),
+                yes(self.on_ac),
+                or_unknown(self.temp, " C"),
+                or_unknown(self.lux, " lux (approx.)"),
+            )
+        }
+    }
+
+    /// Log lines said at most once each, so a broken device is reported once
+    /// and then ignored instead of filling the journal.
+    #[derive(Default)]
+    pub struct Notes {
+        said: HashSet<String>,
+        lines: Vec<String>,
+    }
+
+    impl Notes {
+        pub fn once(&mut self, key: impl Into<String>, line: impl FnOnce() -> String) {
+            if self.said.len() < 4 * MAX_ENTRIES && self.said.insert(key.into()) {
+                self.lines.push(line());
+            }
+        }
+
+        pub fn take(&mut self) -> Vec<String> {
+            std::mem::take(&mut self.lines)
+        }
+    }
+
+    /// The trimmed text of a small sysfs file, or None if it is missing,
+    /// unreadable, empty, too big or not text.
+    pub fn read_text(path: &Path) -> Option<String> {
+        let mut data = String::new();
+        fs::File::open(path).ok()?.take(MAX_VALUE).read_to_string(&mut data).ok()?;
+        let data = data.trim();
+        (!data.is_empty()).then(|| data.to_owned())
+    }
+
+    fn read_number(path: &Path) -> Option<i64> {
+        read_text(path)?.parse().ok()
+    }
+
+    /// The sorted entries of a directory; None if it cannot be listed.
+    fn list(dir: &Path) -> Option<Vec<PathBuf>> {
+        let mut entries: Vec<_> = fs::read_dir(dir).ok()?.flatten().take(MAX_ENTRIES).map(|e| e.path()).collect();
+        entries.sort();
+        Some(entries)
+    }
+
+    fn name_of(path: &Path) -> String {
+        path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+    }
+
+    #[derive(Default, Debug, PartialEq)]
+    pub struct Power {
+        pub battery: Option<f64>,
+        pub charging: Option<bool>,
+        pub on_ac: Option<bool>,
+    }
+
+    /// Percent charge from `capacity`, or from energy or charge now and full.
+    fn battery_percent(dir: &Path) -> Option<f64> {
+        if let Some(percent) = read_number(&dir.join("capacity")).filter(|p| (0..=100).contains(p)) {
+            return Some(percent as f64);
+        }
+        ["energy", "charge"].into_iter().find_map(|kind| {
+            let now = read_number(&dir.join(format!("{kind}_now"))).filter(|v| *v >= 0)?;
+            let full = read_number(&dir.join(format!("{kind}_full"))).filter(|v| *v > 0)?;
+            // A worn battery can report more than its last full charge.
+            Some((now as f64 * 100.0 / full as f64).clamp(0.0, 100.0).round())
+        })
+    }
+
+    pub fn read_power(root: &Path, notes: &mut Notes) -> Power {
+        let mut power = Power::default();
+        let Some(devices) = list(&root.join("sys/class/power_supply")) else {
+            notes.once("power:none", || "power: no power_supply devices; battery and AC unknown".into());
+            return power;
+        };
+        let mut ac_unreadable = false;
+        for path in devices {
+            let name = name_of(&path);
+            let key = format!("power:{name}");
+            // A wireless mouse's or keyboard's own battery is not the body's.
+            if read_text(&path.join("scope")).as_deref() == Some("Device") {
+                notes.once(key, || format!("power: ignoring {name}, a peripheral's battery"));
+                continue;
+            }
+            match read_text(&path.join("type")).as_deref() {
+                Some("Battery") => {
+                    notes.once(key, || format!("power: found battery {name}"));
+                    if power.battery.is_some() {
+                        continue;
+                    }
+                    if read_text(&path.join("present")).as_deref() == Some("0") {
+                        notes.once(format!("power:{name}:absent"), || format!("power: battery {name} is not present"));
+                        continue;
+                    }
+                    power.battery = battery_percent(&path);
+                    if power.battery.is_none() {
+                        notes.once(format!("power:{name}:unreadable"), || {
+                            format!("power: battery {name} reports no readable charge")
+                        });
+                    }
+                    power.charging = match read_text(&path.join("status")).as_deref() {
+                        Some("Charging") => Some(true),
+                        Some("Discharging" | "Full" | "Not charging") => Some(false),
+                        _ => None,
+                    };
+                }
+                Some("Mains") => {
+                    notes.once(key, || format!("power: found AC adapter {name}"));
+                    match read_text(&path.join("online")).as_deref() {
+                        Some("1") => power.on_ac = Some(true),
+                        Some("0") if power.on_ac.is_none() => power.on_ac = Some(false),
+                        Some("0") => {}
+                        _ => ac_unreadable = true,
+                    }
+                }
+                Some(other) => {
+                    let other = other.to_owned();
+                    notes.once(key, || format!("power: ignoring {name} of type {other}"));
+                }
+                None => notes.once(key, || format!("power: ignoring {name}, its type is unreadable")),
+            }
+        }
+        // One adapter saying "off" is not proof while another cannot be read.
+        if ac_unreadable && power.on_ac == Some(false) {
+            power.on_ac = None;
+        }
+        power
+    }
+
+    fn chip_name(chip: &Path) -> Option<String> {
+        read_text(&chip.join("name")).or_else(|| read_text(&chip.join("device/name")))
+    }
+
+    /// The `tempN_input` files in a directory, as (N, path).
+    fn temp_inputs(dir: &Path) -> Vec<(String, PathBuf)> {
+        list(dir)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|path| {
+                let name = name_of(&path);
+                let channel = name.strip_prefix("temp")?.strip_suffix("_input")?;
+                (!channel.is_empty() && channel.bytes().all(|b| b.is_ascii_digit()))
+                    .then(|| (channel.to_owned(), path))
+            })
+            .collect()
+    }
+
+    /// The coretemp chips' hottest channel: None when there is no coretemp
+    /// chip, Some(None) when one exists but a channel cannot be trusted.
+    fn coretemp(hwmon: &Path) -> Option<Option<f64>> {
+        let mut found = false;
+        let mut hottest: Option<i64> = None;
+        for chip in list(hwmon)? {
+            if chip_name(&chip).as_deref() != Some("coretemp") {
+                continue;
+            }
+            let mut inputs = temp_inputs(&chip);
+            if inputs.is_empty() {
+                // Older kernels keep the channels on the platform device.
+                inputs = temp_inputs(&chip.join("device"));
+            }
+            // A coretemp chip with no channels at all is not a reading; let
+            // the SMC stand in rather than leaving the temperature unknown.
+            found |= !inputs.is_empty();
+            for (_, input) in inputs {
+                let Some(value) = read_number(&input).filter(|v| (0..=150_000).contains(v)) else {
+                    return Some(None);
+                };
+                hottest = Some(hottest.map_or(value, |current| current.max(value)));
+            }
+        }
+        found.then(|| hottest.map(|value| value as f64 / 1000.0))
+    }
+
+    /// Read the hottest package/core channel from the Intel coretemp driver.
+    /// One unreadable channel invalidates the reading: the hottest may be it.
+    #[cfg(test)]
+    pub fn read_core_temperature(hwmon: &Path) -> Option<f64> {
+        coretemp(hwmon).flatten()
+    }
+
+    /// The hottest CPU sensor the SMC reports (labels TC0D, TC0P, ...). SMC
+    /// keys are often junk, so a bad channel is skipped rather than trusted.
+    pub fn smc_cpu_temperature(smc: &Path) -> Option<f64> {
+        temp_inputs(smc)
+            .into_iter()
+            .filter(|(channel, _)| {
+                read_text(&smc.join(format!("temp{channel}_label"))).is_some_and(|label| label.starts_with("TC"))
+            })
+            .filter_map(|(_, input)| read_number(&input).filter(|v| (1..=150_000).contains(v)))
+            .max()
+            .map(|value| value as f64 / 1000.0)
+    }
+
+    /// The CPU temperature: coretemp if the kernel has it, else the SMC.
+    pub fn read_temperature(root: &Path, smc: Option<&Path>) -> Option<f64> {
+        match coretemp(&root.join("sys/class/hwmon")) {
+            Some(reading) => reading,
+            None => smc.and_then(smc_cpu_temperature),
+        }
+    }
+
+    /// The applesmc platform device, if the kernel found an SMC.
+    pub fn find_smc(root: &Path) -> Option<PathBuf> {
+        let direct = root.join("sys/devices/platform/applesmc.768");
+        if direct.is_dir() {
+            return Some(direct);
+        }
+        list(&root.join("sys/bus/platform/devices"))?
+            .into_iter()
+            .find(|path| name_of(path).starts_with("applesmc") && path.is_dir())
+    }
+
+    /// The brighter of applesmc's two light-sensor values, "(left,right)".
+    pub fn parse_light(text: &str) -> Option<u32> {
+        let inner = text.trim().strip_prefix('(')?.strip_suffix(')')?;
+        let (left, right) = inner.split_once(',')?;
+        let left: u32 = left.trim().parse().ok()?;
+        let right: u32 = right.trim().parse().ok()?;
+        (left <= 4095 && right <= 4095).then(|| left.max(right))
+    }
+
+    pub fn read_light(smc: &Path) -> Option<u32> {
+        parse_light(&read_text(&smc.join("light"))?)
+    }
+
+    /// The input devices, as (eventN, name, reports SW_LID).
+    pub fn input_devices(root: &Path) -> Vec<(String, String, bool)> {
+        list(&root.join("sys/class/input"))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|path| name_of(path).strip_prefix("event").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())))
+            .map(|path| {
+                let device = path.join("device");
+                let name = read_text(&device.join("name")).unwrap_or_else(|| "(no name)".into());
+                let lid = read_text(&device.join("capabilities/sw")).is_some_and(|bits| has_lid_switch(&bits));
+                (name_of(&path), name, lid)
+            })
+            .collect()
+    }
+
+    /// The kernel prints a capability bitmap as hex words, most significant
+    /// first; SW_LID is bit 0 of the last word.
+    pub fn has_lid_switch(bitmap: &str) -> bool {
+        bitmap
+            .split_whitespace()
+            .last()
+            .and_then(|word| u64::from_str_radix(word, 16).ok())
+            .is_some_and(|word| word & 1 != 0)
+    }
+
+    /// The backlight devices whose `bl_power` can blank the panel, native GPU
+    /// control first, then platform, then firmware (ACPI video).
+    pub fn backlight_controls(root: &Path) -> Vec<(String, String, PathBuf)> {
+        let mut found: Vec<_> = list(&root.join("sys/class/backlight"))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|path| {
+                let kind = read_text(&path.join("type")).unwrap_or_else(|| "unknown".into());
+                let rank = match kind.as_str() {
+                    "raw" => 0,
+                    "platform" => 1,
+                    "firmware" => 2,
+                    _ => 3,
+                };
+                (rank, name_of(&path), kind, path.join("bl_power"))
+            })
+            .collect();
+        found.sort();
+        found.into_iter().map(|(_, name, kind, control)| (name, kind, control)).collect()
+    }
+
+    /// One line per device the body might use, for the boot log and for
+    /// "Check hardware": did it find the lid, battery, light sensor, backlight?
+    pub fn survey(root: &Path) -> Vec<String> {
+        let mut lines = Vec::new();
+        let inputs = input_devices(root);
+        if inputs.is_empty() {
+            lines.push("input: no input devices yet".into());
+        }
+        for (event, name, _) in &inputs {
+            lines.push(format!("input: {event} \"{name}\""));
+        }
+        match inputs.iter().find(|(_, _, lid)| *lid) {
+            Some((event, name, _)) => lines.push(format!("lid: found \"{name}\" ({event})")),
+            None => lines.push("lid: no lid switch found; the lid stays unknown".into()),
+        }
+
+        let mut notes = Notes::default();
+        let power = read_power(root, &mut notes);
+        lines.extend(notes.take());
+        if power.battery.is_none() && power.on_ac.is_none() {
+            lines.push("power: no battery or AC reading".into());
+        }
+
+        let backlights = backlight_controls(root);
+        if backlights.is_empty() {
+            lines.push("backlight: none found; the panel cannot be blanked".into());
+        }
+        for (name, kind, control) in backlights {
+            let dir = control.parent().map(Path::to_path_buf).unwrap_or_default();
+            let level = |file: &str| read_text(&dir.join(file)).unwrap_or_else(|| "?".into());
+            lines.push(format!(
+                "backlight: {name} ({kind}), brightness {}/{}, bl_power {}",
+                level("brightness"),
+                level("max_brightness"),
+                if control.exists() { level("bl_power") } else { "missing".into() },
+            ));
+        }
+
+        let leds = list(&root.join("sys/class/leds")).unwrap_or_default();
+        match leds.iter().find(|path| name_of(path).ends_with("kbd_backlight")) {
+            Some(led) => lines.push(format!(
+                "keyboard light: {}, brightness {}/{}",
+                name_of(led),
+                read_text(&led.join("brightness")).unwrap_or_else(|| "?".into()),
+                read_text(&led.join("max_brightness")).unwrap_or_else(|| "?".into()),
+            )),
+            None => lines.push("keyboard light: not found".into()),
+        }
+
+        let smc = find_smc(root);
+        match &smc {
+            Some(smc) => {
+                let fans = list(smc).unwrap_or_default().iter()
+                    .filter(|p| { let n = name_of(p); n.starts_with("fan") && n.ends_with("_input") }).count();
+                lines.push(format!("smc: found {}, {} temperature channels, {fans} fans", name_of(smc), temp_inputs(smc).len()));
+                lines.push(match (read_text(&smc.join("light")), read_light(smc)) {
+                    (_, Some(raw)) => format!("light sensor: found, raw {raw} (~{:.0} lux)", f64::from(raw) * LUX_PER_STEP),
+                    (Some(text), None) => format!("light sensor: unreadable value {text:?}"),
+                    (None, None) => "light sensor: not found or not answering".into(),
+                });
+            }
+            None => lines.push("smc: applesmc not found; no light sensor or SMC temperatures".into()),
+        }
+
+        let chips: Vec<_> = list(&root.join("sys/class/hwmon")).unwrap_or_default().iter()
+            .map(|chip| chip_name(chip).unwrap_or_else(|| "?".into())).collect();
+        lines.push(if chips.is_empty() { "temperature: no hwmon chips".into() } else { format!("temperature: hwmon {}", chips.join(", ")) });
+        lines
+    }
+
+    fn hold<T: Copy>(fresh: Option<T>, last: &mut Option<(T, Instant)>, now: Instant) -> Option<T> {
+        match fresh {
+            Some(value) => {
+                *last = Some((value, now));
+                Some(value)
+            }
+            None => {
+                let kept = last.filter(|(_, at)| now.saturating_duration_since(*at) < HOLD).map(|(value, _)| value);
+                if kept.is_none() {
+                    *last = None;
+                }
+                kept
+            }
+        }
+    }
+
+    /// The sensors read on the sensor thread, with short failures smoothed.
+    pub struct Sensors {
+        root: PathBuf,
+        pub notes: Notes,
+        battery: Option<(f64, Instant)>,
+        charging: Option<(bool, Instant)>,
+        on_ac: Option<(bool, Instant)>,
+        temp: Option<(f64, Instant)>,
+        lux: Option<(f64, Instant)>,
+    }
+
+    impl Sensors {
+        pub fn new(root: PathBuf) -> Self {
+            Self { root, notes: Notes::default(), battery: None, charging: None, on_ac: None, temp: None, lux: None }
+        }
+
+        pub fn read(&mut self, now: Instant) -> Reading {
+            let power = read_power(&self.root, &mut self.notes);
+            let smc = find_smc(&self.root);
+            let temp = read_temperature(&self.root, smc.as_deref());
+            if temp.is_none() {
+                self.notes.once("temp:none", || "temperature: no CPU temperature reading".into());
+            }
+            let raw = smc.as_deref().and_then(read_light);
+            if let Some(raw) = raw {
+                self.notes.once("light:first", || format!("light sensor: first reading raw {raw}"));
+            } else {
+                self.notes.once("light:none", || "light sensor: no reading; the room's light is unknown".into());
+            }
+            let lux = raw.map(|raw| f64::from(raw) * LUX_PER_STEP);
+            Reading {
+                battery: hold(power.battery, &mut self.battery, now),
+                charging: hold(power.charging, &mut self.charging, now),
+                on_ac: hold(power.on_ac, &mut self.on_ac, now),
+                temp: hold(temp, &mut self.temp, now),
+                lux: hold(lux, &mut self.lux, now),
+            }
+        }
+
+        /// One timed pass, noting once if the hardware is slow to answer.
+        pub fn pass(&mut self) -> Reading {
+            let started = Instant::now();
+            let reading = self.read(started);
+            let took = started.elapsed();
+            if took > SLOW_PASS {
+                self.notes.once("slow", || format!("sensors: one reading pass took {} ms", took.as_millis()));
+            }
+            reading
+        }
+    }
+
+    /// Read the sensors every `period` on a thread of their own. The hub only
+    /// ever takes what is already there, so a stuck read cannot stall it.
+    #[cfg(target_os = "linux")]
+    pub fn spawn(root: PathBuf, period: Duration) -> Option<std::sync::mpsc::Receiver<Reading>> {
+        use std::sync::mpsc::{sync_channel, TrySendError};
+        let (tx, rx) = sync_channel(1);
+        let thread = std::thread::Builder::new().name("being-sensors".into()).spawn(move || {
+            let started = Instant::now();
+            let mut said = HashSet::new();
+            for line in survey(&root) {
+                eprintln!("brainstem: hardware: {line}");
+                said.insert(line);
+            }
+            // USB input (the internal keyboard and trackpad) and late drivers
+            // can appear after the brainstem starts: survey once more and
+            // log only what changed, so the boot log is not a stale answer.
+            let mut resurveyed = false;
+            let mut sensors = Sensors::new(root.clone());
+            loop {
+                if !resurveyed && started.elapsed() >= RESURVEY {
+                    resurveyed = true;
+                    for line in survey(&root) {
+                        if !said.contains(&line) {
+                            eprintln!("brainstem: hardware: (after {} s) {line}", RESURVEY.as_secs());
+                            said.insert(line);
+                        }
+                    }
+                }
+                let reading = sensors.pass();
+                for line in sensors.notes.take() {
+                    eprintln!("brainstem: {line}");
+                }
+                if let Err(TrySendError::Disconnected(_)) = tx.try_send(reading) {
+                    return;
+                }
+                std::thread::sleep(period);
+            }
+        });
+        match thread {
+            Ok(_) => Some(rx),
+            Err(e) => {
+                eprintln!("brainstem: sensors: could not start the sensor thread: {e}");
+                None
+            }
+        }
+    }
+
+    /// A reading older than this is no longer the truth.
+    pub const STALE: f64 = 30.0;
+
+    /// The hub's end of the sensor thread.
+    #[cfg(any(target_os = "linux", test))]
+    pub struct Feed {
+        rx: std::sync::mpsc::Receiver<Reading>,
+        at: f64,
+        quiet: bool,
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    impl Feed {
+        pub fn new(rx: std::sync::mpsc::Receiver<Reading>, now: f64) -> Self {
+            Self { rx, at: now, quiet: false }
+        }
+
+        /// Apply the newest reading without waiting. If the thread has
+        /// stopped or gone quiet, the readings become unknown, said once.
+        pub fn update(&mut self, body: &mut super::Body, now: f64) -> Option<&'static str> {
+            use std::sync::mpsc::TryRecvError;
+            let mut latest = None;
+            let mut gone = false;
+            loop {
+                match self.rx.try_recv() {
+                    Ok(reading) => latest = Some(reading),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        gone = true;
+                        break;
+                    }
+                }
+            }
+            if let Some(reading) = latest {
+                body.sense(&reading);
+                self.at = now;
+                self.quiet = false;
+                return None;
+            }
+            if self.quiet || !(gone || now - self.at > STALE) {
+                return None;
+            }
+            self.quiet = true;
+            body.sense(&Reading::default());
+            Some(if gone {
+                "sensors: the sensor thread stopped; battery, temperature and light are now unknown"
+            } else {
+                "sensors: no reading for 30 s; battery, temperature and light are now unknown"
+            })
+        }
+    }
+}
+
+fn unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
+}
+
+/// Hour and minute of the day at `offset` seconds east of UTC.
+fn offset_time(unix: i64, offset: i64) -> (u32, u32) {
+    let day = (unix + offset).rem_euclid(86_400);
+    ((day / 3600) as u32, (day % 3600 / 60) as u32)
+}
+
+fn local_time() -> (u32, u32) {
+    // SAFETY: plain libc calls with valid pointers to stack values.
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        (tm.tm_hour as u32, tm.tm_min as u32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_clock_follows_the_zone_the_mind_gives() {
+        // 12:30 UTC on some day; Sydney in summer is eleven hours ahead.
+        let noon = 20_000 * 86_400 + 12 * 3600 + 30 * 60;
+        assert_eq!(offset_time(noon, 0), (12, 30));
+        assert_eq!(offset_time(noon, 11 * 3600), (23, 30));
+        assert_eq!(offset_time(noon, -(5 * 3600 + 1800)), (7, 0));
+
+        let mut b = Body::new(0.0);
+        b.tick(0.0);
+        b.set_utc_offset(Some(11 * 3600));
+        let (h, m) = offset_time(unix_seconds(), 11 * 3600);
+        let (bh, bm) = b.clock();
+        assert!((bh, bm) == (h, m) || bm == (m + 1) % 60, "body clock uses the given zone");
+        assert!(!b.tick(0.1).is_empty(), "a zone change is published at once");
+        b.set_utc_offset(Some(99 * 3600));
+        assert_eq!(b.utc_offset, None, "an impossible offset is refused");
+    }
+
+    #[test]
+    fn senses_line_reports_what_was_set() {
+        let mut b = Body::new(0.0);
+        b.on_event(
+            &Event::new("sim.body")
+                .with("battery", 12.0)
+                .with("charging", false)
+                .with("temp", 80.0)
+                .with("lux", 1.0)
+                .with("hour", 23.0),
+            1.0,
+        );
+        let line = b.senses_line();
+        assert!(line.starts_with("23:"), "{line}");
+        assert!(line.contains("battery 12% and low, unplugged"), "{line}");
+        assert!(line.contains("hot"), "{line}");
+        assert!(line.contains("room dark"), "{line}");
+        assert!(b.dark() && b.night());
+    }
+
+    #[test]
+    fn publishes_on_change_and_then_periodically() {
+        let mut b = Body::new(0.0);
+        let first = b.tick(0.1);
+        assert_eq!(first.len(), 3);
+        assert!(b.tick(1.0).is_empty());
+        b.on_event(&Event::new("sim.body").with("lux", 20.0), 1.5);
+        assert_eq!(b.tick(1.6).len(), 3);
+        assert!(b.tick(3.0).is_empty());
+        assert_eq!(b.tick(6.7).len(), 3);
+    }
+
+    #[test]
+    fn battery_low_requires_a_known_low_charge_and_confirmed_disconnection() {
+        let mut b = Body::physical(0.0);
+        for (battery, on_ac, low) in [
+            (Some(15.0), Some(false), true),
+            (Some(16.0), Some(false), false),
+            (Some(9.0), Some(true), false),
+            (Some(9.0), None, false),
+            (None, Some(false), false),
+        ] {
+            b.set_power(battery, Some(false), on_ac);
+            let event = b.tick(1.0).into_iter().find(|e| e.topic == "body.state").unwrap();
+            assert_eq!(event.bool("battery_low"), Some(low));
+            assert_eq!(b.snapshot().bool("battery_low"), Some(low));
+        }
+    }
+
+    #[test]
+    fn drives_stay_in_range() {
+        let mut b = Body::new(0.0);
+        b.on_event(&Event::new("sim.body").with("temp", 119.0).with("battery", 3.0).with("charging", false), 0.0);
+        let out = b.tick(99999.0);
+        let d = out.iter().find(|e| e.topic == "body.drives").unwrap();
+        for key in ["energy", "arousal", "social", "comfort"] {
+            let v = d.f64(key).unwrap();
+            assert!((0.0..=1.0).contains(&v), "{key} = {v}");
+        }
+    }
+
+    #[test]
+    fn panel_recovery_does_not_claim_the_lid_is_open() {
+        let mut b = Body::physical(0.0);
+        assert!(b.lid_blocked());
+        assert!(b.snapshot().data["battery"].is_null());
+        b.recover_panel();
+        let recovery_seq = b.lid_seq();
+        assert!(b.lid_blocked() && b.lid_event().bool("show_face") == Some(true));
+        b.set_lid(Some(true));
+        b.panel_ready(recovery_seq);
+        assert!(!b.panel_ready);
+        b.set_lid(Some(false));
+        b.panel_ready(b.lid_seq());
+        assert!(b.panel_ready && !b.lid_blocked());
+    }
+
+    #[test]
+    fn a_full_battery_on_ac_is_not_reporting_a_charge() {
+        let mut b = Body::physical(0.0);
+        b.set_power(Some(100.0), Some(false), Some(true));
+        let line = b.senses_line();
+        assert!(line.contains("battery 100% plugged in"), "{line}");
+        assert!(!line.contains("room") && !line.contains("cool"), "{line}");
+    }
+
+    #[test]
+    fn core_temperature_uses_the_hottest_channel_and_invalidates_on_sensor_failure() {
+        let tree = Tree::new("coretemp");
+        let root = tree.0.clone();
+        let coretemp = root.join("hwmon0");
+        tree.file("hwmon0/name", "coretemp\n");
+        tree.file("hwmon0/temp1_input", "49900\n");
+        tree.file("hwmon0/temp2_input", "65250\n");
+        tree.file("hwmon1/name", "acpitz\n");
+        tree.file("hwmon1/temp1_input", "90000\n");
+
+        let mut body = Body::physical(0.0);
+        let reading = sysfs::read_core_temperature(&root);
+        assert_eq!(reading, Some(65.25));
+        body.set_temperature(reading);
+        assert_eq!(body.tick(0.1)[0].f64("temp"), Some(65.25));
+        body.set_temperature(reading);
+        assert!(body.tick(1.0).is_empty());
+
+        fs::write(coretemp.join("temp2_input"), "invalid\n").unwrap();
+        body.set_temperature(sysfs::read_core_temperature(&root));
+        assert!(body.tick(1.1)[0].data["temp"].is_null());
+        fs::remove_dir_all(&coretemp).unwrap();
+        assert_eq!(sysfs::read_core_temperature(&root), None);
+    }
+
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+    use sysfs::{Reading, Sensors};
+
+    /// A throwaway sysfs tree, removed when the test ends.
+    struct Tree(PathBuf);
+
+    impl Tree {
+        fn new(tag: &str) -> Tree {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, Ordering::SeqCst);
+            let root = std::env::temp_dir().join(format!("being-sysfs-{}-{tag}-{n}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).unwrap();
+            Tree(root)
+        }
+
+        fn file(&self, path: &str, data: impl AsRef<[u8]>) {
+            let path = self.0.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, data).unwrap();
+        }
+
+        fn dir(&self, path: &str) {
+            fs::create_dir_all(self.0.join(path)).unwrap();
+        }
+
+        fn remove(&self, path: &str) {
+            let path = self.0.join(path);
+            if path.is_dir() { fs::remove_dir_all(path).unwrap() } else { fs::remove_file(path).unwrap() }
+        }
+
+        fn root(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The sysfs a MacBookPro9,2 shows under Linux 6.x, from public dumps
+    /// of the ACPI battery, applesmc, i915 and ACPI button drivers.
+    fn macbook_pro_9_2(tag: &str) -> Tree {
+        let t = Tree::new(tag);
+        t.file("sys/class/power_supply/ADP1/type", "Mains\n");
+        t.file("sys/class/power_supply/ADP1/online", "1\n");
+        t.file("sys/class/power_supply/BAT0/type", "Battery\n");
+        t.file("sys/class/power_supply/BAT0/present", "1\n");
+        t.file("sys/class/power_supply/BAT0/status", "Charging\n");
+        t.file("sys/class/power_supply/BAT0/capacity", "87\n");
+        t.file("sys/class/power_supply/BAT0/energy_now", "52200000\n");
+        t.file("sys/class/power_supply/BAT0/energy_full", "60000000\n");
+        // A Bluetooth mouse's battery must not become the body's.
+        t.file("sys/class/power_supply/hid-mouse-battery/type", "Battery\n");
+        t.file("sys/class/power_supply/hid-mouse-battery/scope", "Device\n");
+        t.file("sys/class/power_supply/hid-mouse-battery/capacity", "5\n");
+        t.file("sys/class/hwmon/hwmon0/name", "acpitz\n");
+        t.file("sys/class/hwmon/hwmon0/temp1_input", "99000\n");
+        t.file("sys/class/hwmon/hwmon1/name", "applesmc\n");
+        t.file("sys/class/hwmon/hwmon2/name", "coretemp\n");
+        t.file("sys/class/hwmon/hwmon2/temp1_input", "52000\n");
+        t.file("sys/class/hwmon/hwmon2/temp2_input", "50000\n");
+        t.file("sys/class/hwmon/hwmon2/temp3_input", "51000\n");
+        let smc = "sys/devices/platform/applesmc.768";
+        t.file(&format!("{smc}/light"), "(3,0)\n");
+        t.file(&format!("{smc}/temp1_label"), "TB0T\n");
+        t.file(&format!("{smc}/temp1_input"), "31000\n");
+        t.file(&format!("{smc}/temp2_label"), "TC0D\n");
+        t.file(&format!("{smc}/temp2_input"), "56250\n");
+        t.file(&format!("{smc}/temp3_label"), "TC0P\n");
+        t.file(&format!("{smc}/temp3_input"), "-127000\n");
+        t.file(&format!("{smc}/fan1_input"), "1999\n");
+        t.file("sys/class/backlight/acpi_video0/type", "firmware\n");
+        t.file("sys/class/backlight/acpi_video0/bl_power", "0\n");
+        t.file("sys/class/backlight/intel_backlight/type", "raw\n");
+        t.file("sys/class/backlight/intel_backlight/brightness", "2000\n");
+        t.file("sys/class/backlight/intel_backlight/max_brightness", "4882\n");
+        t.file("sys/class/backlight/intel_backlight/bl_power", "0\n");
+        t.file("sys/class/leds/smc::kbd_backlight/brightness", "0\n");
+        t.file("sys/class/leds/smc::kbd_backlight/max_brightness", "255\n");
+        t.file("sys/class/input/event0/device/name", "Lid Switch\n");
+        t.file("sys/class/input/event0/device/capabilities/sw", "1\n");
+        t.file("sys/class/input/event1/device/name", "Power Button\n");
+        t.file("sys/class/input/event1/device/capabilities/sw", "0\n");
+        t.file("sys/class/input/event4/device/name", "Apple Inc. Apple Internal Keyboard / Trackpad\n");
+        t.file("sys/class/input/event4/device/capabilities/sw", "0\n");
+        t.file("sys/class/input/mouse0/device/name", "not an event node\n");
+        t
+    }
+
+    #[test]
+    fn the_real_macbook_layout_is_read_and_surveyed() {
+        let tree = macbook_pro_9_2("mbp");
+        let mut sensors = Sensors::new(tree.0.clone());
+        let reading = sensors.read(Instant::now());
+        assert_eq!(
+            reading,
+            Reading { battery: Some(87.0), charging: Some(true), on_ac: Some(true), temp: Some(52.0), lux: Some(12.0) }
+        );
+        let notes = sensors.notes.take().join("\n");
+        assert!(notes.contains("found battery BAT0") && notes.contains("found AC adapter ADP1"), "{notes}");
+        assert!(notes.contains("ignoring hid-mouse-battery"), "{notes}");
+        // Said once, not on every pass.
+        sensors.read(Instant::now());
+        assert!(sensors.notes.take().is_empty());
+
+        let survey = sysfs::survey(tree.root()).join("\n");
+        for want in [
+            "lid: found \"Lid Switch\" (event0)",
+            "input: event4 \"Apple Inc. Apple Internal Keyboard / Trackpad\"",
+            "power: found battery BAT0",
+            "backlight: intel_backlight (raw), brightness 2000/4882, bl_power 0",
+            "keyboard light: smc::kbd_backlight, brightness 0/255",
+            "smc: found applesmc.768, 3 temperature channels, 1 fans",
+            "light sensor: found, raw 3",
+            "temperature: hwmon acpitz, applesmc, coretemp",
+        ] {
+            assert!(survey.contains(want), "missing {want:?} in\n{survey}");
+        }
+        assert!(!survey.contains("mouse0"), "{survey}");
+        let order: Vec<_> = sysfs::backlight_controls(tree.root()).into_iter().map(|(name, _, _)| name).collect();
+        assert_eq!(order, ["intel_backlight", "acpi_video0"]);
+    }
+
+    #[test]
+    fn a_machine_with_nothing_reads_unknown_and_says_so() {
+        let tree = Tree::new("empty");
+        let mut sensors = Sensors::new(tree.0.clone());
+        assert_eq!(sensors.read(Instant::now()), Reading::default());
+        let survey = sysfs::survey(tree.root()).join("\n");
+        for want in ["no lid switch", "power: no power_supply", "backlight: none found", "keyboard light: not found", "applesmc not found", "no hwmon chips"] {
+            assert!(survey.contains(want), "missing {want:?} in\n{survey}");
+        }
+        // A root that is not even a directory.
+        let file = tree.0.join("plain");
+        fs::write(&file, "x").unwrap();
+        assert_eq!(Sensors::new(file.clone()).read(Instant::now()), Reading::default());
+        assert!(!sysfs::survey(&file).is_empty());
+    }
+
+    #[test]
+    fn garbage_values_are_unknown_and_a_missing_capacity_falls_back() {
+        let tree = macbook_pro_9_2("garbage");
+        let bat = "sys/class/power_supply/BAT0";
+        tree.file(&format!("{bat}/capacity"), "eighty\n");
+        tree.file(&format!("{bat}/status"), "Unknown\n");
+        tree.file("sys/class/power_supply/ADP1/online", "2\n");
+        tree.file("sys/devices/platform/applesmc.768/light", "(3;0)\n");
+        let mut sensors = Sensors::new(tree.0.clone());
+        let reading = sensors.read(Instant::now());
+        assert_eq!(reading.battery, Some(87.0), "energy_now / energy_full");
+        assert_eq!((reading.charging, reading.on_ac, reading.lux), (None, None, None));
+
+        tree.remove(&format!("{bat}/energy_now"));
+        tree.file(&format!("{bat}/charge_now"), "6000\n");
+        tree.file(&format!("{bat}/charge_full"), "5000\n");
+        assert_eq!(sysfs::read_power(tree.root(), &mut sysfs::Notes::default()).battery, Some(100.0), "worn battery clamps");
+        tree.file(&format!("{bat}/charge_full"), "0\n");
+        tree.file(&format!("{bat}/capacity"), "250\n");
+        assert_eq!(sysfs::read_power(tree.root(), &mut sysfs::Notes::default()).battery, None);
+
+        for bad in ["", "()", "(1)", "(-1,2)", "(99999,0)", "3,0", "(1,2,3)"] {
+            assert_eq!(sysfs::parse_light(bad), None, "{bad:?}");
+        }
+        assert_eq!(sysfs::parse_light(" (0, 7)\n"), Some(7));
+
+        // Not text, huge, and a negative temperature.
+        tree.file("sys/class/hwmon/hwmon2/temp2_input", [0xff, 0xfe, 0x00]);
+        assert_eq!(sysfs::read_core_temperature(&tree.0.join("sys/class/hwmon")), None);
+        tree.file("sys/class/hwmon/hwmon2/temp2_input", "1".repeat(100_000));
+        assert_eq!(sysfs::read_core_temperature(&tree.0.join("sys/class/hwmon")), None);
+        tree.file("sys/class/hwmon/hwmon2/temp2_input", "-5000");
+        assert_eq!(sysfs::read_core_temperature(&tree.0.join("sys/class/hwmon")), None);
+    }
+
+    #[test]
+    fn unreadable_files_behave_like_eio() {
+        // A directory where a value should be fails every read, as EIO does.
+        let tree = macbook_pro_9_2("eio");
+        for path in [
+            "sys/class/power_supply/BAT0/capacity",
+            "sys/class/power_supply/BAT0/energy_now",
+            "sys/class/power_supply/BAT0/status",
+            "sys/class/power_supply/ADP1/type",
+            "sys/devices/platform/applesmc.768/light",
+            "sys/class/hwmon/hwmon2/temp1_input",
+            "sys/class/input/event0/device/capabilities/sw",
+        ] {
+            tree.remove(path);
+            tree.dir(path);
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/nonexistent/being", tree.0.join("sys/class/power_supply/BAT1")).unwrap();
+        let mut sensors = Sensors::new(tree.0.clone());
+        let reading = sensors.read(Instant::now());
+        assert_eq!(reading, Reading::default());
+        let notes = sensors.notes.take().join("\n");
+        assert!(notes.contains("ignoring ADP1, its type is unreadable"), "{notes}");
+        assert!(notes.contains("battery BAT0 reports no readable charge"), "{notes}");
+        let survey = sysfs::survey(tree.root()).join("\n");
+        assert!(survey.contains("no lid switch") && survey.contains("light sensor: not found or not answering"), "{survey}");
+    }
+
+    #[test]
+    fn the_smc_stands_in_for_coretemp_and_its_junk_keys_are_skipped() {
+        let tree = macbook_pro_9_2("smc");
+        tree.remove("sys/class/hwmon/hwmon2");
+        let smc = sysfs::find_smc(tree.root());
+        assert_eq!(sysfs::read_temperature(tree.root(), smc.as_deref()), Some(56.25));
+        // A coretemp chip with no channels does not hide the SMC.
+        tree.file("sys/class/hwmon/hwmon9/name", "coretemp\n");
+        assert_eq!(sysfs::read_temperature(tree.root(), smc.as_deref()), Some(56.25));
+        // Found through the platform bus when the device path differs.
+        tree.remove("sys/devices/platform/applesmc.768");
+        tree.file("sys/bus/platform/devices/applesmc.769/light", "(0,0)\n");
+        let smc = sysfs::find_smc(tree.root()).unwrap();
+        assert_eq!(sysfs::read_light(&smc), Some(0));
+        assert_eq!(sysfs::read_temperature(tree.root(), Some(&smc)), None);
+    }
+
+    #[test]
+    fn a_short_failure_keeps_the_last_reading_and_a_long_one_does_not() {
+        let tree = macbook_pro_9_2("hold");
+        let mut sensors = Sensors::new(tree.0.clone());
+        let start = Instant::now();
+        let good = sensors.read(start);
+        tree.remove("sys/class/power_supply");
+        tree.remove("sys/devices/platform/applesmc.768");
+        tree.remove("sys/class/hwmon");
+        assert_eq!(sensors.read(start + Duration::from_secs(3)), good);
+        assert_eq!(sensors.read(start + Duration::from_secs(11)), Reading::default());
+        // And it does not come back from the dead.
+        assert_eq!(sensors.read(start + Duration::from_secs(12)), Reading::default());
+    }
+
+    #[test]
+    fn lid_capability_bitmaps() {
+        for (bits, lid) in [("1", true), ("0", false), ("3", true), ("10 1", true), ("ffff 0", false), ("", false), ("zz", false)] {
+            assert_eq!(sysfs::has_lid_switch(bits), lid, "{bits:?}");
+        }
+    }
+
+    #[test]
+    fn the_hub_feed_never_waits_and_goes_unknown_when_the_thread_does() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let mut feed = sysfs::Feed::new(rx, 0.0);
+        let mut body = Body::physical(0.0);
+        assert_eq!(feed.update(&mut body, 1.0), None);
+        tx.send(Reading { battery: Some(50.0), on_ac: Some(false), lux: Some(0.0), ..Reading::default() }).unwrap();
+        assert_eq!(feed.update(&mut body, 2.0), None);
+        assert_eq!(body.snapshot().f64("battery"), Some(50.0));
+        assert!(body.dark());
+        assert_eq!(feed.update(&mut body, 20.0), None);
+        assert!(feed.update(&mut body, 40.0).is_some_and(|line| line.contains("no reading for 30 s")));
+        assert!(body.snapshot().data["battery"].is_null() && !body.dark());
+        assert_eq!(feed.update(&mut body, 41.0), None, "said once");
+        tx.send(Reading { battery: Some(49.0), ..Reading::default() }).unwrap();
+        feed.update(&mut body, 42.0);
+        assert_eq!(body.snapshot().f64("battery"), Some(49.0));
+        drop(tx);
+        assert!(feed.update(&mut body, 43.0).is_some_and(|line| line.contains("stopped")));
+        assert!(body.snapshot().data["battery"].is_null());
+    }
+}

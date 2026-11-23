@@ -1,0 +1,146 @@
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -32,6 +32,7 @@
+ #include <filesystem>
+ #include <random>
+ #include <utility>
++#include <string_view>
+ #include <fstream>
+ 
+ // fix problem with std::min and std::max
+@@ -2094,6 +2095,16 @@
+             }
+         } else {
+             slot.smpl.reset();
++        }
++
++        if (task.cache_only) {
++            // Only the single CPU Qwen3.5 stream is covered by the zero-output path.
++            char arch[7] = {};
++            task.cache_only = slots.size() == 1 && !spec && !mctx && !params_base.embedding &&
++                !task.params.sampling.backend_sampling &&
++                params_base.lora_adapters.empty() && !llama_supports_gpu_offload() &&
++                llama_model_meta_val_str(model_tgt, "general.architecture", arch, sizeof(arch)) == 6 &&
++                std::string_view(arch) == "qwen35";
+         }
+ 
+         // the per-request limit takes priority over the global one
+@@ -4571,13 +4582,14 @@
+ 
+                         GGML_ASSERT(batch.size() > 0);
+ 
+-                        // extract the logits only for the last token
+-                        batch.set_output(batch.size() - 1, true);
+-
+                         slot.stats.n_gen = 0;
+                         slot.i_batch     = batch.size() - 1;
+ 
+-                        slot.init_sampler();
++                        if (!slot.task->cache_only) {
++                            // extract the logits only for the last token
++                            batch.set_output(slot.i_batch, true);
++                            slot.init_sampler();
++                        }
+                     } else {
+                         // skip ordinary mid-prompt checkpoints, unless the batch starts a user
+                         // message or we are near the end of the prompt
+@@ -4710,12 +4722,18 @@
+             has_output |= batch.tokens[i].output;
+         }
+ 
++        // A cache-only response must wait for all of its cache writes.
++        const bool sync = has_output || std::any_of(slots.begin(), slots.end(), [&](const server_slot & slot) {
++            return slot.state == SLOT_STATE_DONE_PROMPT && slot.task->cache_only &&
++                   slot.i_batch >= off && slot.i_batch < off + batch.view.size();
++        });
++
+         // yield to the queue, so we can still handle metrics tasks while decoding
+         // note: the sync is done here too, so that the wait is also covered by the yield
+         int ret = 0;
+         queue_tasks.yield_to_queue([&]() {
+             ret = llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch.view.get());
+-            if (ret == 0 && has_output) {
++            if (ret == 0 && sync) {
+                 llama_synchronize(ctx_tgt);
+             }
+         });
+@@ -4770,7 +4788,7 @@
+             return false; // retry with the updated n_batch
+         } else {
+             // success, apply batch metrics
+-            metrics_post_decode(off, batch.view.size(), has_output);
++            metrics_post_decode(off, batch.view.size(), sync);
+         }
+ 
+         // TODO: avoid restoring the draft context and re-evaluating the drafted tokens when not needed [TAG_SPEC_AVOID_DRAFT_REEVAL]
+@@ -4853,6 +4871,15 @@
+             }
+ 
+             if (slot.state == SLOT_STATE_DONE_PROMPT) {
++                if (slot.task->cache_only) {
++                    slot.i_batch = -1;
++                    slot.stop = STOP_TYPE_LIMIT;
++                    slot.print_timings();
++                    send_final_response(slot);
++                    slot.release();
++                    return;
++                }
++
+                 if (slot.task->type == SERVER_TASK_TYPE_EMBEDDING) {
+                     // prompt evaluated for embedding
+                     send_embedding(slot, batch.view);
+@@ -5130,8 +5157,7 @@
+         n_prompt_queued = 0;
+     }
+ 
+-    // has_output is computed by the caller, which also already synchronized the context if it is set
+-    void metrics_post_decode(int32_t off, int32_t n_tokens, bool has_output) {
++    void metrics_post_decode(int32_t off, int32_t n_tokens, bool synchronized) {
+         metrics.n_decode++;
+         for (const auto & slot : slots) {
+             if (slot.is_processing()) {
+@@ -5162,8 +5188,7 @@
+ 
+         metrics_queue_prompt(n_prompt_tokens);
+ 
+-        if (has_output) {
+-            // the context is already synchronized, so the timings are correct
++        if (synchronized) {
+             metrics_flush_prompt();
+         }
+ 
+@@ -5387,6 +5412,14 @@
+             inputs = tokenize_input_prompts(ctx_server.vocab, ctx_server.mctx, prompt, true, true, ctx_server.init_opt);
+         }
+ 
++        // Other native completion requests keep the regular path and its options.
++        const bool cache_only = inputs.size() == 1 && type == SERVER_TASK_TYPE_COMPLETION &&
++            res_type == TASK_RESPONSE_TYPE_NONE && data.size() == 3 && data.contains("n_predict") &&
++            data["n_predict"].is_number_integer() && data["n_predict"] == 0 &&
++            data.contains("cache_prompt") && data["cache_prompt"] == true &&
++            (prompt.is_string() || (prompt.is_array() &&
++                std::all_of(prompt.begin(), prompt.end(), [](const json & token) { return token.is_number_integer(); })));
++
+         // tasks.reserve(inputs.size()); // TODO: this is inaccurate due to child tasks
+ 
+         for (size_t i = 0; i < inputs.size(); i++) {
+@@ -5402,6 +5435,7 @@
+                     data);
+ 
+             task.apply_chat_session(chat_session);
++            task.cache_only = cache_only && task.n_tokens() > 0;
+ 
+             task.id_slot = json_value(data, "id_slot", -1);
+             sse_ping_interval = task.params.sse_ping_interval;
+--- a/tools/server/server-task.h
++++ b/tools/server/server-task.h
+@@ -204,6 +204,9 @@
+     // used by SERVER_TASK_TYPE_METRICS
+     bool metrics_reset_bucket = false;
+ 
++    // Native prompt request with no generated output.
++    bool cache_only = false;
++
+     // used by SERVER_TASK_TYPE_DECISION
+     // where to read the model output of each option, exactly one of the two lists is used
+     struct decision {

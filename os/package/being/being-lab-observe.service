@@ -1,0 +1,23 @@
+[Unit]
+Description=PipOS owner-authorized LAN observation
+Requires=being-network-policy.service
+After=being-network-policy.service being-wifi.service
+RequiresMountsFor=/mind
+ConditionPathExists=/mind/lab-access/access.json
+ConditionKernelCommandLine=!being.try=1
+StartLimitIntervalSec=0
+
+[Service]
+RuntimeDirectory=being-lab-observe
+LoadCredential=access:/mind/lab-access/access.json
+LoadCredential=host-key:/mind/lab-access/ssh_host_ed25519_key
+InaccessiblePaths=/mind /bootstate -/run/being -/run/being-wifi
+ExecCondition=/usr/sbin/being-network require-pair
+ExecStartPre=+/bin/mkdir -p -m 0755 /var/empty
+ExecStart=/usr/sbin/being-lab-access listen observe
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target

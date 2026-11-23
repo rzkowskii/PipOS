@@ -1,0 +1,6 @@
+# The owner-approved interface configurations use lower numeric prefixes.
+[Match]
+Name=*
+
+[Link]
+Unmanaged=yes

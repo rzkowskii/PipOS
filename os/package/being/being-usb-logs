@@ -1,0 +1,4 @@
+#!/bin/sh
+# Try boot diagnostics on the USB stick's PIPLOGS partition (mind/usb_logs.py).
+export PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1
+exec /usr/bin/python3 -m mind.usb_logs "$@"

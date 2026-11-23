@@ -1,0 +1,23 @@
+From: PipOS
+Subject: [PATCH] kmsdrm: scan out XRGB8888, not ARGB8888
+
+SDL asks GBM for an ARGB8888 surface and hands that format to the kernel.
+The main display plane of many drivers does not accept a format with alpha:
+virtio-gpu rejects it ("Invalid pixel format AR24"), and so do Intel GPUs
+before Skylake, which includes the HD 4000 this OS is built for. The mode set
+then fails and nothing is ever shown.
+
+A screen has no use for alpha. XRGB8888 is accepted everywhere.
+
+---
+--- a/src/video/kmsdrm/SDL_kmsdrmvideo.c	2026-11-20 11:03:04.308777043 +0000
++++ b/src/video/kmsdrm/SDL_kmsdrmvideo.c	2026-11-20 11:03:04.309777056 +0000
+@@ -1193,7 +1193,7 @@
+     SDL_VideoDisplay *display = SDL_GetDisplayForWindow(window);
+     SDL_DisplayData *dispdata = (SDL_DisplayData *)display->driverdata;
+ 
+-    uint32_t surface_fmt = GBM_FORMAT_ARGB8888;
++    uint32_t surface_fmt = GBM_FORMAT_XRGB8888;
+     uint32_t surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;
+ 
+     EGLContext egl_context;

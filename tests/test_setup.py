@@ -1,0 +1,191 @@
+import asyncio
+import io
+import json
+import os
+import tempfile
+import unittest
+from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+from mind import setup
+from mind.initiative import InitiativePolicy, QuietHours, load_policy as load_initiative_policy
+from mind.network_policy import NetworkPolicy, save_policy
+from mind.profile import PROFILE_FILE, Personality, Profile
+
+
+class SetupTests(unittest.TestCase):
+    def setUp(self):
+        work = self.enterContext(tempfile.TemporaryDirectory())
+        self.mind_dir = Path(work) / "mind"
+        self.args = ["--config", str(Path(__file__).resolve().parents[1] / "config"),
+                     "--mind-dir", str(self.mind_dir)]
+
+    def enter_choices(self, choices, *args):
+        with (patch("sys.stdin.isatty", return_value=True), patch("builtins.input", side_effect=choices),
+              patch.object(setup, "available_voices", return_value={"slt", "awb"}), redirect_stdout(io.StringIO())):
+            return setup.main(self.args + list(args))
+
+    def test_cancel_and_dry_run_leave_no_profile(self):
+        self.assertEqual(0, self.enter_choices(["1", "Clover", "q"]))
+        self.assertEqual(0, self.enter_choices(["1", "Clover", "k", "yes"], "--dry-run"))
+        self.assertFalse((self.mind_dir / PROFILE_FILE).exists())
+
+    def test_keep_uses_the_reviewed_roll_and_preserves_wake_phrase_on_rename(self):
+        first = Personality(0, 1, 2, 0, 1)
+        second = Personality(1, 0, 1, 2, 0)
+        with patch.object(setup, "random_personality", side_effect=[first, second]):
+            self.assertEqual(0, self.enter_choices(["1", "Clover", "4", "2", "6", "5", "r", "k", "y"]))
+        with redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(0, setup.main(self.args + ["--show"]))
+        profile = json.loads(output.getvalue())
+        self.assertEqual(("Clover", "Hey Pip", "awb"), (profile["name"], profile["wake_word"], profile["voice"]))
+        self.assertEqual({"warmth": 1, "curiosity": 0, "humour": 1, "expressiveness": 2, "detail": 0},
+                         profile["personality"])
+
+    def test_saved_try_profile_reloads_active_organs_and_dry_run_does_not(self):
+        with (patch.object(setup, "is_try_boot", return_value=True),
+              patch.object(setup, "load_profile", return_value=Profile()),
+              patch.object(setup, "save_profile") as save,
+              patch.object(setup, "restart_try_organs", new_callable=AsyncMock) as restart):
+            self.assertEqual(0, self.enter_choices(["1", "Clover", "k", "yes"], "--mind-dir", "/mind", "--dry-run"))
+            save.assert_not_called()
+            restart.assert_not_awaited()
+            self.assertEqual(0, self.enter_choices(["1", "Clover", "k", "yes"], "--mind-dir", "/mind"))
+        self.assertEqual(save.call_args.args[0], Path("/mind"))
+        self.assertEqual(save.call_args.args[1].name, "Clover")
+        restart.assert_awaited_once_with()
+
+    def test_network_setup_applies_independently_consenting_to_web_and_time(self):
+        self.mind_dir.mkdir()
+        save_policy(self.mind_dir, NetworkPolicy("internet", True))
+        with (patch.object(setup, "APPLIANCE_MIND", self.mind_dir.resolve()), patch.object(setup, "is_try_boot", return_value=False),
+              patch.object(setup.subprocess, "run") as run):
+            run.return_value.returncode = 0
+            self.assertEqual(0, self.enter_choices(["3", "y", "clock.test", "fd00:0000::7", "yes"], "--network"))
+        run.assert_called_once_with([setup.NETWORK_COMMAND, "set", "internet", "--web-lookups",
+                                     "--time-server", "fd00::7"], check=False)
+        self.assertFalse((self.mind_dir / PROFILE_FILE).exists())
+
+    def test_local_setup_menu_can_select_paired_lan_without_web_or_clock_flags(self):
+        with (patch.object(setup, "APPLIANCE_MIND", self.mind_dir.resolve()), patch.object(setup, "is_try_boot", return_value=False),
+              patch.object(setup.subprocess, "run") as run):
+            run.return_value.returncode = 0
+            self.assertEqual(0, self.enter_choices(["8", "2", "yes", "q"]))
+        run.assert_called_once_with([setup.NETWORK_COMMAND, "set", "paired-lan"], check=False)
+
+    def test_network_setup_requires_confirmation_and_is_unavailable_in_try(self):
+        with (patch.object(setup, "APPLIANCE_MIND", self.mind_dir.resolve()), patch.object(setup, "is_try_boot") as try_boot,
+              patch.object(setup.subprocess, "run") as run):
+            try_boot.return_value = False
+            self.assertEqual(0, self.enter_choices(["1", "n"], "--network"))
+            self.assertEqual(0, self.enter_choices(["8", "q"], "--dry-run"))
+            try_boot.return_value = True
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(1, self.enter_choices([], "--network"))
+        run.assert_not_called()
+
+    def test_quiet_hours_submenu_saves_separately_from_personalization(self):
+        self.assertEqual(0, self.enter_choices(["9", "1", "2", "3", "22:00", "07:00", "k", "q"]))
+        self.assertEqual(load_initiative_policy(self.mind_dir, strict=True),
+                         InitiativePolicy(False, True, QuietHours("22:00", "07:00")))
+        self.assertFalse((self.mind_dir / PROFILE_FILE).exists())
+
+    def test_quiet_hours_direct_save_clear_discard_and_preview(self):
+        self.assertEqual(0, self.enter_choices(["3", "22:00", "07:00", "k"], "--initiative"))
+        saved = InitiativePolicy(True, False, QuietHours("22:00", "07:00"))
+        self.assertEqual(load_initiative_policy(self.mind_dir, strict=True), saved)
+        self.assertEqual(0, self.enter_choices(["9", "4", "k", "q"], "--dry-run"))
+        self.assertEqual(0, self.enter_choices(["1", "4", "q"], "--initiative"))
+        self.assertEqual(0, self.enter_choices(["3", "24:30", "07:00", "3", "22:00", "22:00", "k"],
+                                               "--initiative"))
+        self.assertEqual(load_initiative_policy(self.mind_dir, strict=True), saved)
+        self.assertEqual(0, self.enter_choices(["4", "k"], "--initiative"))
+        self.assertEqual(load_initiative_policy(self.mind_dir, strict=True), InitiativePolicy())
+
+
+
+class ConsoleSetupTests(SetupTests):
+    """Every setup flow also works drawn for being-console."""
+
+    def setUp(self):
+        super().setUp()
+        self.enterContext(patch.dict(os.environ, {"BEING_CONSOLE_UI": "1", "COLUMNS": "68", "LINES": "32"}))
+        setup.ui.discard_notes()
+        self.addCleanup(setup.ui.discard_notes)
+
+    def test_screens_show_the_profile_card_and_keep_prompts(self):
+        with (patch("sys.stdin.isatty", return_value=True),
+              patch("builtins.input", side_effect=["x", "1", "Clover", "6", "0", "k", "yes"]) as keyboard,
+              patch.object(setup, "available_voices", return_value={"slt"}),
+              redirect_stdout(io.StringIO()) as output):
+            self.assertEqual(0, setup.main(self.args))
+        text = setup.ui.plain(output.getvalue())
+        prompts = [setup.ui.plain(call.args[0]) for call in keyboard.call_args_list]
+        self.assertTrue(prompts[2].endswith("Name [Pip]: "), prompts[2])
+        self.assertTrue(prompts[-1].endswith("Save these choices? [y/N] "))
+        self.assertIn("Make it yours", text)
+        self.assertIn("Clover calls you", text)
+        self.assertIn("Warmth ●●●", text)
+        self.assertIn("Choose a number, P, K, or Q.", text)
+        self.assertIn("Warm and curious", text)
+        self.assertIn("current", text)
+        self.assertEqual(json_name(self), "Clover")
+
+
+def json_name(case):
+    with redirect_stdout(io.StringIO()) as output:
+        setup.main(case.args + ["--show"])
+    return json.loads(output.getvalue())["name"]
+
+class PreviewTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp")))
+        self.socket = self.directory / "bus.sock"
+        self.started = asyncio.Event()
+        self.stopped = asyncio.Event()
+        self.muted = True
+        self.closed = False
+        self.enterContext(patch.dict(os.environ, {"BEING_BUS": str(self.socket)}))
+        self.enterContext(patch.object(setup, "FW", self.directory))
+        self.enterContext(patch.object(setup, "child", self.audio_player))
+        await self.enterAsyncContext(await asyncio.start_unix_server(self.send_readings, path=self.socket))
+
+    async def send_readings(self, reader, writer):
+        async def send(event):
+            writer.write((json.dumps(event) + "\n").encode())
+            await writer.drain()
+
+        try:
+            await reader.readline()
+            await send({"t": "body.lid", "closed": self.closed})
+            await send({"t": "state.changed", "state": "idle", "muted": self.muted})
+            if self.muted and not self.closed:
+                await self.started.wait()
+                await send({"t": "body.lid", "closed": True})
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    @asynccontextmanager
+    async def audio_player(self, *_command, **_options):
+        class Player:
+            async def wait(self):
+                await asyncio.Future()
+
+        self.started.set()
+        try:
+            yield Player()
+        finally:
+            self.stopped.set()
+
+    async def test_does_not_play_while_microphone_is_on(self):
+        self.muted = False
+        self.assertFalse(await setup.play_preview(self.directory / "sample.wav"))
+        self.assertFalse(self.started.is_set())
+
+    async def test_lid_close_stops_playback(self):
+        self.assertFalse(await asyncio.wait_for(setup.play_preview(self.directory / "sample.wav"), 2))
+        self.assertTrue(self.started.is_set())
+        self.assertTrue(self.stopped.is_set())

@@ -1,0 +1,55 @@
+################################################################################
+#
+# cortex: llama.cpp's server, for Ivy Bridge
+#
+################################################################################
+
+CORTEX_VERSION = v1.0.0
+CORTEX_SOURCE = $(CORTEX_VERSION).tar.gz
+CORTEX_SITE = https://github.com/ggml-org/llama.cpp/archive/refs/tags
+CORTEX_LICENSE = MIT
+CORTEX_LICENSE_FILES = LICENSE
+CORTEX_SUPPORTS_IN_SOURCE_BUILD = NO
+
+# Ivy Bridge: SSE4.2, AVX and F16C, and nothing newer. GGML_NATIVE must be off
+# (the build machine is not the laptop), and with it off llama.cpp would
+# otherwise assume AVX2, FMA and BMI2.
+CORTEX_CONF_OPTS = \
+	-DBUILD_SHARED_LIBS=OFF \
+	-DLLAMA_BUILD_TESTS=OFF \
+	-DLLAMA_BUILD_EXAMPLES=OFF \
+	-DLLAMA_BUILD_TOOLS=ON \
+	-DLLAMA_BUILD_SERVER=ON \
+	-DLLAMA_CURL=OFF \
+	-DLLAMA_OPENSSL=OFF \
+	-DLLAMA_FATAL_WARNINGS=OFF \
+	-DLLAMA_BUILD_UI=OFF \
+	-DLLAMA_USE_PREBUILT_UI=OFF \
+	-DGGML_NATIVE=OFF \
+	-DGGML_SSE42=ON \
+	-DGGML_AVX=ON \
+	-DGGML_F16C=ON \
+	-DGGML_AVX2=OFF \
+	-DGGML_FMA=OFF \
+	-DGGML_BMI2=OFF \
+	-DGGML_AVX512=OFF \
+	-DGGML_OPENMP=OFF \
+	-DGGML_VULKAN=OFF \
+	-DGGML_BLAS=OFF
+
+# The two UI options: no web interface is built, and none is downloaded from
+# llama.cpp's asset bucket during the build. The being has a face already.
+
+# Only the server is wanted.
+CORTEX_MAKE_OPTS = llama-server
+
+define CORTEX_INSTALL_TARGET_CMDS
+	$(INSTALL) -D -m 0755 $(@D)/buildroot-build/bin/llama-server $(TARGET_DIR)/usr/bin/llama-server
+endef
+
+define CORTEX_INSTALL_INIT_SYSTEMD
+	$(INSTALL) -D -m 0644 $(CORTEX_PKGDIR)/being-cortex.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/being-cortex.service
+endef
+
+$(eval $(cmake-package))
