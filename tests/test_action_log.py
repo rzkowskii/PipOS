@@ -85,6 +85,21 @@ class ActionLogTests(unittest.TestCase):
         self.assertEqual(list((self.mind / "log").iterdir()), [])
         self.assertTrue(action_log.erase_all(self.mind), "nothing left is fine too")
 
+    def test_session_only_mode_writes_no_line_from_any_writer(self):
+        from mind.retention import MemoryPolicy, save_policy
+
+        save_policy(self.mind, MemoryPolicy("session-only"))
+        # The voice backup, the night shift and the doctor call record() directly.
+        for kind in ("backup", "backup.auto", "backup.failed", "repair.organ", "repair.audio", "update.install"):
+            self.assertFalse(action_log.record(self.mind, kind), kind)
+        self.assertFalse(action_log.log_path(self.mind).exists())
+        save_policy(self.mind, MemoryPolicy("explicit-only"))
+        self.assertTrue(action_log.record(self.mind, "backup"))
+        # A damaged policy counts as keeping nothing, as it does for memory.
+        (self.mind / "memory-policy.json").write_text("{not json")
+        self.assertFalse(action_log.record(self.mind, "backup"))
+        self.assertEqual(len(self.lines()), 1)
+
     def test_a_full_disk_or_a_symlink_is_a_skipped_line_not_an_error(self):
         (self.mind / "log").mkdir()
         os.symlink("/nonexistent/elsewhere", action_log.log_path(self.mind))

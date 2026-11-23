@@ -288,11 +288,32 @@ def install_summary(plan, *, profile=None, initiative=None, restore=None, skills
     return rows
 
 
-def contents_warning(contents):
-    """Card rows for a target that already holds something, or None."""
+def discard_supported(device, sys_root="/sys/class/block"):
+    """True when the kernel says the drive can discard (forget) old blocks,
+    False when it says it cannot, None when that can't be read. The new mind
+    image is sparse: without discard, an old being's data stays in the blocks
+    it never writes (the original hard disk, many USB bridges)."""
+    name = os.path.basename(os.path.realpath(str(device)))
+    try:
+        with open(os.path.join(sys_root, name, "queue", "discard_max_bytes")) as limit:
+            return int(limit.read().strip() or "0") > 0
+    except (OSError, ValueError):
+        return None
+
+
+def contents_warning(contents, discard=True):
+    """Card rows for a target that already holds something, or None.
+
+    `discard` is discard_supported() for the drive: only a drive that can
+    discard old blocks really erases the old being's memories."""
     if contents.get("being"):
+        if discard:
+            erase = "Installing erases that being for good."
+        else:
+            erase = ("Installing replaces that being, but this drive can't erase old blocks, so parts of "
+                     "its memories may stay readable on the disk until new data overwrites them.")
         return [ui.paint("This drive holds a PipOS being and its memories.", "text", "bold"),
-                "Installing erases that being for good. To keep its memory, start it from this drive "
+                erase + " To keep its memory, start it from this drive "
                 "and use F2, Update from a USB stick, instead."], "being"
     if contents.get("macos"):
         rows = [ui.paint("This drive holds macOS.", "text", "bold"), "Before it is erased, in macOS:"]
@@ -391,7 +412,8 @@ def confirm_installation(device, *, expected_plan=None, profile=None, initiative
             print("Installing creates a new being with fresh memory. Back up anything you want to keep.", flush=True)
         else:
             print("The backup will be restored and checked before writing to the selected disk.", flush=True)
-    warning, kind = contents_warning(disk_contents(device, plan["target"].get("logical_sector_bytes") or 512))
+    warning, kind = contents_warning(disk_contents(device, plan["target"].get("logical_sector_bytes") or 512),
+                                     discard=bool(discard_supported(device)))
     if warning:
         if ui.enabled():
             ui.card(warning, title=ui.paint("Look first", "warning", "bold"), tone="warning")

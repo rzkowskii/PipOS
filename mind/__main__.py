@@ -18,15 +18,41 @@ from .retention import load_policy
 from .turn import SUBS, Config, Mind, log, optional_module
 
 ROOT = Path(__file__).resolve().parent.parent
+_NUMBER = (int, float)
+# Config fields read from being.json, with the types each one accepts.
+FACTORY_KEYS = {
+    "ctx_tokens": (int,),
+    "max_tokens": (int,),
+    "temperature": _NUMBER,
+    "prefill": (bool,),
+    "morning_brief": (bool,),
+    "time_zone": (str,),
+    "top_k": (int,),
+    "top_p": _NUMBER,
+    "presence_penalty": _NUMBER,
+    "reply_shape": (str,),
+    "battery_plea_percent": _NUMBER,
+    "battery_plea_minutes": _NUMBER,
+    "battery_second_plea_percent": _NUMBER,
+    "battery_second_plea_minutes": _NUMBER,
+    "battery_critical_percent": _NUMBER,
+    "battery_critical_minutes": _NUMBER,
+}
 
 
 def load_config(config_dir, mind_dir, *, include_core=True):
     settings = read_factory(config_dir)
     profile = load_profile(config_dir, mind_dir, settings=settings, strict=False)
     cfg = Config(name=profile.name, owner=profile.owner, personality=profile.personality)
-    for key in ("ctx_tokens", "max_tokens", "temperature", "prefill", "morning_brief"):
-        if key in settings:
-            setattr(cfg, key, settings[key])
+    for key, kinds in FACTORY_KEYS.items():
+        value = settings.get(key)
+        # A wrong type in being.json keeps the built-in value. bool is an
+        # int in Python, so a number setting never takes true or false.
+        if value is None or isinstance(value, bool) and bool not in kinds or not isinstance(value, kinds):
+            continue
+        if key == "reply_shape" and value not in ("open", "strict"):
+            continue
+        setattr(cfg, key, value)
     identity = (config_dir / "identity.md").read_text(encoding="utf-8")
     if profile.personality != DEFAULT_PERSONALITY:
         style = temperament(profile.personality)

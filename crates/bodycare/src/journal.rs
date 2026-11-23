@@ -3,7 +3,9 @@
 //! ExecStopPost) puts them back even if the controller was killed, so a
 //! crash never leaves the machine with a changed setting nobody owns.
 //!
-//! The file lives in /run (memory). A reboot resets the volatile controls
+//! The file lives in /run (memory): the unit's own runtime directory when
+//! systemd gives it one ($RUNTIME_DIRECTORY), which stays writable under
+//! ProtectSystem=strict. A reboot resets the volatile controls
 //! (fan floor, P-state, RAPL) by itself, so a lost journal loses nothing.
 //! The charge limit is different: it lives in the SMC and survives power
 //! off. That is the point of it, so restoring it is a separate, explicit
@@ -89,6 +91,19 @@ impl Journal {
         let tmp = PathBuf::from(tmp);
         fs::write(&tmp, Value::Object(self.entries.clone()).to_string())?;
         fs::rename(&tmp, &self.path)
+    }
+
+    /// Can the journal be written where it lives? Act mode asks at start,
+    /// so a read-only location is said plainly instead of every pass.
+    pub fn check_writable(&self) -> io::Result<()> {
+        if let Some(dir) = self.path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let mut probe = self.path.as_os_str().to_owned();
+        probe.push(".probe");
+        let probe = PathBuf::from(probe);
+        fs::write(&probe, b"")?;
+        fs::remove_file(&probe)
     }
 
     /// Note a control's original value before its first change. Already

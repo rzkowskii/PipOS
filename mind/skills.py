@@ -645,11 +645,15 @@ class Skills:
         if request.kind in ("create", "timer", "alarm"):
             kind = {"timer": "timer", "alarm": "alarm"}.get(request.kind, "reminder")
             duration = request.duration_seconds if kind == "timer" and request.duration_seconds else None
+            relative = kind == "timer" or request.relative
             entry = self.reminders.add(request.task, request.due_at, kind=kind, duration=duration,
                                        rule=request.rule, at_local=request.at_local,
-                                       zone=self.zone if request.rule else None)
+                                       zone=self.zone if request.rule or not clock_trusted else None,
+                                       relative=relative, held=not clock_trusted)
             running = len(self.reminders.upcoming(kind=kind))
-            held = "" if clock_trusted or kind == "timer" else \
+            # A delay counts real seconds and rings anyway; a clock time is
+            # held and worked out again when the owner sets the clock.
+            held = "" if clock_trusted or relative else \
                 " My clock may be wrong, so I'll hold it until you tell me the time."
             note = held or self._delivery_note(entry.due_at, kind)
             if kind == "timer":

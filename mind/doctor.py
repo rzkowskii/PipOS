@@ -54,6 +54,12 @@ MIN_JUDGED_PROMPT = 16
 MOST_SPOKEN = 3
 AUDIO_INIT = Path("/usr/libexec/being/being-audio-init")
 DATABASES = {"mind.db": "memory", "lists.db": "lists", "reminders.db": "reminders"}
+# "Are you okay?" waits for the check-up, and a full quick_check reads the
+# whole archive, which grows for years. By voice each database gets this long;
+# the Care page's Health check (F2) reads every page.
+VOICE_CHECK_S = 1.5
+# A check stopped at its time limit: neither good nor damaged.
+UNFINISHED = "unfinished"
 # Organs, as Pip names them. The mind is checked but never restarted by itself.
 ORGANS = {
     "being-brainstem.service": "brainstem",
@@ -151,15 +157,28 @@ class System:
         except OSError:
             return None
 
-    def quick_check(self, path):
-        """True, False (damaged) or None (absent or unreadable)."""
+    def quick_check(self, path, budget_s=None):
+        """True, False (damaged) or None (absent or unreadable); UNFINISHED
+        when `budget_s` ran out first (the voice's bounded check)."""
         path = Path(path)
         if not path.is_file() or path.is_symlink():
             return None
+        stopped = []
         try:
             with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)) as db:
+                if budget_s is not None:
+                    deadline = time.monotonic() + max(0.0, float(budget_s))
+
+                    def over():
+                        if time.monotonic() > deadline:
+                            stopped.append(True)
+                            return 1
+                        return 0
+                    db.set_progress_handler(over, 2000)
                 return db.execute("PRAGMA quick_check(1)").fetchone() == ("ok",)
         except sqlite3.OperationalError:
+            if stopped:
+                return UNFINISHED
             # Busy, locked or not openable read-only: unknown, never "damaged".
             return None
         except sqlite3.DatabaseError:
@@ -204,6 +223,8 @@ class Facts:
     clock_trusted: bool = True
     cortex_busy: bool = False
     now: float | None = None
+    # Seconds each database check may take; None reads every page (F2).
+    check_budget_s: float | None = None
 
     @property
     def ears_closed(self):
@@ -334,8 +355,12 @@ def check_disk(system, facts):
 def check_databases(system, facts):
     found = []
     for filename, name in DATABASES.items():
-        verdict = system.quick_check(Path(facts.state_dir) / filename)
-        if verdict is False:
+        path = Path(facts.state_dir) / filename
+        budget = getattr(facts, "check_budget_s", None)
+        verdict = system.quick_check(path) if budget is None else system.quick_check(path, budget_s=budget)
+        if verdict == UNFINISHED:
+            found.append(Finding(OK, "databases", "", f"{filename}: not checked in full (the Health page does)"))
+        elif verdict is False:
             found.append(Finding(BAD, "databases", f"My {name} file is damaged.", f"{filename}: damaged"))
         elif verdict:
             found.append(Finding(OK, "databases", "", f"{filename}: ok"))
@@ -482,7 +507,8 @@ def facts_from(ctx):
     turn = getattr(ctx, "body", None) or {}
     return Facts(state_dir=Path(ctx.state_dir), body=dict(turn), voice=dict(getattr(ctx, "voice", None) or {}),
                  clock_trusted=bool(getattr(ctx, "clock_trusted", True)),
-                 cortex_busy=bool(turn.get("cortex_busy", False)), now=time.time())
+                 cortex_busy=bool(turn.get("cortex_busy", False)), now=time.time(),
+                 check_budget_s=VOICE_CHECK_S)
 
 
 def examine(system, facts, checks=CHECKS):

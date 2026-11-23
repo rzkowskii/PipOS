@@ -37,6 +37,10 @@ case "${BEING_TRY_LAPTOP:-0}" in
     1) BEINGOS_VARIANT=laptop; output_name=beingos-laptop-try.img ;;
     *) echo "BEING_TRY_LAPTOP must be 0 or 1" >&2; exit 2 ;;
 esac
+# A bench stick has its own name (lab/build.sh expects it).
+if [ -n "$bench_option" ]; then
+    output_name="${output_name%.img}-bench.img"
+fi
 . "$board_dir/slots.sh"
 
 for artifact in "$bootloader" "$rootfs" "$models"; do

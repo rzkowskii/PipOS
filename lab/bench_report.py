@@ -143,6 +143,9 @@ def summarise(data):
     if checked:
         lines.append("bench pack: " + (f"verified, {checked.get('files')} files" if checked.get("ok")
                                        else f"NOT VERIFIED: {checked.get('error')}"))
+    for label, checked in (("conversation pack", data.get("fallback_pack")), ("dream pack", dream.get("pack"))):
+        if checked and not checked.get("ok"):
+            lines.append(f"{label}: NOT VERIFIED: {checked.get('error')}")
     idle = data.get("voice") or data.get("speech_idle") or {}
     if idle:
         lines.append(f"voice ({idle.get('engine', 'flite+pocketsphinx')}): " + _voice(idle))

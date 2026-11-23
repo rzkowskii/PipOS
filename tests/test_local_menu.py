@@ -610,3 +610,43 @@ class TryHomecoming(LocalMenuTests):
         self.assertEqual(code, 0)
         backup_menu.assert_called_once_with(self.mind_path, temporary=True)
         self.assertIn("7  Back up to a USB stick", text)
+
+
+class CameraCheckTests(unittest.TestCase):
+    """The 10 s camera check always turns the camera off again."""
+
+    def setUp(self):
+        self.mind = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(patch.object(local_menu, "MIND_DIR", self.mind))
+        self.calls = []
+
+    def run_camera(self, argv, **kwargs):
+        self.calls.append(argv)
+        return SimpleNamespace(returncode=0)
+
+    def test_ctrl_c_during_the_wait_still_disables(self):
+        with patch.object(local_menu.subprocess, "run", side_effect=self.run_camera), \
+                patch.object(local_menu.time, "sleep", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                local_menu.camera_check(10)
+        self.assertEqual(self.calls, [["being-camera", "enable"], ["being-camera", "disable"]])
+
+    def test_a_hung_enable_still_disables(self):
+        import subprocess
+
+        def run(argv, **kwargs):
+            self.calls.append(argv)
+            if argv[1] == "enable":
+                raise subprocess.TimeoutExpired(argv, 40)
+            raise subprocess.TimeoutExpired(argv, 40)  # the disable failing is swallowed
+        with patch.object(local_menu.subprocess, "run", side_effect=run), patch.object(local_menu.time, "sleep"):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                local_menu.camera_check(10)
+        self.assertEqual(self.calls[-1], ["being-camera", "disable"])
+
+    def test_a_camera_that_was_on_stays_on(self):
+        (self.mind / "camera.enabled").write_text("")
+        with patch.object(local_menu.subprocess, "run", side_effect=self.run_camera), \
+                patch.object(local_menu.time, "sleep"):
+            self.assertTrue(local_menu.camera_check(10))
+        self.assertEqual(self.calls, [["being-camera", "enable"]])

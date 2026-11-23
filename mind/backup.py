@@ -169,17 +169,23 @@ def actions_copy(source, target):
         atomic_write(target, "".join(lines), mode=0o600)
 
 
-def extras_snapshot(root, stage, policy):
+def extras_snapshot(root, stage, policy, count=None):
     """The lists and the action log, beside the archive.
 
     Lists are things the owner said to keep, so a memory that keeps nothing
     (session-only) backs none up. The action log holds no words at all.
+
+    `count` is the erase count read before anything was copied (create()
+    passes it). A "forget everything" that lands during the copies then
+    leaves this snapshot counting fewer erasures than its proof, so a restore
+    drops these extras instead of bringing forgotten lists back.
     """
+    if count is None:
+        count = erasures(root)
     if policy.mode != "session-only" and (root / LISTS_FILE).exists():
         sqlite_copy(root / LISTS_FILE, stage / LISTS_FILE)
     if (root / ACTIONS_FILE).exists():
         actions_copy(root / ACTIONS_FILE, stage / ACTIONS_ARCHIVED)
-    count = erasures(root)
     if count:
         write_erasures(stage, count)
 
@@ -281,6 +287,9 @@ def create(mind_dir, output, recipient):
     life = life_record(root)
     # A damaged policy must fail the backup, not quietly back up nothing.
     policy = read_policy(root)
+    # Read once, before any copy: see extras_snapshot. Reading it again later
+    # would let an erase in the middle make old lists look current.
+    erased = erasures(root)
     with working_directory() as directory:
         stage = Path(directory)
         copy_eligible_settings(root, stage, life)
@@ -288,9 +297,9 @@ def create(mind_dir, output, recipient):
             save_policy(stage, policy)
         database_snapshot(root, stage / DB_FILE, policy)
         compact_archive(stage, policy)
-        extras_snapshot(root, stage, policy)
+        extras_snapshot(root, stage, policy, erased)
         manifest = {"kind": "snapshot", "version": VERSION, "life_id": life["id"], "created": int(time.time()),
-                    "erasures": erasures(root)}
+                    "erasures": erased}
         atomic_write(stage / MANIFEST, json_text(manifest))
         with tempfile.TemporaryFile(dir=stage) as plaintext:
             with tarfile.open(fileobj=plaintext, mode="w", format=tarfile.USTAR_FORMAT) as bundle:
@@ -595,6 +604,8 @@ SET = re.compile(r"pip-(\d{8}-\d{6})(?:\.age|-deletions\.age|-checkpoint\.txt)")
 HOW = ("menu", "voice", "night")
 # The night shift backs up at most once in this long.
 NIGHT_GAP_S = 20 * 3600
+# The nice value of backup worker threads (the memory's vector thread uses 10).
+BACKGROUND_NICE = 10
 
 
 class Unavailable(Exception):
@@ -651,19 +662,41 @@ def find_stick(by_label=BY_LABEL):
     return None
 
 
-def prune(folder, keep=KEEP):
+def set_stamp(path):
+    """The time stamp a backup file is named by, or None."""
+    match = SET.fullmatch(Path(path).name)
+    return match[1] if match else None
+
+
+def prune(folder, keep=KEEP, *, newest=None, clock_trusted=None):
     """Keep the newest `keep` backup sets in the folder; remove the rest.
 
     Only files this tool names (pip-<time>.age, its proof and checkpoint) are
     touched. Older sets can hold what was forgotten since, so going is good.
+
+    `newest` is the stamp of the set just written. It is never removed, even
+    when a clock that went back (a flat clock battery) named it older than
+    the sets already there. Sets are named by the clock, so the others are
+    ranked by name; only when the clock is trusted are sets named after the
+    one just written known to come from a clock that ran ahead, and they go
+    first.
     """
     sets = {}
     for path in Path(folder).iterdir():
         match = SET.fullmatch(path.name)
         if match and path.is_file() and not path.is_symlink():
             sets.setdefault(match[1], []).append(path)
+    keep = max(1, int(keep))
+    others = sorted((stamp for stamp in sets if stamp != newest), reverse=True)
+    if newest in sets:
+        if clock_trusted:
+            # Named in the future by a clock that ran ahead: really older.
+            others = [stamp for stamp in others if stamp < newest] + [stamp for stamp in others if stamp > newest]
+        kept = {newest, *others[:keep - 1]}
+    else:
+        kept = set(others[:keep])
     removed = 0
-    for stamp in sorted(sets, reverse=True)[keep:]:
+    for stamp in sorted(stamp for stamp in sets if stamp not in kept):
         for path in sets[stamp]:
             path.unlink(missing_ok=True)
             removed += 1
@@ -745,12 +778,27 @@ def mount_stick(device, mount_dir=STICK_DIR):
     raise ValueError("The backup stick could not be mounted. PipOS writes FAT, exFAT and ext4 sticks.")
 
 
+def lower_priority():
+    """Run the calling thread (and the age child it starts) below the face,
+    the voice and the turn, as the memory's vector thread does. A backup is
+    a minute of SQLite, tar and age on two slow cores; it may take longer,
+    the owner's conversation may not. Linux only; elsewhere nothing changes."""
+    import threading
+
+    try:
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), BACKGROUND_NICE)
+        return True
+    except (AttributeError, OSError):
+        return False
+
+
 def stick_backup(mind_dir, how, *, mount=None, unmount=None, which=shutil.which, by_label=BY_LABEL, now=None,
-                 keep=KEEP, lock=None):
+                 keep=KEEP, lock=None, clock_trusted=None):
     """Back up to the labelled stick (voice or night). Returns the result dict.
 
     Raises Unavailable. The menu's backup (care.py) keeps its own stick picker
-    but takes the same lock.
+    but takes the same lock. The set just written always survives the prune
+    (see prune), whatever the clock named it.
     """
     with backup_lock(lock):
         device, recipient = readiness(mind_dir, which=which, by_label=by_label)
@@ -761,7 +809,9 @@ def stick_backup(mind_dir, how, *, mount=None, unmount=None, which=shutil.which,
             folder = root / BACKUP_FOLDER
             folder.mkdir(mode=0o700, exist_ok=True)
             result = backup_to_folder(Path(mind_dir), folder, recipient, now=now)
-            result["pruned"] = prune(folder, keep)
+            written = result.get("snapshot")
+            result["pruned"] = prune(folder, keep, newest=set_stamp(written) if written else None,
+                                     clock_trusted=clock_trusted)
             os.sync()
         except Unavailable:
             raise
@@ -804,6 +854,7 @@ class AutoBackupJob:
         self._outcome = None
 
     def _attempt(self):
+        lower_priority()
         try:
             self.backup()
             self._outcome = "done"
@@ -825,7 +876,10 @@ class AutoBackupJob:
 
         if self._worker is None:
             last = last_backup(self.mind_dir)
-            if last is not None and self.clock() - last < self.gap_s:
+            # A last backup "in the future" means the clock went back since
+            # (a flat clock battery): not recent, or the night would never
+            # back up again until the clock caught up.
+            if last is not None and 0 <= self.clock() - last < self.gap_s:
                 self.last_reason = "recent"
                 return True
             self._outcome = None

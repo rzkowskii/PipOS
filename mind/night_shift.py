@@ -8,7 +8,10 @@ whole or not at all. What each job had finished, and where it had got to, is
 written down, so the next quiet spell carries on instead of starting again.
 
 Only the database checkpoint may run off mains power or without bodycare's
-leave: it is quick and it protects the archive. Everything else needs both.
+leave: it is quick and it protects the archive. Everything else needs both,
+compaction (which may vacuum the whole file) included. The memory jobs do
+their SQLite work on a connection of their own in a worker thread, so a
+long statement never holds up the event loop and an interrupt aborts it.
 
 The order (PIP-FUNCTIONS 2.6): database checkpoint and check, gentle expiry,
 search index upkeep, memory vectors, the rule-based journal, the day record,
@@ -18,8 +21,11 @@ re-warming the conversation model for the morning.
 
 import asyncio
 import json
+import os
 import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -252,22 +258,102 @@ class ThreadJob:
         return await asyncio.to_thread(self.work, budget_s)
 
 
-class CheckpointJob:
-    """Fold the WAL into the database, check it, and compact when the disk is low."""
+class SideWork:
+    """Blocking database work on a connection of its own, in a worker
+    thread, so the event loop (wake, lid, voice, keys) never waits for a
+    checkpoint, an integrity check, a vacuum or a batch of vectors.
+
+    `interrupt()` aborts the statement in flight: SQLite rolls its
+    transaction back, so the chunk commits whole or not at all. An archive in
+    RAM has no file to open a second connection on, and is small: its work
+    runs in place.
+    """
+
+    BUSY_TIMEOUT = 0.5  # seconds a side statement waits for a lock
 
     def __init__(self, memory):
         self.memory = memory
+        self._lock = threading.Lock()
+        self._open = {}  # connection -> its stop flag
+
+    async def run(self, work):
+        """`work(db, stop) -> value`, where `stop` is a threading.Event set
+        when the chunk is interrupted."""
+        stop = threading.Event()
+        root = getattr(self.memory, "root", None)
+        if root is None:
+            return work(self.memory.db, stop)
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(_WORKER, self._in_thread, Path(root) / "mind.db", work, stop)
+        except asyncio.CancelledError:
+            stop.set()
+            self.interrupt()
+            raise
+
+    def _in_thread(self, path, work, stop):
+        check(stop)
+        db = sqlite3.connect(path, timeout=self.BUSY_TIMEOUT)
+        try:
+            db.execute("PRAGMA foreign_keys = ON")
+            db.execute("PRAGMA secure_delete = ON")
+            with self._lock:
+                self._open[db] = stop
+            check(stop)
+            return work(db, stop)
+        finally:
+            with self._lock:
+                self._open.pop(db, None)
+            db.close()
+
+    def interrupt(self):
+        with self._lock:
+            for db, stop in self._open.items():
+                stop.set()
+                db.interrupt()
+
+    interrupted = interrupt  # the shift's "let go now" hook
+
+
+def check(stop):
+    """Between statements, where SQLite's interrupt cannot reach."""
+    if stop.is_set():
+        raise sqlite3.OperationalError("interrupted")
+
+
+def _lower_priority():
+    """Night work yields the cores to the face, the voice and the turn. The
+    night's own worker thread keeps the lower priority."""
+    try:
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)
+    except (AttributeError, OSError):
+        pass
+
+
+# One worker of the night's own: a second chunk waits for the first to let
+# go, and the event loop's shared pool keeps its normal priority.
+_WORKER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="night-work", initializer=_lower_priority)
+
+
+class CheckpointJob(SideWork):
+    """Fold the WAL into the database and check it. Light enough for
+    battery: compaction, which may vacuum the whole file, is search upkeep's,
+    on mains only."""
+
+    def __init__(self, memory):
+        super().__init__(memory)
         self.last_check = None
 
     async def run_chunk(self, budget_s):
-        memory = self.memory
-        memory.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        row = memory.db.execute("PRAGMA quick_check").fetchone()
-        self.last_check = row[0] if row else None
+        def work(db, stop):
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            check(stop)
+            row = db.execute("PRAGMA quick_check").fetchone()
+            return row[0] if row else None
+
+        self.last_check = await self.run(work)
         if self.last_check != "ok":
             log("database check did not pass")
-        if memory.disk_state(refresh=True)["state"] != "ok":
-            memory.compact()
         return True
 
 
@@ -297,33 +383,45 @@ class ExpiryJob:
         return True
 
 
-class SearchJob:
-    """Merge the search indexes into one segment each."""
-
-    def __init__(self, memory):
-        self.memory = memory
+class SearchJob(SideWork):
+    """Merge the search indexes into one segment each, and give space back
+    (vacuuming when there is room) when the disk is low."""
 
     async def run_chunk(self, budget_s):
-        self.memory.optimize_search()
+        memory = self.memory
+        low = memory.disk_state(refresh=True)["state"] != "ok"
+
+        def work(db, stop):
+            if low:
+                memory.compact(db)
+            else:
+                memory.optimize_search(db)
+
+        await self.run(work)
         return True
 
 
-class VectorJob:
+class VectorJob(SideWork):
     """Embed every sentence and fact still without a vector, and remake
     vectors from an older model, a few hundred rows per chunk."""
 
     def __init__(self, memory, *, rows=400):
-        self.memory, self.rows = memory, rows
+        super().__init__(memory)
+        self.rows = rows
 
     async def run_chunk(self, budget_s):
-        if self.memory.embedder is None:
+        memory = self.memory
+        if memory.embedder is None:
             return True
         deadline = time.monotonic() + budget_s
-        while time.monotonic() < deadline:
-            if not self.memory.backfill_vectors(self.rows):
-                return True
-            await asyncio.sleep(0)
-        return False
+
+        def work(db, stop):
+            while time.monotonic() < deadline and not stop.is_set():
+                if not memory.backfill_vectors(self.rows, db=db):
+                    return True
+            return False
+
+        return await self.run(work)
 
 
 class JournalJob:

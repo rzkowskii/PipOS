@@ -23,7 +23,8 @@ class ReminderLanguageTest(unittest.TestCase):
         ]
         for said, task, seconds in cases:
             with self.subTest(said=said):
-                self.assertEqual(self.parse(said), ReminderRequest("create", task, self.now.timestamp() + seconds))
+                self.assertEqual(self.parse(said),
+                                 ReminderRequest("create", task, self.now.timestamp() + seconds, relative=True))
 
     def test_absolute_reminders_use_the_requested_local_day_and_time(self):
         cases = [

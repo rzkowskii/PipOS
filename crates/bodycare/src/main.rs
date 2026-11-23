@@ -24,7 +24,8 @@ being-bodycare: one fail-safe owner of the charge limit, fan floor and CPU caps
   being-bodycare --once             one pass, print the report, exit (writes in act mode)
   being-bodycare --bus PATH         the bus socket (default as for every organ)
   being-bodycare --root PATH        a copy of / to work on instead (tests)
-  being-bodycare --journal PATH     the restore journal (default /run/being/bodycare-restore.json)";
+  being-bodycare --journal PATH     the restore journal (default: bodycare-restore.json in
+                                    systemd's $RUNTIME_DIRECTORY, else /run/being/)";
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -48,7 +49,7 @@ const BUS_LOST: f64 = 5.0;
 
 fn main() {
     let mut root = PathBuf::from("/");
-    let mut journal = PathBuf::from("/run/being/bodycare-restore.json");
+    let mut journal = default_journal(std::env::var_os("RUNTIME_DIRECTORY"));
     let mut bus_path = bus::socket_path();
     let mut cfg = Config::default();
     let mut mode = Mode::Observe;
@@ -228,6 +229,19 @@ fn main() {
     eprintln!("bodycare: stopped");
 }
 
+/// The restore journal's home. Under ProtectSystem=strict only a directory
+/// the unit owns (RuntimeDirectory=, handed over as $RUNTIME_DIRECTORY, the
+/// first of a colon-separated list) or one named in ReadWritePaths= can be
+/// written; /run/being belongs to the brainstem.
+fn default_journal(runtime_dir: Option<std::ffi::OsString>) -> PathBuf {
+    const NAME: &str = "bodycare-restore.json";
+    let first = runtime_dir.and_then(|dirs| {
+        let dirs = dirs.to_string_lossy().into_owned();
+        dirs.split(':').next().filter(|d| d.starts_with('/')).map(PathBuf::from)
+    });
+    first.unwrap_or_else(|| PathBuf::from("/run/being")).join(NAME)
+}
+
 /// Take in one bus event.
 fn take(being: &mut Being, ev: &Event) {
     match ev.topic.as_str() {
@@ -270,5 +284,31 @@ mod tests {
         take(&mut b, &Event::new("mind.dreaming").with("active", true));
         take(&mut b, &Event::new("state.changed").with("state", "waking"));
         assert!(!b.dreaming);
+    }
+
+    #[test]
+    fn the_journal_lives_where_the_unit_may_write() {
+        assert_eq!(default_journal(None), PathBuf::from("/run/being/bodycare-restore.json"));
+        assert_eq!(
+            default_journal(Some("/run/being-bodycare".into())),
+            PathBuf::from("/run/being-bodycare/bodycare-restore.json")
+        );
+        assert_eq!(
+            default_journal(Some("/run/being-bodycare:/run/other".into())),
+            PathBuf::from("/run/being-bodycare/bodycare-restore.json")
+        );
+        assert_eq!(default_journal(Some("".into())), PathBuf::from("/run/being/bodycare-restore.json"));
+    }
+
+    #[test]
+    fn night_work_is_seen_without_a_dreaming_event() {
+        // The mind sends no `mind.dreaming`: asleep with the lid closed is
+        // enough for the dream loop to hold the package at the target.
+        let mut b = Being::default();
+        take(&mut b, &Event::new("state.changed").with("state", "asleep"));
+        take(&mut b, &Event::new("body.lid").with("closed", true));
+        assert!(!b.dreaming && b.night());
+        take(&mut b, &Event::new("body.lid").with("closed", false));
+        assert!(!b.night());
     }
 }

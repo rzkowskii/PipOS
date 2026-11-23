@@ -27,9 +27,11 @@ STRICT_GRAMMAR = (
 )
 
 # Assistant boilerplate a small model falls back on. A reply that opens with
-# it is not said and is asked for again, like a parrot.
+# it is not said and is asked for again, like a parrot. Only the opening
+# counts: "Kites are fun, and I'm here to help you fly one" is its own voice.
 _BOILERPLATE = re.compile(
-    r"\b(?:as an ai|as a language model|i(?:'| a)m (?:just )?an ai|i(?:'| a)m (?:just )?a (?:large )?language model"
+    r"(?:(?:well|oh|sure|okay|ok|hi|hello|hey|of course|certainly|great|good question)[,.!: ]+)*"
+    r"(?P<phrase>as an ai|as a language model|i(?:'| a)m (?:just )?an ai|i(?:'| a)m (?:just )?a (?:large )?language model"
     r"|i am an artificial intelligence|how (?:can|may) i (?:help|assist)(?: you)?(?: today)?"
     r"|i(?:'m| am) here to (?:help|assist)|i don't have (?:personal )?(?:feelings|emotions|a body)"
     r"|i(?:'m| am) (?:just )?a (?:computer )?program)\b",
@@ -37,9 +39,19 @@ _BOILERPLATE = re.compile(
 )
 
 
-def boilerplate(text):
-    """True for assistant boilerplate that does not belong in its voice."""
-    return bool(_BOILERPLATE.search(text.replace("’", "'")))
+def _plain_words(text):
+    return " ".join(re.findall(r"[a-z']+", text.replace("’", "'").casefold()))
+
+
+def boilerplate(text, heard=""):
+    """True for a reply that opens with assistant boilerplate. Words the owner
+    used first are not boilerplate: "How can I help?" answers "how can I help
+    a sad friend?" in their own words."""
+    match = _BOILERPLATE.match(text.replace("’", "'").lstrip(" \"'"))
+    if match is None:
+        return False
+    phrase = _plain_words(match["phrase"])
+    return not (heard and f" {phrase} " in f" {_plain_words(heard)} ")
 
 
 class ThinkFilter:

@@ -89,9 +89,59 @@ class Record(unittest.TestCase):
     def test_a_topic_goes_when_a_sentence_it_came_from_is_forgotten(self):
         diary.build_day(self.memory, "Richard", MONDAY, zone=ZONE, state_dir=self.root)
         self.memory.edit(episode_ids=[self.ids["I booked the hotel in Japan today"]])
-        record = diary.stored(self.memory.db, "Richard", MONDAY)
+        self.assertIsNone(diary.stored(self.memory.db, "Richard", MONDAY),
+                          "the stored counts included the forgotten sentence")
+        record = diary.record_for(self.memory.db, "Richard", MONDAY, zone=ZONE, state_dir=self.root,
+                                  today=MONDAY + timedelta(days=1))
         self.assertEqual([topic for topic, _ in record["topics"]], ["orchids", "plumber"])
-        self.assertEqual(record["conversations"], 3, "counts carry no words and stay")
+        self.assertEqual(record["conversations"], 3)
+        self.assertEqual(record["owner_lines"], 5, "counted again from what remains")
+
+    def test_a_forgotten_day_is_not_reported_as_talked_about(self):
+        diary.build_day(self.memory, "Richard", MONDAY, zone=ZONE, state_dir=self.root)
+        start, end = diary.day_bounds(MONDAY, ZONE)
+        monday = [row[0] for row in self.memory.db.execute(
+            "SELECT id FROM episodes WHERE ts >= ? AND ts < ? AND kind IN ('heard', 'said')", (start, end))]
+        self.memory.edit(episode_ids=monday)
+        wednesday = datetime(2026, 11, 25, 8, tzinfo=ZONE)
+        line = diary.answer(self.memory.db, "Richard", "what did we talk about on Monday", now=wednesday, zone=ZONE)
+        self.assertEqual(line, "[neutral] We didn't talk on Monday, as far as I remember.")
+        self.assertEqual(self.memory.db.execute("SELECT count(*) FROM diary_days").fetchone()[0], 0)
+
+    def test_expiry_takes_the_record_of_an_expired_day(self):
+        diary.build_day(self.memory, "Richard", MONDAY, zone=ZONE, state_dir=self.root)
+        tuesday = MONDAY + timedelta(days=1)
+        diary.build_day(self.memory, "Richard", tuesday, zone=ZONE, state_dir=self.root)
+        self.memory.expire_before(diary.day_bounds(tuesday, ZONE)[0])
+        days = [row[0] for row in self.memory.db.execute("SELECT day FROM diary_days")]
+        self.assertEqual(days, [tuesday.isoformat()])
+        self.assertEqual(self.memory.db.execute("SELECT count(*) FROM diary_topics").fetchone()[0], 0)
+
+    def test_a_record_from_before_bounds_were_kept_still_goes(self):
+        diary.build_day(self.memory, "Richard", MONDAY, zone=ZONE, state_dir=self.root)
+        with self.memory.db:
+            self.memory.db.execute("UPDATE diary_days SET start_ts = NULL, end_ts = NULL")
+        self.memory.edit(episode_ids=[self.ids["Mum rang about the orchids"]])
+        self.assertIsNone(diary.stored(self.memory.db, "Richard", MONDAY))
+
+    def test_an_older_archive_gains_the_bounds(self):
+        self.memory.close()
+        import sqlite3
+
+        db = sqlite3.connect(self.root / "mind.db")
+        with db:
+            db.execute("DROP TABLE diary_topic_sources")
+            db.execute("DROP TABLE diary_topics")
+            db.execute("DROP TABLE diary_days")
+            db.execute("CREATE TABLE diary_days (owner TEXT NOT NULL, day TEXT NOT NULL, conversations INTEGER "
+                       "NOT NULL, owner_lines INTEGER NOT NULL, reminders_done INTEGER NOT NULL, timers INTEGER "
+                       "NOT NULL, body_events TEXT NOT NULL, built REAL NOT NULL, PRIMARY KEY (owner, day))")
+        db.close()
+        self.memory = Memory(self.root, embedder=None)
+        record = diary.build_day(self.memory, "Richard", MONDAY, zone=ZONE, state_dir=self.root)
+        self.assertEqual(record["conversations"], 3)
+        bounds = self.memory.db.execute("SELECT start_ts, end_ts FROM diary_days").fetchone()
+        self.assertEqual(bounds, diary.day_bounds(MONDAY, ZONE))
 
     def test_the_night_job_writes_each_finished_day_once(self):
         job = diary.DiaryJob(self.memory, "Richard", today=MONDAY + timedelta(days=2), zone=ZONE,

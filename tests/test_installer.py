@@ -228,3 +228,23 @@ class DiskWording(unittest.TestCase):
         self.assertEqual(installer.friendly_reason(disk), "This is the USB stick PipOS is running from.")
         self.assertIn("model partition", installer.friendly_reason({"reasons": []}, layout_ready=False))
         self.assertIn("odd", installer.friendly_reason({"reasons": ["odd"]}))
+
+
+class DiscardHonesty(unittest.TestCase):
+    def test_a_drive_without_discard_is_not_promised_erasure(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as root:
+            for name, value in (("sda", "0\n"), ("sdb", "2147450880\n")):
+                queue = Path(root) / name / "queue"
+                queue.mkdir(parents=True)
+                (queue / "discard_max_bytes").write_text(value)
+            self.assertIs(installer.discard_supported("/dev/sda", sys_root=root), False)
+            self.assertIs(installer.discard_supported("/dev/sdb", sys_root=root), True)
+            self.assertIsNone(installer.discard_supported("/dev/sdc", sys_root=root))
+        rows, kind = installer.contents_warning({"being": True}, discard=False)
+        self.assertEqual(kind, "being")
+        self.assertNotIn("for good", rows[1])
+        self.assertIn("may stay readable", rows[1])
+        rows, _ = installer.contents_warning({"being": True}, discard=True)
+        self.assertIn("erases that being for good", rows[1])

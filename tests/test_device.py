@@ -181,6 +181,29 @@ class Backups(unittest.TestCase):
         self.assertEqual(action_log.entries(self.mind)[-1]["kind"], "backup.failed")
         self.assertIn("something went wrong writing to the stick", device.last_backup_line(self.mind, current=current))
 
+    def test_a_voice_backup_runs_low_tells_prune_the_clock_and_logs_nothing_in_session_only(self):
+        from unittest.mock import patch
+
+        from mind.retention import MemoryPolicy, save_policy
+
+        calls = []
+        ctx = make_ctx(self.mind)
+        ctx.clock_trusted = False
+        current = device._VoiceBackup()
+        with patch("mind.backup.stick_backup", lambda state_dir, how, **options: calls.append((how, options))), \
+                patch("mind.backup.lower_priority") as lowered:
+            reply = run(device.back_up(ctx, readiness=lambda state_dir: ("/dev/sdb1", "age1x"), current=current))
+            done = run(reply.confirm.on_yes())
+        self.assertEqual(done.line, "[joy] Done. I've backed myself up to your stick.")
+        self.assertEqual(calls, [("voice", {"clock_trusted": False})], "prune is told the clock is in doubt")
+        lowered.assert_called_once_with()
+        # "Nothing after a restart": the backup still happens, but no durable log line says so.
+        save_policy(self.mind, MemoryPolicy("session-only"))
+        reply = run(device.back_up(make_ctx(self.mind), readiness=lambda state_dir: ("/dev/sdb1", "age1x"),
+                                   run=lambda: None, current=current))
+        run(reply.confirm.on_yes())
+        self.assertEqual([entry["kind"] for entry in action_log.entries(self.mind)], ["backup"])
+
     def test_a_slow_backup_answers_at_once_and_carries_on(self):
         release = threading.Event()
         current = device._VoiceBackup()

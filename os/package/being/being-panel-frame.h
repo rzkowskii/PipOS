@@ -1,10 +1,15 @@
 /* being-panel-frame.h: the frame file and in-band protocol of
  * `being-console --panel`, the headless renderer behind Pip's workshop apps.
  *
- * This header is the spec (docs/design/voice-apps.md sections 3.2 and 3.3).
- * The reference reader is mind/hands.py read_frame_header(); the face reads
- * the same layout in Rust (crates/face/src/panel.rs). tests/test_hands.py (PanelFrameTest)
- * compiles this header and checks both sides agree.
+ * NOT the frame file the renderer writes. being-console.c includes
+ * being-console-panel.h, whose panel_encode() layout (width at 4, sequence at
+ * 16, flags at 32, title at 96, no status field) is what crates/face/src/panel.rs
+ * reads; tests/test_panel_frame_contract.py ties those two together. The
+ * struct below is an earlier draft of the layout, still mirrored by
+ * mind/hands.py read_frame_header() and checked only against that reader by
+ * tests/test_hands.py (PanelFrameTest). Do not use it to read a real frame;
+ * it is to be removed with read_frame_header(). The OSC 7770 notes below
+ * still describe the in-band protocol.
  *
  * ---------------------------------------------------------------- the process
  *

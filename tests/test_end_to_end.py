@@ -6,7 +6,9 @@ Needs the brainstem built first:  cargo build -p brainstem
 
 import asyncio
 import io
+import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -16,6 +18,8 @@ from pathlib import Path
 
 from mind.bus import Bus
 from mind.initiative import InitiativePolicy, QuietHours, save_policy
+from mind.profile import daily_greeting
+from mind.skills import find_zone
 from sim.body import SUBS, SimBody
 from sim.fake_cortex import FakeCortex
 
@@ -150,10 +154,22 @@ class EndToEnd(unittest.IsolatedAsyncioTestCase):
         await w.until("heartbeat during quiet hours", lambda e: e["t"] == "stem.beat")
         self.assertFalse(any(e["t"] == "mind.announce" for e in w.events))
         save_policy(self.mind_dir, InitiativePolicy(greetings=True))
+        before = self.expected_greeting()
         await eyes.send("see.presence", **reading)
         await w.until("greeting playback", lambda e: e["t"] == "say.done" and e.get("announcement"))
-        self.assertIn("Hello. Good to see you.", self.said())
+        # The greeting follows the factory time zone's hour, so the test runs
+        # at any time of day; either side of an hour boundary is accepted.
+        said = self.said()
+        self.assertTrue(before in said or self.expected_greeting() in said, said)
         self.assertEqual(self.cortex.chats, [])
+
+    @staticmethod
+    def expected_greeting():
+        """The daily greeting for the factory time zone's local time now, without its tag."""
+        settings = json.loads((ROOT / "config" / "being.json").read_text(encoding="utf-8"))
+        zone = find_zone(settings.get("time_zone") or "")
+        line = daily_greeting(datetime.now(zone) if zone is not None else None)
+        return re.sub(r"^\[[a-z]+\]\s*", "", line)
 
     def said(self):
         """Everything it has said aloud so far, as one string."""

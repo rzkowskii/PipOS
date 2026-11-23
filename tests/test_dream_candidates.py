@@ -21,12 +21,20 @@ def checked(memory, episode_id, claim, quote, kind="fact"):
     return verdict.item
 
 
+def said_days_ago(memory, episode_id, days):
+    """Recurrence counts days the owner said it on, so a fixture's first
+    sentence is said earlier than the one that recurs."""
+    with memory.db:
+        memory.db.execute("UPDATE episodes SET ts = ts - ? WHERE id = ?", (days * 86400, episode_id))
+
+
 class Candidates(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.memory = Memory(Path(self.tmp.name), embedder=None)
         self.orchid = self.memory.log("heard", "My orchid is called Silverleaf and it loves the sun", "Richard")
         self.again = self.memory.log("heard", "Silverleaf, my orchid, is flowering again", "Richard")
+        said_days_ago(self.memory, self.orchid, 1)
 
     def tearDown(self):
         self.memory.close()
@@ -101,6 +109,7 @@ class Forgetting(unittest.TestCase):
         self.first = self.memory.log("heard", "My orchid is called Silverleaf and it loves the sun", "Richard")
         self.second = self.memory.log("heard", "Silverleaf, my orchid, is flowering again", "Richard")
         self.other = self.memory.log("heard", "My sister Anna is visiting on Saturday", "Richard")
+        said_days_ago(self.memory, self.first, 1)
         dream_store.save_candidates(self.memory, "Richard", [checked(
             self.memory, self.first, "The owner's orchid is called Silverleaf.", "My orchid is called Silverleaf")],
             night="2026-11-22")
@@ -164,6 +173,139 @@ class Forgetting(unittest.TestCase):
         fact = self.memory.facts()[0]
         self.memory.correct(fact.id, "my orchid is called Moonleaf")
         self.assertEqual(self.memory.fact(fact.id).text, "my orchid is called Moonleaf")
+
+
+class CorrectingADreamFact(unittest.TestCase):
+    """The owner's conversation the dream quoted is theirs: correcting the
+    claim never rewrites what they actually said."""
+
+    BISCUIT = "ugh Biscuit chewed my shoe again, my dog is called Biscuit and he is a menace"
+    VET = "I took my dog Biscuit to the vet today"
+
+    def setUp(self):
+        self.memory = Memory(None, embedder=None)
+        self.addCleanup(self.memory.close)
+        self.chewed = self.memory.log("heard", self.BISCUIT, "Richard")
+        self.vet = self.memory.log("heard", self.VET, "Richard")
+        said_days_ago(self.memory, self.chewed, 1)
+        claim = "The owner's dog is called Biscuit."
+        for episode, quote, night in ((self.chewed, "my dog is called Biscuit", "2026-11-22"),
+                                      (self.vet, "my dog Biscuit", "2026-11-23")):
+            dream_store.save_candidates(self.memory, "Richard", [checked(self.memory, episode, claim, quote)],
+                                        night=night)
+        self.fact, = self.memory.facts()
+
+    def episode(self, episode_id):
+        return self.memory.db.execute("SELECT text, meta, speaker FROM episodes WHERE id = ?",
+                                      (episode_id,)).fetchone()
+
+    def test_the_quoted_sentences_keep_the_owners_words(self):
+        before = {episode: self.episode(episode) for episode in (self.chewed, self.vet)}
+        self.assertTrue(self.memory.correct(self.fact.id, "The owner's dog is called Rex."))
+        self.assertEqual(self.memory.fact(self.fact.id).text, "The owner's dog is called Rex.")
+        self.assertEqual({episode: self.episode(episode) for episode in before}, before)
+        self.assertEqual([e.text for e in self.memory.recall_history("vet")], [self.VET])
+        self.assertEqual(self.memory.recall_history("Rex"), [], "the owner never said Rex")
+
+    def test_the_corrected_fact_no_longer_rests_on_the_dreams_quotes(self):
+        self.memory.correct(self.fact.id, "The owner's dog is called Rex.")
+        tellings = self.memory.db.execute("SELECT count(*) FROM fact_tellings WHERE fact_id = ?",
+                                          (self.fact.id,)).fetchone()[0]
+        self.assertEqual(tellings, 0)
+        source, = self.memory.db.execute("SELECT source FROM facts WHERE id = ?", (self.fact.id,)).fetchone()
+        self.assertIsNone(source)
+        # Forgetting a quoted sentence now leaves the owner's corrected fact.
+        self.memory.edit(episode_ids=[self.chewed])
+        self.assertEqual(self.memory.fact(self.fact.id).text, "The owner's dog is called Rex.")
+        self.assertEqual(self.episode(self.vet)[0], self.VET)
+
+    def test_a_reply_that_recalled_the_old_claim_goes(self):
+        reply = self.memory.log("said", "Biscuit sounds like a handful.", "Pip", recalled=[self.fact.id])
+        change = self.memory.edit(fact_ids=[self.fact.id], replacement="The owner's dog is called Rex.")
+        self.assertIn(reply, change.episode_ids)
+        self.assertEqual(self.episode(reply)[0], "[forgotten]")
+        self.assertNotIn(self.chewed, change.episode_ids)
+
+    def test_a_retelling_by_command_is_corrected_with_the_fact(self):
+        command = self.memory.log("heard", "remember that the owner's dog is called Biscuit", "Richard",
+                                  command=True)
+        self.assertEqual(self.memory.remember("The owner's dog is called Biscuit.", "Richard", command),
+                         self.fact.id)
+        self.memory.correct(self.fact.id, "The owner's dog is called Rex.")
+        text, meta, _ = self.episode(command)
+        self.assertEqual(text, "The owner's dog is called Rex.")
+        self.assertIn("command", meta)
+        self.assertEqual(self.episode(self.chewed)[0], self.BISCUIT)
+
+    def test_correcting_a_quoted_sentence_drops_the_claim_drawn_from_it(self):
+        change = self.memory.edit(episode_ids=[self.chewed], replacement="ugh my dog chewed my shoe again")
+        self.assertEqual(self.episode(self.chewed)[0], "ugh my dog chewed my shoe again")
+        self.assertEqual(self.episode(self.vet)[0], self.VET, "the other quote is not rewritten")
+        self.assertEqual(self.memory.facts(), [], "the claim rested on the old words")
+        self.assertIn(self.fact.id, change.fact_ids)
+
+
+class ExpiringADreamFact(unittest.TestCase):
+    """A promoted fact rests on every quote: the oldest one expiring takes
+    it, visibly, with the replies that recalled it."""
+
+    def test_expiry_of_the_oldest_quote_reports_the_fact_and_takes_its_replies(self):
+        memory = Memory(None, embedder=None)
+        self.addCleanup(memory.close)
+        old = memory.log("heard", "My sister Ana is moving to Perth next month.", "Richard")
+        new = memory.log("heard", "My sister Ana is moving to Perth soon.", "Richard")
+        said_days_ago(memory, old, 40)
+        claim = "The owner's sister Ana is moving to Perth."
+        dream_store.save_candidates(memory, "Richard", [checked(memory, old, claim, "My sister Ana is moving to Perth")],
+                                    night="2026-10-15")
+        dream_store.save_candidates(memory, "Richard", [checked(memory, new, claim, "My sister Ana is moving to Perth")],
+                                    night="2026-11-23")
+        fact, = memory.facts()
+        reply = memory.log("said", "Is Ana settling in Perth?", "Pip", recalled=[fact.id])
+
+        change = memory.expire_before(time.time() - 30 * 86400)
+
+        self.assertEqual(change.fact_ids, (fact.id,))
+        self.assertEqual(change.fact_texts, (claim,))
+        self.assertIn(reply, change.episode_ids)
+        self.assertEqual(memory.facts(), [])
+        self.assertEqual(memory.recall_history("settling"), [], "a reply made from the fact goes with it")
+        self.assertEqual([e.id for e in memory.recall_history("Perth soon")], [new],
+                         "the newer sentence is independent and stays until it ages out")
+
+
+class SameEvening(unittest.TestCase):
+    """Two sentences from one evening, read either side of midnight, are not
+    a fact recurring on a later night."""
+
+    def test_recurrence_counts_the_days_the_owner_said_it(self):
+        from datetime import datetime, timedelta, timezone
+
+        zone = timezone(timedelta(hours=11))
+        memory = Memory(None, embedder=None)
+        self.addCleanup(memory.close)
+
+        def said(text, when):
+            episode = memory.log("heard", text, "Richard")
+            with memory.db:
+                memory.db.execute("UPDATE episodes SET ts = ? WHERE id = ?", (when.timestamp(), episode))
+            return episode
+
+        evening = datetime(2026, 11, 22, 23, 30, tzinfo=zone)
+        first = said("I started my new job at Acme this week", evening)
+        second = said("the new job at Acme is going well", evening + timedelta(minutes=20))
+        later = said("my new job at Acme had a long meeting today", evening + timedelta(days=1, hours=-4))
+        claim = "The owner has a new job at Acme."
+
+        def save(episode, quote, night):
+            return dream_store.save_candidates(memory, "Richard", [checked(memory, episode, claim, quote)],
+                                               night=night, zone=zone)
+
+        self.assertEqual(save(first, "my new job at Acme", "2026-11-22"), [])
+        self.assertEqual(save(second, "new job at Acme", "2026-11-23"), [], "the same evening, past midnight")
+        self.assertEqual(memory.facts(), [])
+        self.assertEqual(len(save(later, "my new job at Acme", "2026-11-24")), 1, "said again the next day")
+        self.assertEqual([f.text for f in memory.facts()], [claim])
 
 
 class Reports(unittest.TestCase):

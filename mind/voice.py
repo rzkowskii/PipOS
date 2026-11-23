@@ -885,14 +885,18 @@ class Voice:
             self.last_sound = now
         elif topic == "hear.wake":
             segment = self.last_segment or self.segment or Span()
-            LOG.info("heard the wake phrase%s: score %s, %s, mic gain %.2fx", " in one breath" if oneshot else "",
+            LOG.info("heard the wake phrase%s%s: score %s, %s, mic gain %.2fx", " in one breath" if oneshot else "",
+                     f" while {self.state}" if self.state in TALKING else "",
                      number(getattr(self.recognizer, "wake_score", None), "d"), segment.describe(), self.mic.gain)
-            self.dictation_until = math.inf
-            self.followup = False
-            self._oneshot_wake = oneshot
-            self.expecting = True
-            self.apology_owed = True
-            self.pending_timing = None
+            # The brainstem ignores a wake during its turn, so nothing is
+            # expected and no apology is owed for one heard then.
+            if self.state not in TALKING:
+                self.dictation_until = math.inf
+                self.followup = False
+                self._oneshot_wake = oneshot
+                self.expecting = True
+                self.apology_owed = True
+                self.pending_timing = None
         elif topic == "hear.speech_start":
             self.dictation = Span()
             self.voiced_at = None
@@ -1087,15 +1091,18 @@ class Voice:
 
     async def refresh_engines(self, wake):
         refresh = getattr(self.engines, "refresh_tts", None)
-        changing = self.engine_task is not None and not self.engine_task.done()
-        if refresh is not None and not changing and not self.tts_forced:
-            found = await refresh(self.tts, self.tts_choice, state_dir=self.settings_dir)
+        if refresh is not None and not self.changing_engine() and not self.tts_forced:
+            current, choice = self.tts, self.tts_choice
+            found = await refresh(current, choice, state_dir=self.settings_dir)
             if found is not None:
                 engine, note = _engine_result(found)
                 if note:
                     log(note)
                 if engine is not None:
-                    await self.use_tts(engine, self.tts_choice)
+                    # The measurement takes seconds: a voice the owner chose
+                    # meanwhile is kept, and the measured one is given back.
+                    await self.use_tts(engine, choice, lambda: self.tts is current and self.tts_choice == choice
+                                       and not self.changing_engine())
         refresh = getattr(self.engines, "refresh_asr", None)
         if refresh is not None and self.recognizer is wake:
             phrase = getattr(wake, "wake_phrase", None)
@@ -1108,15 +1115,28 @@ class Voice:
                 if engine is not None and engine is not wake:
                     await self.adopt_recognizer(engine, wake)
 
+    def changing_engine(self):
+        """A spoken voice change is under way in another task."""
+        task = self.engine_task
+        return task is not None and not task.done() and task is not asyncio.current_task()
+
     async def adopt_tts(self, choice):
         engine, note = await asyncio.to_thread(pick_tts, self.engines, choice, self.settings_dir)
         if note:
             log(note)
-        await self.use_tts(engine, choice)
+        # The owner's latest spoken choice wins over this one if it changed
+        # while the voice was being chosen or loaded.
+        await self.use_tts(engine, choice, lambda: self.tts_choice == choice and not self.changing_engine())
 
-    async def use_tts(self, engine, choice):
+    async def use_tts(self, engine, choice, wanted=None):
+        """Switch to `engine`. `wanted()` says whether the switch still stands;
+        it is asked again after the voice loads, and so is whether another
+        switch happened meanwhile. A voice not switched to is given back."""
         old = self.tts
         if engine is old:
+            return
+        if wanted is not None and not wanted():
+            await self.drop_engine(engine, old)
             return
         warm = getattr(engine, "warm", None)
         if warm is not None and inspect.iscoroutinefunction(warm):
@@ -1124,6 +1144,9 @@ class Voice:
             try:
                 await warm()
             except asyncio.CancelledError:
+                # The load goes on on the voice's own thread; its memory must
+                # still come back, after the load ends.
+                self.discard_engine(engine)
                 raise
             except Exception as error:
                 # A voice that cannot load is never switched to: the one in use stays.
@@ -1131,10 +1154,32 @@ class Voice:
                             engine_name(old))
                 await self.release_engine(engine)
                 return
+        if self.tts is not old or (wanted is not None and not wanted()):
+            await self.drop_engine(engine, old)
+            return
         if engine_name(engine) != engine_name(old):
             LOG.info("speech engine: %s (%s)", engine_name(engine), choice)
         self.tts = engine
         await self.release_engine(old)
+
+    async def drop_engine(self, engine, old):
+        LOG.info("not switching to the %s voice: the voice was changed meanwhile; keeping %s",
+                 engine_name(engine), engine_name(self.tts))
+        if engine is not self.tts and engine is not old:
+            await self.release_engine(engine)
+
+    def discard_engine(self, engine):
+        """Give back a voice that was never switched to, without waiting:
+        its close runs on a worker thread even if this task is cancelled."""
+        close = getattr(engine, "close", None)
+        if isinstance(engine, FliteEngine) or not callable(close) or engine is self.tts:
+            return
+
+        def done(future):
+            if not future.cancelled() and future.exception() is not None:
+                LOG.warning("could not unload the %s voice: %r", engine_name(engine), future.exception())
+
+        asyncio.get_running_loop().run_in_executor(None, close).add_done_callback(done)
 
     async def release_engine(self, engine):
         """Give back a resident voice's memory. A voice the reply thread may still

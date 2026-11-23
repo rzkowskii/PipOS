@@ -81,9 +81,27 @@ def _valid(kind, count):
     return (isinstance(kind, str) and kind in KINDS and type(count) is int and 0 <= count <= MAX_COUNT)
 
 
+def keeps_nothing(state_dir):
+    """True while the memory mode is session-only ("nothing after a
+    restart"), or the policy cannot be read: then no line is written, by any
+    writer, because this file outlives the restart. Never raises."""
+    try:
+        from .retention import load_policy
+
+        return load_policy(state_dir).mode == "session-only"
+    except Exception:
+        return True
+
+
 def record(state_dir, kind, count=1, *, now=None):
-    """Append one line; True if it was written. Never raises."""
+    """Append one line; True if it was written. Never raises.
+
+    Nothing is written in session-only mode: the turn, the voice backup, the
+    night shift and the doctor's repairs all come through here.
+    """
     if not _valid(kind, count):
+        return False
+    if keeps_nothing(state_dir):
         return False
     try:
         stamp = int(time.time() if now is None else now)

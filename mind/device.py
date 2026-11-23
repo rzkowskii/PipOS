@@ -254,12 +254,14 @@ class _VoiceBackup:
         self.finished = threading.Event()
 
         def attempt():
+            from . import backup
+
             try:
+                # Below the face, the voice and the turn: the owner may keep talking.
+                backup.lower_priority()
                 work()
                 self.outcome = "done"
             except Exception as error:  # every ending is told, never raised into a turn
-                from . import backup
-
                 reason = getattr(error, "reason", None) if isinstance(error, backup.Unavailable) else None
                 self.outcome = reason if reason in FAILED_WORDS else "failed"
             finally:
@@ -312,7 +314,8 @@ async def back_up(ctx, *, readiness=None, run=None, current=None, answer_within=
     async def go():
         if current.running:
             return Reply(NOT_READY["busy"])
-        current.start(state_dir, run or (lambda: backup.stick_backup(state_dir, "voice")))
+        trusted = getattr(ctx, "clock_trusted", None)
+        current.start(state_dir, run or (lambda: backup.stick_backup(state_dir, "voice", clock_trusted=trusted)))
         # Wait in small steps, so the loop (and the face) stay free.
         deadline = time.monotonic() + answer_within
         while not current.finished.is_set() and time.monotonic() < deadline:

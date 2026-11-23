@@ -240,9 +240,18 @@ class Sticks(CareTestCase):
 
         with patch.object(care, "quiet", side_effect=fake), patch.object(care, "run", side_effect=fake), \
                 self.keys("1", "y", "n"):
-            care.update_menu(try_boot=False)
+            care.update_menu(self.mind, try_boot=False)
         self.mount.assert_called_once_with("/dev/sdc1")  # read-only: no writable flag
         self.assertIn(["rauc", "install", str(bundle)], calls)
+        # "Did your update work?" reads this line: the menu, not a test, writes it.
+        from mind import action_log, device
+
+        self.assertEqual([entry["kind"] for entry in action_log.entries(self.mind)], ["update.install"])
+        good = self.mind / "slot-good"
+        good.write_text("B\n")
+        cmdline = self.mind / "cmdline"
+        cmdline.write_text("rauc.slot=B quiet\n")
+        self.assertIn("I started on the new system", device.update_line(self.mind, cmdline=cmdline, slot_good=good))
         self.assertTrue(self.unmount.called)
         self.assertNotIn(["systemctl", "reboot"], calls)
         self.assertIn("beingos-laptop-installed-v1", self.out.getvalue())
@@ -257,8 +266,27 @@ class Sticks(CareTestCase):
 
         with patch.object(care, "quiet", side_effect=fake), patch.object(care, "run", side_effect=fake), \
                 self.keys("1"), self.assertRaisesRegex(ValueError, "not signed"):
-            care.update_menu(try_boot=False)
+            care.update_menu(self.mind, try_boot=False)
         self.assertFalse(any(command[:2] == ["rauc", "install"] for command in calls))
+        from mind import action_log
+
+        self.assertEqual(action_log.entries(self.mind), [], "an update that never went in is not logged")
+
+    def test_a_failed_install_is_not_logged_as_an_update(self):
+        (self.stick / "pipos-1.3.raucb").write_bytes(b"bundle")
+
+        def fake(command, **_):
+            if command[:2] == ["rauc", "info"]:
+                return CompletedProcess(command, 0, json.dumps({"compatible": "beingos-laptop-installed-v1",
+                                                                "version": "1.3"}), "")
+            return CompletedProcess(command, 1, "", "slot busy")
+
+        with patch.object(care, "quiet", side_effect=fake), patch.object(care, "run", side_effect=fake), \
+                self.keys("1", "y"), self.assertRaisesRegex(ValueError, "did not install"):
+            care.update_menu(self.mind, try_boot=False)
+        from mind import action_log
+
+        self.assertEqual(action_log.entries(self.mind), [])
 
     def test_try_cannot_update(self):
         care.update_menu(try_boot=True)

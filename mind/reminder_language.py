@@ -18,6 +18,7 @@ class ReminderRequest:
     duration_seconds: int | None = None
     rule: str | None = None         # "daily", "weekdays" or "weekly:mon"; None rings once
     at_local: str | None = None     # a repeat's wall-clock time, "07:00"
+    relative: bool = False          # said as a delay ("in two hours"): counts real seconds
 
 
 class _ScheduleError(ValueError):
@@ -249,7 +250,26 @@ def _relative_timestamp(now, seconds):
     return stamp
 
 
+def _tonight(hour, today):
+    """(day, hour) for an evening hour said with "tonight": 12 and the small hours are after midnight."""
+    if hour == 12:
+        return today + timedelta(days=1), 0
+    if hour < 6:
+        return today + timedelta(days=1), hour
+    return today, hour
+
+
+def _tonight_clock(text):
+    """The 24-hour (hour, minute) for a clock said with "tonight", which never asks a.m. or p.m."""
+    hours = _hours_for(text, "p")
+    if hours is None:
+        return None
+    candidates, minute = hours
+    return candidates[-1], minute
+
+
 def _schedule(text, now):
+    """(timestamp, relative) for a spoken time, or None if it is not one."""
     text = re.sub(r"\s*,\s*", " ", text).casefold().replace("’", "'").strip().removeprefix("for ")
     if text.startswith("in "):
         seconds = _duration_seconds(text[3:])
@@ -257,21 +277,28 @@ def _schedule(text, now):
             return None
         if not seconds:
             raise _ScheduleError("Choose a time in the future for your reminder.")
-        return _relative_timestamp(now, seconds)
+        return _relative_timestamp(now, seconds), True
 
     text = text.removeprefix("at ")
     match = _DAY_FIRST.fullmatch(text) or _DAY_LAST.fullmatch(text)
     clock_text = match["clock"] if match else text
     if not clock_text:
         raise _ScheduleError("What time on that day? Include the task and time in the same request.")
-    clock = _clock(clock_text)
-    if clock is None:
-        return None
-    day = _calendar_day(match["day"], now.date()) if match else now.date()
+    if match and match["day"] == "tonight":
+        said = _tonight_clock(clock_text.removeprefix("at "))
+        if said is None:
+            return None
+        day, hour = _tonight(said[0], now.date())
+        clock = time(hour, said[1])
+    else:
+        clock = _clock(clock_text)
+        if clock is None:
+            return None
+        day = _calendar_day(match["day"], now.date()) if match else now.date()
     stamp = _local_timestamp(datetime.combine(day, clock), now.tzinfo)
     if stamp <= now.timestamp():
         raise _ScheduleError("That time has already passed. Choose a time in the future.")
-    return stamp
+    return stamp, False
 
 
 def _create_request(rest, now):
@@ -290,8 +317,8 @@ def _create_request(rest, now):
                 return _repeat_request("create", task, schedule, now)
         for match in _SCHEDULE_START.finditer(task_with_time):
             task = task_with_time[:match.start()].rstrip(" ,")
-            if task and (stamp := _schedule(task_with_time[match.start():], now)) is not None:
-                return ReminderRequest("create", task, stamp)
+            if task and (when := _schedule(task_with_time[match.start():], now)) is not None:
+                return ReminderRequest("create", task, when[0], relative=when[1])
         return ReminderRequest("clarify", message=_ASK_TIME)
 
     time_text, *task_part = re.split(r"\s+to(?:\s+|$)", rest, maxsplit=1, flags=re.I)
@@ -300,10 +327,10 @@ def _create_request(rest, now):
         return ReminderRequest("clarify", message=_ASK_TASK)
     if (schedule := _repeat_schedule(time_text)) is not None:
         return _repeat_request("create", task, schedule, now)
-    stamp = _schedule(time_text, now)
-    if stamp is None:
+    when = _schedule(time_text, now)
+    if when is None:
         return ReminderRequest("clarify", message=_ASK_TIME)
-    return ReminderRequest("create", task, stamp)
+    return ReminderRequest("create", task, when[0], relative=when[1])
 
 
 _REPEAT = re.compile(
@@ -389,12 +416,12 @@ def _alarm_request(match, now):
         return ReminderRequest("clarify", message=_ASK_ALARM)
     if rest.startswith("for ") and (seconds := _duration_seconds(rest[4:])):
         # "Set an alarm for ten minutes" is a length, like "in ten minutes".
-        return ReminderRequest("alarm", "Alarm", _relative_timestamp(now, seconds))
+        return ReminderRequest("alarm", "Alarm", _relative_timestamp(now, seconds), relative=True)
     if rest.startswith("in "):
         seconds = _duration_seconds(rest[3:])
         if not seconds:
             return ReminderRequest("clarify", message=_ASK_ALARM)
-        return ReminderRequest("alarm", "Alarm", _relative_timestamp(now, seconds))
+        return ReminderRequest("alarm", "Alarm", _relative_timestamp(now, seconds), relative=True)
     span = (match["span"] or "").replace(" ", "")
     if span == "daily":
         schedule = _repeat_schedule(rest.removeprefix("for "), rule="daily")
@@ -408,11 +435,21 @@ def _alarm_request(match, now):
     clock_text = clock_text.removeprefix("at ").removeprefix("for ")
     if not clock_text:
         return ReminderRequest("clarify", message=_ASK_ALARM)
+    today = now.date()
+    if day_match and day_match["day"] == "tonight":
+        # "Tonight" is the evening: 9 is 21:00, and 12 is midnight.
+        said = _tonight_clock(clock_text)
+        if said is None:
+            return ReminderRequest("clarify", message=_ASK_ALARM)
+        day, hour = _tonight(said[0], today)
+        stamp = wall_stamp(day, hour, said[1], now.tzinfo)
+        if stamp > now.timestamp():
+            return ReminderRequest("alarm", "Alarm", stamp)
+        raise _ScheduleError("That time has already passed. Choose a time in the future.")
     hours = _hours_for(clock_text, "a" if span in ("morning", "wakeup") else None)
     if hours is None:
         return ReminderRequest("clarify", message=_ASK_ALARM)
     candidates, minute = hours
-    today = now.date()
     days = [_calendar_day(day_match["day"], today)] if day_match and day_match["day"] else [today, today + timedelta(days=1)]
     for day in days:
         for hour in sorted(candidates):

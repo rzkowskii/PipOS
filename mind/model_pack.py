@@ -320,9 +320,38 @@ class Verdicts:
                         os.replace(name, self.path)
                     finally:
                         name.unlink(missing_ok=True)
+                # Make the rename itself durable: a power cut must not roll a
+                # removed (distrusted) entry back into the folder.
+                fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
             return True
         except OSError:
             return False
+
+    def drop(self, role):
+        """Stop trusting a role's cached verdict, failing safe. True when it is gone.
+
+        Rewriting the file can fail (a full or failing /mind). Unlinking it
+        then still works on a full disk, and costs only a full hash of every
+        pack at the next start, never a skipped hash of a damaged file.
+        """
+        if self.path is None:
+            return True
+        if self.update(role, None):
+            return True
+        try:
+            self.path.unlink(missing_ok=True)
+            fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            return True
+        except OSError:
+            return not self.path.exists() and not self.path.is_symlink()
 
 
 def descriptor_digest(pack):
@@ -493,8 +522,10 @@ class RehashJob:
         return queue
 
     def _fail(self, role, reason):
-        self.failures.append({"role": role, "reason": str(reason)[:200]})
-        Verdicts(self.verdict).update(role, None)
+        failure = {"role": role, "reason": str(reason)[:200]}
+        if not Verdicts(self.verdict).drop(role):
+            failure["verdict_kept"] = True      # nothing on /mind could be changed; say so
+        self.failures.append(failure)
 
     def _work(self, budget_s):
         """Hash for about budget_s seconds. True when every pack is done."""

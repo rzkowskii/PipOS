@@ -32,6 +32,9 @@ class Confirm:
     on_yes: Callable[[], Awaitable[Reply]]
     on_no: Reply = Reply("[neutral] Okay, I've left it.")
     seconds: float = 15.0
+    # True for what cannot be undone (switching off, clearing a list): only a
+    # plain yes confirms, never "okay" or "sure".
+    strict: bool = False
 
 
 @dataclass(frozen=True)

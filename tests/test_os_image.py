@@ -591,10 +591,30 @@ class UnitTests(unittest.TestCase):
     def test_bodycare_restores_defaults_on_any_exit(self):
         service = unit(PACKAGE / "being-bodycare.service")
         self.assertEqual(values(service, "Service", "Type"), ["notify"])
-        self.assertEqual(values(service, "Service", "ExecStopPost"), ["/usr/bin/being-bodycare --restore"])
+        self.assertEqual(values(service, "Service", "ExecStopPost"),
+                         ["/usr/bin/being-bodycare --restore --journal /run/being-bodycare/restore.json"])
         self.assertTrue(values(service, "Service", "WatchdogSec"))
         # /sys must stay writable for the power knobs.
         self.assertFalse(values(service, "Service", "ProtectKernelTunables"))
+
+    def test_bodycare_can_write_its_restore_journal_inside_its_sandbox(self):
+        # Care::set() refuses every write it cannot journal first, so a
+        # read-only journal would silently turn act mode into observe mode.
+        service = unit(PACKAGE / "being-bodycare.service")
+        self.assertEqual(values(service, "Service", "ProtectSystem"), ["strict"])
+        writable = ["/run/" + name for line in values(service, "Service", "RuntimeDirectory")
+                    for name in line.split()]
+        writable += [path.lstrip("-") for line in values(service, "Service", "ReadWritePaths")
+                     for path in line.split()]
+        # Kept across restarts and through ExecStopPost, so the originals survive a crash.
+        self.assertEqual(values(service, "Service", "RuntimeDirectoryPreserve"), ["yes"])
+        for key in ("ExecStart", "ExecStopPost"):
+            with self.subTest(command=key):
+                words = values(service, "Service", key)[0].split()
+                self.assertIn("--journal", words, "the default journal path is the brainstem's read-only /run/being")
+                journal = Path(words[words.index("--journal") + 1])
+                self.assertTrue(any(journal.parent == Path(place) or Path(place) in journal.parents
+                                    for place in writable), (journal, writable))
 
     def test_every_unit_file_here_is_installed_by_the_recipe(self):
         recipe = (PACKAGE / "being.mk").read_text()

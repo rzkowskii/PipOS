@@ -507,3 +507,56 @@ class HandsDownNamesTheApp(unittest.TestCase):
                          "My hands aren't working right now, so I can't open my monitor.")
         self.assertEqual(bridge.parse("open the terminal", False).say,
                          "My hands aren't working right now, so I can't open the terminal.")
+
+
+class ForgetAnswerTest(unittest.IsolatedAsyncioTestCase):
+    """The forget waits for 'forgotten' itself, and a late one still redacts."""
+
+    async def asyncSetUp(self):
+        self.bus = SilentBus()
+        self.bridge = AppBridge(self.bus, shelf=SHELF, enabled=lambda: True)
+        self.bridge.hands_up = True
+        self.said = []
+
+    async def say(self, line):
+        self.said.append(line)
+
+    async def test_a_cancelled_status_under_the_req_is_not_the_answer(self):
+        self.bridge.observe({"t": "term.status", "id": "j1", "phase": "writing", "source": "model"})
+        await self.bridge.handle(self.bridge.parse("clear the workshop"), self.say)
+
+        async def answer():
+            await asyncio.sleep(0.01)
+            req = self.bus.sent[-1]["req"]
+            self.bridge.observe({"t": "term.status", "id": "j1", "phase": "cancelled", "req": req})
+            await asyncio.sleep(0.05)
+            self.bridge.observe({"t": "term.status", "phase": "forgotten", "removed": 1, "req": req})
+        asyncio.get_running_loop().create_task(answer())
+        await self.bridge.handle(self.bridge.parse("yes"), self.say)
+        self.assertEqual(self.said[-1], REPLIES["cleared"])
+
+    async def test_a_forgotten_after_the_wait_still_redacts_the_episode(self):
+        self.bridge.observe({"t": "term.status", "id": "j1", "phase": "waiting", "file": "spiral.py", "sha256": "ab"})
+        self.bridge.note_episode(41, self.bridge.episode()[1])
+        await self.bridge.handle(parse("forget that script", WAITING), self.say)
+        with mock.patch.object(app_commands, "FORGET_WAIT", 0.05):
+            await self.bridge.handle(self.bridge.parse("yes"), self.say)
+        self.assertEqual(self.said[-1], "I couldn't reach my hands to forget it.")
+        self.assertEqual(self.bridge.forgotten_episodes(), [])
+        req = self.bus.sent[-1]["req"]
+        self.bridge.observe({"t": "term.status", "id": "j1", "phase": "forgotten", "removed": 1, "req": req})
+        self.assertEqual(self.bridge.forgotten_episodes(), [41])
+
+    async def test_a_restarted_hands_hears_about_the_guest_again(self):
+        await self.bridge.privacy(True)
+        self.bus.sent.clear()
+        self.bridge.observe({"t": "organ.down", "name": "hands"})
+        self.bridge.observe({"t": "organ.up", "name": "hands"})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.assertEqual(self.bus.sent, [{"t": "app.privacy", "guest": True}])
+        await self.bridge.privacy(False)
+        self.bus.sent.clear()
+        self.bridge.observe({"t": "organ.up", "name": "hands"})
+        await asyncio.sleep(0)
+        self.assertEqual(self.bus.sent, [])

@@ -167,13 +167,33 @@ class SherpaRecognizer(RecognizerEngine):
         events = self._collect()
         if self.decoding is not None:
             return events       # one utterance at a time; frames during a decode are dropped
-        if not attending and not self.oneshot:
+        # An utterance already announced with hear.speech_start is finished
+        # even when attending drops under it, as PocketSphinx finishes its own
+        # dictation: it ends in a final, never silently.
+        finishing = self.was_attending and self._vad_speech
+        if not attending and not self.oneshot and not finishing:
             if self.was_attending:
                 self._back_to_rest()
             return events + self._rest(frame, oneshot)
         if not self.was_attending and not self.oneshot:
             self._begin_attending()
         return events + self._listen(sherpa.pcm_to_float(frame))
+
+    @property
+    def in_speech(self):
+        """Whether someone is talking now, as the voice's levels need it.
+
+        While resting PocketSphinx hears every frame, so its endpointer is the
+        answer; while attending (or in a one-breath command) it is Silero's."""
+        if self.broken or not (self.was_attending or self.oneshot):
+            if self.decoding is not None:
+                return False    # the wake engine is not fed while a decode runs
+            return getattr(self.wake, "in_speech", False) is True
+        return self._vad_speech
+
+    @in_speech.setter
+    def in_speech(self, value):
+        self._vad_speech = bool(value)
 
     # Resting: PocketSphinx listens for the name -------------------------------------
 

@@ -247,6 +247,61 @@ class MemoryJobs(unittest.IsolatedAsyncioTestCase):
                          ["checkpoint", "expiry", "search", "vectors", "journal", "diary", "dream"])
         memory.close()
 
+    async def test_a_long_statement_never_holds_up_the_event_loop_and_an_interrupt_aborts_it(self):
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = Memory(Path(tmp), embedder=None)
+            self.addCleanup(memory.close)
+            ended, outcome = threading.Event(), []
+
+            def slow_optimise(db=None):
+                # Seconds of SQLite work: a VACUUM or quick_check of a big
+                # archive on the old laptop's disk.
+                self.assertIsNotNone(db, "the night's own connection, not memory's")
+                self.assertIsNot(db, memory.db)
+                try:
+                    db.execute("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c "
+                               "WHERE x < 200000000) SELECT count(*) FROM c").fetchone()
+                    outcome.append("finished")
+                except Exception as exc:
+                    outcome.append(type(exc).__name__)
+                    raise
+                finally:
+                    ended.set()
+
+            memory.optimize_search = slow_optimise
+            shift = NightShift()
+            shift.register("search", standard_jobs(NightShift(), memory, owner="R", night="n").jobs["search"])
+            task = asyncio.create_task(shift.step(OPEN))
+            await asyncio.sleep(0.05)
+            started = time.monotonic()
+            await asyncio.sleep(0.2)
+            self.assertLess(time.monotonic() - started, 0.5, "the loop kept running during the statement")
+            shift.interrupt()
+            results = await asyncio.wait_for(task, 2.0)
+            self.assertEqual(results, {"search": "interrupted"})
+            self.assertTrue(await asyncio.to_thread(ended.wait, 2.0), "the statement in flight was aborted")
+            self.assertEqual(outcome, ["OperationalError"])
+
+    async def test_compaction_needs_mains_and_never_runs_with_the_light_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = Memory(Path(tmp), embedder=None)
+            self.addCleanup(memory.close)
+            compacted = []
+            memory.disk_state = lambda refresh=False: {"state": "low", "free_fraction": 0.08, "free_bytes": 1}
+            memory.compact = lambda db=None: compacted.append(db is not None)
+            shift = standard_jobs(NightShift(), memory, owner="Richard", night="2026-11-23")
+            battery = Gate(night=True, on_ac=False, body_ok=False)
+            results = await shift.step(battery, night="2026-11-23")
+            self.assertEqual(results["checkpoint"], "done")
+            self.assertEqual(shift.jobs["checkpoint"].last_check, "ok")
+            self.assertEqual(results["search"], "waiting")
+            self.assertEqual(compacted, [], "no vacuum on battery")
+            results = await shift.step(OPEN, night="2026-11-23")
+            self.assertEqual(results["search"], "done")
+            self.assertEqual(compacted, [True], "on mains, on the night's own connection")
+
     async def test_the_vector_job_backfills_in_bounded_chunks(self):
         from mind import embed
 

@@ -531,3 +531,149 @@ class RingBell(unittest.IsolatedAsyncioTestCase):
         for state in ({"chirps_on": False}, {"muted": True}):
             order = await self.speak({"text": "Your timer is done.", "last": True, "chirp": "bell"}, **state)
             self.assertEqual(order, [("words", True)], state)
+
+
+class Loading(AsyncEngine):
+    """A natural voice whose load is held until released; records its close."""
+
+    def __init__(self):
+        super().__init__()
+        self.release = asyncio.Event()
+        self.closed = threading.Event()
+
+    async def warm(self):
+        await self.release.wait()
+
+    def close(self):
+        self.closed.set()
+
+
+class EngineRaces(unittest.IsolatedAsyncioTestCase):
+    """The owner's spoken voice choice beats a measurement or start-up load."""
+
+    async def wait_for(self, condition):
+        async with asyncio.timeout(2):
+            while not condition():
+                await real_sleep(0.001)
+
+    async def test_a_measurement_finishing_after_a_spoken_choice_does_not_override_it(self):
+        piper = Loading()
+        piper.release.set()
+        measuring = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def refresh_tts(current, choice, *, state_dir):
+            measuring.set()
+            await finish.wait()     # three sentences take seconds on the laptop
+            return piper, "The natural voice is fast enough now."
+
+        with tempfile.TemporaryDirectory() as work:
+            engines = SimpleNamespace(refresh_tts=refresh_tts)
+            wake = Mock()
+            voice = Voice(wake, "Richard", [], "", engines=engines, settings_dir=Path(work))
+            voice.state = "idle"
+            with patch("builtins.print"), patch.object(voice, "publish_level", AsyncMock()):
+                refresh = asyncio.create_task(voice.refresh_engines(wake))
+                await measuring.wait()
+                # "Hey Pip, use your original voice."
+                await voice.change_engine("flite")
+                await voice.engine_task
+                chosen = voice.tts
+                finish.set()
+                await refresh
+            self.assertIs(voice.tts, chosen)
+            self.assertIsInstance(voice.tts, FliteEngine)
+            self.assertEqual(voice.tts_choice, "flite")
+            await self.wait_for(piper.closed.is_set)
+
+    async def test_a_start_up_voice_still_loading_does_not_override_a_spoken_choice(self):
+        piper = Loading()
+        wake = Mock(wake_phrase="Hey Pip")
+        with tempfile.TemporaryDirectory() as work:
+            engines = SimpleNamespace(choose_tts=Mock(return_value=(piper, None)),
+                                      choose_asr=Mock(return_value=(wake, None)))
+            voice = Voice(wake, "Richard", [], "", engines=engines, settings_dir=Path(work))
+            voice.state = "idle"
+            with patch("mind.voice.ENGINE_REFRESH_SECONDS", 3600), patch("builtins.print"), \
+                    patch.object(voice, "publish_level", AsyncMock()):
+                task = asyncio.create_task(voice.choose_engines())
+                await self.wait_for(lambda: engines.choose_tts.called)
+                await real_sleep(0.01)
+                await voice.change_engine("flite")
+                await voice.engine_task
+                chosen = voice.tts
+                piper.release.set()
+                await self.wait_for(lambda: engines.choose_asr.called)
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            self.assertIs(voice.tts, chosen)
+            self.assertIsInstance(voice.tts, FliteEngine)
+            await self.wait_for(piper.closed.is_set)
+
+    async def test_a_voice_change_cancelled_while_loading_gives_the_voice_back(self):
+        first, second = Loading(), Loading()
+        second.release.set()
+        picks = iter([(first, None), (second, None)])
+        with tempfile.TemporaryDirectory() as work:
+            engines = SimpleNamespace(choose_tts=Mock(side_effect=lambda *a, **k: next(picks)))
+            voice = Voice(Mock(), "Richard", [], "", engines=engines, settings_dir=Path(work))
+            with patch("builtins.print"), patch.object(voice, "publish_level", AsyncMock()):
+                await voice.change_engine("piper")      # "use your natural voice"
+                await self.wait_for(lambda: engines.choose_tts.call_count == 1)
+                await real_sleep(0.01)
+                await voice.change_engine("auto")       # changed again while it loads
+                await voice.engine_task
+            self.assertIs(voice.tts, second)
+            await self.wait_for(first.closed.is_set)
+            self.assertFalse(second.closed.is_set())
+
+    async def test_a_measured_voice_is_still_adopted_when_nothing_changed(self):
+        piper = Loading()
+        piper.release.set()
+
+        async def refresh_tts(current, choice, *, state_dir):
+            return piper, None
+
+        voice = Voice(Mock(), "Richard", [], "", engines=SimpleNamespace(refresh_tts=refresh_tts),
+                      settings_dir=Path("/unused"))
+        with patch("builtins.print"):
+            await voice.refresh_engines(Mock())
+        self.assertIs(voice.tts, piper)
+        self.assertFalse(piper.closed.is_set())
+
+
+class WakeDuringTurn(unittest.IsolatedAsyncioTestCase):
+    async def test_a_wake_heard_while_thinking_owes_no_apology_for_a_cough_after_the_reply(self):
+        heard = (False, [("hear.final", {"text": "what's the weather"})])
+        miss = (False, [("hear.cancel", {})])
+        cough = [SPEECH] * 20   # 0.6 s of sound, over MISSED_MIN_SECONDS
+        harness = Harness([WAKE, START, SPEECH, heard, WAKE, START, *cough, miss])
+        voice = harness.voice
+        voice.state = "attending"
+        voice.apologise = AsyncMock()
+        with patch("builtins.print"):
+            async with asyncio.TaskGroup() as voice.tasks:
+                voice.capture = voice.tasks.create_task(voice.listen())
+                await harness.frames(tone(500), tone(4000), tone(4000), tone(10))
+                voice.state = "thinking"
+                await harness.frames(tone(500))      # "Hey Pip" again, or the TV
+                self.assertIn(("hear.wake", {}), harness.sent)
+                self.assertFalse(voice.apology_owed)
+                self.assertFalse(voice.expecting)
+                voice.state = "attending"            # the follow-up window after the reply
+                await harness.frames(*[tone(4000)] * 21, tone(10))
+                voice.disarm()
+        self.assertIn(("hear.missed", {"reason": "unclear"}), harness.sent)
+        voice.apologise.assert_not_called()
+
+    async def test_a_wake_at_rest_still_expects_words(self):
+        harness = Harness([WAKE])
+        voice = harness.voice
+        voice.state = "idle"
+        with patch("builtins.print"):
+            async with asyncio.TaskGroup() as voice.tasks:
+                voice.capture = voice.tasks.create_task(voice.listen())
+                await harness.frames(tone(500))
+                self.assertTrue(voice.apology_owed)
+                self.assertTrue(voice.expecting)
+                voice.disarm()

@@ -88,6 +88,11 @@ class BenchGuest(unittest.TestCase):
                                                                {"threads": 1, "threads_batch": 2, "mlock": True}]}]}))
         self.out = self.root / "PIPLOGS-boot"
         self.out.mkdir()
+        # These tests measure; signing is tests/test_bench.py's. Stand in for a
+        # bench pack that verified, with its signed digests.
+        digests = {name: bench_guest.sha256(self.models / name) for name in ("tiny.gguf", "manifest.json")}
+        self.enterContext(patch.object(bench_guest, "bench_pack", lambda models_dir: {
+            "ok": True, "files": 2, "bound": False, "digests": dict(digests)}))
 
     def run_bench(self, *extra):
         argv = ["--output", str(self.out), "--models-dir", str(self.models), "--server", str(self.server),

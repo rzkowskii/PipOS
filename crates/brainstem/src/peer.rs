@@ -18,6 +18,9 @@ pub const PROTECTED: &[(&str, &[&str])] = &[
     ("eyes", &["being-eyes.service"]),
     ("hands", &["being-hands.service"]),
     ("bodycare", &["being-bodycare.service"]),
+    // The typing chat (mind/type_chat.py) runs from the local menu, and its
+    // words count as the owner's, so no other unit may take its name.
+    ("keyboard", &["being-local-screen.service"]),
 ];
 
 /// The unit our own process runs in, if it is the appliance brainstem.
@@ -107,6 +110,9 @@ mod tests {
         assert!(!may_claim("face", None), "an unknown peer cannot be the face");
         assert!(may_claim("face", Some("being-local-screen.service")));
         assert!(may_claim("voice", Some("being-lab-body.service")));
+        assert!(may_claim("keyboard", Some("being-local-screen.service")), "the typing chat");
+        assert!(!may_claim("keyboard", Some("being-eyes.service")), "the camera sandbox cannot type as the owner");
+        assert!(!may_claim("keyboard", None));
         assert!(may_claim("soak", None), "lab tools keep their own names");
         assert!(may_claim("hardware-timing-12", Some("being-lab-observe.service")));
     }

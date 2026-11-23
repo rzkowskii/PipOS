@@ -631,7 +631,12 @@ fn a_dying_battery_warns_then_powers_off_after_the_mind_saves() {
     std::fs::create_dir_all(&dir).unwrap();
     let mark = dir.join("off");
     let cmd = format!("touch {}", mark.display());
-    let stem = Stem::start_with("battery", "mind", &["--poweroff-cmd", &cmd], &[("BEING_SHUTDOWN_GRACE", "30")]);
+    let stem = Stem::start_with(
+        "battery",
+        "mind",
+        &["--poweroff-cmd", &cmd],
+        &[("BEING_SHUTDOWN_GRACE", "30"), ("BEING_BATTERY_CONFIRM_HOLD", "1")],
+    );
     let watcher = stem.join("watcher", &["body.battery", "stem.shutdown", "body.state"]);
     let mut mind = stem.join("mind", &[]);
     let mut lab = stem.join("lab", &[]);
@@ -648,5 +653,34 @@ fn a_dying_battery_warns_then_powers_off_after_the_mind_saves() {
         assert!(Instant::now() < deadline, "no power-off after the mind saved");
         std::thread::sleep(Duration::from_millis(20));
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn one_bad_battery_reading_does_not_power_off_a_healthy_laptop() {
+    let dir = PathBuf::from(format!("/tmp/bt-{}-glitch-mark", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mark = dir.join("off");
+    let cmd = format!("touch {}", mark.display());
+    // The default confirmation hold (30 s) and a short grace.
+    let stem = Stem::start_with("glitch", "mind", &["--poweroff-cmd", &cmd], &[("BEING_SHUTDOWN_GRACE", "1")]);
+    let watcher = stem.join("watcher", &["body.battery", "stem.shutdown"]);
+    let mut mind = stem.join("mind", &[]);
+    let mut lab = stem.join("lab", &[]);
+    lab.send(&Event::new("sim.body").with("battery", 60.0).with("charging", false)).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    // One pass reads capacity 0, the next 60% again.
+    lab.send(&Event::new("sim.body").with("battery", 0.0)).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    lab.send(&Event::new("sim.body").with("battery", 60.0)).unwrap();
+    mind.send(&Event::new("mind.shutdown_ready")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if let Ok(Some(ev)) = watcher.recv_timeout(Duration::from_millis(50)) {
+            panic!("a lone bad reading was believed: {ev:?}");
+        }
+    }
+    assert!(!mark.exists(), "powered off at 60%");
     let _ = std::fs::remove_dir_all(&dir);
 }

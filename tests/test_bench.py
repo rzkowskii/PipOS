@@ -1,6 +1,9 @@
 """Bench mode (mind/bench.py, being-bench.service, the bench stick) against a fake llama-server (task L7.6)."""
 
+import functools
+import hashlib
 import json
+import shutil
 import sys
 import tempfile
 import types
@@ -8,28 +11,56 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from lab import bench_report, quant_candidates
+from lab import bench_report, package_model, quant_candidates
 from lab.tests.host.test_bench_guest import FAKE_SERVER, free_port
-from mind import bench
+from mind import bench, model_pack
+from tests.test_model_pack import keypair
 
 REPO = Path(__file__).resolve().parent.parent
 
 
+def sign_pack(models, role, files, certificate, key):
+    """Sign a pack for files already in place under `models` (as a builder would)."""
+    base = model_pack.root(role, models)
+    if role == "conversation":
+        data = (base / "reflex.gguf").read_bytes()
+        pack = {"format": model_pack.FORMAT_V1, "role": role, "file": "reflex.gguf", "bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest()}
+    else:
+        pack = {"format": model_pack.FORMAT_V2, "role": role, "dir": model_pack.ROLE_DIRS[role], "files": [
+            {"path": name, "bytes": (base / name).stat().st_size,
+             "sha256": hashlib.sha256((base / name).read_bytes()).hexdigest()} for name in files]}
+    (base / model_pack.envelope_name(role)).write_bytes(package_model.sign(json.dumps(pack).encode(), certificate, key))
+
+
+@unittest.skipUnless(shutil.which("openssl"), "needs the OpenSSL CLI")
 class FullRun(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        temp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(temp.cleanup)
+        cls.key, cls.cert = keypair(Path(temp.name), "fixture release")
+
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.server = self.root / "llama-server"
         self.server.write_text(f"#!{sys.executable}\n" + FAKE_SERVER)
         self.server.chmod(0o755)
+        source = self.root / "bench-src"
+        source.mkdir()
+        (source / "q4_0.gguf").write_bytes(b"GGUF q4_0")
+        (source / "manifest.json").write_text(json.dumps({"models": [{"file": "q4_0.gguf", "name": "Q4_0"}]}))
+        package_model.stage_bench(source, self.root / "models", self.cert, self.key)
         self.models = self.root / "models/bench"
-        self.models.mkdir(parents=True)
-        (self.models / "q4_0.gguf").write_bytes(b"GGUF q4_0")
-        (self.models / "manifest.json").write_text(json.dumps({"models": [{"file": "q4_0.gguf", "name": "Q4_0"}]}))
         self.dream = self.root / "models/dream/dream.gguf"
         self.dream.parent.mkdir(parents=True)
         self.dream.write_bytes(b"GGUF dream")
+        sign_pack(self.root / "models", "dream", ["dream.gguf"], self.cert, self.key)
         self.out = self.root / "PIPLOGS-boot"
         self.out.mkdir()
+        # The system's trust root, as the bench's checks see it on the laptop.
+        self.enterContext(patch.object(model_pack, "verify", functools.partial(
+            model_pack.verify, certificate=self.cert, descriptor=None, verdict=None)))
 
     def run_bench(self, *extra):
         argv = ["--output", str(self.out), "--models-dir", str(self.models), "--server", str(self.server),
@@ -113,28 +144,91 @@ class FullRun(unittest.TestCase):
         self.assertTrue({"asr_root", "voice_dir", "busy", "cortex"} <= set(inspect.signature(voice_bench.run).parameters))
 
     def test_a_bench_stick_records_its_pack_check(self):
-        self.assertIsNone(bench.bench_pack(self.models))
+        self.assertTrue(bench.bench_pack(self.models)["ok"])
+        empty = self.root / "models-empty/bench"
+        empty.mkdir(parents=True)
+        self.assertIsNone(bench.bench_pack(empty), "nothing to measure, nothing to check")
+        self.assertIsNone(bench.bench_pack(self.root / "models-none/bench"))
         (self.models / "beingos-bench.cms").write_bytes(b"not a signature")
         result = bench.bench_pack(self.models)
         self.assertFalse(result["ok"])
+
+    def test_bench_models_without_their_envelope_are_not_run(self):
+        (self.models / "beingos-bench.cms").unlink()
+        self.assertFalse(bench.bench_pack(self.models)["ok"], "a missing envelope is not a pass")
+        data = self.run_bench("--quick", "--no-speech", "--fallback-model", "")
+        self.assertFalse(data["bench_pack"]["ok"])
+        self.assertIn("no signed bench pack", data["bench_pack"]["error"])
+        self.assertIn("bench_models_skipped", data)
+        self.assertEqual(data["models"], [])
 
     def test_a_bench_pack_that_does_not_verify_keeps_its_models_from_the_server(self):
         (self.models / "beingos-bench.cms").write_bytes(b"not a signature")
         fallback = self.root / "models/reflex.gguf"
         fallback.write_bytes(b"GGUF reflex")
+        sign_pack(self.root / "models", "conversation", None, self.cert, self.key)
         data = self.run_bench("--quick", "--no-speech", "--fallback-model", str(fallback))
         self.assertFalse(data["bench_pack"]["ok"])
         self.assertIn("bench_models_skipped", data)
+        self.assertTrue(data["fallback_pack"]["ok"])
         self.assertEqual([model["file"] for model in data["models"]], ["reflex.gguf"])
+        self.assertNotIn("error", data["models"][0])
 
-    def test_a_model_that_differs_from_its_manifest_is_not_run(self):
-        (self.models / "manifest.json").write_text(json.dumps(
-            {"models": [{"file": "q4_0.gguf", "name": "Q4_0", "sha256": "0" * 64}]}))
-        data = self.run_bench("--quick", "--no-speech")
-        (model,) = data["models"]
-        self.assertFalse(model["sha256_ok"])
-        self.assertIn("skipped", model["error"])
-        self.assertNotIn("prefill", model)
+    def test_an_unverified_fallback_or_dream_model_is_never_loaded(self):
+        (self.models / "beingos-bench.cms").write_bytes(b"not a signature")
+        fallback = self.root / "models/reflex.gguf"
+        fallback.write_bytes(b"GGUF reflex")      # no conversation envelope: the cortex would refuse it too
+        self.dream.write_bytes(b"GGUF dreaM")      # same size, different bytes
+        started = []
+        real = bench.start_server
+
+        def watch(model, *options, **keywords):
+            started.append(Path(model).name)
+            return real(model, *options, **keywords)
+
+        with patch.object(bench, "start_server", watch):
+            data = self.run_bench("--quick", "--no-speech", "--fallback-model", str(fallback))
+        self.assertEqual(started, [], "llama-server never saw an unverified file")
+        self.assertFalse(data["fallback_pack"]["ok"])
+        self.assertEqual(data["models"], [])
+        self.assertFalse(data["dream"]["pack"]["ok"])
+        self.assertIn("SHA-256", data["dream"]["pack"]["error"])
+        self.assertIn("skipped", data["dream"]["error"])
+        self.assertNotIn("prefill", data["dream"])
+        lines = "\n".join(bench_report.summarise(data)["lines"])
+        self.assertIn("conversation pack: NOT VERIFIED", lines)
+        self.assertIn("dream pack: NOT VERIFIED", lines)
+
+    def test_a_model_file_outside_its_pack_folder_or_list_is_refused(self):
+        stray = self.root / "elsewhere/dream.gguf"
+        stray.parent.mkdir()
+        stray.write_bytes(b"GGUF dream")
+        self.assertIn("folder", bench.pack_check("dream", stray)["error"])
+        extra = self.dream.with_name("other.gguf")
+        extra.write_bytes(b"GGUF other")
+        self.assertIn("not a file of the signed dream pack", bench.pack_check("dream", extra)["error"])
+        self.assertTrue(bench.pack_check("dream", self.dream)["ok"])
+
+    def test_a_manifest_entry_the_signed_pack_does_not_list_is_not_run(self):
+        manifest = json.loads((self.models / "manifest.json").read_text())
+        manifest["models"].append({"file": "extra.gguf", "name": "extra"})
+        (self.models / "extra.gguf").write_bytes(b"GGUF extra")
+        (self.models / "manifest.json").write_text(json.dumps(manifest))
+        models = bench.load_models(self.models, None, {"q4_0.gguf": "0" * 64, "manifest.json": "1" * 64})
+        self.assertEqual([(model["path"].name, model["unsigned"], model["sha256"]) for model in models],
+                         [("q4_0.gguf", False, "0" * 64), ("extra.gguf", True, None)])
+
+    def test_a_model_that_differs_from_its_signed_digest_is_not_run(self):
+        model = self.models / "q4_0.gguf"
+        signed = {"q4_0.gguf": hashlib.sha256(model.read_bytes()).hexdigest()}
+        with patch.object(bench, "bench_pack", return_value={"ok": True, "files": 2, "bound": False,
+                                                             "digests": {**signed, "q4_0.gguf": "0" * 64}}):
+            data = self.run_bench("--quick", "--no-speech")
+        (entry,) = data["models"]
+        self.assertFalse(entry["sha256_ok"])
+        self.assertIn("skipped", entry["error"])
+        self.assertNotIn("prefill", entry)
+        self.assertNotIn("digests", data["bench_pack"], "the report keeps only the verdict")
 
     def test_the_lab_name_is_the_same_module(self):
         from lab import bench_guest
@@ -302,7 +396,7 @@ class QuantCandidates(unittest.TestCase):
         self.assertIn("--imatrix", argv)
         self.assertNotIn("--allow-requantize", argv)
         self.assertTrue(argv[-2].endswith("qwen3.5-0.8b-iq4_nl.gguf.part"))
-        self.assertTrue(argv[-3].endswith("qwen3.5-0.8b-bf16.gguf"))
+        self.assertRegex(Path(argv[-3]).name, r"^qwen3\.5-0\.8b-bf16-[0-9a-f]{16}\.gguf$")
         # The bench reads exactly this manifest.
         models = bench.load_models(self.bench, None)
         self.assertEqual([model["name"] for model in models],
@@ -311,6 +405,44 @@ class QuantCandidates(unittest.TestCase):
         # A second model adds to the manifest.
         self.build("qwen3-1.7b")
         self.assertEqual(len(json.loads((self.bench / "manifest.json").read_text())["models"]), 4)
+
+    def test_the_16_bit_intermediate_belongs_to_its_source_and_is_never_half_written(self):
+        import subprocess
+        converts = []
+
+        def run(command, check):
+            if command[1].endswith("convert_hf_to_gguf.py"):
+                converts.append(command[command.index("--outfile") + 1])
+            return subprocess.run(command, check=check)
+
+        self.build(run=run, types={"Q4_0"})
+        self.build(run=run, types={"Q4_0"})
+        self.assertEqual(len(converts), 1, "the same source converts once")
+        self.assertTrue(converts[0].endswith(".part"), "the converter never writes the trusted name")
+        first = json.loads((self.bench / "manifest.json").read_text())["models"][0]
+        # A new upstream revision: other weights, another record.
+        (self.hf / "model.safetensors").write_bytes(b"new weights")
+        (self.hf / "WIDTH").write_text("1")        # F16 instead of BF16: visibly another conversion
+        self.build(run=run, types={"Q4_0"})
+        self.assertEqual(len(converts), 2, "other weights are converted again, never the stale file reused")
+        second = json.loads((self.bench / "manifest.json").read_text())["models"][0]
+        self.assertNotEqual(first["from"]["weights"], second["from"]["weights"])
+        self.assertEqual((first["from"]["intermediate"], second["from"]["intermediate"]), ("BF16", "F16"))
+        # A converter that dies part-way leaves nothing a later build trusts.
+        (self.hf / "config.json").write_text('{"changed": true}')
+
+        def dies(command, check):
+            if command[1].endswith("convert_hf_to_gguf.py"):
+                Path(command[command.index("--outfile") + 1]).write_bytes(b"GGUF trunc")
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.run(command, check=check)
+
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.build(run=dies, types={"Q4_0"})
+        self.assertEqual(sorted(path.name.startswith(".") for path in (self.root / "work").iterdir()),
+                         [False, False], "no partial conversion is left, and none takes a trusted name")
+        self.build(run=run, types={"Q4_0"})
+        self.assertEqual(len(converts), 3)
 
     def test_a_quantized_input_is_refused(self):
         (self.hf / "WIDTH").write_text("15")

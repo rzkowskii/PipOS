@@ -38,6 +38,33 @@ class BeingProfile(unittest.TestCase):
         self.assertEqual(personality_greetings(cfg.personality)["hello"][0], "[joy] Hi. Good to hear you.")
         self.assertFalse(self.mind_dir.exists())
 
+    def test_every_factory_setting_reaches_the_mind(self):
+        cfg, settings = load_config(FACTORY, self.mind_dir)
+        self.assertEqual(cfg.time_zone, "Australia/Sydney")
+        self.assertEqual((cfg.top_k, cfg.top_p, cfg.presence_penalty), (20, 0.8, 1.0))
+        self.assertEqual(cfg.reply_shape, settings["reply_shape"])
+        for key in ("battery_plea_percent", "battery_plea_minutes", "battery_second_plea_percent",
+                    "battery_second_plea_minutes", "battery_critical_percent", "battery_critical_minutes"):
+            self.assertEqual(getattr(cfg, key), settings[key], key)
+
+    def test_changed_factory_settings_are_used_and_wrong_types_are_ignored(self):
+        work = tempfile.TemporaryDirectory()
+        self.addCleanup(work.cleanup)
+        config = Path(work.name) / "config"
+        config.mkdir()
+        (config / "identity.md").write_text((FACTORY / "identity.md").read_text())
+        settings = json.loads((FACTORY / "being.json").read_text())
+        settings.update(reply_shape="strict", battery_plea_percent=22, top_k=True, top_p="0.9",
+                        presence_penalty=None, time_zone=7)
+        (config / "being.json").write_text(json.dumps(settings))
+        cfg, _ = load_config(config, self.mind_dir)
+        self.assertEqual(cfg.reply_shape, "strict")
+        self.assertEqual(cfg.battery_plea_percent, 22)
+        self.assertEqual((cfg.top_k, cfg.top_p, cfg.presence_penalty, cfg.time_zone), (None, None, None, ""))
+        settings["reply_shape"] = "rambling"
+        (config / "being.json").write_text(json.dumps(settings))
+        self.assertEqual(load_config(config, self.mind_dir)[0].reply_shape, "open")
+
     def test_round_trip_keeps_the_wake_phrase_and_applies_personality_to_both_reply_paths(self):
         original = load_profile(FACTORY, self.mind_dir)
         profile = replace(original, name="Écho", voice="awb", rate=0.85, personality=PRESETS["calm"])

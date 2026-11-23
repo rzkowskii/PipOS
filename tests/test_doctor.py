@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import patch
 from pathlib import Path
@@ -29,6 +30,7 @@ class FakeSystem:
         self.backup = backup
         self.restart_ok, self.audio_ok = restart_ok, audio_ok
         self.restarted, self.audio_runs = [], 0
+        self.budgets = []
 
     def units(self, names):
         return None if self._units is None else {name: self._units[name] for name in names if name in self._units}
@@ -47,7 +49,8 @@ class FakeSystem:
     def disk(self, path):
         return self._disk
 
-    def quick_check(self, path):
+    def quick_check(self, path, budget_s=None):
+        self.budgets.append(budget_s)
         return self.checks.get(Path(path).name)
 
     def uptime(self):
@@ -281,6 +284,16 @@ class RealHardware(unittest.TestCase):
         self.assertEqual(asyncio.run(doctor.self_care(ctx, system=system)), ["I restarted my ears and voice."])
         self.assertEqual(action_log.entries(self.mind)[0]["kind"], "repair.organ")
 
+    def test_repairs_in_session_only_mode_leave_no_durable_log_line(self):
+        from mind.retention import MemoryPolicy, save_policy
+
+        save_policy(self.mind, MemoryPolicy("session-only"))
+        system = FakeSystem(units=unit("being-voice.service", "failed"), backup=time.time())
+        ctx = SimpleNamespace(state_dir=self.mind, body={}, voice={"floor_dbfs": -60}, clock_trusted=True)
+        self.assertEqual(asyncio.run(doctor.self_care(ctx, system=system)), ["I restarted my ears and voice."])
+        self.assertEqual(action_log.entries(self.mind), [])
+        self.assertFalse(action_log.log_path(self.mind).exists())
+
     def test_an_unopenable_database_is_unknown_not_damaged(self):
         system = doctor.System(systemctl="definitely-not-systemctl")
         path = self.mind / "mind.db"
@@ -333,6 +346,31 @@ class Handler(unittest.TestCase):
                      "what's the weather"):
             self.assertFalse(doctor.may_match(text), text)
             self.assertIsNone(asyncio.run(doctor.handle(text, self.ctx(), system=FakeSystem())), text)
+
+    def test_by_voice_each_database_check_is_time_bounded_and_f2_reads_it_all(self):
+        system = FakeSystem(backup=time.time())
+        asyncio.run(doctor.handle("are you okay", self.ctx(), system=system))
+        self.assertEqual(system.budgets, [doctor.VOICE_CHECK_S] * len(doctor.DATABASES))
+        full = FakeSystem(backup=time.time())
+        doctor.health_rows(full, doctor.Facts(state_dir=self.mind))
+        self.assertEqual(full.budgets, [None] * len(doctor.DATABASES), "the Health page checks every page")
+
+    def test_a_check_that_runs_out_of_time_is_unfinished_not_damaged(self):
+        system = doctor.System(systemctl="definitely-not-systemctl")
+        big = self.mind / "mind.db"
+        with closing(sqlite3.connect(big)) as db, db:
+            db.execute("CREATE TABLE t (x TEXT)")
+            db.executemany("INSERT INTO t VALUES (?)", (("x" * 200,) for _ in range(20000)))
+            db.execute("CREATE INDEX t_x ON t (x)")
+        self.assertEqual(system.quick_check(big, budget_s=0), doctor.UNFINISHED)
+        self.assertTrue(system.quick_check(big, budget_s=60))
+        self.assertTrue(system.quick_check(big))
+        slow = FakeSystem(checks={"mind.db": doctor.UNFINISHED, "lists.db": True})
+        rows = [finding.row for finding in doctor.check_databases(slow, doctor.Facts(state_dir=self.mind,
+                                                                                     check_budget_s=1.0))]
+        self.assertIn("mind.db: not checked in full (the Health page does)", rows)
+        self.assertTrue(all(finding.severity == doctor.OK
+                            for finding in doctor.check_databases(slow, doctor.Facts(state_dir=self.mind))))
 
     def test_guests_get_a_polite_answer_and_no_repairs(self):
         system = FakeSystem(units=unit("being-voice.service", "failed"))

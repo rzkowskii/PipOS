@@ -655,14 +655,7 @@ def guided_checks():
     ui.para("3. Camera. With your permission the camera runs for 10 seconds. Look for the green light. "
             "No pictures are kept.", "plain")
     if answer("Turn the camera on for 10 seconds?"):
-        was_on = (MIND_DIR / "camera.enabled").is_file()
-        started = subprocess.run(["being-camera", "enable"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, timeout=40, check=False).returncode == 0
-        time.sleep(10)
-        if not was_on:
-            subprocess.run(["being-camera", "disable"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=40, check=False)
-        results["camera_started"] = started
+        results["camera_started"] = camera_check(10)
         results["camera_light_seen"] = answer("Did the green light come on?")
     else:
         results["camera"] = "skipped by the owner"
@@ -670,6 +663,25 @@ def guided_checks():
     ui.note("Saved with the boot diagnostics." if saved else "There is no diagnostics stick on this boot.",
             "success" if saved else "muted")
     input(ui.prompt("Press Enter to go back. "))
+
+
+def camera_check(seconds):
+    """The camera on for `seconds`, as the owner agreed, then off again if it
+    was off before: always, even after Ctrl-C or a hung command."""
+    was_on = (MIND_DIR / "camera.enabled").is_file()
+    started = False
+    try:
+        started = subprocess.run(["being-camera", "enable"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, timeout=40, check=False).returncode == 0
+        time.sleep(seconds)
+    finally:
+        if not was_on:
+            try:
+                subprocess.run(["being-camera", "disable"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=40, check=False)
+            except (OSError, subprocess.SubprocessError):
+                pass
+    return started
 
 
 def wake_phrase():
