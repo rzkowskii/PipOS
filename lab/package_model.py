@@ -274,6 +274,10 @@ def stage_bench(bench_dir, output, certificate, key):
 def stage_all(source, output, certificate, key, *, roles=IMAGE_ROLES, bench=False, packs=PACKS,
               default_pack=DEFAULT_PACK):
     """The whole models partition: the conversation pack, then every other role."""
+    roles = list(roles)
+    if "conversation" not in roles:
+        # Without /models/reflex.gguf the image has no mind to talk with.
+        raise ValueError("the role list must include conversation (reflex.gguf)")
     empty_output(output)
     out_root = Path(source).parent
     staged = []
@@ -316,6 +320,8 @@ def main(argv=None):
     unknown = [role for role in roles if role not in IMAGE_ROLES]
     if unknown:
         parser.error(f"unknown roles: {', '.join(unknown)}")
+    if "conversation" not in roles:
+        parser.error("--roles must include conversation: an image without reflex.gguf cannot talk")
     try:
         staged = stage_all(args.source, args.output, args.certificate, args.key, roles=roles, bench=args.bench)
     except (ValueError, KeyError, OSError, tarfile.TarError) as error:

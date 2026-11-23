@@ -410,8 +410,19 @@ static void put_codepoint(struct terminal *terminal, uint32_t code)
 
 static void put_byte(struct terminal *terminal, unsigned char byte)
 {
+    /* CAN and SUB cancel any sequence in progress (ECMA-48), so a control
+     * string sent after one always starts from the ground state. */
+    if ((byte == 0x18 || byte == 0x1a) && terminal->state != GROUND) {
+        terminal->state = GROUND;
+        return;
+    }
     switch (terminal->state) {
     case ESCAPE:
+        /* Panel mode: ESC ESC is a fresh escape, so a program that ends its
+         * output in ESC ESC cannot swallow the ESC of hands' next control
+         * string (a lost wipe=1 would not forget). */
+        if (terminal->control && byte == '\033')
+            return;
         terminal->state = GROUND;
         if (byte == '[') {
             terminal->state = CSI;

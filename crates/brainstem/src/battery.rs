@@ -24,6 +24,11 @@ pub struct Thresholds {
     /// ...or with the pack voltage under this floor (volts) for `floor_hold`.
     pub voltage_floor: Option<f64>,
     pub floor_hold: f64,
+    /// A percentage or time-to-empty plea (and the power-off) needs the
+    /// readings to say so for this many seconds in a row: one bad reading
+    /// from the embedded controller (a 0% or 0 Wh at resume, say) must not
+    /// switch off a healthy laptop.
+    pub confirm_hold: f64,
     /// Power off after the lid has been closed on battery this many minutes.
     /// Zero turns it off.
     pub lid_closed_min: f64,
@@ -48,6 +53,7 @@ impl Default for Thresholds {
             // spike is not mistaken for an empty pack. Calibrate on the Mac.
             voltage_floor: Some(9.3),
             floor_hold: 30.0,
+            confirm_hold: 30.0,
             lid_closed_min: 10.0,
             grace: 20.0,
             smoothing: 60.0,
@@ -76,6 +82,7 @@ impl Thresholds {
         number("BEING_BATTERY_CRITICAL_MIN", &mut t.critical_min, 0.0..=600.0);
         number("BEING_LID_BATTERY_SHUTDOWN_MIN", &mut t.lid_closed_min, 0.0..=1440.0);
         number("BEING_SHUTDOWN_GRACE", &mut t.grace, 0.0..=120.0);
+        number("BEING_BATTERY_CONFIRM_HOLD", &mut t.confirm_hold, 0.0..=300.0);
         if let Some(text) = get("BEING_BATTERY_VOLTAGE_FLOOR") {
             match text.trim() {
                 "" | "off" | "0" => t.voltage_floor = None,
@@ -151,6 +158,9 @@ pub struct Battery {
     ema_since: Option<f64>,
     last_sample_at: Option<f64>,
     below_floor_since: Option<f64>,
+    /// Since when the readings have said at least Low, VeryLow, Critical
+    /// (by percentage or time to empty) without a break.
+    seen_since: [Option<f64>; 3],
     closed_on_battery_since: Option<f64>,
     pending: Option<Pending>,
     powered_off: bool,
@@ -166,6 +176,11 @@ pub struct Battery {
 /// After a failed power-off, wait this long before announcing another.
 const RETRY_AFTER: f64 = 300.0;
 
+/// A Critical notice is taken back when a reading is clearly healthy again:
+/// this many points over the critical percentage, and twice the critical
+/// minutes left (whichever of the two is known).
+const RECOVER_PCT: f64 = 5.0;
+
 impl Battery {
     pub fn new(th: Thresholds) -> Battery {
         Battery {
@@ -176,6 +191,7 @@ impl Battery {
             ema_since: None,
             last_sample_at: None,
             below_floor_since: None,
+            seen_since: [None; 3],
             closed_on_battery_since: None,
             pending: None,
             powered_off: false,
@@ -249,22 +265,12 @@ impl Battery {
         Some((wh / watts * 60.0).min(24.0 * 60.0))
     }
 
-    fn judge(&mut self, s: &Sample, now: f64) -> Level {
+    /// The level this one sample says by percentage and time to empty.
+    fn raw_level(&self, s: &Sample) -> Level {
         let pct = s.percent;
         let min = self.minutes_left;
         let th = &self.th;
-        let floor = match (th.voltage_floor, s.voltage_v) {
-            (Some(floor), Some(v)) if v > 0.0 && v < floor => {
-                let since = *self.below_floor_since.get_or_insert(now);
-                now - since >= th.floor_hold
-            }
-            _ => {
-                self.below_floor_since = None;
-                false
-            }
-        };
-        let th = &self.th;
-        if pct.is_some_and(|p| p <= th.critical_pct) || min.is_some_and(|m| m < th.critical_min) || floor {
+        if pct.is_some_and(|p| p <= th.critical_pct) || min.is_some_and(|m| m < th.critical_min) {
             Level::Critical
         } else if min.is_some_and(|m| m < th.very_low_min) {
             Level::VeryLow
@@ -273,6 +279,52 @@ impl Battery {
         } else {
             Level::Ok
         }
+    }
+
+    /// The level the readings have held for `confirm_hold` (the voltage
+    /// floor keeps its own hold). One sample alone never decides.
+    fn judge(&mut self, s: &Sample, now: f64) -> Level {
+        let floor = match (self.th.voltage_floor, s.voltage_v) {
+            (Some(floor), Some(v)) if v > 0.0 && v < floor => {
+                let since = *self.below_floor_since.get_or_insert(now);
+                now - since >= self.th.floor_hold
+            }
+            _ => {
+                self.below_floor_since = None;
+                false
+            }
+        };
+        let raw = self.raw_level(s);
+        let mut held = Level::Ok;
+        for (i, level) in [Level::Low, Level::VeryLow, Level::Critical].into_iter().enumerate() {
+            if raw >= level {
+                let since = *self.seen_since[i].get_or_insert(now);
+                if now - since >= self.th.confirm_hold {
+                    held = level;
+                }
+            } else {
+                self.seen_since[i] = None;
+            }
+        }
+        if floor {
+            Level::Critical
+        } else {
+            held
+        }
+    }
+
+    /// This sample says the pack is well clear of critical: the percentage
+    /// (if known) well over it, the time left (if known) well over it, the
+    /// voltage (if known) over the floor, and at least one of the first two known.
+    fn clearly_healthy(&self, s: &Sample) -> bool {
+        let th = &self.th;
+        let pct_ok = s.percent.map(|p| p > th.critical_pct + RECOVER_PCT);
+        let min_ok = self.minutes_left.map(|m| m >= 2.0 * th.critical_min);
+        let volts_ok = match (th.voltage_floor, s.voltage_v) {
+            (Some(floor), Some(v)) if v > 0.0 => v >= floor,
+            _ => true,
+        };
+        volts_ok && (pct_ok.is_some() || min_ok.is_some()) && pct_ok != Some(false) && min_ok != Some(false)
     }
 
     fn report(&self, prev: Level, s: &Sample) -> Event {
@@ -298,6 +350,7 @@ impl Battery {
         if s.on_ac == Some(true) {
             // Back on the mains: everything resets, and a warning earns thanks.
             self.below_floor_since = None;
+            self.seen_since = [None; 3];
             if prev != Level::Ok || self.warned {
                 self.level = Level::Ok;
                 out.push(self.report(prev, s).with("plugged", self.warned));
@@ -337,10 +390,20 @@ impl Battery {
                 );
             }
             Some(p) => {
+                // Judged again on every pass of the grace: a pack that reads
+                // clearly healthy again was misread, and is not switched off.
+                let misread = p.reason == Reason::Critical && on_battery && self.clearly_healthy(s);
                 let still = match p.reason {
-                    Reason::Critical => on_battery || s.on_ac.is_none(),
+                    Reason::Critical => (on_battery || s.on_ac.is_none()) && !misread,
                     Reason::LidClosedOnBattery => lid_due || critical,
                 };
+                if misread {
+                    let before = self.level;
+                    // Back to what this reading says; from there it climbs again only
+                    // on readings that hold.
+                    self.level = self.raw_level(s);
+                    out.push(self.report(before, s).with("misread", true));
+                }
                 if !still {
                     self.pending = None;
                     out.push(Event::new("stem.shutdown").with("reason", p.reason.name()).with("cancelled", true));
@@ -374,6 +437,20 @@ mod tests {
         events.iter().filter(|e| e.topic == "body.battery").filter_map(|e| e.str("level")).collect()
     }
 
+    /// The same reading every two seconds from `from` to `to` (inclusive):
+    /// what was said, and whether the power went.
+    fn hold(b: &mut Battery, s: &Sample, from: f64, to: f64) -> (Vec<Event>, bool) {
+        let (mut said, mut off) = (Vec::new(), false);
+        let mut t = from;
+        while t <= to {
+            let (out, now_off) = b.update(s, None, false, t);
+            said.extend(out);
+            off |= now_off;
+            t += 2.0;
+        }
+        (said, off)
+    }
+
     #[test]
     fn time_to_empty_comes_first_and_is_smoothed() {
         let mut b = Battery::new(Thresholds::default());
@@ -404,19 +481,70 @@ mod tests {
         let mut b = Battery::new(Thresholds::default());
         let sample = |p| Sample { percent: Some(p), on_ac: Some(false), charging: Some(false), ..Sample::default() };
         assert!(b.update(&sample(16.0), None, false, 0.0).0.is_empty());
-        let (out, _) = b.update(&sample(15.0), None, false, 1.0);
-        assert_eq!(levels(&out), ["low"]);
+        assert!(b.update(&sample(15.0), None, false, 1.0).0.is_empty(), "one reading is not enough");
+        let (out, _) = hold(&mut b, &sample(15.0), 3.0, 31.0);
+        assert_eq!(levels(&out), ["low"], "held for 30 s, it is");
         // Climbing back up a point (a reading wobble) does not undo it.
-        assert!(b.update(&sample(16.0), None, false, 2.0).0.is_empty());
-        let (out, off) = b.update(&sample(5.0), None, false, 3.0);
+        assert!(b.update(&sample(16.0), None, false, 32.0).0.is_empty());
+        let (out, off) = hold(&mut b, &sample(5.0), 33.0, 61.0);
+        assert!(out.is_empty() && !off, "not yet: {out:?}");
+        let (out, off) = b.update(&sample(5.0), None, false, 63.0);
         assert_eq!(levels(&out), ["critical"]);
         let shutdown = out.iter().find(|e| e.topic == "stem.shutdown").unwrap();
         assert_eq!(shutdown.str("reason"), Some("battery_critical"));
         assert_eq!(shutdown.f64("in"), Some(20.0));
         assert!(!off, "the mind gets its grace to say goodbye and save");
-        assert!(!b.update(&sample(5.0), None, false, 10.0).1);
-        assert!(b.update(&sample(4.0), None, false, 23.1).1, "then the power goes");
-        assert!(!b.update(&sample(4.0), None, false, 24.0).1, "only once");
+        assert!(!b.update(&sample(5.0), None, false, 70.0).1);
+        assert!(b.update(&sample(4.0), None, false, 83.1).1, "then the power goes");
+        assert!(!b.update(&sample(4.0), None, false, 84.0).1, "only once");
+    }
+
+    #[test]
+    fn one_bad_reading_never_switches_off_a_healthy_laptop() {
+        // A MacBookPro9,2 at 60% on battery; one pass reads capacity 0.
+        let mut b = Battery::new(Thresholds::default());
+        let good = on_battery(60.0, 25.0, 10.0);
+        let (said, off) = hold(&mut b, &good, 0.0, 60.0);
+        assert!(said.is_empty() && !off);
+        let zero = Sample { percent: Some(0.0), ..good };
+        let (out, off) = b.update(&zero, None, false, 62.0);
+        assert!(out.is_empty() && !off, "a lone 0% is not believed: {out:?}");
+        // So is a one-off charge_now of 0 (0 Wh left, 0 minutes).
+        let empty = Sample { energy_wh: Some(0.0), ..good };
+        let (out, off) = b.update(&empty, None, false, 64.0);
+        assert!(out.is_empty() && !off, "a lone 0 Wh is not believed: {out:?}");
+        let (said, off) = hold(&mut b, &good, 66.0, 600.0);
+        assert!(said.is_empty() && !off, "{said:?}");
+        assert_eq!(b.level(), Level::Ok);
+        assert_eq!(b.shutting_down(), None);
+    }
+
+    #[test]
+    fn a_critical_notice_is_taken_back_when_the_pack_reads_healthy_again() {
+        // Even a misreading that lasts past the hold is judged again during
+        // the grace: the next healthy pass cancels it, on battery.
+        let mut b = Battery::new(Thresholds::default());
+        let good = Sample { percent: Some(60.0), on_ac: Some(false), charging: Some(false), ..Sample::default() };
+        let bad = Sample { percent: Some(0.0), ..good };
+        hold(&mut b, &good, 0.0, 10.0);
+        let (out, off) = hold(&mut b, &bad, 12.0, 42.0);
+        assert!(!off && out.iter().any(|e| e.topic == "stem.shutdown" && e.bool("cancelled").is_none()));
+        let (out, off) = b.update(&good, None, false, 44.0);
+        assert!(!off);
+        assert!(out.iter().any(|e| e.topic == "stem.shutdown" && e.bool("cancelled") == Some(true)), "{out:?}");
+        let report = out.iter().find(|e| e.topic == "body.battery").unwrap();
+        assert_eq!((report.str("level"), report.str("prev"), report.bool("misread")), (Some("ok"), Some("critical"), Some(true)));
+        assert_eq!(b.shutting_down(), None);
+        let (said, off) = hold(&mut b, &good, 46.0, 200.0);
+        assert!(said.is_empty() && !off, "{said:?}");
+        // A pack only a point over critical is not "clearly" healthy.
+        let mut b = Battery::new(Thresholds::default());
+        let low = Sample { percent: Some(5.0), ..good };
+        hold(&mut b, &low, 0.0, 30.0);
+        assert_eq!(b.shutting_down(), Some("battery_critical"));
+        let wobble = Sample { percent: Some(6.0), ..good };
+        assert!(b.update(&wobble, None, false, 32.0).0.is_empty());
+        assert!(b.update(&wobble, None, false, 51.0).1, "a wobble does not save it");
     }
 
     #[test]
@@ -424,7 +552,9 @@ mod tests {
         let mut b = Battery::new(Thresholds::default());
         let s = Sample { percent: Some(3.0), on_ac: Some(false), ..Sample::default() };
         b.update(&s, None, false, 0.0);
-        assert!(b.update(&s, None, true, 2.0).1);
+        assert!(!b.update(&s, None, true, 2.0).1, "no notice yet, so nothing to end");
+        b.update(&s, None, false, 30.0);
+        assert!(b.update(&s, None, true, 32.0).1);
     }
 
     #[test]
@@ -432,9 +562,12 @@ mod tests {
         let mut b = Battery::new(Thresholds::default());
         let s = Sample { percent: Some(4.0), on_ac: Some(false), ..Sample::default() };
         b.update(&s, None, false, 0.0);
+        b.update(&s, None, false, 4.0);
+        assert_eq!(b.shutting_down(), None, "not before the readings hold");
+        b.update(&s, None, false, 0.0 + 30.0);
         assert_eq!(b.shutting_down(), Some("battery_critical"));
         let plugged = Sample { percent: Some(4.0), on_ac: Some(true), charging: Some(true), ..Sample::default() };
-        let (out, off) = b.update(&plugged, None, false, 5.0);
+        let (out, off) = b.update(&plugged, None, false, 35.0);
         assert!(!off);
         let thanks = out.iter().find(|e| e.topic == "body.battery").unwrap();
         assert_eq!((thanks.str("level"), thanks.str("prev"), thanks.bool("plugged")), (Some("ok"), Some("critical"), Some(true)));
@@ -520,15 +653,17 @@ mod tests {
         let mut b = Battery::new(Thresholds::default());
         let s = Sample { percent: Some(3.0), on_ac: Some(false), ..Sample::default() };
         b.update(&s, None, false, 0.0);
-        assert!(b.update(&s, None, false, 21.0).1);
-        b.power_off_failed(22.0);
+        b.update(&s, None, false, 30.0);
+        assert!(b.update(&s, None, false, 51.0).1);
+        b.power_off_failed(52.0);
         assert_eq!(b.shutting_down(), None);
-        assert!(b.update(&s, None, false, 30.0).0.is_empty(), "not straight away");
+        assert!(b.update(&s, None, false, 60.0).0.is_empty(), "not straight away");
         let plugged = Sample { on_ac: Some(true), charging: Some(true), ..s };
-        let (out, _) = b.update(&plugged, None, false, 40.0);
+        let (out, _) = b.update(&plugged, None, false, 70.0);
         assert_eq!(levels(&out), ["ok"], "still watching after the failure");
-        b.update(&s, None, false, 50.0);
-        let (out, _) = b.update(&s, None, false, 323.0);
+        hold(&mut b, &s, 80.0, 350.0);
+        assert_eq!(b.shutting_down(), None, "still waiting out the retry");
+        let (out, _) = b.update(&s, None, false, 353.0);
         assert!(out.iter().any(|e| e.topic == "stem.shutdown"), "a fresh notice after the wait");
     }
 
@@ -539,9 +674,11 @@ mod tests {
             "BEING_LID_BATTERY_SHUTDOWN_MIN" => Some("ten".to_string()),
             "BEING_BATTERY_VOLTAGE_FLOOR" => Some("off".to_string()),
             "BEING_BATTERY_CRITICAL_PCT" => Some("150".to_string()),
+            "BEING_BATTERY_CONFIRM_HOLD" => Some("5".to_string()),
             _ => None,
         };
         let (t, notes) = Thresholds::from_env(env);
+        assert_eq!(t.confirm_hold, 5.0);
         assert_eq!(t.low_pct, 20.0);
         assert_eq!(t.lid_closed_min, 10.0);
         assert_eq!(t.critical_pct, 5.0);

@@ -148,6 +148,28 @@ class Snapshots(unittest.TestCase):
         self.assertEqual(read_lists(target / "lists.db"), ["milk", "eggs"])
         self.assertEqual(len(action_log.entries(target)), 2)
 
+    def test_forget_everything_during_a_backup_never_brings_the_old_lists_back(self):
+        # The erase lands after the lists and the log were copied but before
+        # the manifest is written: the snapshot must still count the erasures
+        # from before its copies, so its proof (made after) outnumbers it.
+        real_copy = backup.actions_copy
+
+        def copy_then_erase(source, target):
+            real_copy(source, target)
+            (self.source / "lists.db").unlink()
+            action_log.clear(self.source)
+            backup.note_erase(self.source)
+        with patch("mind.backup.actions_copy", copy_then_erase):
+            raced = backup.backup_to_folder(self.source, self.stick, RECIPIENT, now=1_800_000_200)
+        manifest = json.loads(self.members(raced["snapshot"])["manifest.json"])
+        self.assertEqual(manifest["erasures"], 0, "counted before the copies")
+        self.assertNotIn("erasures.json", self.members(raced["snapshot"]))
+        target = self.target()
+        backup.restore(target, raced["snapshot"], self.identity, raced["deletions"], raced["checkpoint"])
+        self.assertFalse((target / "lists.db").exists(), "the forgotten shopping list stays forgotten")
+        self.assertEqual(action_log.entries(target), [])
+        self.assertEqual(backup.erasures(target), 1)
+
     def test_an_unreadable_erasure_count_errs_on_forgetting(self):
         (self.source / backup.ERASURES_FILE).write_text("{broken")
         self.assertGreater(backup.erasures(self.source), 1000)
@@ -221,6 +243,60 @@ class Stick(unittest.TestCase):
         self.assertEqual(len(left), 15)
         self.assertTrue(left[0].startswith("pip-20261104"))
         self.assertTrue((self.work / "holiday-photo.jpg").exists() and (self.work / "pip-notes.txt").exists())
+
+    def sets(self, folder, *stamps):
+        for stamp in stamps:
+            for suffix in (".age", "-deletions.age", "-checkpoint.txt"):
+                (folder / f"pip-{stamp}{suffix}").write_text("x")
+
+    def stamps(self, folder):
+        return sorted({backup.set_stamp(path) for path in folder.iterdir()} - {None})
+
+    def test_a_clock_that_went_back_never_prunes_the_backup_just_written(self):
+        november = [f"202611{day:02d}-030000" for day in range(10, 15)]
+        self.sets(self.work, *november, "20240101-000512")
+        # Ranked by name alone the new set would be the oldest, and deleted.
+        self.assertEqual(backup.prune(self.work, keep=5, newest="20240101-000512"), 3)
+        self.assertIn("20240101-000512", self.stamps(self.work))
+        self.assertEqual(len(self.stamps(self.work)), 5)
+        # The next night, still behind: the newer real backup replaces the last one.
+        self.sets(self.work, "20240102-000400")
+        backup.prune(self.work, keep=5, newest="20240102-000400")
+        self.assertIn("20240102-000400", self.stamps(self.work))
+        self.assertNotIn("20240101-000512", self.stamps(self.work))
+        self.assertEqual(len(self.stamps(self.work)), 5, "the stick never fills up")
+
+    def test_a_set_named_by_a_clock_that_ran_ahead_does_not_stay_forever(self):
+        stick = self.work / "ahead"
+        stick.mkdir()
+        self.sets(stick, "20991231-235959", *[f"202611{day:02d}-030000" for day in range(10, 15)])
+        backup.prune(stick, keep=5, newest="20261114-030000", clock_trusted=True)
+        self.assertNotIn("20991231-235959", self.stamps(stick))
+        self.assertEqual(len(self.stamps(stick)), 5)
+        # Without a trusted clock nothing says which is right: the new set stays, and so does the rest by name.
+        self.sets(stick, "20991231-235959")
+        backup.prune(stick, keep=5, newest="20261114-030000")
+        self.assertIn("20261114-030000", self.stamps(stick))
+        self.assertIn("20991231-235959", self.stamps(stick))
+
+    def test_a_voice_backup_with_the_clock_behind_keeps_its_set_and_tells_the_truth(self):
+        (self.mind / backup.RECIPIENT_FILE).write_text(RECIPIENT + "\n")
+        self.label("being-backup")
+        which = {"age": "/usr/bin/age", "age-keygen": "/usr/bin/age-keygen"}.get
+        folder = self.mounted / backup.BACKUP_FOLDER
+        folder.mkdir(parents=True)
+        self.sets(folder, *[f"202611{day:02d}-030000" for day in range(10, 15)])
+
+        def fake_folder(mind_dir, folder, recipient, now=None):
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(now))
+            self.sets(folder, stamp)
+            return {"checkpoint": "0" * 64, "snapshot": folder / f"pip-{stamp}.age"}
+        behind = 1_704_067_512  # 2024-01-01 00:05:12 UTC
+        with patch("mind.backup.backup_to_folder", fake_folder):
+            result = backup.stick_backup(self.mind, "voice", mount=self.mount, unmount=self.unmount, which=which,
+                                         by_label=self.labels, now=behind)
+        self.assertIn("20240101-000512", self.stamps(folder))
+        self.assertTrue(result["snapshot"].exists(), "the backup Pip reports is on the stick")
 
     def test_stick_backup_mounts_writes_prunes_unmounts_and_records(self):
         (self.mind / backup.RECIPIENT_FILE).write_text(RECIPIENT + "\n")
@@ -312,6 +388,34 @@ class NightJob(unittest.TestCase):
             return await shift.step(True)
         self.assertEqual(asyncio.run(night()), {"backup": "done"})
         self.assertEqual(self.kinds(), ["backup.auto"])
+
+    def test_a_clock_that_went_back_does_not_stop_night_backups(self):
+        ran = []
+        job = self.job(lambda: ran.append(1))
+        backup.record_backup(self.mind, "night", now=self.now + 400 * 86400)  # made while the clock ran ahead
+        self.assertTrue(asyncio.run(job.run_chunk(1.0)))
+        self.assertEqual((ran, job.last_reason), ([1], "done"))
+
+    def test_backup_threads_run_below_the_conversation(self):
+        seen = []
+
+        def note():
+            try:
+                seen.append(os.getpriority(os.PRIO_PROCESS, threading.get_native_id()))
+            except (AttributeError, OSError):
+                seen.append(None)
+        job = self.job(note)
+        with patch("mind.backup.lower_priority", wraps=backup.lower_priority) as lowered:
+            self.assertTrue(asyncio.run(job.run_chunk(1.0)))
+        lowered.assert_called_once_with()
+        if os.uname().sysname == "Linux":
+            self.assertGreaterEqual(seen[0], backup.BACKGROUND_NICE)
+
+    def test_session_only_night_backups_leave_no_durable_log_line(self):
+        save_policy(self.mind, MemoryPolicy("session-only"))
+        job = self.job(lambda: None)
+        self.assertTrue(asyncio.run(job.run_chunk(1.0)))
+        self.assertEqual((job.last_reason, self.kinds()), ("done", []))
 
     def test_no_stick_is_quietly_nothing_and_a_failure_is_logged(self):
         def no_stick():

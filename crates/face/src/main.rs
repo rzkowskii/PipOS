@@ -299,6 +299,7 @@ fn run() -> Result<(), String> {
     }
     let mut events = sdl.event_pump()?;
     let local_setup = cfg!(target_os = "linux") && std::env::var("BEING_LOCAL_SETUP").as_deref() == Ok("1");
+    let mut setup_start = Launcher::default();
     let appliance = cfg!(target_os = "linux") && args.fullscreen && !hidden;
 
     let seed = args.seed.unwrap_or_else(|| {
@@ -362,6 +363,7 @@ fn run() -> Result<(), String> {
     'run: loop {
         let frame_start = Instant::now();
         watchdog.kick();
+        setup_start.reap();
         let scene_time = if recording { clock } else { started.elapsed().as_secs_f64() };
         if args.exit_after.is_some_and(|secs| scene_time >= secs) {
             break 'run;
@@ -408,9 +410,7 @@ fn run() -> Result<(), String> {
                             link.send(Event::new("key.panel_recover"));
                         }
                     } else if key == Keycode::F2 && local_setup {
-                        let _ = std::process::Command::new("systemctl")
-                            .args(["--no-block", "start", "being-local-screen.service"])
-                            .status();
+                        setup_start.start("systemctl", &["--no-block", "start", "being-local-screen.service"]);
                     } else if key == Keycode::Q && !args.fullscreen {
                         break 'run;
                     }
@@ -770,6 +770,60 @@ const ATTEND_KEYS: [Keycode; 3] = [Keycode::Space, Keycode::Return, Keycode::KpE
 /// A press (or a click, which has no key) asks for attention only while the
 /// eyes rest and no app panel has the keyboard: typing into the terminal
 /// stays typing.
+/// A helper command started from the frame loop without waiting for it:
+/// a slow PID 1 (at boot, or with the model on every core) must not freeze
+/// the eyes or miss the 5 s watchdog. One at a time; reaped on later frames.
+#[derive(Default)]
+struct Launcher {
+    child: Option<std::process::Child>,
+}
+
+impl Launcher {
+    /// Start `program` unless the last one is still running. True if started.
+    fn start(&mut self, program: &str, args: &[&str]) -> bool {
+        self.reap();
+        if self.child.is_some() {
+            return false;
+        }
+        match std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                self.child = Some(child);
+                true
+            }
+            Err(e) => {
+                eprintln!("face: could not run {program}: {e}");
+                false
+            }
+        }
+    }
+
+    /// Collect a finished command, never waiting.
+    fn reap(&mut self) {
+        if let Some(child) = &mut self.child {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        eprintln!("face: the setup start command failed: {status}");
+                    }
+                    self.child = None;
+                }
+                Ok(None) => {}
+                Err(_) => self.child = None,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn running(&self) -> bool {
+        self.child.is_some()
+    }
+}
+
 fn asks_attention(anim: &anim::Anim, panel_focus: bool) -> bool {
     !panel_focus && anim.resting()
 }
@@ -1070,9 +1124,29 @@ fn write_png(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::verbose::{hold_from_cmdline, DEFAULT_HOLD};
-    use super::{anim, asks_attention, ATTEND_KEYS};
+    use super::{anim, asks_attention, Launcher, ATTEND_KEYS};
     use sdl2::keyboard::Keycode;
     use std::time::Duration;
+
+    #[test]
+    fn the_setup_key_starts_its_command_without_waiting_for_it() {
+        // A PID 1 slow to answer: the frame loop must not wait.
+        let mut l = Launcher::default();
+        let began = std::time::Instant::now();
+        assert!(l.start("sleep", &["2"]));
+        assert!(began.elapsed() < Duration::from_millis(500), "the frame loop waited {:?}", began.elapsed());
+        assert!(l.running());
+        assert!(!l.start("sleep", &["2"]), "a second press does not stack another");
+        l.reap();
+        assert!(l.running(), "reaping never waits");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while l.running() {
+            assert!(std::time::Instant::now() < deadline, "never reaped");
+            std::thread::sleep(Duration::from_millis(50));
+            l.reap();
+        }
+        assert!(!l.start("/nonexistent/systemctl", &[]), "a missing command is only logged");
+    }
 
     #[test]
     fn space_return_and_a_click_ask_for_attention_only_while_resting_and_unfocused() {

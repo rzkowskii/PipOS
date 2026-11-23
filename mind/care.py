@@ -1037,9 +1037,14 @@ def install_bundle(path):
                          + (f" ({lines[-1][:200]})" if lines else ""))
 
 
-def update_menu(*, try_boot=None):
-    """Update the system from a USB stick, keeping the being's memory."""
-    from . import local_menu
+def update_menu(mind=MIND, *, try_boot=None):
+    """Update the system from a USB stick, keeping the being's memory.
+
+    A finished install is noted in the action log ("update.install"), which is
+    how "did your update work?", "what did you do?" and the diary know an
+    update went in. The log holds the kind and time only.
+    """
+    from . import action_log, local_menu
     from .try_mode import is_try_boot
 
     if (is_try_boot() if try_boot is None else try_boot):
@@ -1083,6 +1088,7 @@ def update_menu(*, try_boot=None):
         with view:
             view.stage("Installing.")
             install_bundle(bundle)
+        action_log.record(Path(mind), "update.install")
     finally:
         local_menu.unmount_media()
     done("The update is installed. I'll start the new system on the next restart.")

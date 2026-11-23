@@ -116,6 +116,22 @@ fn allowed_from(topic: &str, from: &str, hardware_body: bool) -> bool {
     if topic_matches("key.*", topic) && hardware_body && from != "face" {
         return false;
     }
+    // The owner's words: on the laptop only the voice hears them, and the
+    // local menu's typing chat types them (as a wake, the start of speech
+    // and the finished utterance). No other organ may put words in the
+    // owner's mouth. In the lab and the simulator any organ stands in, as
+    // for the keys.
+    if topic_matches("hear.*", topic) && hardware_body {
+        return match from {
+            "voice" => true,
+            "keyboard" => matches!(topic, "hear.wake" | "hear.speech_start" | "hear.partial" | "hear.final" | "hear.cancel"),
+            _ => false,
+        };
+    }
+    // What the camera sees is the eyes' alone, everywhere.
+    if topic_matches("see.*", topic) && from != "eyes" {
+        return false;
+    }
     match topic {
         "mind.progress" | "mind.shutdown_ready" | "mind.announce" | "mind.clock" | "mind.dream_committed"
         | "mind.dreaming" => from == "mind",
@@ -906,6 +922,20 @@ fn wave_two_topics_are_allowed_only_from_their_owners() {
     assert!(mind_may_press(&mute(None), "mind", false), "the lab's console stands in for the keyboard");
     assert!(allowed_from("key.attend", "console", false), "the lab's typed console stands in");
     assert!(allowed_from("key.interrupt", "keyboard", true), "typing over Pip stops it, as Esc does");
+    // The owner's words come from the voice, or from the typing chat.
+    for topic in ["hear.wake", "hear.speech_start", "hear.partial", "hear.final", "hear.cancel"] {
+        assert!(allowed_from(topic, "voice", true), "{topic}");
+        assert!(allowed_from(topic, "keyboard", true), "{topic}");
+        for organ in ["eyes", "hands", "bodycare", "mind", "face", "rogue"] {
+            assert!(!allowed_from(topic, organ, true), "{organ} may not send {topic} on the laptop");
+        }
+        assert!(allowed_from(topic, "console", false), "the lab's console stands in");
+    }
+    for topic in ["hear.sound", "hear.missed", "hear.anything_new"] {
+        assert!(allowed_from(topic, "voice", true) && !allowed_from(topic, "keyboard", true), "{topic}");
+    }
+    assert!(allowed_from("see.presence", "eyes", true) && !allowed_from("see.presence", "keyboard", true));
+    assert!(!allowed_from("see.presence", "rogue", false), "the camera is the eyes' even in the lab");
     assert!(!allowed_from("key.mute", "keyboard", true) && !allowed_from("key.attend", "keyboard", true));
 }
 

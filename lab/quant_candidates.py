@@ -211,6 +211,24 @@ def source_record(hf_dir):
         for path in sorted(hf_dir.iterdir()) if path.is_file() and path.name.endswith(".safetensors")]}
 
 
+def source_digest(record, hf_dir):
+    """A short name for exactly which inputs a conversion read.
+
+    The 16-bit intermediate is keyed by it, so a build from another revision
+    or other files never quantizes an older conversion under the new record:
+    the weights' hashes (already checked by source_record) plus every other
+    file the converter may read (config, tokenizer).
+    """
+    weights = sorted((entry["name"], entry["sha256"]) for entry in record["files"]
+                     if entry["name"].endswith(".safetensors"))
+    others = sorted((path.name, sha256(path)) for path in Path(hf_dir).iterdir()
+                    if path.is_file() and not path.name.endswith(".safetensors")
+                    and path.name != "SOURCE.json" and not path.name.startswith("."))
+    data = json.dumps({"repo": record.get("repo"), "revision": record.get("revision"), "weights": weights,
+                       "others": others}, sort_keys=True).encode()
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
 def tool_version(llama_cpp):
     for name in ("VERSION", ".version"):
         path = Path(llama_cpp) / name
@@ -240,9 +258,17 @@ def build(model, hf_dir, llama_cpp, *, bench=BENCH, work=WORK, python=sys.execut
     work, bench = Path(work), Path(bench)
     work.mkdir(parents=True, exist_ok=True)
     bench.mkdir(parents=True, exist_ok=True)
-    wide = work / f"{model}-bf16.gguf"
+    wide = work / f"{model}-bf16-{source_digest(record, hf_dir)}.gguf"
     if not wide.is_file():
-        run([python, str(convert), str(hf_dir), "--outtype", "bf16", "--outfile", str(wide)], check=True)
+        # The converter writes straight to --outfile: only a finished file
+        # takes the name a later build trusts.
+        part = wide.with_name("." + wide.name + ".part")
+        part.unlink(missing_ok=True)
+        try:
+            run([python, str(convert), str(hf_dir), "--outtype", "bf16", "--outfile", str(part)], check=True)
+            os.replace(part, wide)
+        finally:
+            part.unlink(missing_ok=True)
     width = require_unquantized(wide)
     entries = []
     for entry in candidates(model):

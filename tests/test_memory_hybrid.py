@@ -298,6 +298,135 @@ class VectorTables(unittest.TestCase):
         self.assertNotEqual(model, "older")
 
 
+class Hashed:
+    """A tiny stand-in embedder: each word adds to one of `dim` slots."""
+
+    def __init__(self, dim, name="hashed"):
+        self.dim, self.model_id = dim, f"{name}:{dim}"
+
+    def embed(self, text):
+        import math
+        import zlib
+
+        vector = [0.0] * self.dim
+        for word in text.lower().split():
+            code = zlib.crc32(word.encode())
+            vector[code % self.dim] += 1.0 if code >> 16 & 1 else -1.0
+        norm = math.sqrt(sum(value * value for value in vector)) or 1.0
+        return [value / norm for value in vector]
+
+
+class StaleVectors(unittest.TestCase):
+    """A new embeddings pack or recipe: until the night shift remakes the
+    old vectors, recall is by words for those rows, never by a dot product
+    across two models' spaces."""
+
+    def setUp(self):
+        self.memory = Memory(None, embedder=Hashed(8))
+        self.addCleanup(self.memory.close)
+        self.fact = self.memory.remember("my dog is called Biscuit", "Richard")
+        self.memory.remember("the spare key is in the blue pot", "Richard")
+        self.episode = self.memory.log("heard", "ugh Biscuit chewed my shoe again, the dog is a menace", "Richard")
+        self.memory.index_pending(100)
+        self.assertEqual(self.memory.vector_counts(), (1, 2))
+
+    def test_a_model_of_another_size_does_not_break_recall(self):
+        self.memory.embedder = Hashed(6)
+        # Before: ValueError from math.sumprod, so every memory question failed.
+        self.assertEqual([f.id for f in self.memory.recall("what is my dog called")], [self.fact])
+        self.assertEqual([e.id for e in self.memory.recall_history("dog shoe")], [self.episode])
+
+    def test_vectors_of_another_model_of_the_same_size_are_not_scored(self):
+        self.memory.embedder = Hashed(8, name="other")
+        vector = self.memory._query_vector("my dog Biscuit")
+        self.assertEqual(self.memory._cosines("fact_vec", "fact_id", "", "1", (), vector), {})
+        self.assertEqual(self.memory._cosines("episode_vec", "episode_id", "JOIN episodes e ON e.id = v.episode_id",
+                                              "1", (), vector), {})
+
+    def test_once_remade_the_rows_are_found_by_meaning_again(self):
+        self.memory.embedder = Hashed(6)
+        while self.memory.backfill_vectors(100):
+            pass
+        vector = self.memory._query_vector("my dog Biscuit")
+        self.assertIn(self.fact, self.memory._cosines("fact_vec", "fact_id", "", "1", (), vector))
+
+
+class Counting:
+    def __init__(self, inner):
+        self.inner, self.model_id, self.calls = inner, inner.model_id, 0
+
+    def embed(self, text):
+        self.calls += 1
+        return self.inner.embed(text)
+
+
+class IndexerFailures(unittest.TestCase):
+    """A disk that refuses writes is not a busy database: the indexer says
+    so once and waits, instead of re-embedding the same batch five times a
+    second until shutdown."""
+
+    def setUp(self):
+        import sqlite3
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        memory = Memory(self.root, embedder=None)
+        for i in range(5):
+            memory.log("heard", f"sentence {i} about the garden", "Richard")
+        memory.close()
+        self.connect = sqlite3.connect
+
+    def read_only(self, *args, **kwargs):
+        import threading
+
+        db = self.connect(*args, **kwargs)
+        if threading.current_thread().name == "memory-vectors":
+            db.execute("PRAGMA query_only = ON")  # every write fails with SQLITE_READONLY
+        return db
+
+    def test_a_read_only_disk_is_not_retried_in_a_loop(self):
+        from mind.memory import _Indexer
+
+        embedder = Counting(Hashed(8))
+        with patch("mind.memory.sqlite3.connect", self.read_only), patch("builtins.print"):
+            indexer = _Indexer(self.root / "mind.db", embedder)
+            indexer.poke()
+            time.sleep(1.0)
+            indexer.stop()
+        self.assertEqual(embedder.calls, 5, "one batch embedded once, not again every 200 ms")
+
+    def test_nothing_is_embedded_while_the_disk_guard_says_critical(self):
+        from mind.memory import _Indexer
+
+        embedder = Counting(Hashed(8))
+        indexer = _Indexer(self.root / "mind.db", embedder, allowed=lambda: False)
+        indexer.poke()
+        time.sleep(0.3)
+        indexer.stop()
+        self.assertEqual(embedder.calls, 0)
+
+    def test_a_batch_whose_insert_failed_is_stored_without_embedding_it_again(self):
+        import sqlite3
+
+        from mind.memory import _index_rows
+
+        embedder = Counting(Hashed(8))
+        made = {}
+        refusing = sqlite3.connect(self.root / "mind.db")
+        refusing.execute("PRAGMA query_only = ON")
+        with self.assertRaises(sqlite3.OperationalError):
+            _index_rows(refusing, embedder, 64, made=made)
+        refusing.close()
+        self.assertEqual(embedder.calls, 5)
+        db = sqlite3.connect(self.root / "mind.db")
+        self.addCleanup(db.close)
+        self.assertEqual(_index_rows(db, embedder, 64, made=made), 5)
+        self.assertEqual(embedder.calls, 5)
+        self.assertEqual(made, {})
+        self.assertEqual(db.execute("SELECT count(*) FROM episode_vec").fetchone()[0], 5)
+
+
 class NoModel(unittest.TestCase):
     def test_without_the_model_recall_is_exactly_word_based(self):
         memory = Memory(None, embedder=None)

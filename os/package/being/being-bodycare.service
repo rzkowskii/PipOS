@@ -13,8 +13,15 @@ Before=shutdown.target
 Type=notify
 NotifyAccess=main
 EnvironmentFile=/etc/being/env
-ExecStart=/usr/bin/being-bodycare --bus ${BEING_BUS}
-ExecStopPost=/usr/bin/being-bodycare --restore
+# The restore journal (each control's original value, saved before it is
+# changed) must be writable under ProtectSystem=strict, where all of /run is
+# read-only: it lives in the unit's own runtime directory. Preserved, so a
+# restart after a crash still knows the factory values.
+RuntimeDirectory=being-bodycare
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ExecStart=/usr/bin/being-bodycare --bus ${BEING_BUS} --journal /run/being-bodycare/restore.json
+ExecStopPost=/usr/bin/being-bodycare --restore --journal /run/being-bodycare/restore.json
 WatchdogSec=30s
 Restart=always
 RestartSec=2

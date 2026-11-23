@@ -3,7 +3,7 @@
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 
 from . import consolidation
 from .memory import Episode, _HISTORY
@@ -153,8 +153,9 @@ def journal(db_connection, owner, *, limit=20):
 # -- candidates from the dream model ------------------------------------------
 #
 # What the dream model found, after dream_verify passed it. A candidate is
-# never told as a fact. It is promoted when it is found again, from a
-# different sentence, on a later night, or when the owner confirms it. Each
+# never told as a fact. It is promoted when it is found again, on a later
+# night, in a different sentence said on a later day, or when the owner
+# confirms it. Each
 # rests on the exact quotes it came from: forgetting any of those sentences
 # takes the candidate, and anything derived from it, with it.
 
@@ -193,12 +194,19 @@ def dream_cursor(memory, owner):
         return 0
 
 
-def save_candidates(memory, owner, items, *, night, through=None):
+def _said_on(ts, zone):
+    return datetime.fromtimestamp(ts, zone).date()
+
+
+def save_candidates(memory, owner, items, *, night, through=None, zone=None):
     """Store checked items as candidates, and move the cursor, together.
 
-    Returns the ids of candidates promoted by this save (found again on a
-    later night from a different sentence). An item whose sentence has gone
-    since it was read is dropped.
+    Returns the ids of candidates promoted by this save: found again, on a
+    later night, in a different sentence that was said on a later day (in
+    `zone`, the owner's) than one it was found in before. The night a chunk
+    was read is not enough on its own: two sentences from one evening can be
+    read either side of midnight. An item whose sentence has gone since it
+    was read is dropped.
     """
     promoted = []
     db = memory.db
@@ -206,10 +214,11 @@ def save_candidates(memory, owner, items, *, night, through=None):
     with _background_transaction(db, "BEGIN IMMEDIATE"):
         for item in items:
             alive = db.execute(
-                "SELECT 1 FROM episodes WHERE id = ? AND text NOT IN ('', '[forgotten]') AND instr(text, ?) > 0",
+                "SELECT ts FROM episodes WHERE id = ? AND text NOT IN ('', '[forgotten]') AND instr(text, ?) > 0",
                 (item.episode_id, item.quote)).fetchone()
             if not alive:
                 continue
+            said = _said_on(alive[0], zone)
             key = claim_key(item.claim)
             row = db.execute(
                 "SELECT id, status, first_night FROM candidate_facts WHERE owner = ? AND claim_key = ?",
@@ -223,9 +232,10 @@ def save_candidates(memory, owner, items, *, night, through=None):
                            (candidate, item.episode_id, night, item.quote))
                 continue
             candidate, status, first_night = row
-            earlier = db.execute(
-                "SELECT 1 FROM candidate_sources WHERE candidate_id = ? AND night < ? AND episode_id <> ?",
-                (candidate, night, item.episode_id)).fetchone()
+            earlier = any(_said_on(ts, zone) < said for ts, in db.execute(
+                "SELECT e.ts FROM candidate_sources s JOIN episodes e ON e.id = s.episode_id "
+                "WHERE s.candidate_id = ? AND s.night < ? AND s.episode_id <> ?",
+                (candidate, night, item.episode_id)))
             db.execute("INSERT OR IGNORE INTO candidate_sources VALUES (?, ?, ?, ?)",
                        (candidate, item.episode_id, night, item.quote))
             db.execute("UPDATE candidate_facts SET last_night = max(last_night, ?) WHERE id = ?", (night, candidate))

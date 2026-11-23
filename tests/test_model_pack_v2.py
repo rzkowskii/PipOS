@@ -289,6 +289,74 @@ class RolePacks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "SHA-256 differs"):
             self.verify()  # ... and the next boot hashes and refuses it.
 
+    def hide_a_damaged_file_behind_the_cache(self):
+        """Bit rot under a valid-looking verdict: the stat key matches, the bytes do not."""
+        self.verify()
+        path = root("asr", self.models) / "decoder_model_merged.ort"
+        info = path.stat()
+        data = bytearray(path.read_bytes())
+        data[0] ^= 1
+        path.write_bytes(bytes(data))
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+        forged = json.loads(self.verdict.read_text())
+        changed = path.stat()
+        forged["roles"]["asr"]["files"]["decoder_model_merged.ort"].update(
+            inode=changed.st_ino, mtime_ns=changed.st_mtime_ns, ctime_ns=changed.st_ctime_ns)
+        self.verdict.write_text(json.dumps(forged))
+        hashed = []
+        self.verify(hashed=hashed)
+        self.assertEqual(hashed, [], "the cache hides it at boot")
+
+    def test_rehash_failure_drops_the_verdict_even_when_it_cannot_be_rewritten(self):
+        from unittest.mock import patch
+        self.hide_a_damaged_file_behind_the_cache()
+        real_replace = os.replace
+
+        def full_disk(source, target, *args, **kwargs):
+            if Path(target) == self.verdict:
+                raise OSError(28, "No space left on device")
+            return real_replace(source, target, *args, **kwargs)
+
+        job = self.job([6_000_000.0])
+        with patch.object(model_pack.os, "replace", full_disk):
+            self.assertTrue(asyncio.run(job.run_chunk(60)))
+        self.assertEqual([failure["role"] for failure in job.failures], ["asr"])
+        self.assertNotIn("verdict_kept", job.failures[0])
+        self.assertFalse(self.verdict.exists(), "a verdict that cannot be rewritten is removed")
+        hashed = []
+        with self.assertRaisesRegex(ValueError, "SHA-256 differs"):
+            self.verify(hashed=hashed)
+        self.assertIn("decoder_model_merged.ort", hashed, "the next start hashes in full")
+
+    def test_rehash_says_so_when_nothing_on_mind_can_change(self):
+        from unittest.mock import patch
+        self.hide_a_damaged_file_behind_the_cache()
+        job = self.job([6_000_000.0])
+        with patch.object(Verdicts, "update", return_value=False), \
+                patch.object(Path, "unlink", side_effect=OSError(30, "Read-only file system")):
+            self.assertTrue(asyncio.run(job.run_chunk(60)))
+        self.assertTrue(job.failures[0].get("verdict_kept"))
+
+    def test_a_verdict_write_syncs_its_folder(self):
+        from unittest.mock import patch
+        synced = []
+        real_open, real_fsync = os.open, os.fsync
+        folders = {}
+
+        def tracking_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if flags & os.O_DIRECTORY:
+                folders[fd] = Path(path)
+            return fd
+
+        def tracking_fsync(fd):
+            synced.append(folders.get(fd))
+            return real_fsync(fd)
+
+        with patch.object(model_pack.os, "open", tracking_open), patch.object(model_pack.os, "fsync", tracking_fsync):
+            self.assertTrue(Verdicts(self.verdict).update("asr", None))
+        self.assertIn(self.verdict.parent, synced, "the rename is made durable")
+
     def test_rehash_job_is_a_night_shift_job(self):
         self.assertTrue(callable(model_pack.rehash_job))
         self.assertIsInstance(model_pack.rehash_job(), RehashJob)
@@ -373,11 +441,35 @@ class ShippedDescriptors(unittest.TestCase):
                 self.assertEqual(produce(REPO / "out", pack), listed)
 
     def test_post_image_stages_every_role_through_the_packager(self):
+        import subprocess
         script = (REPO / "os/board/beingos/post-image.sh").read_text()
-        self.assertIn("python3 -m lab.package_model", script)
-        self.assertNotIn("--roles", script, "post-image stages every image role")
+        self.assertIn("-m lab.package_model", script)
+        option = '${BEING_PACK_ROLES:+--roles "$BEING_PACK_ROLES"}'
+        self.assertIn(option, script, "a role list only ever comes from BEING_PACK_ROLES")
+        self.assertEqual(script.count("--roles"), 1)
+        snippet = f'set -- {option}; printf "[%s]" "$#" "$@"'
+        for value, expected in ((None, "[0]"), ("", "[0]"), ("conversation,vad", "[2][--roles][conversation,vad]")):
+            with self.subTest(BEING_PACK_ROLES=value):
+                env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+                if value is not None:
+                    env["BEING_PACK_ROLES"] = value
+                result = subprocess.run(["sh", "-c", snippet], capture_output=True, text=True, check=True, env=env)
+                self.assertEqual(result.stdout, expected, "unset: every image role (no --roles)")
         self.assertIn('du -sm "$MODELS"', script, "models.ext4 is sized from what was staged")
         self.assertIn("model-packs", script)
+
+    def test_a_role_list_without_the_conversation_pack_is_refused(self):
+        from lab import package_model
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "models"
+            with self.assertRaisesRegex(ValueError, "must include conversation"):
+                package_model.stage_all(Path(temp) / "out/models", output, "c.pem", "k.pem", roles=("vad", "asr"))
+            self.assertFalse(output.exists(), "nothing is staged")
+            with contextlib.redirect_stderr(io.StringIO()) as errors, self.assertRaises(SystemExit) as stopped:
+                package_model.main(["--source", str(Path(temp) / "out/models"), "--output", str(output),
+                                    "--certificate", "c.pem", "--key", "k.pem", "--roles", "vad,asr,dream"])
+            self.assertEqual(stopped.exception.code, 2)
+            self.assertIn("must include conversation", errors.getvalue())
 
     def test_models_partition_leaves_room_for_ext4_metadata(self):
         """mkfs.ext4 -d fails when the data and ext4's own metadata do not fit.

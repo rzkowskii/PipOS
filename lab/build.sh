@@ -31,6 +31,9 @@ Usage: lab/build.sh [command]
   laptop [ARGS...] build the laptop image (no lab access) as out/images/beingos-laptop.img
                    (with no ARGS it rebuilds the being package first, then everything)
   laptop-try       build the laptop Try USB (local screen menu) as out/images/beingos-laptop-try.img
+                   With BEING_TRY_BENCH=1 the Try commands build a bench stick instead
+                   (every entry runs bench mode; /models/bench holds out/models/bench),
+                   named with a -bench suffix, e.g. beingos-laptop-try-bench.img.
   laptop-config    re-apply beingos_laptop_defconfig in the laptop output tree
   laptop-make ARGS...
                    run make in the laptop output tree
@@ -478,6 +481,21 @@ EOF
     ls -lh out/images/beingos-laptop-update.raucb
 }
 
+# BEING_TRY_BENCH=1 makes the Try commands build a bench stick. run() does
+# not forward it: only try-image.sh reads it, so no installed image or
+# update bundle ever carries the bench quants.
+TRY_BENCH="${BEING_TRY_BENCH:-0}"
+check_try_bench() {
+    case "$TRY_BENCH" in
+        0|1) ;;
+        *) echo "BEING_TRY_BENCH must be 0 or 1" >&2; exit 2 ;;
+    esac
+}
+# A bench stick is never mistaken for (or overwrites) the ordinary Try media.
+try_bench_suffix() {
+    if [ "$TRY_BENCH" = 1 ]; then printf %s -bench; fi
+}
+
 cmd="${1:-build}"
 [ $# -gt 0 ] && shift
 case "$cmd" in
@@ -512,6 +530,7 @@ case "$cmd" in
         ls -lh out/images/beingos.img
         ;;
     try-image|try-screen)
+        check_try_bench
         up
         run bash -c "[ -f $OUT/.config ] && [ $OUT/.config -nt /src/os/configs/$DEFCONFIG ]" || br_make "$DEFCONFIG"
         check_space
@@ -527,11 +546,14 @@ case "$cmd" in
             screen=1
         fi
         case "$screen" in
-            0) output=beingos-try.img ;;
-            1) output=beingos-try-screen.img ;;
+            0) output=beingos-try ;;
+            1) output=beingos-try-screen ;;
             *) echo "BEING_TRY_SCREEN must be 0 or 1" >&2; exit 2 ;;
         esac
-        run env BEING_TRY_SCREEN="$screen" sh /src/os/board/beingos/try-image.sh \
+        output="$output$(try_bench_suffix).img"
+        # The builder sees only the variables run() names: pass the bench
+        # choice to try-image.sh explicitly.
+        run env BEING_TRY_SCREEN="$screen" BEING_TRY_BENCH="$TRY_BENCH" sh /src/os/board/beingos/try-image.sh \
             "$OUT/host" "$OUT/images/efi-part/EFI/BOOT/bootx64.efi" \
             "$OUT/images/rootfs.squashfs" "$OUT/images/models.ext4" /src/out/images
         ls -lh "out/images/$output"
@@ -564,6 +586,7 @@ case "$cmd" in
         ls -lh "out/images/$LAPTOP_NAME.img"
         ;;
     laptop-try)
+        check_try_bench
         laptop_select
         up
         laptop_config
@@ -580,12 +603,12 @@ case "$cmd" in
         run bash -euo pipefail -c '
             stage=$(mktemp -d /src/out/images/.laptop-try.XXXXXX)
             trap "rm -rf \"\$stage\"" EXIT
-            BEING_TRY_SCREEN=1 BEING_TRY_LAPTOP=1 sh /src/os/board/beingos/try-image.sh \
+            BEING_TRY_SCREEN=1 BEING_TRY_LAPTOP=1 BEING_TRY_BENCH="$3" sh /src/os/board/beingos/try-image.sh \
                 "$1/host" "$1/images/efi-part/EFI/BOOT/bootx64.efi" \
                 "$1/images/rootfs.squashfs" "$1/images/models.ext4" "$stage"
-            mv -f "$stage/beingos-laptop-try.img" "/src/out/images/$2-try.img"
-        ' laptop-try "$OUT" "$LAPTOP_NAME"
-        ls -lh "out/images/$LAPTOP_NAME-try.img"
+            mv -f "$stage/beingos-laptop-try$4.img" "/src/out/images/$2-try$4.img"
+        ' laptop-try "$OUT" "$LAPTOP_NAME" "$TRY_BENCH" "$(try_bench_suffix)"
+        ls -lh "out/images/$LAPTOP_NAME-try$(try_bench_suffix).img"
         ;;
     laptop-make)
         laptop_select

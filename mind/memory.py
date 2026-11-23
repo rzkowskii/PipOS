@@ -221,6 +221,8 @@ CREATE TABLE IF NOT EXISTS diary_days (
     timers         INTEGER NOT NULL,
     body_events    TEXT NOT NULL,       -- JSON object of counts, never words
     built          REAL NOT NULL,
+    start_ts       REAL,                -- the day's [start, end) in the owner's zone
+    end_ts         REAL,
     PRIMARY KEY (owner, day)
 );
 CREATE TABLE IF NOT EXISTS diary_topics (
@@ -420,9 +422,12 @@ def _sign_bits(vector):
     return bits.to_bytes((len(vector) + 7) // 8, "little")
 
 
-def _index_rows(db, embedder, limit, *, recent_only=False):
+def _index_rows(db, embedder, limit, *, recent_only=False, made=None):
     """Embed rows with no vector, newest first. With `recent_only`, look only
-    above the newest vector: cheap enough to run before every search."""
+    above the newest vector: cheap enough to run before every search.
+
+    `made`, a dict, keeps vectors whose insert failed, keyed by row and
+    words, so a retry stores them without embedding them again."""
     from .embed import quantise
 
     done = 0
@@ -443,21 +448,46 @@ def _index_rows(db, embedder, limit, *, recent_only=False):
             continue
         coded = []
         for row_id, text in rows:
-            vector = embedder.embed(vector_text(text))
-            scale, q8 = quantise(vector)
-            coded.append((row_id, model, scale, q8, _sign_bits(vector), row_id, text))
+            key = (newest, row_id, text)
+            entry = made.get(key) if made is not None else None
+            if entry is None:
+                vector = embedder.embed(vector_text(text))
+                scale, q8 = quantise(vector)
+                entry = (row_id, model, scale, q8, _sign_bits(vector), row_id, text)
+                if made is not None:
+                    made[key] = entry
+            coded.append(entry)
         with db:
             db.executemany(insert, coded)
+        if made is not None:
+            for row_id, text in rows:
+                made.pop((newest, row_id, text), None)
         done += len(rows)
     return done
+
+
+def _busy(error):
+    """True when SQLite only means another connection holds the lock now."""
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is not None:
+        return code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    message = str(error).lower()
+    return "locked" in message or "busy" in message
 
 
 class _Indexer:
     """Embeds new sentences on a thread of its own, with its own connection,
     so recording a sentence never waits for its vector."""
 
-    def __init__(self, path, embedder):
+    BUSY_FIRST = 0.2        # seconds before the first retry of a locked database
+    BUSY_LONGEST = 5.0      # backing off up to this
+    BUSY_TRIES = 8          # then waiting for the next sentence
+    PARKED_SECONDS = 300.0  # after a failure that is not a lock (a full or read-only disk)
+
+    def __init__(self, path, embedder, *, allowed=None):
         self.path, self.embedder = path, embedder
+        # Asked before each batch: False (the disk guard says critical) skips it.
+        self.allowed = allowed or (lambda: True)
         self._wake = threading.Event()
         self._stopping = threading.Event()
         self._thread = threading.Thread(target=self._run, name="memory-vectors", daemon=True)
@@ -482,17 +512,37 @@ class _Indexer:
             db = sqlite3.connect(self.path, timeout=0.5)
             db.execute("PRAGMA foreign_keys = ON")
             db.execute("PRAGMA secure_delete = ON")
+            made = {}
             while not self._stopping.is_set():
                 self._wake.wait()
                 self._wake.clear()
+                delay, tries = self.BUSY_FIRST, 0
                 while not self._stopping.is_set():
+                    if not self.allowed():
+                        break
                     try:
-                        if not _index_rows(db, self.embedder, EMBED_BATCH, recent_only=True):
+                        if not _index_rows(db, self.embedder, EMBED_BATCH, recent_only=True, made=made):
                             break
-                    except sqlite3.OperationalError:
-                        # Busy with a foreground write: try again shortly.
-                        if self._stopping.wait(0.2):
+                        delay, tries = self.BUSY_FIRST, 0
+                    except sqlite3.OperationalError as exc:
+                        if not _busy(exc):
+                            # A full, read-only or failing disk does not clear
+                            # in a moment: say so once, then wait a long while
+                            # for the next sentence rather than spinning.
+                            print("memory: vector indexing paused:", exc, flush=True)
+                            made.clear()
+                            if self._stopping.wait(self.PARKED_SECONDS):
+                                return
+                            break
+                        tries += 1
+                        if tries >= self.BUSY_TRIES:
+                            break  # the next sentence tries again
+                        # Busy with a foreground write: try again, backing off.
+                        if self._stopping.wait(delay):
                             return
+                        delay = min(delay * 2, self.BUSY_LONGEST)
+                if len(made) > 4 * EMBED_BATCH:
+                    made.clear()
         except sqlite3.Error as exc:
             print("memory: vector indexing stopped:", exc, flush=True)
         finally:
@@ -521,6 +571,12 @@ class Memory:
         found = int(self.db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()[0])
         if found != SCHEMA_VERSION:
             raise RuntimeError(f"memory schema is version {found}, this code needs {SCHEMA_VERSION}")
+        with self.db:
+            # Day records written before they carried their bounds.
+            columns = {column[1] for column in self.db.execute("PRAGMA table_info(diary_days)")}
+            for column in ("start_ts", "end_ts"):
+                if column not in columns:
+                    self.db.execute(f"ALTER TABLE diary_days ADD COLUMN {column} REAL")
         with self.db:
             added = self.db.execute("INSERT OR IGNORE INTO meta VALUES ('episode_search', '1')")
             if added.rowcount:
@@ -644,6 +700,9 @@ class Memory:
             episodes = sorted({ref for _, refs, _ in newer for ref in refs})
             facts = sorted({ref for _, _, refs in newer for ref in refs})
             self._begin_deletion_batch()
+            self._forget_days(row[0] for row in self.db.execute(
+                "SELECT id FROM episodes WHERE deletion_ref IN (SELECT value FROM json_each(?))",
+                (json.dumps(episodes),)))
             self.db.execute(
                 f"UPDATE episodes SET text = '[forgotten]', meta = NULL, speaker = NULL, {_TOMBSTONE_TS} "
                 "WHERE deletion_ref IN (SELECT value FROM json_each(?))",
@@ -698,12 +757,16 @@ class Memory:
         self.db.execute("INSERT INTO episodes_fts (episodes_fts) VALUES ('rebuild')")
         self._sweep_derived()
 
-    def optimize_search(self):
-        """Nightly: merge the search index into one segment, for speed and size."""
-        with self.db:
-            self.db.execute("INSERT INTO episodes_fts (episodes_fts) VALUES ('optimize')")
-            self.db.execute("INSERT INTO facts_fts (facts_fts) VALUES ('optimize')")
-        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    def optimize_search(self, db=None):
+        """Nightly: merge the search index into one segment, for speed and size.
+
+        `db`, for this and the other night work, is a connection of the night
+        shift's own on a worker thread; the default is memory's own."""
+        db = self.db if db is None else db
+        with db:
+            db.execute("INSERT INTO episodes_fts (episodes_fts) VALUES ('optimize')")
+            db.execute("INSERT INTO facts_fts (facts_fts) VALUES ('optimize')")
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def _sweep_derived(self):
         """Delete everything derived, at any depth, from records now gone.
@@ -796,10 +859,10 @@ class Memory:
         # Low: commands are kept, conversation is no longer archived.
         return explicit or kind == "command"
 
-    def compact(self):
+    def compact(self, db=None):
         """Give space back: merge the search index, truncate the WAL, and
         vacuum only when there is room for the copy a vacuum makes."""
-        self.optimize_search()
+        self.optimize_search(db)
         if self.root is None:
             return
         try:
@@ -808,12 +871,13 @@ class Memory:
             return
         reading = self.disk_state(refresh=True)
         if reading["free_bytes"] is not None and reading["free_bytes"] > 2 * size + (16 << 20):
-            self._vacuum()
+            self._vacuum(db)
         self.disk_state(refresh=True)
 
-    def _vacuum(self):
-        self.db.execute("VACUUM")
-        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    def _vacuum(self, db=None):
+        db = self.db if db is None else db
+        db.execute("VACUUM")
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     # -- vectors ---------------------------------------------------------------
 
@@ -821,10 +885,11 @@ class Memory:
         if self.embedder is None or self.root is None:
             return
         if self._indexer is None:
-            self._indexer = _Indexer(self.root / "mind.db", self.embedder)
+            self._indexer = _Indexer(self.root / "mind.db", self.embedder,
+                                     allowed=lambda: self.disk_state()["state"] != "critical")
         self._indexer.poke()
 
-    def index_pending(self, limit=EMBED_BATCH, *, recent_only=False):
+    def index_pending(self, limit=EMBED_BATCH, *, recent_only=False, db=None):
         """Embed up to `limit` rows that have no vector yet. Returns how many.
 
         A vector is stored only if the words it was made from are still the
@@ -834,23 +899,24 @@ class Memory:
         embedder = self.embedder
         if embedder is None or self.disk_state()["state"] == "critical":
             return 0
-        return _index_rows(self.db, embedder, limit, recent_only=recent_only)
+        return _index_rows(self.db if db is None else db, embedder, limit, recent_only=recent_only)
 
-    def backfill_vectors(self, limit=500):
+    def backfill_vectors(self, limit=500, db=None):
         """Night work: remake vectors from an older model or recipe, then
         embed every row still without one (an edited row, an old archive).
         Returns how many rows were touched; 0 means it is all done."""
         if self.embedder is None:
             return 0
+        db = self.db if db is None else db
         model = vector_model(self.embedder)
-        with self.db:
-            stale = self.db.execute(
+        with db:
+            stale = db.execute(
                 "DELETE FROM episode_vec WHERE episode_id IN (SELECT episode_id FROM episode_vec "
                 "WHERE model <> ? LIMIT ?)", (model, limit)).rowcount
-            stale += self.db.execute(
+            stale += db.execute(
                 "DELETE FROM fact_vec WHERE fact_id IN (SELECT fact_id FROM fact_vec WHERE model <> ? LIMIT ?)",
                 (model, limit)).rowcount
-        return stale + self.index_pending(limit)
+        return stale + self.index_pending(limit, db=db)
 
     def vector_counts(self):
         """(episode vectors, fact vectors): for tests and the doctor."""
@@ -1405,7 +1471,11 @@ class Memory:
         """
         from .embed import dot
 
-        base = f"FROM {table} v {join} WHERE {where}"
+        # Only vectors made by this model and recipe share the query's space
+        # (and its length). A row still holding an older vector is found by
+        # its words alone until the night shift remakes it.
+        base = f"FROM {table} v {join} WHERE ({where}) AND v.model = ?"
+        params = (*params, vector_model(self.embedder))
         count = self.db.execute(f"SELECT count(*) {base}", params).fetchone()[0]
         if not count:
             return {}
@@ -1424,7 +1494,7 @@ class Memory:
             rows = self.db.execute(f"SELECT v.{key}, v.scale, v.q8 {base}", params)
         found = {}
         for row_id, scale, q8 in rows:
-            if scale:
+            if scale and len(q8) == len(vector):
                 found[row_id] = dot(vector, array("b", q8)) * scale
         return found
 
@@ -1513,6 +1583,7 @@ class Memory:
         """
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
+            self._expire_days(cutoff)
             expired = self._expired_rows(cutoff)
             if not expired:
                 return MemoryEdit()
@@ -1546,7 +1617,21 @@ class Memory:
                         UNION ALL
                         SELECT 'episode', source, 'fact', id FROM facts WHERE source IS NOT NULL
                         UNION ALL
-                        SELECT 'fact', id, 'episode', source FROM facts WHERE source IS NOT NULL
+                        -- A fact the dream promoted is the owner's newest
+                        -- quote of it, not a telling of its own: that
+                        -- sentence stays until it ages out itself.
+                        SELECT 'fact', f.id, 'episode', f.source FROM facts f WHERE f.source IS NOT NULL
+                        AND NOT EXISTS (SELECT 1 FROM candidate_facts c JOIN candidate_sources s
+                                        ON s.candidate_id = c.id WHERE c.fact_id = f.id AND s.episode_id = f.source)
+                        UNION ALL
+                        -- Any quote a candidate rests on takes it, and the
+                        -- fact promoted from it, and whatever was made from it.
+                        SELECT 'episode', episode_id, 'candidate', candidate_id FROM candidate_sources
+                        UNION ALL
+                        SELECT 'candidate', id, 'fact', fact_id FROM candidate_facts WHERE fact_id IS NOT NULL
+                        UNION ALL
+                        SELECT parent_kind, parent_id, 'candidate', child_id FROM derivations
+                        WHERE child_kind = 'candidate'
                     ),
                     expired(kind, id) AS (
                         SELECT 'episode', id FROM episodes
@@ -1566,7 +1651,31 @@ class Memory:
             (cutoff, cutoff),
         ).fetchall()
 
+    def _forget_days(self, episode_ids):
+        """A day record counts the owner's conversation. When any of it is
+        forgotten the record goes (called before the tombstone rounds the
+        moment away), and that day is counted again from what remains
+        whenever it is asked about. A record from before records kept their
+        bounds goes for any day the moment could fall on, in any zone."""
+        self.db.execute(
+            "DELETE FROM diary_days WHERE EXISTS (SELECT 1 FROM episodes e "
+            "WHERE e.id IN (SELECT value FROM json_each(?)) AND e.kind = 'heard' AND CASE "
+            "WHEN diary_days.start_ts IS NULL OR diary_days.end_ts IS NULL "
+            "THEN abs(julianday(diary_days.day) - julianday(e.ts, 'unixepoch', 'start of day')) <= 1 "
+            "ELSE e.ts >= diary_days.start_ts AND e.ts < diary_days.end_ts END)",
+            (json.dumps(list(episode_ids)),),
+        )
+
+    def _expire_days(self, cutoff):
+        """Day records of days wholly before the cutoff go with that day's talk."""
+        self.db.execute(
+            "DELETE FROM diary_days WHERE CASE WHEN end_ts IS NULL "
+            "THEN julianday(day) < julianday(?, 'unixepoch', 'start of day') - 1 ELSE end_ts <= ? END",
+            (cutoff, cutoff),
+        )
+
     def _redact_episodes(self, episode_ids):
+        self._forget_days(episode_ids)
         # A tombstone keeps only that something was said on that day: not who
         # said it, nor the moment.
         self.db.execute(
@@ -1581,6 +1690,7 @@ class Memory:
     def edit(self, *, fact_ids=(), episode_ids=(), replacement=None):
         """Correct or forget selected memories and invalidate their derived text."""
         episode_ids = set(episode_ids)
+        named_facts = set(fact_ids)
         with self.db:
             # Take the write lock before collecting source IDs. Another writer
             # cannot commit a new dependent episode halfway through this edit.
@@ -1594,11 +1704,32 @@ class Memory:
             ).fetchall()
             fact_ids = tuple(row[0] for row in facts)
             fact_texts = tuple(row[1] for row in facts)
-            episode_ids.update(row[2] for row in facts if row[2] is not None)
-            # Every sentence that told a fact goes with it, or is corrected with it.
-            episode_ids.update(row[0] for row in self.db.execute(
-                "SELECT episode_id FROM fact_tellings WHERE fact_id IN (SELECT value FROM json_each(?))",
-                (json.dumps(fact_ids),)))
+            # The owner's sentences each fact the dream promoted was found in.
+            quotes = {}
+            for fact, episode in self.db.execute(
+                    "SELECT c.fact_id, s.episode_id FROM candidate_facts c "
+                    "JOIN candidate_sources s ON s.candidate_id = c.id "
+                    "WHERE c.fact_id IN (SELECT value FROM json_each(?))", (json.dumps(fact_ids),)):
+                quotes.setdefault(fact, set()).add(episode)
+            dropped = ()
+            if replacement is not None:
+                # A fact the dream drew from a sentence now being corrected
+                # rested on the old words: it goes, rather than taking on
+                # the new wording.
+                dropped = tuple(fact for fact in fact_ids if fact in quotes and fact not in named_facts)
+            linked = [(row[0], row[2]) for row in facts if row[2] is not None]
+            linked += self.db.execute(
+                "SELECT fact_id, episode_id FROM fact_tellings WHERE fact_id IN (SELECT value FROM json_each(?))",
+                (json.dumps(fact_ids),)).fetchall()
+            if replacement is None:
+                # Every sentence that told a fact goes with it.
+                episode_ids.update(episode for _, episode in linked)
+            else:
+                # A telling is corrected with its fact. The conversation the
+                # dream quoted is not a telling: it stays the owner's own
+                # words, and the corrected fact no longer rests on it.
+                episode_ids.update(episode for fact, episode in linked
+                                   if fact not in dropped and episode not in quotes.get(fact, ()))
             sources = self.db.execute(
                 "SELECT id, text FROM episodes WHERE id IN (SELECT value FROM json_each(?)) "
                 "AND text NOT IN ('', '[forgotten]') ORDER BY id",
@@ -1637,9 +1768,10 @@ class Memory:
             else:
                 # The owner's correction wins: the fact is theirs now, no
                 # longer the dream's, and the dream's candidate goes.
+                rewritten = tuple(fact for fact in fact_ids if fact not in dropped)
                 self.db.execute(
                     "UPDATE candidate_facts SET fact_id = NULL WHERE fact_id IN (SELECT value FROM json_each(?))",
-                    (json.dumps(list(fact_ids)),))
+                    (json.dumps(rewritten),))
             self._begin_deletion_batch()
             if replacement is None:
                 self._redact_episodes(stale)
@@ -1648,11 +1780,26 @@ class Memory:
                 # The corrected sentences keep who said them and when; only
                 # what was derived from the old wording becomes a tombstone.
                 self._redact_episodes(tuple(row for row in stale if row not in episode_ids))
+                self._delete_facts(dropped)
                 corrected = " ".join(replacement.split())
                 self.db.execute(
                     "UPDATE facts SET text = ?, confirmed = ? WHERE id IN (SELECT value FROM json_each(?))",
-                    (corrected, stamp, json.dumps(fact_ids)),
+                    (corrected, stamp, json.dumps(rewritten)),
                 )
+                kept = set(episode_ids)
+                for fact in rewritten:
+                    untold = sorted(quotes.get(fact, set()) - kept)
+                    if not untold:
+                        continue
+                    self.db.execute(
+                        "DELETE FROM fact_tellings WHERE fact_id = ? AND episode_id IN (SELECT value FROM json_each(?))",
+                        (fact, json.dumps(untold)))
+                    # It ages from its latest remaining telling, or from the
+                    # correction itself.
+                    self.db.execute(
+                        "UPDATE facts SET source = (SELECT max(episode_id) FROM fact_tellings WHERE fact_id = ?) "
+                        "WHERE id = ? AND source IN (SELECT value FROM json_each(?))",
+                        (fact, fact, json.dumps(untold)))
                 self.db.execute(
                     # The old wording's excerpt and links go; that it was a
                     # command ("remember that ...") stays, so the corrected

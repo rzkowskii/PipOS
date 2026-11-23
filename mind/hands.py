@@ -90,6 +90,7 @@ HUMAN_QUIET = 1.5           # Pip resumes this long after the owner's last key
 STATUS_EVERY = 2.0
 STALL_SECONDS = 20.0        # no token for this long while writing: pause
 KILL_GRACE = 2.0            # Ctrl-C first, then kill all but the shell
+STOP_FORGET_SECONDS = 3.5   # the clear on stop, inside being-hands' TimeoutStopSec=5
 TICK = 0.04                 # 25 pty writes a second at most
 RELAY_RATE = 256 * 1024     # bytes a second relayed from the shell
 TRANSCRIPT = 64 * 1024
@@ -858,6 +859,9 @@ class CodeCortex:
 
 # -- the shell side: OSC filter and transcript ---------------------------------
 
+SPLICE = b"\x18"  # CAN: put where OscFilter strips a sequence
+
+
 class OscFilter:
     """Strip OSC 7770 and 7771 from everything the shell side writes, so no
     program can forge Pip's flags or the prompt marker. Returns the clean
@@ -902,6 +906,10 @@ class OscFilter:
             if data[start + 5:start + 6] == b"1":
                 body = data[start + 6:stop]
                 markers.append(body[1:].decode("ascii", "replace") if body.startswith(b";") else "")
+            # CAN where the sequence was: a lone ESC ] the program wrote just
+            # before it can never join what follows into a forged 7770 (the
+            # panel ignores CAN; inside an OSC the body no longer starts 7770;).
+            out += SPLICE
             index = stop + width
         return bytes(out), markers
 
@@ -924,7 +932,8 @@ class Ring:
         self.data = bytearray()
 
     def lines(self):
-        text = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\x1b.", "", self.data.decode("utf-8", "replace"))
+        text = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\x1b.|\x18", "",
+                      self.data.decode("utf-8", "replace"))
         return [line.rstrip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
 
 
@@ -2488,7 +2497,8 @@ class Hands:
                 job.tokens.extend(tokens)
                 job.last_token = self.clock()
                 if job.phase == "reading":
-                    job.phase = "writing"
+                    # A wake word heard while the prompt was read holds the typist.
+                    job.phase = "held" if self._typist is not None and self._typist.held else "writing"
                 if not self._accept(job, text):
                     stream.cancel()
                     return
@@ -2558,7 +2568,7 @@ class Hands:
         job.finished = True
         job.generation_done = True
         if job.phase == "reading":
-            job.phase = "writing"
+            job.phase = "held" if self._typist is not None and self._typist.held else "writing"
         if job.kind == "script":
             if not job.body.strip():
                 await self._cancel_job("empty", speak=True)
@@ -2603,11 +2613,12 @@ class Hands:
                 self._hold_until = self.clock() + HOLD_SECONDS
         elif action == "release":
             self._hold_until = None
+            # Whatever the phase now (a hold taken while reading may have
+            # moved on to writing), the wake hold always lets go.
+            if self._typist is not None:
+                self._typist.release()
             if job.phase == "held":
-                self._typist.release()
                 job.phase = "writing"
-            elif job.phase == "reading" and self._typist:
-                self._typist.release()
         elif action == "pause":
             if job.phase in GENERATING:
                 await self._pause_job(reason, speak=False)
@@ -2984,34 +2995,48 @@ class Hands:
     # -- forgetting --------------------------------------------------------------------------------
 
     async def forget(self, event):
-        """term.forget: a job's file and every copy, or everything."""
+        """term.forget: a job's file and every copy, or everything.
+
+        The reply ('forgotten', under the request's req) goes out as soon as
+        the files are gone, before the slower shell restart and slot erase, so
+        the mind hears it in time. A job cancelled on the way sends its
+        'cancelled' status without the req: that is not the answer."""
         everything = bool(event.get("all"))
         job = self.job
         removed, changed = [], []
         wanted = str(event.get("id") or "")
         parent = job.id[:-1] if job is not None and job.fixed and job.id.endswith("f") else None
         also = tuple(name for name in event.get("files") or () if isinstance(name, str))[:64]
+
+        async def answer():
+            if not event.get("quiet"):
+                await self.reply("term.status", id=wanted or None, phase="forgotten",
+                                 removed=len(removed), changed=changed, speakable=False)
+
         if everything:
             if job is not None and job.phase in ACTIVE:
-                await self._cancel_job("forget")
+                await self._cancel_unanswered("forget")
             for small in SMALL_APPS:
                 if self.view[small] != "closed":
                     await self._close_small(small)
             await self._stop_terminal()
-            if self.cage.real:
-                # A fresh tmpfs: nothing of the old workshop survives in RAM.
-                await asyncio.to_thread(self.cage.run, ["systemctl", "restart", "workshop.mount"])
+            # Never restart workshop.mount from here: being-hands.service
+            # needs the mount (RequiresMountsFor=/workshop), so systemd would
+            # restart hands itself mid-forget. clear_workshop() zeroes and
+            # unlinks every file once the cage units are stopped.
             if self.workshop.is_dir():
                 count = await asyncio.to_thread(clear_workshop, self.workshop)
                 removed = ["?"] * count
             self.job = None
             self._typist = None
+            await answer()
             await self.announce_state("terminal")
         elif also and (job is None or (wanted and wanted not in (job.id, parent))):
             # The changed copies the owner said yes to, after the script
             # itself was forgotten (so there is no job any more).
             if self.workshop.is_dir():
                 removed = await asyncio.to_thread(remove_files, self.workshop, also)
+            await answer()
             await self._restart_shell()
             if self.renderer is not None:
                 self.renderer.wipe()
@@ -3022,7 +3047,7 @@ class Hands:
                 await self.reply("term.status", id=wanted or None, phase=None, reason="no_job", speakable=False)
                 return
             if job.phase in ACTIVE:
-                await self._cancel_job("forget")
+                await self._cancel_unanswered("forget")
             if self.workshop.is_dir():
                 # A fix job forgets the file it fixed as well.
                 for name in dict.fromkeys(n for n in (job.file, job.parent_file) if n):
@@ -3030,6 +3055,9 @@ class Hands:
                     removed += [n for n in gone if n not in removed]
                     changed += [n for n in differ if n not in changed and n not in removed]
                 changed = [n for n in changed if n not in removed]
+            self.job = None
+            self._typist = None
+            await answer()
             # A fresh shell: the old one's in-memory history held every
             # line Pip typed, the script included.
             await self._restart_shell()
@@ -3037,13 +3065,15 @@ class Hands:
                 self.renderer.wipe()
             self.transcript.wipe()
             self._out_since_run = b""
-            self.job = None
-            self._typist = None
         await self.cortex.erase()
-        if not event.get("quiet"):
-            await self.reply("term.status", id=wanted or None, phase="forgotten",
-                            removed=len(removed), changed=changed, speakable=False)
         log(f"forgot {len(removed)} files")
+
+    async def _cancel_unanswered(self, reason):
+        token = _REQ.set(None)
+        try:
+            await self._cancel_job(reason)
+        finally:
+            _REQ.reset(token)
 
     # -- running -------------------------------------------------------------------------------------
 
@@ -3063,7 +3093,13 @@ class Hands:
                 await self.on_event(await self.bus.recv())
         finally:
             self._tick_task.cancel()
-            await self.forget({"all": True, "quiet": True})
+            # Clear the workshop on the way out, but never past systemd's
+            # TimeoutStopSec=5: a slow unit stop or slot erase must not get
+            # hands SIGKILLed.
+            try:
+                await asyncio.wait_for(self.forget({"all": True, "quiet": True}), STOP_FORGET_SECONDS)
+            except (asyncio.TimeoutError, Exception) as exc:
+                log(f"clear on stop incomplete: {type(exc).__name__}")
             await self.bus.stop()
 
     async def _ticker(self):

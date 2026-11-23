@@ -17,6 +17,7 @@ import unittest
 from pathlib import Path
 
 from lab import console_preview as preview
+from mind import hands
 
 BUILD = None
 SKIP = None
@@ -206,6 +207,35 @@ class PanelTest(unittest.TestCase):
         session.control("wipe=1")
         _, wiped = wait_for(lambda: (lambda h: h if h[1] == empty else None)(session.read()), timeout=2)
         self.assertEqual(wiped, empty)
+
+    def test_a_trailing_escape_escape_cannot_swallow_a_wipe(self):
+        # hands' OscFilter holds back only a chunk's last ESC, so when a
+        # program ends in ESC ESC the first reaches the renderer just before
+        # hands' own control string does.
+        filtered = hands.OscFilter().feed(b"secret\r\n\x1b\x1b")[0]
+        self.assertEqual(filtered, b"secret\r\n\x1b")
+        blank = self.session()
+        _, empty = blank.read()
+        for output in (filtered, b"secret\r\n\x1b\x1b"):
+            with self.subTest(output=output):
+                session = self.session()
+                session.send(output)
+                self.settle(session, 0.2)
+                session.control("wipe=1")
+                _, wiped = wait_for(lambda: (lambda h: h if h[1] == empty else None)(session.read()), timeout=2)
+                self.assertEqual(wiped, empty, "']7770;wipe=1' was drawn as text and the old output stayed")
+
+    def test_cancel_ends_any_half_sequence(self):
+        plain = self.session()
+        plain.send(b"Z")
+        _, expected = self.settle(plain, 0.3)
+        for prefix in (b"\x1b", b"\x1b[12", b"\x1b(", b"\x1b]0;half a title"):
+            for cancel in (b"\x18", b"\x1a"):
+                with self.subTest(prefix=prefix, cancel=cancel):
+                    session = self.session()
+                    session.send(prefix + cancel + b"Z")
+                    _, pixels = self.settle(session, 0.3)
+                    self.assertEqual(pixels, expected, "the Z after CAN/SUB is drawn as text")
 
     def test_erase_scrollback_is_real_in_panel_mode(self):
         session = self.session()

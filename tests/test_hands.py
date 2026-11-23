@@ -16,6 +16,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from mind import hands
 from mind.hands import (
@@ -342,7 +343,7 @@ class TypistTest(unittest.TestCase):
 class OscFilterTest(unittest.TestCase):
     def test_strips_flags_and_markers(self):
         clean, markers = OscFilter().feed(b"a\x1b]7770;pip=idle\x07b\x1b]7771;0\x07pip:~$ ")
-        self.assertEqual(clean, b"abpip:~$ ")
+        self.assertEqual(clean, b"a\x18b\x18pip:~$ ")  # CAN where each was
         self.assertEqual(markers, ["0"])
 
     def test_split_across_reads(self):
@@ -353,12 +354,12 @@ class OscFilterTest(unittest.TestCase):
             clean, found = osc.feed(part)
             out += clean
             markers += found
-        self.assertEqual((out, markers), (b"xy", ["127"]))
+        self.assertEqual((out, markers), (b"x\x18y", ["127"]))
 
     def test_st_terminator_and_other_oscs_pass(self):
         clean, markers = OscFilter().feed(b"\x1b]7771;1\x1b\\a\x1b]0;title\x07")
         self.assertEqual(markers, ["1"])
-        self.assertEqual(clean, b"a\x1b]0;title\x07")
+        self.assertEqual(clean, b"\x18a\x1b]0;title\x07")
 
     def test_unterminated_flood_is_dropped(self):
         osc = OscFilter()
@@ -784,3 +785,111 @@ class RendererSignalTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _Bus:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, topic, **fields):
+        self.sent.append({"t": topic, **fields})
+
+
+class _Cortex:
+    async def erase(self):
+        return True
+
+
+class RealCageForgetTest(unittest.IsolatedAsyncioTestCase):
+    """forget(all) with the real cage (SystemdCage, a fake systemctl)."""
+
+    async def asyncSetUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.workshop = Path(self.dir.name)
+        (self.workshop / "a.py").write_text("print(1)\n")
+        self.calls = []
+
+        def run(argv, timeout=10.0):
+            self.calls.append(argv)
+            return 0, ""
+        self.bus = _Bus()
+        self.hands = hands.Hands(self.bus, cage=hands.SystemdCage(run=run), cortex=_Cortex(),
+                                 workshop=self.workshop, disabled=None, body_root=self.workshop / "root",
+                                 state_dir=self.workshop / "mind")
+
+    async def asyncTearDown(self):
+        self.dir.cleanup()
+
+    async def test_clearing_never_restarts_the_mount_hands_needs(self):
+        # being-hands.service has RequiresMountsFor=/workshop: a restart of
+        # workshop.mount would restart hands itself mid-forget.
+        await self.hands.on_event({"t": "term.forget", "all": True, "req": "r1"})
+        self.assertFalse(any("workshop.mount" in argv for argv in self.calls), self.calls)
+        self.assertEqual(list(self.workshop.iterdir()), [])
+        self.assertEqual([e["phase"] for e in self.bus.sent if e["t"] == "term.status"], ["forgotten"])
+        await self.hands.privacy(True)
+        self.assertFalse(any("workshop.mount" in argv for argv in self.calls), self.calls)
+
+    async def test_the_clear_on_stop_is_bounded(self):
+        # run()'s finally must finish inside TimeoutStopSec=5, however slow
+        # the unit stops or the slot erase are.
+        class Slow(_Cortex):
+            async def erase(self):
+                await asyncio.sleep(30)
+
+        class StopBus(_Bus):
+            async def start(self):
+                pass
+
+            async def recv(self):
+                raise RuntimeError("bus gone")
+
+            async def stop(self):
+                self.stopped = True
+        bus = StopBus()
+        self.hands.bus = bus
+        self.hands.cortex = Slow()
+        with mock.patch.object(hands, "STOP_FORGET_SECONDS", 0.2):
+            with self.assertRaises(RuntimeError):
+                await asyncio.wait_for(self.hands.run(), 3)
+        self.assertTrue(bus.stopped)
+
+
+class ForgetReplyTest(unittest.IsolatedAsyncioTestCase):
+    """The forget's req is answered by 'forgotten', never by the status of a
+    job it cancelled on the way."""
+
+    async def test_cancel_status_does_not_carry_the_forget_req(self):
+        with tempfile.TemporaryDirectory() as folder:
+            bus = _Bus()
+            h = hands.Hands(bus, cage=hands.SystemdCage(run=lambda argv, timeout=10.0: (0, "")), cortex=_Cortex(),
+                            workshop=folder, disabled=None, body_root=Path(folder) / "root",
+                            state_dir=Path(folder) / "mind")
+            job = hands.Job(id="j1", kind="script", text="x", source="model", phase="writing")
+            h.job = job
+            await h.on_event({"t": "term.forget", "all": True, "req": "r9"})
+            statuses = [e for e in bus.sent if e["t"] == "term.status"]
+            self.assertEqual([e["phase"] for e in statuses], ["cancelled", "forgotten"])
+            self.assertNotIn("req", statuses[0])
+            self.assertEqual(statuses[1]["req"], "r9")
+
+
+class SpliceTest(unittest.TestCase):
+    def test_a_lone_osc_start_cannot_join_a_forged_flag(self):
+        forged = b"7770;title=Ready;status=Ready;job=idle\x07"
+        clean, markers = OscFilter().feed(b"\x1b]\x1b]7771;0\x07" + forged)
+        self.assertEqual(markers, ["0"])
+        self.assertNotIn(b"\x1b]7770", clean)
+        self.assertNotIn(b"\x1b]" + forged, clean)
+
+    def test_the_splice_across_reads(self):
+        osc = OscFilter()
+        out = b"".join(osc.feed(part)[0] for part in (b"\x1b]", b"\x1b]7771;0\x07", b"7770;wipe=1\x07"))
+        self.assertNotIn(b"\x1b]7770", out)
+        out = b"".join(osc.feed(part)[0] for part in (b"\x1b", b"\x1b]7770;x\x07", b"]7770;wipe=1\x07"))
+        self.assertNotIn(b"\x1b]7770", out)
+
+    def test_the_transcript_drops_the_splice_byte(self):
+        ring = Ring()
+        ring.add(OscFilter().feed(b"a\x1b]7771;0\x07b\n")[0])
+        self.assertEqual(ring.lines()[0], "ab")

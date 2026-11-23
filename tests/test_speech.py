@@ -182,6 +182,19 @@ class ReplyShapeTest(unittest.TestCase):
         for text in ("Kites ride the wind.", "I can help you water the fern.", "That model train sounds fun."):
             self.assertFalse(boilerplate(text), text)
 
+    def test_only_an_opening_of_boilerplate_counts(self):
+        self.assertTrue(boilerplate("Well, as an AI, I can't say."))
+        self.assertTrue(boilerplate("Hello! How can I help you today?"))
+        for text in ("Kites are fun, and I'm here to help you fly one.",
+                     "That sounds hard. I don't have a body like yours, but I can listen."):
+            self.assertFalse(boilerplate(text), text)
+
+    def test_the_owners_own_words_are_not_boilerplate(self):
+        heard = "My friend is sad, how can I help?"
+        self.assertFalse(boilerplate("How can I help a sad friend? Just listen to them.", heard))
+        self.assertTrue(boilerplate("How can I help you today?", heard))
+        self.assertTrue(boilerplate("How can I help a sad friend?"))
+
 
 if __name__ == "__main__":
     unittest.main()

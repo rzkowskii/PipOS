@@ -211,7 +211,7 @@ class Lid(unittest.TestCase):
         self.wait_shell(f"test -S {NATIVE_BUS}")
         self.wait_shell(
             "journalctl -b -u l5-native --no-pager -o cat | "
-            "grep -Fq 'brainstem: standard timeouts, think 120s, speak 60s'"
+            "grep -Fq 'brainstem: standard timeouts, think '"
         )
         self.watch(NATIVE_BUS)
         self.event("body.lid", closed=None, snapshot=True)

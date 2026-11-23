@@ -401,7 +401,8 @@ class DreamJob:
         # contention with the vector indexer either.
         for attempt in range(20):
             try:
-                self.store.save_candidates(self.memory, self.owner, accepted, night=night, through=through)
+                self.store.save_candidates(self.memory, self.owner, accepted, night=night, through=through,
+                                           zone=self.zone)
                 break
             except sqlite3.OperationalError:
                 if attempt == 19:

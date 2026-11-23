@@ -7,8 +7,10 @@ own body (restarts, repairs, backups) as counts. It never keeps a sentence.
 
 A topic is a single word from the owner's own speech, linked to the
 sentences it came from. Forgetting any of those sentences takes the topic
-with it (memory's triggers), so "what did we talk about on Monday?" can never
-bring back something forgotten.
+with it (memory's triggers), and forgetting or expiring any of a day's
+conversation takes that day's stored counts too, so "what did we talk about
+on Monday?" can never bring back something forgotten: the day is counted
+again from what remains.
 
 `may_match` and `handle` answer "what did we talk about yesterday?" as an
 everyday skill; `answer` is the same answer for the `diary` command kind.
@@ -124,13 +126,16 @@ def collect(db, owner, day, *, zone=None, state_dir=None):
 def build_day(memory, owner, day, *, zone=None, state_dir=None):
     """Write (or rewrite) the stored record of a finished day."""
     record = collect(memory.db, owner, day, zone=zone, state_dir=state_dir)
+    start, end = day_bounds(day, zone)
     with memory.db:
         memory.db.execute("DELETE FROM diary_days WHERE owner = ? AND day = ?", (owner, record["day"]))
+        # The bounds let memory drop this record the moment any of the day's
+        # conversation is forgotten or expires.
         memory.db.execute(
             "INSERT INTO diary_days (owner, day, conversations, owner_lines, reminders_done, timers, body_events, "
-            "built) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "built, start_ts, end_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (owner, record["day"], record["conversations"], record["owner_lines"], record["reminders_done"],
-             record["timers"], json.dumps(record["body_events"], sort_keys=True), time.time()))
+             record["timers"], json.dumps(record["body_events"], sort_keys=True), time.time(), start, end))
         for rank, (topic, sources) in enumerate(record["topics"], 1):
             topic_id = memory.db.execute(
                 "INSERT INTO diary_topics (owner, day, rank, topic) VALUES (?, ?, ?, ?)",
@@ -141,8 +146,9 @@ def build_day(memory, owner, day, *, zone=None, state_dir=None):
 
 
 def stored(db, owner, day):
-    """The stored record of `day`, or None. Topics whose sentences were
-    forgotten are already gone."""
+    """The stored record of `day`, or None. A record any of whose
+    conversation was forgotten or has expired is already gone (memory drops
+    it), so the day is counted again from what remains."""
     try:
         row = db.execute(
             "SELECT conversations, owner_lines, reminders_done, timers, body_events FROM diary_days "

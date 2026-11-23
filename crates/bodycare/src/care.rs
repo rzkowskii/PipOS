@@ -7,7 +7,7 @@ use crate::hw::{self, Hardware, Reading};
 use crate::journal::{Journal, Kind};
 use crate::policy::{self, Being, Config, CpuCap, DreamLoop, Latch};
 use bus::Event;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -63,6 +63,11 @@ pub struct Care {
     pub notes: Vec<String>,
     /// What act mode would write (observe) or last wrote (act).
     pub wanted: HashMap<&'static str, String>,
+    /// Act mode: the controls it wanted to change and could not (the
+    /// journal or the write refused), so the report never shows them as held.
+    pub not_applied: BTreeSet<&'static str>,
+    /// Act mode: why the restore journal cannot be written, if it cannot.
+    pub journal_error: Option<String>,
     pub cap: Option<CpuCap>,
     pub fan_target: Option<i64>,
     pub factory_fan_min: Option<i64>,
@@ -93,6 +98,8 @@ impl Care {
             said: HashSet::new(),
             notes: Vec::new(),
             wanted: HashMap::new(),
+            not_applied: BTreeSet::new(),
+            journal_error: None,
             cap: None,
             fan_target: None,
             factory_fan_min: None,
@@ -100,6 +107,15 @@ impl Care {
         };
         for line in care.hw.survey() {
             care.notes.push(line);
+        }
+        if mode == Mode::Act {
+            if let Err(e) = care.journal.check_writable() {
+                care.notes.push(format!(
+                    "act mode, but the restore journal {} cannot be written ({e}): nothing will be changed",
+                    journal_path.display()
+                ));
+                care.journal_error = Some(e.to_string());
+            }
         }
         care
     }
@@ -116,22 +132,37 @@ impl Care {
         self.wanted.insert(label, value.clone());
         let Some(path) = path else { return false };
         if current.as_deref() == Some(value.as_str()) {
+            self.not_applied.remove(label);
             return false;
         }
+        let done = self.write(label, &path, kind, &value, current);
+        if self.mode == Mode::Act {
+            if done {
+                self.not_applied.remove(label);
+            } else {
+                self.not_applied.insert(label);
+            }
+        }
+        done
+    }
+
+    fn write(&mut self, label: &'static str, path: &Path, kind: Kind, value: &str, current: Option<String>) -> bool {
         if self.mode == Mode::Observe {
             let shown = current.clone().unwrap_or_else(|| "?".into());
             self.once(format!("would:{label}:{value}"), || format!("observe: would set {label} from {shown} to {value}"));
             return false;
         }
-        let Some(original) = current.or_else(|| hw::read_text(&path)) else {
+        let Some(original) = current.or_else(|| hw::read_text(path)) else {
             self.once(format!("unreadable:{label}"), || format!("{label}: unreadable, so not changed"));
             return false;
         };
-        if let Err(e) = self.journal.remember(&path, kind, &original) {
+        if let Err(e) = self.journal.remember(path, kind, &original) {
+            self.journal_error = Some(e.to_string());
             self.once(format!("journal:{label}"), || format!("{label}: could not journal the original ({e}), so not changed"));
             return false;
         }
-        match hw::write_value(&path, &value) {
+        self.journal_error = None;
+        match hw::write_value(path, value) {
             Ok(()) => {
                 self.notes.push(format!("set {label} to {value} (was {original})"));
                 true
@@ -177,8 +208,11 @@ impl Care {
             self.said.remove("pause");
         }
 
-        // CPU caps by state.
-        let dreaming = being.dreaming && !pause;
+        // CPU caps by state. Night work (the dream, the diary, memory
+        // upkeep) runs only while asleep with the lid closed, so that is
+        // held at the target too, whether or not the mind says it dreams:
+        // idle and cool, the loop opens straight up to 100%.
+        let dreaming = (being.dreaming || being.night()) && !pause;
         let dream_pct = if dreaming {
             Some(self.dream.update(self.package, cfg.dream_target_c, cfg.dream_min_pct, dt))
         } else {
@@ -203,6 +237,7 @@ impl Care {
                     }
                 }
                 self.wanted.remove("rapl_pl1");
+                self.not_applied.remove("rapl_pl1");
             }
         }
         self.cap = Some(cap);
@@ -320,7 +355,16 @@ impl Care {
             // Always present, so "how's your battery health" never guesses:
             // the owner's chosen cap (null: none) and whether it holds.
             .with("charge_limit", self.cfg.charge_limit)
-            .with("cap_honoured", self.cap_honoured());
+            .with("cap_honoured", self.cap_honoured())
+            // Act mode with every wanted control really set. Observe mode,
+            // a journal that cannot be written or a refused write: false,
+            // and the refused ones are named, so no cap is claimed that is
+            // not in force.
+            .with("acting", self.mode == Mode::Act && self.not_applied.is_empty() && self.journal_error.is_none())
+            .with("not_applied", self.not_applied.iter().copied().collect::<Vec<_>>());
+        if let Some(e) = &self.journal_error {
+            ev = ev.with("journal_error", e.as_str());
+        }
         if self.cfg.charge_limit.is_some() {
             ev = ev
                 .with("charge_limit_reads", r.charge_limit)
@@ -688,6 +732,74 @@ mod tests {
         care.step(&being("speaking", false), 4.0);
         assert!(care.dream_allowed());
         assert_eq!((t.get(&format!("{PSTATE}/max_perf_pct")), t.get(&format!("{PSTATE}/no_turbo"))), ("100".into(), "0".into()));
+    }
+
+    #[test]
+    fn a_journal_that_cannot_be_written_changes_nothing_and_says_so() {
+        // As under ProtectSystem=strict with no writable runtime directory:
+        // the journal's directory cannot be made (here a file is in the way).
+        let t = macbook("journal-ro");
+        t.file("sys/class/hwmon/hwmon3/temp1_input", "90000\n");
+        t.file("sys/class/power_supply/ADP1/online", "0\n");
+        t.file("run/being", "not a directory\n");
+        let mut care = act(&t, Config { charge_limit: Some(80), ..Config::default() });
+        for s in 0..30 {
+            care.step(&being("thinking", false), f64::from(s));
+        }
+        assert_eq!(t.get(&format!("{PSTATE}/no_turbo")), "0", "never changed without a journal");
+        assert_eq!(t.get(&format!("{SMC}/fan1_min")), "2000");
+        assert_eq!(t.get(&format!("{SMC}/battery_charge_limit")), "100");
+        let notes = care.notes.join("\n");
+        assert!(notes.contains("cannot be written") && notes.contains("nothing will be changed"), "{notes}");
+        let report = care.report();
+        assert_eq!(report.str("mode"), Some("act"));
+        assert_eq!(report.bool("acting"), Some(false), "a refused cap is not shown as held");
+        let refused: Vec<_> = report.data["not_applied"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        for label in ["charge_limit", "fan1_min", "no_turbo"] {
+            assert!(refused.contains(&label), "{label} missing from {refused:?}");
+        }
+        assert!(report.str("journal_error").is_some());
+
+        // Writable: everything is set and the report says it is held.
+        let t = macbook("journal-rw");
+        t.file("sys/class/hwmon/hwmon3/temp1_input", "90000\n");
+        t.file("sys/class/power_supply/ADP1/online", "0\n");
+        let mut care = act(&t, Config::default());
+        care.step(&being("thinking", false), 0.0);
+        assert_eq!(t.get(&format!("{PSTATE}/no_turbo")), "1");
+        let report = care.report();
+        assert_eq!(report.bool("acting"), Some(true));
+        assert_eq!(report.data["not_applied"].as_array().map(Vec::len), Some(0));
+        assert!(report.data.get("journal_error").is_none());
+        // Observe mode never claims to act.
+        let mut watch = Care::new(&t.0, &t.journal(), Config::default(), Mode::Observe);
+        watch.step(&being("thinking", false), 0.0);
+        assert_eq!(watch.report().bool("acting"), Some(false));
+    }
+
+    #[test]
+    fn night_work_is_held_at_the_target_without_a_dreaming_event() {
+        // The night shift runs asleep with the lid closed; the mind sends
+        // no `mind.dreaming`, yet the package is held at the dream target.
+        let t = macbook("night");
+        t.file("sys/class/hwmon/hwmon3/temp1_input", "85000\n");
+        let mut care = act(&t, Config::default());
+        for s in 0..20 {
+            care.step(&being("asleep", true), f64::from(s));
+        }
+        let pct: i64 = t.get(&format!("{PSTATE}/max_perf_pct")).parse().unwrap();
+        assert!(pct < 60, "hot night work is capped: {pct}");
+        assert!(care.report().data["cpu_reasons"].to_string().contains("night"));
+        // Cool and idle: the loop opens straight up.
+        t.file("sys/class/hwmon/hwmon3/temp1_input", "40000\n");
+        let mut cool = act(&t, Config::default());
+        cool.step(&being("asleep", true), 0.0);
+        assert_eq!(t.get(&format!("{PSTATE}/max_perf_pct")), "100");
+        // Lid open while asleep: not night work.
+        t.file("sys/class/hwmon/hwmon3/temp1_input", "85000\n");
+        let mut open = act(&macbook("night-open"), Config::default());
+        open.step(&being("asleep", false), 0.0);
+        assert!(!open.report().data["cpu_reasons"].to_string().contains("night"));
     }
 
     #[test]

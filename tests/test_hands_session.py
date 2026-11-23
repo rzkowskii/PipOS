@@ -373,6 +373,74 @@ class HandsSessionTest(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(len(self.hands.job.tokens), 0)  # generation went on into the buffer
             await self.until(lambda: self.phase() == "writing", timeout=3, what="released")
 
+    async def test_a_wake_word_while_reading_the_prompt_never_leaves_typing_held(self):
+        # "Pip ..." heard during the long prompt read: the hold must outlast
+        # the move to writing and be let go when the hold time is up.
+        self.llama.delay = 0.05
+        self.llama.replies.append([f"print({n})\n" for n in range(6)] + ["```"])
+        await self.open_minimised()
+        with mock.patch.object(hands_module, "HOLD_SECONDS", 1.0):
+            started = asyncio.Event()
+            real = self.hands.cortex.prompt_tokens
+
+            async def slow_prompt(*args, **kwargs):
+                started.set()
+                await asyncio.sleep(0.4)  # the prompt read
+                return await real(*args, **kwargs)
+            with mock.patch.object(self.hands.cortex, "prompt_tokens", slow_prompt):
+                await self.hear("write a script that prints a few, write it yourself")
+                await asyncio.wait_for(started.wait(), 5)
+                self.assertEqual(self.phase(), "reading")
+                self.hands.urgent({"t": "hear.wake"})
+                self.assertTrue(self.hands._typist.held)
+                await self.until(lambda: self.hands.job.tokens, what="the first token")
+                self.assertIn(self.phase(), ("held", "waiting", "checking"))
+                await self.until(lambda: self.phase() == "waiting", what="typed after the hold")
+        self.assertTrue(any(self.workshop.glob("*.py")))
+
+    async def test_the_release_lets_go_even_after_the_phase_moved_on(self):
+        await self.open_minimised()
+        self.llama.delay = 0.05
+        self.llama.replies.append([f"print({n})\n" for n in range(40)] + ["```"])
+        await self.hear("write a script that prints many, write it yourself")
+        await self.until(lambda: self.phase() == "writing", what="writing")
+        self.hands._typist.hold()  # held, but the phase says writing
+        await self.hands.control("release", "quiet")
+        self.assertFalse(self.hands._typist.held)
+
+    async def test_forgetting_a_job_mid_write_answers_forgotten_and_redacts(self):
+        self.llama.delay = 0.1
+        self.llama.replies.append([f"print({n})\n" for n in range(40)] + ["```"])
+        await self.open_minimised()
+        await self.hear("write a script that prints lots, write it yourself")
+        await self.until(lambda: self.phase() == "writing", what="writing")
+        await self.hear("clear the workshop")
+        await self.hear("yes")
+        # The cancelled job's status is not the answer: "forgotten" is.
+        self.assertEqual(self.said[-1], "Okay. My workshop is empty.")
+        self.assertIsNone(self.hands.job)
+
+    async def test_a_late_forgotten_still_redacts_the_episode(self):
+        await self.open_minimised()
+        await self.hear("write a script that draws a tree")
+        await self.until(lambda: self.phase() == "waiting", what="written")
+        line, meta = self.bridge.episode()
+        self.bridge.note_episode("ep-1", meta)
+        real = self.hands.forget
+
+        async def slow_forget(event):
+            await asyncio.sleep(0.5)
+            await real(event)
+        with mock.patch.object(self.hands, "forget", slow_forget), \
+                mock.patch("mind.app_commands.FORGET_WAIT", 0.1):
+            await self.hear("forget that script")
+            await self.hear("yes")
+            self.assertEqual(self.said[-1], "I couldn't reach my hands to forget it.")
+            self.assertEqual(self.bridge.forgotten_episodes(), [])
+            await self.until(lambda: not (self.workshop / "tree.py").exists(), what="forgotten late")
+            await self.until(lambda: self.bridge.status is None, what="the late answer")
+        self.assertEqual(self.bridge.forgotten_episodes(), ["ep-1"])
+
     async def test_conversation_turn_parks_the_job(self):
         self.llama.delay = 0.2
         self.llama.replies.append([f"print({n})\n" for n in range(20)] + ["```"])
@@ -625,10 +693,12 @@ class HandsSessionTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.workshop / "tree.py").exists())
         self.assertFalse((self.workshop / "elsewhere.py").exists())
         self.assertTrue((self.workshop / "tree-9.py").exists())  # changed: asked about first
+        self.assertIsNone(self.bridge.status)
+        # The answer comes as soon as the files are gone; the fresh shell,
+        # the wipe and the slot erase follow.
+        await self.until(lambda: self.llama.erased == erased + 1, what="the slot erase")
         self.assertEqual(self.renderers[-1].wiped, 1)
         self.assertNotIn(b"tree", bytes(self.hands.transcript.data))
-        self.assertEqual(self.llama.erased, erased + 1)
-        self.assertIsNone(self.bridge.status)
         # The old shell's in-memory history held the script: a fresh shell.
         self.assertIn(("stop", "being-shell-1"), self.cage.calls)
         self.assertEqual(self.hands.session.unit, "being-shell-2")

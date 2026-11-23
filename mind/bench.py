@@ -29,7 +29,12 @@ finished parts):
   error.
 
 Models: GGUF files listed in /models/bench/manifest.json, else the shipped
-/models/reflex.gguf. Manifest format (lab/quant_candidates.py writes it):
+/models/reflex.gguf. No file reaches llama-server unless its signed pack
+vouches for it: the bench pack (beingos-bench.cms, required whenever
+/models/bench holds anything), the conversation pack for the fallback and
+the dream pack for the dream model, each checked with mind/model_pack.py as
+the cortex units check them. A file that fails is recorded and skipped.
+Manifest format (lab/quant_candidates.py writes it):
 
     {"models": [{"file": "qwen3.5-0.8b-q4_0.gguf", "name": "Qwen3.5-0.8B Q4_0",
                  "sha256": "...",
@@ -615,9 +620,13 @@ def soak(client, caps, minutes, energy, *, caps_list=SOAK_CAPS, temp=package_tem
 
 # --- the run ------------------------------------------------------------------
 
-def load_models(models_dir, fallback):
+def load_models(models_dir, fallback, signed=None):
     """Models to measure. A model whose manifest entry names no settings gets
-    the production setting in full plus the thread sweep."""
+    the production setting in full plus the thread sweep.
+
+    `signed` ({file: sha256} from the verified bench pack) replaces the
+    manifest's own digests; a manifest entry the pack does not list is
+    marked "unsigned" and never run."""
     manifest = Path(models_dir) / "manifest.json" if models_dir else None
     if manifest and manifest.is_file():
         data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -626,8 +635,10 @@ def load_models(models_dir, fallback):
             path = Path(models_dir) / entry["file"]
             if path.parent.resolve() != Path(models_dir).resolve():
                 raise ValueError(f"model file must sit beside the manifest: {entry['file']}")
+            digest = entry.get("sha256") if signed is None else signed.get(entry["file"])
             found.append({"path": path, "name": entry.get("name", entry["file"]),
-                          "sha256": entry.get("sha256"), "sweep": not entry.get("settings"),
+                          "sha256": digest, "sweep": not entry.get("settings"),
+                          "unsigned": signed is not None and digest is None,
                           "settings": entry.get("settings") or [dict(PRODUCTION)]})
         return found
     if fallback and Path(fallback).is_file():
@@ -636,17 +647,59 @@ def load_models(models_dir, fallback):
     return []
 
 
+def _model_pack():
+    from mind import model_pack
+    return model_pack
+
+
 def bench_pack(models_dir):
-    """The signed bench pack on a bench stick, checked like any other model pack."""
+    """The signed bench pack on a bench stick, checked like any other model pack.
+
+    None when /models/bench holds nothing to measure. A manifest without its
+    envelope is "not verified", never "nothing to check".
+    """
     models_dir = Path(models_dir)
-    if not (models_dir / "beingos-bench.cms").exists():
-        return None
+    envelope = models_dir / "beingos-bench.cms"
+    if not envelope.exists() and not envelope.is_symlink():
+        try:
+            present = models_dir.is_dir() and any(models_dir.iterdir())
+        except OSError:
+            present = True
+        if not present:
+            return None
+        return {"ok": False, "error": "no signed bench pack (beingos-bench.cms) beside the bench models"}
     try:
-        from mind import model_pack
+        model_pack = _model_pack()
         pack = model_pack.verify("bench", models=models_dir.parent, verdict=None)
-        return {"ok": True, "files": len(pack["files"]), "bound": pack.get("bound")}
+        digests = {relative: digest for relative, _, digest in model_pack.files_of(pack)}
+        if "manifest.json" not in digests:
+            raise ValueError("the signed bench pack does not cover manifest.json")
+        return {"ok": True, "files": len(pack["files"]), "bound": pack.get("bound"), "digests": digests}
     except Exception as error:
         return {"ok": False, "error": f"{type(error).__name__}: {error}"[:300]}
+
+
+def pack_check(role, path):
+    """Whether `role`'s signed pack vouches for the model file at `path`. Never raises.
+
+    The same check the cortex units run as ExecCondition (mind/model_pack.py
+    verify, with the verdict cache), plus: the file is one the pack lists.
+    """
+    path = Path(path)
+    try:
+        model_pack = _model_pack()
+        folder = Path(model_pack.ROLE_DIRS[role]).parts
+        base = path.parent
+        if folder and base.parts[len(base.parts) - len(folder):] != folder:
+            raise ValueError(f"{path} is not in the {role} pack's folder")
+        models = Path(*base.parts[:len(base.parts) - len(folder)]) if folder else base
+        pack = model_pack.verify(role, models=models)
+        relative = path.relative_to(model_pack.root(role, models)).as_posix()
+        if relative not in {name for name, _, _ in model_pack.files_of(pack)}:
+            raise ValueError(f"{relative} is not a file of the signed {role} pack")
+        return {"ok": True, "role": role, "bound": pack.get("bound")}
+    except Exception as error:
+        return {"ok": False, "role": role, "error": f"{type(error).__name__}: {error}"[:300]}
 
 
 def voice_rtf(*, cortex_url=None, models=MODELS, mind_path="/usr/lib/being", busy_client=None):
@@ -746,29 +799,43 @@ def run(args):
     sizes = (16, 128) if quick else PREFILL_SIZES
     slot_dir = Path(tempfile.mkdtemp(prefix="being-bench-slots-", dir=args.scratch))
     try:
-        models_dir = args.models_dir
+        # Never hand llama-server a model file its signed pack does not vouch for.
+        models_dir, signed = args.models_dir, None
         if models_dir:
             checked = bench_pack(models_dir)
             if checked is not None:
+                signed = checked.pop("digests", None)
                 data["bench_pack"] = checked
                 if not checked["ok"]:
-                    # Never hand llama-server a model file its signed pack does not vouch for.
                     data["bench_models_skipped"] = "the bench pack did not verify"
                     models_dir = None
-        models = load_models(models_dir, args.fallback_model)
+        if not models_dir:
+            signed = None
+        models = load_models(models_dir, args.fallback_model, signed)
+        if models and signed is None:
+            # Not bench quants (none, or they failed): the shipped reflex.gguf.
+            data["fallback_pack"] = pack_check("conversation", models[0]["path"])
+            if not data["fallback_pack"]["ok"]:
+                data["fallback_skipped"] = "the conversation pack did not verify"
+                models = []
         if not models:
             data["error"] = "no models found"
         for model in models:
             for setting in model["settings"]:
                 entry = {"name": model["name"], "file": model["path"].name, "setting": setting,
                          "bytes": model["path"].stat().st_size}
+                if model.get("unsigned"):
+                    entry["error"] = "skipped: the signed bench pack does not list this file"
+                    data["models"].append(entry)
+                    report.save()
+                    continue
                 if model["sha256"]:
                     entry["sha256_expected"] = model["sha256"]
                     entry["sha256_ok"] = sha256(model["path"]) == model["sha256"]
                 data["models"].append(entry)
                 report.save()
                 if entry.get("sha256_ok") is False:
-                    entry["error"] = "skipped: the file differs from its manifest SHA-256"
+                    entry["error"] = "skipped: the file differs from its signed SHA-256"
                     report.save()
                     continue
                 process = None
@@ -807,8 +874,12 @@ def run(args):
         dream = Path(args.dream_model) if args.dream_model else None
         if dream is not None and dream.is_file():
             data["dream"] = {"file": dream.name, "bytes": dream.stat().st_size,
-                             **measure_light(dream, {**PRODUCTION, **DREAM_SERVER}, args, slot_dir,
-                                             tokens=(128,) if quick else (128, 512))}
+                             "pack": pack_check("dream", dream)}
+            if data["dream"]["pack"]["ok"]:
+                data["dream"].update(measure_light(dream, {**PRODUCTION, **DREAM_SERVER}, args, slot_dir,
+                                                   tokens=(128,) if quick else (128, 512)))
+            else:
+                data["dream"]["error"] = "skipped: the dream pack did not verify"
             report.save()
     finally:
         errors = caps.restore()

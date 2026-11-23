@@ -90,6 +90,11 @@ impl Being {
     pub fn asleep(&self) -> bool {
         self.state.as_deref() == Some("asleep")
     }
+
+    /// Asleep with the lid closed: the only time night work runs.
+    pub fn night(&self) -> bool {
+        self.asleep() && self.lid_closed == Some(true)
+    }
 }
 
 /// The CPU caps wanted now, and why.
@@ -197,7 +202,8 @@ pub fn cpu_cap(
         cap.cap("on_battery", true, 100, None);
     }
     if let Some(pct) = dream_pct {
-        cap.cap("dreaming", true, pct, None);
+        // "dreaming" when the mind says so; otherwise the night's work.
+        cap.cap(if being.dreaming { "dreaming" } else { "night" }, true, pct, None);
     } else if being.asleep() {
         cap.cap("asleep", true, 100, None);
     }

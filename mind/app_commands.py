@@ -24,6 +24,7 @@ CONFIRM_SECONDS = 15.0
 REPLY_WAIT = 2.0
 OPEN_WAIT = 4.0     # starting the shell's unit and the renderer takes 1.5-3 s (estimate)
 LEASE_WAIT = 0.5
+FORGET_WAIT = 6.0   # hands stops the cage units and removes the files first (seconds on the laptop)
 
 ACTIVE = ("reading", "writing", "held", "paused", "checking", "countdown", "running", "frozen")
 GENERATING = ("reading", "writing", "held")
@@ -676,6 +677,8 @@ class AppBridge:
         self._episoded = set()      # (file, sha256) already handed out by episode()
         self._episode_ids = []      # (episode id, job id, file) the mind recorded
         self._to_forget = []
+        self._forgets = {}          # req -> (what, job status) of a term.forget not yet answered
+        self._tasks = set()
 
     # -- incoming -------------------------------------------------------------------
 
@@ -694,6 +697,12 @@ class AppBridge:
             if event.get("phase") == "forgotten":
                 self.status = None
                 self.text = None
+                what, status = self._forgets.pop(event.get("req"), (None, None))
+                if what == "forget":
+                    # The one-line episode about this script goes too (real
+                    # forgetting), even when the answer came too late to be
+                    # said: the mind redacts these episode ids.
+                    self._forget_episodes(status)
             elif event.get("phase") is not None:
                 self.status = dict(event)
                 if event.get("speakable"):
@@ -707,10 +716,25 @@ class AppBridge:
             if not self.hands_up:
                 self.view = {app: "closed" for app in self.view}
                 self.status = None
+            elif self.guest:
+                # A restarted hands starts as if no guest were here: tell it again.
+                self._send_later("app.privacy", guest=True)
         key = event.get("req")
+        if (topic == "term.status" and key in self._forgets
+                and event.get("phase") not in ("forgotten", None)):
+            return  # a job cancelled on the way, not the forget's answer
         waiter = self._waiters.get((key, topic)) if key is not None else None
         if waiter is not None and not waiter.done():
             waiter.set_result(dict(event))
+
+    def _send_later(self, topic, **fields):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self.bus.send(topic, **fields))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     def context(self, guest=None):
         if self.pending and self.clock() > self.pending_until:
@@ -938,19 +962,21 @@ class AppBridge:
             req = uuid.uuid4().hex[:12]
             loop = asyncio.get_running_loop()
             waiter = self._waiters[(req, "term.status")] = loop.create_future()
+            # Kept after a timeout, so a late 'forgotten' still redacts (observe).
+            self._forgets[req] = (pending, dict(status))
+            while len(self._forgets) > 8:
+                self._forgets.pop(next(iter(self._forgets)))
             await self.bus.send("term.forget", id=job or req, req=req, **fields)
             try:
-                reply = await asyncio.wait_for(waiter, REPLY_WAIT)
+                reply = await asyncio.wait_for(waiter, FORGET_WAIT)
             except asyncio.TimeoutError:
                 reply = None
             finally:
                 self._waiters.pop((req, "term.status"), None)
+            if reply is not None and reply.get("phase") is None:
+                self._forgets.pop(req, None)  # no_job: nothing will follow
             changed = (reply or {}).get("changed") or []
             forgotten = reply is not None and reply.get("phase") == "forgotten"
-            if forgotten and pending == "forget":
-                # The one-line episode about this script goes too (real
-                # forgetting): the mind redacts these episode ids.
-                self._forget_episodes(status)
             if pending == "clear":
                 await say(REPLIES["cleared"] if forgotten else REPLIES["open_failed"].replace("open", "clear"))
             elif pending == "forget_copies":

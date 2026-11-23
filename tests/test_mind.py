@@ -1851,6 +1851,19 @@ class HonestSelf(MindCase):
         self.assertEqual(await self.say("How do kites fly so high"), "Kites ride the wind.")
         self.assertEqual(self.mind.last_timing["retries"], 1)
 
+    async def test_a_second_reply_that_only_looks_like_boilerplate_is_still_said(self):
+        self.cortex_server.reply = lambda _: "[concern] I'm here to help, and the first thing is to listen."
+        reply = await self.say("My friend is sad, what should I do")
+        self.assertEqual(reply, "I'm here to help, and the first thing is to listen.")
+        self.assertNotIn("lost my thought", reply)
+        self.assertEqual(self.mind.last_timing["retries"], 1)
+
+    async def test_the_owners_words_said_back_are_not_boilerplate(self):
+        self.cortex_server.reply = lambda _: "[concern] How can I help a sad friend? Just listen to them."
+        reply = await self.say("My friend is sad, how can I help")
+        self.assertEqual(reply, "How can I help a sad friend? Just listen to them.")
+        self.assertEqual(self.mind.last_timing["retries"], 0)
+
     async def test_dream_question_is_answered_honestly(self):
         self.assertIn("Dreaming is switched off", await self.say("What did you dream about?"))
         (self.root / "dreams-enabled").write_text("")

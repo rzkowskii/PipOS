@@ -277,3 +277,56 @@ class FilesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpeechFlagTests(unittest.TestCase):
+    """The voice's mic levels read `in_speech` every frame, from either engine."""
+
+    def test_while_resting_the_flag_is_the_wake_engines_endpointer(self):
+        wake = FakeWake()
+        recognizer = engine(wake=wake)
+        wake.in_speech = True
+        run(recognizer, frames(0.09, 0.3), attending=False)
+        self.assertIs(recognizer.in_speech, True)
+        wake.in_speech = False
+        run(recognizer, frames(0.03), attending=False)
+        self.assertIs(recognizer.in_speech, False)
+        recognizer.close()
+
+    def test_while_attending_the_flag_is_silero_not_the_wake_engine(self):
+        wake = FakeWake()
+        wake.in_speech = True       # stale from the rest: PocketSphinx is not fed now
+        recognizer = engine(wake=wake)
+        run(recognizer, frames(0.09), attending=True)
+        self.assertIs(recognizer.in_speech, False)
+        run(recognizer, frames(0.6, 0.3), attending=True)
+        self.assertIs(recognizer.in_speech, True)
+        recognizer.close()
+
+
+class AttentionDropTests(unittest.TestCase):
+    def test_an_announced_utterance_is_finished_when_attending_drops_under_it(self):
+        """The follow-up window closes just after Silero heard the start: the
+        words still end in a final, and are not cut from their start."""
+        moonshine = FakeMoonshine(["and tomorrow"])
+        recognizer = engine(moonshine=moonshine)
+        events = run(recognizer, frames(0.6, 0.3), attending=True)
+        self.assertEqual([topic for topic, _ in events], ["hear.speech_start"])
+        events = run(recognizer, frames(0.4, 0.3) + frames(0.45), attending=False)
+        events += until_final(recognizer, attending=False)
+        self.assertEqual(events[-1], ("hear.final", {"text": "and tomorrow"}))
+        self.assertNotIn("hear.speech_start", [topic for topic, _ in events])
+        self.assertGreater(moonshine.seen[0], int(1.0 * 16000))
+        # Then it goes back to resting as usual.
+        run(recognizer, frames(0.03), attending=False)
+        self.assertFalse(recognizer.was_attending)
+        recognizer.close()
+
+    def test_attending_dropping_in_silence_still_goes_straight_back_to_rest(self):
+        wake = FakeWake()
+        recognizer = engine(wake=wake)
+        run(recognizer, frames(0.09), attending=True)
+        run(recognizer, frames(0.03), attending=False)
+        self.assertFalse(recognizer.was_attending)
+        self.assertEqual(wake.fed, [False])
+        recognizer.close()

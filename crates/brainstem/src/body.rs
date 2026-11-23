@@ -1140,12 +1140,14 @@ mod tests {
         // it; plugging in does.
         let mut b = Body::physical(0.0);
         b.set_power(Some(15.0), Some(false), Some(false));
-        b.tick(1.0);
+        for t in 1..=31 {
+            b.tick(f64::from(t));
+        }
         b.set_power(Some(16.0), Some(false), Some(false));
-        b.tick(2.0);
+        b.tick(32.0);
         assert_eq!(b.snapshot().bool("battery_low"), Some(true));
         b.set_power(Some(16.0), Some(true), Some(true));
-        b.tick(3.0);
+        b.tick(33.0);
         assert_eq!(b.snapshot().bool("battery_low"), Some(false));
     }
 
@@ -1563,21 +1565,24 @@ mod tests {
         // The draw climbs and the energy runs down: a plea, then a goodbye.
         b.sense(&Reading { battery: Some(30.0), charging: Some(false), on_ac: Some(false), energy_wh: Some(5.0), power_w: Some(15.0), voltage_v: Some(10.9), ..Reading::default() });
         let mut out = Vec::new();
-        for i in 1..=40 {
+        for i in 1..=70 {
             out.extend(b.tick(f64::from(i)));
         }
         let pleas: Vec<_> = out.iter().filter(|e| e.topic == "body.battery").filter_map(|e| e.str("level")).collect();
-        assert_eq!(pleas, ["low"], "20 minutes left at 30%");
+        assert_eq!(pleas, ["low"], "20 minutes left at 30%, held for the confirmation time");
         let state = out.iter().rev().find(|e| e.topic == "body.state").unwrap();
         assert_eq!(state.bool("battery_low"), Some(true));
         assert_eq!(state.f64("minutes_left"), Some(20.0));
         assert!(b.senses_line().contains("battery 30% and low, unplugged, about 20 min left"), "{}", b.senses_line());
         b.sense(&Reading { battery: Some(4.0), charging: Some(false), on_ac: Some(false), ..Reading::default() });
-        let out = b.tick(41.0);
+        let mut out = Vec::new();
+        for i in 71..=101 {
+            out.extend(b.tick(f64::from(i)));
+        }
         assert!(out.iter().any(|e| e.topic == "stem.shutdown"));
         assert!(!b.take_power_off());
         b.mind_saved();
-        b.tick(42.0);
+        b.tick(102.0);
         assert!(b.take_power_off());
         assert!(!b.take_power_off(), "said once");
     }
@@ -1589,10 +1594,11 @@ mod tests {
         b.tick(0.0);
         b.mind_saved(); // stray: no shutdown announced
         b.sense(&Reading { battery: Some(4.0), charging: Some(false), on_ac: Some(false), ..Reading::default() });
-        assert!(b.tick(1.0).iter().any(|e| e.topic == "stem.shutdown"));
-        b.tick(2.0);
+        assert!(!b.tick(1.0).iter().any(|e| e.topic == "stem.shutdown"), "one reading is not enough");
+        assert!(b.tick(31.0).iter().any(|e| e.topic == "stem.shutdown"));
+        b.tick(32.0);
         assert!(!b.take_power_off(), "the grace still runs");
-        b.tick(22.0);
+        b.tick(52.0);
         assert!(b.take_power_off(), "then the power goes");
     }
 

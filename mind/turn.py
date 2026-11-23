@@ -196,8 +196,9 @@ PRIVACY_COMMANDS = {"guest_start", "guest_end"}
 FORGET_CONFIRM_SECONDS = 45.0
 # "Forget everything" erases this many archived sentences between yields.
 ERASE_BATCH = 400
-# Only a plain yes confirms. "Forget it" is how people say "never mind", so it
-# is a no here, never a yes. Anything that is neither keeps everything.
+# The ordinary ways of saying yes (plan 1.11 d) confirm a forget asked for by
+# name. "Forget it" is how people say "never mind", so it is a no here, never a
+# yes. Anything that is neither keeps everything.
 _YES = re.compile(
     # Not a bare "right", and not "forget it": both are as often "never mind".
     r"^(?:(?:oh |well )?(?:yes|yeah|yep|yup|sure|okay|ok|alright|all right|absolutely|definitely|correct)"
@@ -206,6 +207,23 @@ _YES = re.compile(
     r"|do it|go ahead|please do|confirm|i'?m sure|i am sure|replace (?:it|them))$",
     re.I,
 )
+# A plain yes, for what cannot be undone ("forget everything") and for any
+# answer heard in the follow-up window without the name: "okay" and "sure"
+# are as often a nod to someone else, or a television.
+_STRICT_YES = re.compile(
+    r"^(?:(?:yes|yeah|yep|yup)(?:[, ]+(?:please|do it|go ahead|please do|i'?m sure|i am sure"
+    r"|forget (?:them|those|that|everything|it all|all of (?:it|them))))*"
+    r"|do it|go ahead|confirm|i'?m sure|i am sure)$",
+    re.I,
+)
+# Commands that store, change or switch something. Heard in the follow-up
+# window they are only taken with a sign they were meant for the being:
+# "don't forget your keys" and "the time is 6:15" are room talk too.
+ADDRESS_ONLY_COMMANDS = {
+    "remember", "set_time", "forget", "forget_last", "correct", "guest_start", "guest_end", "sleep",
+    "volume_up", "volume_down", "volume_set", "reminder", "snooze", "ack", "weather_location",
+    "clear_weather_location", "clock_zone", "device_zone",
+}
 _NO = re.compile(
     r"^(?:no|nope|no thanks|no thank you|never ?mind|cancel|stop|don't|do not|wait|"
     r"(?:no[, ]+)?(?:keep|forget) (?:it|them|that|those|everything))$",
@@ -1426,12 +1444,19 @@ class Mind:
                 if speaking_announcement and not privacy_change:
                     return
                 greeting = commands.greeting(text, self.cfg.name)
-                certain = command is not None or greeting is not None or self._direct_reply(text)
+                speaker = event.get("speaker") or self.cfg.owner
+                heard_followup = event.get("followup") is True
+                # Only what really answers or asks something code handles
+                # keeps a follow-up: a plain yes or no to an open question, an
+                # answer to a ring, or a command that stores and changes
+                # nothing. An open question alone does not make room talk
+                # meant for it.
+                certain = self._plainly_for_code(text, speaker, command, greeting, strict=heard_followup)
                 # An everyday skill's cheap gate ("list", "note") also matches
                 # ordinary sentences: such a follow-up is answered only if a
                 # skill really takes it, and is otherwise overheard.
                 maybe = not certain and self._everyday_may_match(text)
-                followup = event.get("followup") is True and not certain and not self._addressed(text)
+                followup = heard_followup and not certain and not self._addressed(text)
                 if followup and not maybe:
                     # Heard in the follow-up window with no sign it was meant
                     # for the being: maybe the room, maybe a television. It is
@@ -1442,14 +1467,14 @@ class Mind:
                 # Cancellation closes each in-flight HTTP connection. Wait for
                 # local cancellation before submitting anything to the slot.
                 # Direct replies can speak while the model warms.
-                background = self._interrupt_background(keep_warmup=not privacy_change and certain)
+                code = command is not None or greeting is not None or self._direct_reply(text)
+                background = self._interrupt_background(keep_warmup=not privacy_change and code)
                 if background:
                     await asyncio.gather(*background, return_exceptions=True)
                 if self._turn is not None and not self._turn.done():
                     self._cancel()
                     await asyncio.wait([self._turn])
                 if self.lid_open:
-                    speaker = event.get("speaker") or self.cfg.owner
                     self._turn = asyncio.create_task(
                         self._run_turn(text, speaker, greeting, command=command, followup=followup))
         elif topic == "say.done" and event.get("final"):
@@ -1478,6 +1503,52 @@ class Mind:
         except Exception as exc:
             log(f"workshop parse failed: {exc!r}")
             return False
+
+    def _question_open(self, speaker=None):
+        """An offer to forget or a skill's yes-or-no question still waiting
+        (for `speaker`, when given)."""
+        now = _uptime()
+        return any(
+            pending is not None and now <= pending["until"] and (speaker is None or speaker == pending["speaker"])
+            for pending in (self._pending_forget, self._pending_confirm)
+        )
+
+    def _plainly_for_code(self, text, speaker, command, greeting, *, strict):
+        """True when this utterance answers what is waiting, or is a command
+        that stores and changes nothing, so a follow-up is taken as meant for
+        the being. `strict`: heard without the name, so only a plain yes."""
+        if self._guest_memory is not None:
+            speaker = "guest"
+        answer = self._bare_answer(text)
+        now = _uptime()
+        pending = self._pending_forget
+        if pending is not None and now <= pending["until"] and speaker == pending["speaker"]:
+            if (_STRICT_YES if strict else _YES).match(answer) or _NO.match(answer):
+                return True
+        confirm = self._pending_confirm
+        if confirm is not None and now <= confirm["until"] and speaker == confirm["speaker"]:
+            if self._confirm_yes(confirm, strict).match(answer) or _NO.match(answer):
+                return True
+        if self._ring_open() and speaker in (self._ring.speaker, self.cfg.owner):
+            if commands.ring_reply(text, self.cfg.name) is not None:
+                return True
+            if command is not None and command.kind in ("ack", "snooze"):
+                return True
+        if command is not None:
+            return command.kind not in ADDRESS_ONLY_COMMANDS
+        if greeting is not None:
+            return True
+        try:
+            return self.apps.parse(text, self._guest_memory is not None) is not None
+        except Exception as exc:
+            log(f"workshop parse failed: {exc!r}")
+            return False
+
+    @staticmethod
+    def _confirm_yes(confirm, strict=False):
+        """The yes a skill's question takes: a plain one when the question is
+        marked strict (it cannot be undone) or the answer came unnamed."""
+        return _STRICT_YES if strict or getattr(confirm["confirm"], "strict", False) is True else _YES
 
     def _everyday_may_match(self, text):
         everyday = optional_module("everyday")
@@ -1891,10 +1962,16 @@ class Mind:
                 return
             if command is None:
                 command = commands.parse(text, self.cfg.name, now=self.skills.now())
+            if followup and command is not None and command.kind in ADDRESS_ONLY_COMMANDS:
+                # Unnamed, it may be room talk: "remember to buy bread" is
+                # not kept and "the time is 6:15" does not move the clock.
+                command = None
             privacy = command is not None and command.kind in PRIVACY_COMMANDS
             # 1. Questions it asked and is waiting on: an offer to forget, a
-            #    skill's yes or no, and a ring that may be answered.
-            if not privacy and await self._answer_pending(text, speaker, command):
+            #    skill's yes or no, and a ring that may be answered. A
+            #    follow-up that answered one was taken as addressed; any
+            #    other leaves the question open and answers nothing.
+            if not privacy and not followup and await self._answer_pending(text, speaker, command):
                 return
             if command is not None and command.kind == "ack":
                 command = None  # "stop the alarm" with nothing ringing is conversation
@@ -1990,7 +2067,7 @@ class Mind:
         confirm, self._pending_confirm = self._pending_confirm, None
         if confirm is not None and _uptime() <= confirm["until"] and speaker == confirm["speaker"]:
             answer = self._bare_answer(text)
-            if _YES.match(answer):
+            if self._confirm_yes(confirm).match(answer):
                 try:
                     reply = await confirm["confirm"].on_yes()
                 except Exception as exc:
@@ -2330,6 +2407,10 @@ class Mind:
             return True
         if text.rstrip().endswith("?") or commands.QUESTION.match(text.strip()):
             return True
+        if self._question_open():
+            # A yes-or-no question is answered yes or no, and those were
+            # already taken: anything else unnamed is not its answer.
+            return False
         if self.last_said is not None:
             return self.last_said.rstrip(" —").endswith("?")
         last = next((m for m in reversed(self.messages) if m["role"] == "assistant"), None)
@@ -2659,7 +2740,7 @@ class Mind:
                 emotion_sent = True
                 await self._send_reply("mind.emotion", name=tags.emotion, hold=30.0)
             for clause in splitter.feed(piece):
-                if not spoken and (_parrots(clause, text) or boilerplate(clause)):
+                if not spoken and (_parrots(clause, text) or (not last_try() and boilerplate(clause, text))):
                     parroted = True
                     return
                 spoken.append(clause)
@@ -2671,8 +2752,13 @@ class Mind:
         # with assistant boilerplate. The first clause is checked before it is
         # spoken: such a reply is never said, and is asked for once more, a
         # little less cautiously.
+        # The boilerplate check can be wrong, so it never empties a reply: the
+        # last try is said even if it opens that way. A parrot is never said.
         temperatures = [self.cfg.temperature, min(1.0, self.cfg.temperature + 0.3)]
         attempt = 0
+
+        def last_try():
+            return attempt >= len(temperatures)
         while attempt < len(temperatures):
             temperature = temperatures[attempt]
             attempt += 1
@@ -2716,7 +2802,7 @@ class Mind:
                 await out(guard.feed(think.flush()))
                 await out(guard.flush())
                 rest = (tags.flush() + " " + splitter.flush()).strip()
-                if rest and not spoken and (_parrots(rest, text) or boilerplate(rest)):
+                if rest and not spoken and (_parrots(rest, text) or (not last_try() and boilerplate(rest, text))):
                     parroted, rest = True, ""
             if not parroted or failed is not None or self._cancelled or self._discard_reply:
                 break
@@ -2942,6 +3028,10 @@ class Mind:
         elif kind in ("date", "date_tomorrow", "day") and (doubt := self._clock_doubt()):
             self._record("command", text, speaker)
             await self._say(self._doubtful_clock_line(doubt, what="date"))
+        elif kind == "set_time" and self._guest_memory is not None:
+            # The clock is the owner's: it moves their reminders and the
+            # memory's record of a clock set by hand.
+            await self._say("[neutral] Only the person I live with can set my clock.", keep=False)
         elif kind == "set_time":
             self._record("command", "set the time", speaker)
             await self._set_time_command(arg)
@@ -3136,7 +3226,7 @@ class Mind:
             keep=False, action=None, logged=None,
             confirm=SimpleNamespace(on_yes=forget, on_no=SimpleNamespace(
                 line="[neutral] Okay. I've kept everything.", keep=False, confirm=None, action=None, logged=None),
-                seconds=CONFIRM_SECONDS)), "", speaker)
+                seconds=CONFIRM_SECONDS, strict=True)), "", speaker)
 
     async def _erase_everything(self):
         """Every fact and archived sentence, a batch at a time; the stored day
