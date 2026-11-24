@@ -324,6 +324,59 @@ class Listening(unittest.IsolatedAsyncioTestCase):
         voice.bus.send.assert_not_awaited()
         self.assertFalse(voice._prompted)
 
+    async def test_one_breath_words_wait_for_the_brainstem_to_take_the_wake(self):
+        # A backlog in the microphone stream can be decoded before the
+        # brainstem's state change is read: the final waits for it.
+        voice = make_voice()
+        voice.state = "idle"
+        await voice.hear("hear.wake", {"oneshot": True})
+        self.assertTrue(voice.wake_pending)
+
+        async def brainstem_answers():
+            await voice.handle({"t": "state.changed", "state": "attending", "prev": "idle", "muted": False})
+            await voice.handle({"t": "state.changed", "state": "listening", "prev": "attending", "muted": False})
+
+        voice.sync_capture = AsyncMock()
+        voice.state_chirp = AsyncMock()
+        asyncio.get_running_loop().call_later(0.05, lambda: asyncio.ensure_future(brainstem_answers()))
+        await voice.hear("hear.partial", {"text": "what time", "oneshot": True})
+        await asyncio.wait_for(voice.hear("hear.final", {"text": "what time is it", "oneshot": True}), 1)
+        self.assertEqual(voice.state, "listening")
+        self.assertIn(("hear.final", {"text": "what time is it", "oneshot": True, "speaker": "Richard"}),
+                      sent(voice))
+        self.assertFalse(voice.wake_pending)
+
+    async def test_a_declined_one_breath_wake_still_drops_its_words(self):
+        voice = make_voice()
+        voice.state = "idle"
+        await voice.hear("hear.wake", {"oneshot": True})
+        voice.bus.send.reset_mock()
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        with patch("mind.voice.WAKE_ANSWER_SECONDS", 0.05):
+            await asyncio.wait_for(voice.hear("hear.final", {"text": "what time is it", "oneshot": True}), 1)
+        self.assertGreaterEqual(loop.time() - began, 0.04)
+        voice.bus.send.assert_not_awaited()
+        self.assertFalse(voice.wake_pending)
+        self.assertIsNone(voice.dictation)
+
+    async def test_a_backlog_of_frames_gives_the_bus_its_turn(self):
+        # readexactly returns at once while frames are queued; the capture
+        # loop still yields, so a lid close or a state change is read between
+        # frames, not after the backlog.
+        voice = make_voice()
+        voice.recognizer.feed.return_value = []
+        voice.state = "idle"
+        seen = []
+
+        async def bus_turn():
+            seen.append(voice.frames_read)
+
+        asyncio.get_running_loop().call_soon(lambda: asyncio.ensure_future(bus_turn()))
+        await self.run_frames(voice, count=20)
+        self.assertEqual(voice.frames_read, 20)
+        self.assertTrue(seen and seen[0] < 20, seen)
+
     async def test_unprompted_turns_close_the_window(self):
         voice = make_voice()
         with patch("mind.voice.time.monotonic", return_value=50.0):

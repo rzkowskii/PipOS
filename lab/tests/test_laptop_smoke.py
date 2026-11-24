@@ -375,6 +375,37 @@ def default_entry(config, titles):
     return int(value) if value.isdigit() else titles.index(value)
 
 
+CABLE_TRY_IMAGE = os.environ.get("BEING_LAPTOP_CABLE_TRY_IMAGE")
+# What the Try menu says, before any disk is listed, when Install is chosen on
+# a cable development stick (mind.installer.CABLE_MESSAGE); read off the panel
+# by words, so punctuation the font reader may miss does not matter.
+CABLE_REFUSAL = ("development stick", "release Try stick")
+
+
+def cable_image(image=LAPTOP_TRY_IMAGE):
+    """True for a cable development stick (BEING_LAPTOP_CABLE=1), which never installs:
+    the image BEING_LAPTOP_CABLE_TRY_IMAGE names, or one whose default Try entry
+    boots with being.cable=1 (only the cable build adds it)."""
+    if CABLE_TRY_IMAGE and Path(CABLE_TRY_IMAGE).resolve() == Path(image).resolve():
+        return True
+    try:
+        with Path(image).open("rb") as disk:
+            config = grub_config(disk)
+    except (OSError, ValueError, struct.error):
+        return False
+    if not config:
+        return False
+    entries = menu_entries(config)
+    if not entries:
+        return False
+    try:
+        index = default_entry(config, [title for title, _ in entries])
+        args = kernel_args(entries[index][1]) or []
+    except (ValueError, IndexError):
+        return False
+    return "being.cable=1" in args
+
+
 # -- the panel, read off the screen --------------------------------------------
 
 def _background(frame):
@@ -463,6 +494,29 @@ class FatReader(unittest.TestCase):
             config = grub_config(disk)
         self.assertIn("Try PipOS", [title for title, _ in menu_entries(config)])
         self.assertEqual(boot_folders(None), {})
+
+
+class CableImageDetection(unittest.TestCase):
+    """Which install case applies: a cable stick refuses, a release stick installs."""
+
+    CONFIG = ('set default=0\nmenuentry "Try PipOS" {\n  linux /bzImage root=/dev/sda2 quiet%s\n}\n'
+              'menuentry "Try PipOS (boot messages)" {\n  linux /bzImage root=/dev/sda2 being.cable=1\n}\n')
+
+    def detect(self, config, image=Path("/nonexistent/stick.img")):
+        with patch.object(Path, "open", lambda *a, **k: open(os.devnull, "rb")), \
+                patch(f"{__name__}.grub_config", return_value=config):
+            return cable_image(image)
+
+    def test_the_default_entry_decides(self):
+        self.assertTrue(self.detect(self.CONFIG % " being.cable=1 being.voice_debug=1"))
+        self.assertFalse(self.detect(self.CONFIG % ""), "only the default Try entry counts")
+        self.assertFalse(self.detect(None))
+        self.assertFalse(cable_image(Path("/nonexistent/stick.img")))
+
+    def test_the_cable_image_variable_names_it(self):
+        with patch(f"{__name__}.CABLE_TRY_IMAGE", "/nonexistent/cable.img"):
+            self.assertTrue(cable_image(Path("/nonexistent/cable.img")))
+            self.assertFalse(cable_image(Path("/nonexistent/other.img")))
 
 
 @unittest.skipUnless(LAPTOP_TRY_IMAGE.exists(), "needs the laptop Try USB: run lab/build.sh laptop-try")
@@ -735,6 +789,25 @@ class LaptopSmoke(unittest.TestCase):
         subprocess.run(["qemu-img", "convert", "-O", "raw", str(self.vm.disk), str(raw)], check=True)
         return raw
 
+    def assert_cable_refuses_install(self, target, before):
+        """Install on a cable stick: the refusal on the redrawn Try menu, no disk list, nothing written."""
+        def refused(frame):
+            lines = console_lines(frame)
+            text = " ".join(" ".join(lines).split())
+            if "Disk number" in text:
+                self.fail_on(frame, "32-cable-disks", "a cable development stick offered a disk to install on")
+            if try_menu_lines(frame) and all(words in text for words in CABLE_REFUSAL):
+                return lines
+            return None
+
+        self.wait_screen("32-cable-refused", refused, 240)
+        # Still on the menu a moment later: no disk list, no confirmation.
+        time.sleep(patient(5))
+        frame = self.vm.screen()
+        if not try_menu_lines(frame):
+            self.fail_on(frame, "33-cable-left-menu", "the Try menu did not stay after the refusal")
+        self.assert_untouched(target, before)
+
     # -- the tests -----------------------------------------------------------
 
     def test_default_boot_shows_try_menu_then_eyes_and_keeps_a_boot_log(self):
@@ -905,12 +978,20 @@ class LaptopSmoke(unittest.TestCase):
 
     def test_install_through_screen_then_installed_disk_boots_to_eyes_without_serial_login(self):
         """(7) Install from the Try menu to the blank internal disk with the
-        keyboard; it gets a GPT, then boots alone to the eyes with no login on serial."""
+        keyboard; it gets a GPT, then boots alone to the eyes with no login on serial.
+
+        A cable development stick never installs: Install says so before any
+        disk is listed, returns to the Try menu, and the disk stays untouched."""
         target = self.blank_target()
+        before = target.stat()
+        cable = cable_image()
         self.start_usb(target)
         self.wait_try_menu("31-try-menu")
 
         self.select("2")
+        if cable:
+            self.assert_cable_refuses_install(target, before)
+            return
 
         def disks(frame):
             lines = console_lines(frame)

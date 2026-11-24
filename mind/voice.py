@@ -11,6 +11,7 @@ import signal
 import stat
 import tempfile
 import time
+import types
 import wave
 from array import array
 from concurrent.futures import ThreadPoolExecutor
@@ -21,15 +22,15 @@ from pathlib import Path
 from . import mic_channel, sd_notify
 from .bus import Bus
 from .mic_channel import ChannelPicker
-from .mic_port import MicrophonePort
+from .mic_port import DIAG_ENV, DiagnosticMicrophone, MicrophonePort
 from .profile import DEFAULT_VOICE, FACTORY_CONFIG, VOICES, default_mind_dir, factory_profile, load_profile
 from .recognition import (
     DIGITAL_SILENCE_DBFS, FRAME_BYTES, FRAME_SAMPLES, MAX_MIC_GAIN, MIN_MIC_GAIN, RATE, MicLevel, Recognizer,
     amplify, dbfs, levels, pcm,
 )
 from .tts import (
-    CHIRPS, ChirpBank, FliteEngine, available_voices, playback_command, scale_wav, select_engine,
-    shorten_leading_pause, synthesis_command, volume_gain,
+    CHIRP_PEAK, CHIRP_RATE, CHIRPS, ChirpBank, FliteEngine, available_voices, playback_command, scale_wav,
+    select_engine, shorten_leading_pause, synthesis_command, volume_gain, write_wav,
 )
 
 FW = Path("/sys/firmware/qemu_fw_cfg/by_name/opt/beingos")
@@ -45,7 +46,8 @@ PAUSE_TRIAL_VOICES = frozenset(("slt", "rms", "awb"))
 PAUSE_TRIAL_MAX_CHARS = 512
 SUBSCRIPTIONS = (
     "body.lid", "body.state", "state.changed", "voice.mute", "voice.volume", "voice.chirps",
-    "voice.level_request", "voice.engine", "say.request", "say.stop", "stem.chirp",
+    "voice.level_request", "voice.engine", "say.request", "say.stop", "stem.chirp", "mind.ready",
+    "app.privacy",
 )
 FRAME_SECONDS = FRAME_SAMPLES / RATE
 RUN_DIR = "/run"
@@ -54,6 +56,11 @@ RUN_DIR = "/run"
 FOLLOW_UP_SECONDS = 8.0
 # At most one onset reaction per this many seconds (task 5.6).
 SOUND_INTERVAL = 10.0
+# A one-breath request's final waits this long for the brainstem to take its
+# wake before it is dropped: the words after the name can be decoded before
+# the brainstem's answer is read (a backlog in the microphone stream decodes
+# faster than it arrives).
+WAKE_ANSWER_SECONDS = 2.0
 # The thinking purr starts this long into a prompted turn, then repeats slowly.
 PURR_AFTER = 1.5
 PURR_REPEAT = 12.0
@@ -103,6 +110,63 @@ VOICED_OVER_FLOOR_DB = 10.0
 COST_FRAMES = 1000
 # While resting, voice_engines may take a due measurement this often.
 ENGINE_REFRESH_SECONDS = 900.0
+# A Try session is short and its /mind is empty at every boot, so it takes one
+# measurement of its own this long after the mind says it is ready (the model
+# is then answering and warming), once the CPU is quiet; it gives up waiting
+# for quiet after TRY_MEASURE_PATIENCE seconds.
+TRY_MEASURE_AFTER = 60.0
+# mind.ready comes once per mind connection and is not replayed, so a voice
+# that starts after it (a restart for pip-diag, or after a crash) waits this
+# long for it and then takes the mind as ready.
+TRY_READY_PATIENCE = 120.0
+TRY_MEASURE_POLL = 10.0
+TRY_MEASURE_PATIENCE = 600.0
+# Playback this much shorter than its clip, or twice this much longer, is reported.
+PLAYBACK_TOLERANCE = 0.4
+
+# The command grammar's second pass. When the open-vocabulary transcript of a
+# dictation is not a workshop command, PocketSphinx decodes the same audio
+# again with a grammar of the safe commands and judges it against a free
+# phone loop (a grammar always finds its nearest command; the posterior among
+# commands alone does not tell a command from other speech). Only a whole command whose path beats the phone
+# loop by GRAMMAR_MARGIN per 10 ms frame, and whose own words the transcript
+# already holds (see agreement), replaces the transcript. The margin alone is
+# not enough: one-breath non-commands score at most 3.5, but ordinary
+# sentences said while attending reach 10 to 22 against their nearest
+# command, and only the word check turns those away. Clean commands score 7 to
+# 16; owner recordings should retune it (BEING_COMMAND_GRAMMAR_MARGIN).
+# BEING_COMMAND_GRAMMAR=0 turns the pass off.
+GRAMMAR_MARGIN = 6.0
+# Commands are short: a longer dictation is conversation, never re-read.
+GRAMMAR_MAX_SECONDS = 4.0
+# Kinds of workshop command a grammar result may become (mind/app_commands.py).
+GRAMMAR_SAFE_KINDS = frozenset(("open", "close", "minimise", "restore", "say"))
+# The grammar always finds its nearest command, even in "tell me about the
+# sea" (it read "show me your body" there, with a margin of 13 in attending
+# mode). So the grammar may only tidy a transcript that already holds the
+# command's own words: every word of the command outside these must be in the
+# open-vocabulary transcript, in order (a one-letter slip allowed, two in long
+# words), with at most GRAMMAR_STRAY_WORDS other words besides.
+GRAMMAR_FILLER_WORDS = frozenset((
+    "a", "an", "the", "new", "your", "my", "me", "up", "back", "to", "away", "how", "you're", "you", "are",
+))
+GRAMMAR_STRAY_WORDS = 2
+# Words that turn a command around. "Can't" is the one exception, and only as
+# the first word: in a one-breath "Hey Pip, open a terminal" the n-gram often
+# hears the end of the name as "can't".
+GRAMMAR_NEGATIONS = frozenset((
+    "not", "don't", "dont", "never", "no", "didn't", "won't", "wouldn't", "shouldn't", "stop", "can't", "cannot",
+))
+# When mind/app_commands.py offers no phrase list.
+FALLBACK_PHRASES = (
+    "open a terminal", "open the terminal", "open terminal", "open a new terminal", "open your terminal",
+    "start a terminal", "launch a terminal", "show me the terminal", "close the terminal", "close your terminal",
+    "hide the terminal", "open the clock", "show me the clock", "close the clock", "open the monitor",
+    "close the monitor",
+)
+CMDLINE = Path("/proc/cmdline")
+VOICE_DEBUG_KEY = "being.voice_debug="
+VOICE_DEBUG_ARG = VOICE_DEBUG_KEY + "1"
 
 SETTINGS_FILE = Path("audio") / "voice.json"
 ALSA_STATE_FILE = Path("audio") / "asound.state"
@@ -114,8 +178,24 @@ TTS_CHOICES = ("auto", "piper", "flite")
 # Unscaled samples: the level a relative change starts from when no mixer
 # reports one. Assuming less would make "louder" quieter in software volume.
 FULL_LEVEL = 100
+# A stored level never starts the voice quieter than this, the quietest the
+# owner can ask for by voice (mind.turn.VOLUME_FLOOR): an older build kept a
+# key mute's 0, and a level the volume keys stepped to may be lower still.
+VOLUME_FLOOR = 10
+# The volume keys' click (voice.volume with feedback: true), as a Mac makes:
+# one short soft tick at the new level, well under the earcons' length.
+CLICK_NAME = "click"
+CLICK_SECONDS = 0.03
+CLICK_HZ = 1350
+CLICK_LEVEL = 0.6
 
 LOG = logging.getLogger("being.voice")
+
+
+@types.coroutine
+def _give_way():
+    """Let the event loop run its other tasks once, as asyncio.sleep(0) does."""
+    yield
 
 
 class _JournalHandler(logging.Handler):
@@ -287,6 +367,42 @@ def save_voice_settings(mind_dir, *, volume, chirps, tts="auto"):
     atomic_write(path, json.dumps(data) + "\n")
 
 
+# The volume click ----------------------------------------------------------------
+
+def click_samples(gain=1.0, *, rate=CHIRP_RATE):
+    """The volume keys' tick as 16-bit samples: CLICK_SECONDS of a soft tone
+    with a two-millisecond attack and a fast decay, so it starts and stops
+    without a pop of its own."""
+    count = max(1, int(CLICK_SECONDS * rate))
+    attack = max(1, int(0.002 * rate))
+    peak = CHIRP_PEAK * CLICK_LEVEL * max(0.0, min(1.0, gain))
+    samples = array("h")
+    for index in range(count):
+        position = index / count
+        envelope = min(1.0, index / attack) * math.exp(-6.0 * position) * 0.5 * (1 + math.cos(math.pi * position))
+        value = math.sin(2 * math.pi * CLICK_HZ * index / rate) + 0.2 * math.sin(4 * math.pi * CLICK_HZ * index / rate)
+        samples.append(int(max(-32767, min(32767, peak * envelope * value / 1.2))))
+    return samples
+
+
+def click_path(directory, gain=1.0):
+    """The click at `gain` as a WAV in the chirp directory, made on first use.
+    One gain is kept at a time, as the chirp bank keeps its sounds."""
+    directory = Path(directory)
+    level = max(0, min(100, round(gain * 100)))
+    target = directory / f"{CLICK_NAME}-g{level}.wav"
+    if not target.is_file():
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for stale in directory.glob(f"{CLICK_NAME}-g*.wav"):
+            if stale != target:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+        write_wav(target, click_samples(level / 100))
+    return target
+
+
 # Mixer ---------------------------------------------------------------------------
 
 def mixer_card(device):
@@ -401,12 +517,217 @@ def asr_name(engine, wake):
     return engine_name(engine, "unknown")
 
 
+def command_phrases():
+    """The safe command phrases from mind/app_commands.py, or a small built-in list."""
+    try:
+        from . import app_commands
+
+        found = app_commands.grammar_phrases()
+    except Exception:
+        return list(FALLBACK_PHRASES)
+    phrases = [phrase for phrase in found if isinstance(phrase, str) and phrase.strip()] \
+        if isinstance(found, (list, tuple)) else []
+    return phrases or list(FALLBACK_PHRASES)
+
+
+class CommandGrammar:
+    """When the grammar pass runs and whether its result may stand."""
+
+    def __init__(self, phrases, name="pip", margin=GRAMMAR_MARGIN, max_seconds=GRAMMAR_MAX_SECONDS):
+        self.phrases = tuple(phrases)
+        self.name = name
+        self.margin = margin
+        self.max_seconds = max_seconds
+
+    _shelf = None
+
+    @classmethod
+    def contexts(cls):
+        """What may be on screen: nothing, the terminal shown or tucked away, a small
+        app up, the workshop shelf (so "play snake" counts as running a program),
+        a script being written or finished, and a yes-or-no question open."""
+        from .app_commands import AppContext, load_shelf
+
+        if cls._shelf is None:
+            try:
+                cls._shelf = load_shelf()
+            except Exception:
+                cls._shelf = {}
+        return (AppContext(), AppContext(terminal="shown"), AppContext(terminal="minimised"),
+                AppContext(monitor="shown"), AppContext(clock="shown"), AppContext(shelf=dict(cls._shelf)),
+                AppContext(terminal="shown", job="writing"), AppContext(terminal="shown", job="done"),
+                AppContext(terminal="shown", job="running", pending="close"))
+
+    def commands(self, text):
+        """What `text` means in each ordinary on-screen context (None where nothing)."""
+        from .app_commands import parse
+
+        return [parse(text, context, self.name) for context in self.contexts()]
+
+    def is_command(self, text):
+        """True if the transcript already is a workshop command (or cannot be checked)."""
+        try:
+            return any(command is not None for command in self.commands(text))
+        except Exception as error:
+            LOG.warning("could not check the transcript against the commands: %r", error)
+            return True
+
+    def safe(self, phrase):
+        """True if `phrase` is a command in some context and never more than a safe one."""
+        try:
+            kinds = [command.kind for command in self.commands(phrase) if command is not None]
+        except Exception:
+            return False
+        return bool(kinds) and all(kind in GRAMMAR_SAFE_KINDS for kind in kinds)
+
+    def judge(self, result, transcript=None):
+        """(phrase, None) when a grammar result may replace `transcript`, else (None, why)."""
+        from .recognition import find_command
+
+        if not isinstance(result, dict) or not result.get("text"):
+            return None, "no command fits"
+        found = find_command(result["text"], self.phrases)
+        if found is None:
+            return None, "not a whole command"
+        phrase, extra = found
+        if extra:
+            return None, "words around the command"
+        margin = result.get("margin")
+        if not isinstance(margin, (int, float)) or not math.isfinite(margin) or margin < self.margin:
+            return None, f"margin {number(margin, '.1f')} under {self.margin:g}"
+        why = agreement(transcript, phrase)
+        if why is not None:
+            return None, why
+        if not self.safe(phrase):
+            return None, "not a safe command"
+        return phrase, None
+
+
+def spoken_words(text):
+    """Lowercase words of a transcript, apostrophes kept, other punctuation dropped."""
+    return re.findall(r"[a-z]+(?:'[a-z]+)?", text.lower()) if isinstance(text, str) else []
+
+
+def edits(first, second):
+    """Levenshtein distance between two words."""
+    row = list(range(len(second) + 1))
+    for i, a in enumerate(first, 1):
+        previous, row[0] = row[0], i
+        for j, b in enumerate(second, 1):
+            previous, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, previous + (a != b))
+    return row[-1]
+
+
+def near(heard, wanted):
+    """`heard` is `wanted` or a slip of it: one letter in words of 4 to 7 letters, two from 8."""
+    if heard == wanted:
+        return True
+    allowed = 2 if len(wanted) >= 8 else 1 if len(wanted) >= 4 else 0
+    return allowed > 0 and edits(heard, wanted) <= allowed
+
+
+def agreement(transcript, phrase):
+    """None when the grammar's `phrase` only tidies `transcript`, else why not.
+
+    The command's own words (GRAMMAR_FILLER_WORDS aside) must all be in the
+    transcript, in order, each the same word or a slip of it; at most
+    GRAMMAR_STRAY_WORDS other words (courtesy words aside) may be left over;
+    and nothing may turn the command around ("don't open the terminal")."""
+    from .recognition import COURTESY_WORDS
+
+    if transcript is None:
+        return "no transcript to compare"
+    heard = spoken_words(transcript)
+    for position, word in enumerate(heard):
+        if word in GRAMMAR_NEGATIONS and not (word == "can't" and position == 0):
+            return "the transcript turns the command around"
+    used = set()
+    start = 0
+    for wanted in phrase.split():
+        if wanted in GRAMMAR_FILLER_WORDS:
+            continue
+        index = next((i for i in range(start, len(heard)) if near(heard[i], wanted)), None)
+        if index is None:
+            return "the transcript does not hold the command's words"
+        used.add(index)
+        start = index + 1
+    fillers = set(phrase.split()) | GRAMMAR_FILLER_WORDS | COURTESY_WORDS
+    stray = [word for i, word in enumerate(heard) if i not in used and word not in fillers]
+    if len(stray) > GRAMMAR_STRAY_WORDS:
+        return "too many other words in the transcript"
+    return None
+
+
+def command_grammar(recognizer, environ=os.environ):
+    """Load the second pass into a PocketSphinx recognizer; None when it is off or cannot load."""
+    if environ.get("BEING_COMMAND_GRAMMAR", "1").strip() == "0":
+        LOG.info("command grammar second pass: off (BEING_COMMAND_GRAMMAR=0)")
+        return None
+    load = getattr(recognizer, "load_command_grammar", None)
+    if not callable(load):
+        return None
+    margin = GRAMMAR_MARGIN
+    raw = environ.get("BEING_COMMAND_GRAMMAR_MARGIN", "").strip()
+    if raw:
+        try:
+            margin = float(raw)
+            if not math.isfinite(margin):
+                raise ValueError(raw)
+        except ValueError:
+            LOG.warning("BEING_COMMAND_GRAMMAR_MARGIN=%r is not a number; using %g", raw, GRAMMAR_MARGIN)
+            margin = GRAMMAR_MARGIN
+    try:
+        phrases = load(command_phrases())
+    except Exception as error:
+        LOG.warning("command grammar second pass: could not load (%r); off", error)
+        return None
+    if not phrases:
+        LOG.info("command grammar second pass: off (the grammar or the phone loop did not load)")
+        return None
+    name = (getattr(recognizer, "wake_phrase", None) or "pip").split()[-1].lower()
+    LOG.info("command grammar second pass: %d phrases, margin %g per frame", len(phrases), margin)
+    return CommandGrammar(phrases, name=name, margin=margin)
+
+
+def voice_debug(environ=os.environ, cmdline=CMDLINE, try_boot=None):
+    """(on, why): transcripts go to the log with BEING_VOICE_DEBUG=1, or on a Try boot with being.voice_debug=1."""
+    if environ.get("BEING_VOICE_DEBUG") == "1":
+        return True, "BEING_VOICE_DEBUG"
+    # As with any repeated kernel argument the last one counts, so
+    # being.voice_debug=0 typed at the boot prompt undoes the entry's =1.
+    if mic_channel.kernel_arg(VOICE_DEBUG_KEY, cmdline) != "1":
+        return False, None
+    if try_boot is None:
+        from .try_mode import is_try_boot
+
+        try_boot = is_try_boot()
+    if not try_boot:
+        LOG.info("%s is honoured only on a Try boot; transcript text stays out of the log", VOICE_DEBUG_ARG)
+        return False, None
+    return True, "the kernel command line"
+
+
+def debug_environment(environ, diagnostic, connected):
+    """The environment voice debugging is read from.
+
+    pip-diag sets BEING_VOICE_DEBUG=1 for its own test audio, beside
+    BEING_DIAG_MIC. When that microphone did not answer, the real one listens
+    instead, so the owner's words stay out of the log: BEING_VOICE_DEBUG is
+    dropped (being.voice_debug=1 on a Try boot still counts)."""
+    if not diagnostic or connected or environ.get("BEING_VOICE_DEBUG") != "1":
+        return environ
+    LOG.info("BEING_VOICE_DEBUG was set for the diagnostic microphone, which did not answer; "
+             "it does not apply to the normal microphone")
+    return {key: value for key, value in environ.items() if key != "BEING_VOICE_DEBUG"}
+
+
 class Voice:
     def __init__(self, recognizer, speaker, capture, playback, mic_port=None, *,
                  voice=DEFAULT_VOICE, rate=1.0, shorten_first_pause=False, tts=None,
                  settings_dir=None, settings=None, mixer=None, chirp_bank=None, chirps=False,
                  hear_sounds=False, quiet_hours=None, mic=None, channel=None, clock=None,
-                 tts_choice="auto", engines=None, asr="pocketsphinx", typing_hint=None, tts_forced=False):
+                 tts_choice="auto", engines=None, asr="pocketsphinx", typing_hint=None, tts_forced=False,
+                 tts_override=None, transcripts=False, grammar=None, try_boot=False):
         self.recognizer = recognizer
         self.speaker = speaker
         self.capture_command = capture
@@ -423,9 +744,26 @@ class Voice:
         self.typing_hint = typing_hint
         self._hint = _UNKNOWN
         self.tts_forced = tts_forced
+        # being.tts= or BEING_TTS: piper or flite, chosen without the speed rule.
+        self.tts_override = tts_override if tts_override in ("piper", "flite") else None
+        # Transcript text in the log (being.voice_debug=1 on a Try boot, or BEING_VOICE_DEBUG=1).
+        self.transcripts = transcripts
+        # Guest mode (app.privacy from the mind): a visitor's words never reach the log.
+        self.guest = False
+        self.grammar = grammar
+        self.try_boot = try_boot
+        self.mind_ready = asyncio.Event()
+        # One measurement at a time: the Try measurement and the refresh may fall due together.
+        self.measuring = asyncio.Lock()
+        self.try_task = None
         self.settings_dir = settings_dir
         settings = settings or {"volume": None, "chirps": True}
         self.volume = settings["volume"]
+        # The level kept in the settings file: a key mute (voice.volume with
+        # persist: false) changes self.volume for now and never this.
+        self.kept_volume = self.volume
+        # How the level took effect ("hardware" or "software"), for reports.
+        self.volume_method = None
         self.chirp_choice = settings["chirps"]
         self.chirps_on = chirps
         self.mixer = mixer
@@ -470,6 +808,9 @@ class Voice:
         self.reply_failures = 0
         self._prompted = False
         self._oneshot_wake = False
+        # A one-breath wake was sent and the brainstem has not answered it yet.
+        self.wake_pending = False
+        self.state_seen = asyncio.Event()
         self._start_sent = False
         self._bell_first = False  # the reply being spoken opens with the ring bell
         self._done_sent = False
@@ -482,8 +823,12 @@ class Voice:
         self.hint_at = -math.inf
         # Levels of the current dictation and of the last sound segment.
         self.dictation = None
+        # The frames of the current dictation that were clearly voice (above the floor).
+        self.voiced = None
         self.segment = None
         self.last_segment = None
+        # (confidence, log posterior, engine) of the final being sent.
+        self.final_scores = None
         # When words were last understood, and the timing of the newest ones.
         self.heard_at = None
         self.voiced_at = None
@@ -501,7 +846,7 @@ class Voice:
             async with asyncio.TaskGroup() as tasks:
                 self.tasks = tasks
                 if self.volume is not None:
-                    await self.apply_volume(self.volume)
+                    await self.start_volume()
                 self.spawn(self.level_loop())
                 self.spawn(sd_notify.keep_alive())
                 if self.engines is not None:
@@ -581,6 +926,9 @@ class Voice:
             before = self.state
             self.state = state
             self.muted = event.get("muted", self.muted)
+            if previous is not None:
+                self.wake_pending = False
+            self.state_seen.set()
             await self.follow_attention(before)
             self.follow_state(previous, self.state)
             await self.sync_capture()
@@ -609,6 +957,18 @@ class Voice:
             await self.change_engine(event.get("tts"))
         elif topic == "stem.chirp":
             await self.chirp(event.get("name"))
+        elif topic == "mind.ready":
+            self.mind_ready.set()
+            # A mind that connects after this voice started never heard the
+            # level it came up at.
+            await self.report_volume()
+        elif topic == "app.privacy":
+            guest = event.get("guest") is True
+            if guest != self.guest:
+                self.guest = guest
+                if self.transcripts or LOG.isEnabledFor(logging.DEBUG):
+                    LOG.info("guest mode %s: transcript text %s the log", "on" if guest else "off",
+                             "stays out of" if guest else "goes back into")
         elif topic == "body.state":
             hour, minute = event.get("hour"), event.get("minute")
             valid = type(hour) is int and type(minute) is int and 0 <= hour < 24 and 0 <= minute < 60
@@ -700,7 +1060,8 @@ class Voice:
     @property
     def capture_device(self):
         if self.mic_port is not None:
-            return "the QEMU microphone port"
+            description = getattr(self.mic_port, "description", None)
+            return description if isinstance(description, str) else "the QEMU microphone port"
         command = self.capture_command
         return command[command.index("-D") + 1] if "-D" in command[:-1] else "the default device"
 
@@ -799,13 +1160,28 @@ class Voice:
                     self.account(time.perf_counter() - started)
                     dictating = self.state in ATTENDING and self.dictation_open()
                     oneshot = self.state in RESTING or (self.state == "attending" and not dictating)
+                    # Asleep, a one-breath request still wakes, as the name alone would.
+                    self.wake_while_asleep(self.state == "asleep")
                     events = self.recognizer.feed(frame, dictating, oneshot)
                     self._in_speech = getattr(self.recognizer, "in_speech", False) is True
                     self.measure(level, self._in_speech)
                     for topic, fields in events:
                         await self.hear(topic, fields)
+                    # A backlog in the stream is read without suspending, so
+                    # give the bus its turn between frames: a lid close, a
+                    # mute or the brainstem's answer to a wake is acted on
+                    # while the backlog is decoded, not after it.
+                    await _give_way()
             finally:
                 self.recognizer.stop_capture()
+
+    def wake_while_asleep(self, on):
+        """Tell the recognizer whether a wake phrase that runs on should still wake."""
+        if getattr(self.recognizer, "run_on_wake", None) is not on:
+            try:
+                self.recognizer.run_on_wake = on
+            except AttributeError:
+                pass
 
     @property
     def silenced(self):
@@ -846,6 +1222,9 @@ class Voice:
                           and floor > DIGITAL_SILENCE_DBFS else in_speech)
                 if voiced:
                     self.voiced_at = self.now()
+                    if self.voiced is None:
+                        self.voiced = Span()
+                    self.voiced.add(*level)
             self.report_loudest = max(self.report_loudest, level[0])
         if not in_speech and self.segment is not None:
             self.last_segment, self.segment = self.segment, None
@@ -869,12 +1248,41 @@ class Voice:
         self.report_loudest = 0
         self.report_sounds = 0
 
+    async def wake_taken(self):
+        """Whether the brainstem took the one-breath wake, giving it a moment to answer.
+
+        Waiting yields to the event loop, so a state change that arrived
+        while a backlog of frames was decoded is read before the words are
+        dropped."""
+        if self.state in ATTENDING:
+            return True
+        if not self.wake_pending:
+            return False
+        self.wake_pending = False
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + WAKE_ANSWER_SECONDS
+        while self.state not in ATTENDING:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            self.state_seen.clear()
+            try:
+                await asyncio.wait_for(self.state_seen.wait(), remaining)
+            except asyncio.TimeoutError:
+                break
+        return self.state in ATTENDING
+
     async def hear(self, topic, fields):
         oneshot = bool(fields.get("oneshot"))
-        if oneshot and topic in ("hear.partial", "hear.final", "hear.cancel") and self.state not in ATTENDING:
+        if (oneshot and topic in ("hear.partial", "hear.final", "hear.cancel") and self.state not in ATTENDING
+                and (topic == "hear.partial" or not await self.wake_taken())):
             # The brainstem did not take the one-breath wake (muted, busy or
-            # asleep), so the words are not addressed to it and leave no trace.
+            # asleep), so the words are not addressed to it and leave no trace
+            # (voice debugging says only that it happened).
             if topic != "hear.partial":
+                if self.transcripts:
+                    LOG.info("a one-breath request ended while %s: the brainstem did not take its wake, "
+                             "so it was not passed on", self.state)
                 self.dictation = None
                 self.expecting = False
             return
@@ -884,28 +1292,36 @@ class Voice:
                 return
             self.last_sound = now
         elif topic == "hear.wake":
+            run_on = bool(fields.pop("run_on", False))
             segment = self.last_segment or self.segment or Span()
             LOG.info("heard the wake phrase%s%s: score %s, %s, mic gain %.2fx", " in one breath" if oneshot else "",
                      f" while {self.state}" if self.state in TALKING else "",
                      number(getattr(self.recognizer, "wake_score", None), "d"), segment.describe(), self.mic.gain)
+            if run_on:
+                LOG.info("the wake phrase ran on into more words while %s; waking without them, "
+                         "so they need saying again", self.state)
             # The brainstem ignores a wake during its turn, so nothing is
             # expected and no apology is owed for one heard then.
             if self.state not in TALKING:
                 self.dictation_until = math.inf
                 self.followup = False
                 self._oneshot_wake = oneshot
+                self.wake_pending = oneshot and self.state not in ATTENDING
                 self.expecting = True
                 self.apology_owed = True
                 self.pending_timing = None
         elif topic == "hear.speech_start":
             self.dictation = Span()
+            self.voiced = None
             self.voiced_at = None
             LOG.info("dictation started while %s", self.state)
         elif topic == "hear.partial":
             text = fields.get("text", "")
             LOG.info("partial transcript: %d characters", len(text) if isinstance(text, str) else 0)
-            LOG.debug("partial transcript text: %r", text)
+            if not self.guest:
+                LOG.debug("partial transcript text: %r", text)
         elif topic == "hear.final":
+            await self.second_pass(fields)
             fields["speaker"] = self.speaker
             if self.followup and not oneshot:
                 # Heard without its name, in the window after a reply.
@@ -916,17 +1332,100 @@ class Voice:
         if topic in ("hear.final", "hear.cancel"):
             await self.dictation_ended(topic, fields)
 
+    def text_logged(self):
+        """Transcript text goes into the log: voice debugging is on and no guest is here."""
+        return self.transcripts and not self.guest
+
+    # The command grammar --------------------------------------------------------
+
+    def read_scores(self):
+        """(confidence, log posterior) of the search that just ended, as the recognizer reports them."""
+        def finite(value):
+            ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+            return float(value) if ok else None
+
+        try:
+            scores = getattr(self.recognizer, "scores", None)
+            found = scores() if callable(scores) else None
+            if isinstance(found, tuple) and len(found) == 2:
+                return finite(found[0]), finite(found[1])
+            confidence = getattr(self.recognizer, "confidence", None)
+            return (finite(confidence()) if callable(confidence) else None), None
+        except Exception as error:
+            LOG.warning("could not read the transcript's confidence: %r", error)
+            return None, None
+
+    async def second_pass(self, fields):
+        """Read a dictation that is not a command again, with the command grammar.
+
+        The open-vocabulary scores are kept first: the second search replaces
+        them in the decoder. A grammar result replaces the text only when
+        CommandGrammar.judge accepts it; the log says which pass the words came from."""
+        confidence, log_posterior = self.read_scores()
+        self.final_scores = (confidence, log_posterior, self.asr)
+        if LOG.isEnabledFor(logging.DEBUG) and not self.guest and callable(getattr(self.recognizer, "nbest", None)):
+            try:
+                LOG.debug("n-best transcripts: %r", self.recognizer.nbest())
+            except Exception as error:
+                LOG.debug("no n-best transcripts: %r", error)
+        text = fields.get("text")
+        grammar = self.grammar
+        decode = getattr(self.recognizer, "decode_command", None)
+        if grammar is None or not callable(decode) or not isinstance(text, str) or not text.strip():
+            return
+        if grammar.is_command(text):
+            return
+        audio = self.recognizer.utterance_audio() if callable(getattr(self.recognizer, "utterance_audio", None)) \
+            else b""
+        seconds = len(audio) / (2 * RATE) if isinstance(audio, (bytes, bytearray)) else 0.0
+        if not seconds or seconds > grammar.max_seconds:
+            return
+        result = await self.decode_off_loop(decode, bytes(audio))
+        phrase, why = grammar.judge(result, text)
+        margin = number(result.get("margin") if isinstance(result, dict) else None, ".1f")
+        if phrase is None:
+            LOG.info("command grammar second pass: no match (%s); keeping the open-vocabulary transcript", why)
+            if self.text_logged() and isinstance(result, dict) and result.get("text"):
+                LOG.info("command grammar heard %s (margin %s)", json.dumps(result["text"]), margin)
+            return
+        LOG.info("command grammar second pass: matched a command of %d words (margin %s per frame), "
+                 "replacing the open-vocabulary transcript", len(phrase.split()), margin)
+        fields["text"] = phrase
+        posterior = result.get("log_posterior")
+        self.final_scores = (math.exp(posterior) if isinstance(posterior, float) else None, posterior,
+                             f"{self.asr} grammar")
+
+    async def decode_off_loop(self, decode, audio):
+        """Run the grammar decode on a worker thread, but never let the decoder be
+        touched again before it ends: a cancelled capture waits for it."""
+        job = asyncio.ensure_future(asyncio.to_thread(decode, audio))
+        try:
+            return await asyncio.shield(job)
+        except asyncio.CancelledError:
+            await asyncio.wait({job})
+            raise
+        except Exception as error:
+            LOG.warning("command grammar second pass failed: %r", error)
+            return None
+
     async def dictation_ended(self, topic, fields):
         text = fields.get("text", "") if topic == "hear.final" else ""
         text = text if isinstance(text, str) else ""
-        # The confidence is read after the final is on its way.
         dictation, self.dictation = self.dictation or Span(), None
+        voiced, self.voiced = self.voiced or Span(), None
+        scores, self.final_scores = self.final_scores, None
         now = self.now()
         if text.strip():
-            confidence = self.recognizer.confidence() if hasattr(self.recognizer, "confidence") else None
-            LOG.info("dictation ended after %.1f s: final transcript of %d characters, confidence %s, %s",
-                     dictation.seconds, len(text), number(confidence, ".2f"), dictation.describe())
-            LOG.debug("final transcript text: %r", text)
+            confidence, log_posterior, engine = scores if scores is not None else (*self.read_scores(), self.asr)
+            LOG.info("dictation ended after %.1f s: final transcript of %d characters, confidence %s, "
+                     "log-posterior %s, %s; voiced %.1f s, %s",
+                     dictation.seconds, len(text), number(confidence, ".2f"), number(log_posterior, ".2f"),
+                     dictation.describe(), voiced.seconds, voiced.describe())
+            if self.text_logged():
+                LOG.info("heard: %s (engine %s, confidence %s, log-posterior %s)", json.dumps(text), engine,
+                         number(confidence, ".2f"), number(log_posterior, ".2f"))
+            if not self.guest:
+                LOG.debug("final transcript text: %r", text)
             self.expecting = False
             # This wake was answered with words, so nothing is owed for it. A
             # cough in the follow-up window after the reply must not be
@@ -1061,9 +1560,9 @@ class Voice:
         wake = self.recognizer
         if not self.tts_forced:
             # A voice that will not load must not cost the better ears, so the
-            # two choices fail separately.
+            # two choices fail separately. A forced engine skips the speed rule.
             try:
-                await self.adopt_tts(self.tts_choice)
+                await self.adopt_tts(self.wanted_tts())
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -1078,6 +1577,9 @@ class Voice:
             raise
         except Exception as error:
             LOG.warning("could not choose the speech recognizer: %r", error)
+        if self.try_boot and self.settings_dir is not None:
+            # Its own task: waiting for it must never hold up the refresh below.
+            self.try_task = self.spawn(self.try_measurement_logged(wake))
         while True:
             await asyncio.sleep(ENGINE_REFRESH_SECONDS)
             if self.state not in AT_REST or self.settings_dir is None:
@@ -1089,11 +1591,54 @@ class Voice:
             except Exception as error:
                 LOG.warning("could not re-measure the speech engines: %r", error)
 
-    async def refresh_engines(self, wake):
+    async def try_measurement_logged(self, wake):
+        try:
+            await self.try_measurement(wake)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            LOG.warning("could not measure the speech engines in this Try session: %r", error)
+
+    async def try_measurement(self, wake):
+        """One measurement early in a Try session, which is too short for the 900 s refresh.
+
+        TRY_MEASURE_AFTER seconds after the mind is ready (or TRY_READY_PATIENCE
+        seconds after this voice started looking, when mind.ready went out
+        before it started), at rest, once the CPU is quiet
+        (voice_engines.cpu_quiet). voice_engines measures only what is due
+        (auto, nothing cached) and re-checks the quiet between runs."""
+        try:
+            async with asyncio.timeout(TRY_READY_PATIENCE):
+                await self.mind_ready.wait()
+        except TimeoutError:
+            LOG.info("Try session: no mind.ready in %g s (it may have gone out before this voice started); "
+                     "taking the mind as ready", TRY_READY_PATIENCE)
+        await asyncio.sleep(TRY_MEASURE_AFTER)
+        quiet = getattr(self.engines, "cpu_quiet", None)
+        waited = 0.0
+        while self.state not in AT_REST or (quiet is not None and not await asyncio.to_thread(quiet)):
+            if waited >= TRY_MEASURE_PATIENCE:
+                LOG.info("Try session: the CPU never went quiet, so the speech engines are not measured")
+                return
+            await asyncio.sleep(TRY_MEASURE_POLL)
+            waited += TRY_MEASURE_POLL
+        LOG.info("Try session: measuring the speech engines that are due")
+        await self.refresh_engines(wake, idle=quiet)
+
+    async def refresh_engines(self, wake, idle=None):
+        if self.measuring.locked():
+            LOG.info("a speech engine measurement is already under way; not starting another")
+            return
+        async with self.measuring:
+            await self.measure_engines(wake, idle)
+
+    async def measure_engines(self, wake, idle=None):
+        # The quiet check for each run, when the caller has a better one than the default.
+        options = {"idle": idle} if idle is not None else {}
         refresh = getattr(self.engines, "refresh_tts", None)
-        if refresh is not None and not self.changing_engine() and not self.tts_forced:
+        if refresh is not None and not self.changing_engine() and not self.tts_forced and not self.tts_override:
             current, choice = self.tts, self.tts_choice
-            found = await refresh(current, choice, state_dir=self.settings_dir)
+            found = await refresh(current, choice, state_dir=self.settings_dir, **options)
             if found is not None:
                 engine, note = _engine_result(found)
                 if note:
@@ -1107,7 +1652,7 @@ class Voice:
         if refresh is not None and self.recognizer is wake:
             phrase = getattr(wake, "wake_phrase", None)
             found = await refresh(self.recognizer, wake, state_dir=self.settings_dir,
-                                  wake_word=phrase if isinstance(phrase, str) else "Hey Pip")
+                                  wake_word=phrase if isinstance(phrase, str) else "Hey Pip", **options)
             if found is not None:
                 engine, note = _engine_result(found)
                 if note:
@@ -1120,13 +1665,17 @@ class Voice:
         task = self.engine_task
         return task is not None and not task.done() and task is not asyncio.current_task()
 
+    def wanted_tts(self):
+        """The engine choice in force: a forced one (being.tts=, BEING_TTS), else the owner's."""
+        return self.tts_override or self.tts_choice
+
     async def adopt_tts(self, choice):
         engine, note = await asyncio.to_thread(pick_tts, self.engines, choice, self.settings_dir)
         if note:
             log(note)
         # The owner's latest spoken choice wins over this one if it changed
         # while the voice was being chosen or loaded.
-        await self.use_tts(engine, choice, lambda: self.tts_choice == choice and not self.changing_engine())
+        await self.use_tts(engine, choice, lambda: self.wanted_tts() == choice and not self.changing_engine())
 
     async def use_tts(self, engine, choice, wanted=None):
         """Switch to `engine`. `wanted()` says whether the switch still stands;
@@ -1216,6 +1765,12 @@ class Voice:
         if choice not in TTS_CHOICES:
             log("Ignored a voice.engine without tts of auto, piper or flite.")
             return
+        if self.tts_override is not None:
+            # The owner's spoken choice is the latest word: it ends the boot's
+            # forced engine for the rest of this process.
+            LOG.info("the owner chose the %s voice; the forced %s voice no longer applies", choice,
+                     self.tts_override)
+            self.tts_override = None
         self.tts_choice = choice
         self.save_settings()
         if self.engine_task is not None and not self.engine_task.done():
@@ -1238,9 +1793,52 @@ class Voice:
         hardware = self.mixer is not None and await self.mixer.set(level)
         self.volume = level
         self.gain = 1.0 if hardware else volume_gain(level)
-        return "hardware" if hardware else "software"
+        self.volume_method = "hardware" if hardware else "software"
+        return self.volume_method
+
+    async def start_volume(self):
+        """Apply the stored level at start (never under VOLUME_FLOOR) and tell
+        the face and the mind once the bus is up. A key mute is never stored,
+        so a voice that restarts while one held (a watchdog, pip-diag) plays
+        at the saved level: the report clears the face's "speaker muted" and
+        the mind's mute. A level raised to the floor is saved, so the file,
+        the mind and the speaker agree."""
+        stored = self.volume
+        level = self.starting_volume(stored)
+        await self.apply_volume(level)
+        if level != stored:
+            self.save_settings()
+        self.spawn(self.report_volume_when_connected())
+
+    async def report_volume_when_connected(self):
+        await self.bus.connected.wait()
+        await self.report_volume()
+
+    async def report_volume(self):
+        """Send `voice.volume_state` for the level playing now. Never a 0: the
+        only silence the voice holds unsaved is a key mute, which the mind
+        already knows and must not take for the owner's level after its own
+        restart."""
+        if self.volume is None or self.volume <= 0 or self.volume_method is None:
+            return
+        await self.bus.send("voice.volume_state", level=self.volume, mixer=self.volume_method)
+
+    def starting_volume(self, level):
+        """The stored level the voice starts at: never under VOLUME_FLOOR, so a
+        kept 0 (an older build stored a key mute) or a key's quietest step
+        cannot start Pip unheard. start_volume saves and reports a raised
+        level."""
+        if level < VOLUME_FLOOR:
+            LOG.info("the stored volume %d is below %d; starting at %d", level, VOLUME_FLOOR, VOLUME_FLOOR)
+            self.kept_volume = VOLUME_FLOOR
+            return VOLUME_FLOOR
+        return level
 
     async def change_volume(self, event):
+        """`voice.volume`: a `level` from 0 to 100 or a relative `step`.
+        `persist: false` (a key mute) applies it for now only: neither the
+        settings file nor the sound card's stored state changes. `feedback:
+        true` (the volume keys) plays the short click at the new level."""
         level, step = event.get("level"), event.get("step")
         if type(level) is int and 0 <= level <= 100:
             target = level
@@ -1250,11 +1848,37 @@ class Voice:
             log("Ignored a volume change without a level from 0 to 100.")
             return
         method = await self.apply_volume(target)
-        self.save_settings()
-        if method == "hardware":
-            self.spawn(self.store_mixer())
+        if event.get("persist") is not False:
+            self.kept_volume = target
+            self.save_settings()
+            if method == "hardware":
+                self.spawn(self.store_mixer())
         # The mind keeps the owner's level too; tell it what took effect.
         await self.bus.send("voice.volume_state", level=target, mixer=method)
+        if event.get("feedback") is True and target > 0:
+            await self.volume_click()
+
+    def click_allowed(self):
+        """The volume click obeys every chirp rule, and never plays while the
+        microphone is open for the owner's words."""
+        return self.chirp_allowed() and self.dictation is None and not self.dictation_open()
+
+    async def volume_click(self):
+        """Play the click at the gain now in use, replacing a chirp or click
+        still playing (keys pressed fast give one click per press, never a
+        pile). True when it started."""
+        if not self.click_allowed():
+            return False
+        await self.stop_chirp()
+        try:
+            path = await asyncio.to_thread(click_path, self.chirp_bank.directory, self.gain)
+        except Exception as error:
+            log(f"Could not make the volume click: {error}")
+            return False
+        if not self.click_allowed():
+            return False
+        self.chirp_task = self.spawn(self.sound(path))
+        return True
 
     async def current_volume(self):
         """The level a relative change starts from when none has been set yet."""
@@ -1275,7 +1899,8 @@ class Voice:
         if self.settings_dir is None:
             return
         try:
-            save_voice_settings(self.settings_dir, volume=self.volume, chirps=self.chirp_choice, tts=self.tts_choice)
+            save_voice_settings(self.settings_dir, volume=self.kept_volume, chirps=self.chirp_choice,
+                                tts=self.tts_choice)
         except OSError as error:
             log(f"Could not save voice settings: {error}")
 
@@ -1575,7 +2200,9 @@ class Voice:
         with wave.open(str(audio)) as wav:
             rate = wav.getframerate()
             block = rate // 25
-            limit = wav.getnframes() / rate + PLAYBACK_MARGIN
+            length = wav.getnframes() / rate
+            limit = length + PLAYBACK_MARGIN
+            began = time.monotonic()
             async with child(*playback_command(self.playback, audio)) as process:
                 if first:
                     await self.send_audio("say.started")
@@ -1591,6 +2218,14 @@ class Voice:
                     await asyncio.sleep(0.04)
                 if status := await process.wait():
                     raise RuntimeError(f"aplay exit status {status}")
+            self.playback_timing(length, rate, time.monotonic() - began)
+
+    def playback_timing(self, length, rate, wall):
+        """One line per clause: its length, rate and how long aplay took. Never its words."""
+        LOG.info("playback %s", json.dumps({"wav_s": round(length, 3), "rate": rate, "wall_s": round(wall, 3)}))
+        # Starting aplay takes a moment, so a clip may run a little longer, never shorter.
+        if wall < length - PLAYBACK_TOLERANCE or wall > length + 2 * PLAYBACK_TOLERANCE:
+            LOG.warning("a %.2f s clip took %.2f s to play on %s", length, wall, self.playback)
 
 
 def audio_devices():
@@ -1666,19 +2301,22 @@ def mic_gain(environ=os.environ):
     return clamped
 
 
-def microphone_channel(environ=os.environ, cmdline=mic_channel.CMDLINE, *, loopback=False, port=False):
+def microphone_channel(environ=os.environ, cmdline=mic_channel.CMDLINE, *, loopback=False, port=False,
+                       diagnostic=False):
     """mix, left, right or auto, from being.mic_channel= or BEING_MIC_CHANNEL."""
     choice, source = mic_channel.setting(environ, cmdline)
-    if choice != "mix" and (loopback or port):
+    if choice != "mix" and (loopback or port or diagnostic):
         LOG.info("microphone channel %s from %s does not apply to %s; using mix", choice, source,
-                 "the lab's loopback body" if loopback else "the QEMU microphone port")
+                 "the lab's loopback body" if loopback else
+                 "the diagnostic microphone" if diagnostic else "the QEMU microphone port")
         return "mix"
     LOG.info("microphone channel: %s (from %s)", choice, source)
     return choice
 
 
 def capture_command(device, channel="mix"):
-    return ["arecord", "-q", "-D", device, "-t", "raw", "-f", "S16_LE", "-r", str(RATE),
+    # Not quiet: arecord's overrun reports reach the journal on its standard error.
+    return ["arecord", "-D", device, "-t", "raw", "-f", "S16_LE", "-r", str(RATE),
             "-c", str(mic_channel.capture_channels(channel)), "--buffer-time=120000", "--period-time=30000"]
 
 
@@ -1690,21 +2328,30 @@ def typing_hint():
 
 async def main():
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
+    level = LOG.level
     if os.environ.get("BEING_VOICE_DEBUG") == "1":
         LOG.setLevel(logging.DEBUG)
+    from .try_mode import is_try_boot
+
+    try_boot = is_try_boot()
     mind_dir = default_mind_dir()
     profile = load_profile(FACTORY_CONFIG, mind_dir, strict=False)
     voice = resolve_voice(profile.voice)
-    engines = None
+    engines = load_engines()
     tts_choice = load_engine_choice(mind_dir)
-    forced = os.environ.get("BEING_TTS_ENGINE")
+    # being.tts= or BEING_TTS: a forced engine, still only if its pack verifies.
+    override, override_source = engines.forced("tts") if engines is not None and hasattr(engines, "forced") \
+        else ("auto", None)
+    override = override if override in ("piper", "flite") else None
+    forced = None if override else os.environ.get("BEING_TTS_ENGINE")
+    if override:
+        print(f"Speech engine {override} forced by {override_source}.", flush=True)
     if forced:
         # An explicit engine in /etc/being/env wins over the automatic choice
         # of voice (the recognizer is still chosen automatically).
         tts, note = select_engine(forced, voice_name=os.environ.get("BEING_PIPER_VOICE"))
     else:
         tts, note = FliteEngine(), None
-    engines = load_engines()
     if note:
         print(note, flush=True)
     print(f"Playback voice: {voice} at {profile.rate:g}x", flush=True)
@@ -1718,7 +2365,15 @@ async def main():
                 raise RuntimeError("could not load ALSA loopback")
     capture, playback = audio_devices()
     port = (FW / "microphone" / "raw").exists()
-    channel = microphone_channel(loopback=loopback, port=port)
+    microphone = None
+    diagnostic = os.environ.get(DIAG_ENV, "").strip()
+    if diagnostic:
+        microphone = await DiagnosticMicrophone.connect(diagnostic)
+    debug_environ = debug_environment(os.environ, diagnostic, microphone is not None)
+    if debug_environ is not os.environ:
+        LOG.setLevel(level)
+    transcripts, debug_source = voice_debug(debug_environ)
+    channel = microphone_channel(loopback=loopback, port=port, diagnostic=microphone is not None)
     command = capture_command(capture, channel)
     settings = load_voice_settings(mind_dir)
     mixer = Mixer(os.environ.get("BEING_ALSA_CARD") or mixer_card(playback),
@@ -1727,17 +2382,20 @@ async def main():
     recognizer = wake_recognizer(profile.wake_word)
     auto = os.environ.get("BEING_MIC_AUTO_GAIN", "1") != "0"
     mic = MicLevel(mic_gain(), auto=auto)
-    microphone = None
     organ = None
     try:
-        if port:
+        if port and microphone is None:
             microphone = MicrophonePort()
+        grammar = command_grammar(recognizer)
         LOG.info("capture from %s, playback to %s through aplay",
-                 "the QEMU microphone port" if microphone is not None else f"{capture} through arecord", playback)
-        LOG.info("wake phrase %r, mic gain %gx%s, speech engine %s (%s), transcript text in the log %s",
+                 getattr(microphone, "description", "the QEMU microphone port") if microphone is not None
+                 else f"{capture} through arecord", playback)
+        transcripts = transcripts or LOG.isEnabledFor(logging.DEBUG)
+        LOG.info("wake phrase %r, mic gain %gx%s, speech engine %s (%s), transcript text in the log %s%s",
                  getattr(recognizer, "wake_phrase", profile.wake_word), mic.manual,
                  " with automatic lift of a quiet floor" if auto else "", engine_name(tts),
-                 forced or tts_choice, "on" if LOG.isEnabledFor(logging.DEBUG) else "off")
+                 override or forced or tts_choice, "on" if transcripts else "off",
+                 f" (from {debug_source})" if transcripts and debug_source else "")
         organ = Voice(
             recognizer, profile.owner, command, playback, microphone, voice=voice, rate=profile.rate,
             shorten_first_pause=os.environ.get("BEING_VOICE_SHORTEN_FIRST_PAUSE") == "1", tts=tts,
@@ -1746,6 +2404,7 @@ async def main():
             hear_sounds=lab_default("BEING_HEAR_SOUND", in_lab=in_lab), quiet_hours=quiet_hours_check(mind_dir),
             mic=mic, channel=ChannelPicker(channel) if channel != "mix" else None,
             tts_choice=tts_choice, engines=engines, typing_hint=typing_hint, tts_forced=bool(forced),
+            tts_override=override, transcripts=transcripts, grammar=grammar, try_boot=try_boot,
         )
         await organ.run()
     finally:

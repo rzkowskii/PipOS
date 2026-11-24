@@ -16,7 +16,8 @@ MAX_INTERVAL = 60
 SERVICES = (
     "being-brainstem.service", "being-face.service", "being-mind.service",
     "being-voice.service", "being-cortex.service", "being-wifi.service",
-    "being-boot-health.service",
+    "being-boot-health.service", "being-hands.service", "being-eyes.service",
+    "being-bodycare.service", "being-audio-init.service",
 )
 SERVICE_VALUES = {
     "LoadState": "load_state",

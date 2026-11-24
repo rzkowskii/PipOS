@@ -40,6 +40,16 @@ Usage: lab/build.sh [command]
                    With BEING_LAPTOP_MAINTENANCE=1 the laptop commands use a separate
                    tree with owner-enrolled LAN maintenance (OpenSSH) built in, and
                    name their images beingos-laptop-maintenance*.img.
+                   With BEING_LAPTOP_CABLE=1 they use the cable development tree
+                   (/work/output/laptop-cable): a Try boot of beingos-laptop-cable-try.img
+                   gives root SSH over an Ethernet cable from link-local addresses only,
+                   with the key cable-key imported, plus a writable copy of the code and
+                   the audio debugging kernel options (docs/LAB.md). Never installed,
+                   never made into an ISO, never signed as an update.
+  cable-key PUBKEY HOSTKEY
+                   import the cable login public key and the cable SSH host key (an
+                   unencrypted OpenSSH Ed25519 private key), both kept outside this
+                   repository, into the builder for BEING_LAPTOP_CABLE=1 builds
   release-key DIR [DIR2]
                    on this Mac: make the owner's passphrase-protected release key and
                    certificate in DIR (outside this repository), copied to DIR2 too
@@ -163,6 +173,7 @@ run() {
         -e BR2_DL_DIR=/work/dl -e BR2_CCACHE_DIR=/work/ccache -e BEINGOS_LAB_KEYS=/work/beingos-keys -e BEING_PACK_ROLES="${BEING_PACK_ROLES:-}" \
         -e BEINGOS_RELEASE_CERT="${BEINGOS_RELEASE_CERT:-}" \
         -e BEINGOS_REQUIRE_RELEASE_KEY="${BEINGOS_REQUIRE_RELEASE_KEY:-0}" \
+        -e BEINGOS_CABLE_KEYS="$CABLE_DIR" \
         -e BEING_SOURCE_ID="$SOURCE_ID" \
         "$IMAGE" "$@"
 }
@@ -171,6 +182,9 @@ run() {
 # certificate is ever inside the builder; the key stays on the owner's media.
 RELEASE_DIR=/work/beingos-release
 RELEASE_CN="PipOS Laptop Release"
+# The cable development keys, once imported (cable-key): the login public key
+# and the SSH host key that BEING_LAPTOP_CABLE=1 images carry (post-build.sh).
+CABLE_DIR=/work/beingos-cable
 
 ensure_buildroot() {
     run bash -euo pipefail -c '
@@ -369,19 +383,57 @@ laptop_select() {
         1) OUT="/work/output/laptop-maintenance"; LAPTOP_NAME=beingos-laptop-maintenance ;;
         *) echo "BEING_LAPTOP_MAINTENANCE must be 0 or 1" >&2; exit 2 ;;
     esac
+    check_cable
+    if [ "$CABLE" = 1 ]; then
+        OUT="/work/output/laptop-cable"
+        LAPTOP_NAME=beingos-laptop-cable
+    fi
+}
+
+# BEING_LAPTOP_CABLE=1: the cable development build (docs/LAB.md). A stick
+# for the owner's own bench, never for installing: it cannot be combined with
+# LAN maintenance or with a build meant to be installed.
+CABLE="${BEING_LAPTOP_CABLE:-0}"
+check_cable() {
+    case "$CABLE" in
+        0) return 0 ;;
+        1) ;;
+        *) echo "BEING_LAPTOP_CABLE must be 0 or 1" >&2; exit 2 ;;
+    esac
+    if [ "${BEING_LAPTOP_MAINTENANCE:-0}" != 0 ]; then
+        echo "Refusing: BEING_LAPTOP_CABLE=1 and BEING_LAPTOP_MAINTENANCE=1 are separate builds; choose one." >&2
+        exit 2
+    fi
+    if [ "${BEINGOS_REQUIRE_RELEASE_KEY:-0}" = 1 ]; then
+        echo "Refusing: a cable development stick is never installed, so it cannot be a BEINGOS_REQUIRE_RELEASE_KEY=1 build." >&2
+        exit 2
+    fi
 }
 
 # Set options in the laptop .config, then let Kconfig resolve them.
+# KEY=n writes "# KEY is not set", which Kconfig keeps over a default y.
 laptop_set() {
     run bash -euo pipefail -c '
         cfg=$1/.config; shift
         for kv in "$@"; do
             key=${kv%%=*}
             sed -i -e "/^$key=/d" -e "/^# $key is not set\$/d" "$cfg"
-            echo "$kv" >> "$cfg"
+            if [ "$kv" = "$key=n" ]; then
+                echo "# $key is not set" >> "$cfg"
+            else
+                echo "$kv" >> "$cfg"
+            fi
         done
     ' laptop-set "$OUT" "$@"
     br_make olddefconfig
+}
+
+# The kernel fragments the laptop defconfig names, plus the cable build's own.
+cable_kernel_fragments() {
+    local fragments
+    fragments=$(sed -n 's/^BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="\(.*\)"$/\1/p' "os/configs/$DEFCONFIG")
+    [ -n "$fragments" ] || { echo "os/configs/$DEFCONFIG names no kernel fragment" >&2; exit 1; }
+    printf '%s' "$fragments \$(BR2_EXTERNAL_BEINGOS_PATH)/board/beingos/linux-cable.config"
 }
 
 laptop_config() {
@@ -390,33 +442,77 @@ laptop_config() {
         laptop_set BR2_PACKAGE_OPENSSH=y BR2_PACKAGE_OPENSSH_SERVER=y \
             BR2_PACKAGE_OPENSSH_KEY_UTILS=y BR2_PACKAGE_BEING_LAN_MAINTENANCE=y
     fi
+    # The cable development build: OpenSSH's server for the cable link only
+    # (LAN maintenance, which OpenSSH would switch on by default, stays out),
+    # the debugging kernel fragment, and "cable" for the board scripts.
+    if [ "$CABLE" = 1 ]; then
+        local fragments
+        fragments=$(cable_kernel_fragments)
+        laptop_set BR2_PACKAGE_OPENSSH=y BR2_PACKAGE_OPENSSH_SERVER=y BR2_PACKAGE_OPENSSH_CLIENT=y \
+            BR2_PACKAGE_OPENSSH_KEY_UTILS=y BR2_PACKAGE_BEING_LAN_MAINTENANCE=n BR2_PACKAGE_BEING_CABLE_DEV=y \
+            "BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=\"$fragments\"" \
+            'BR2_ROOTFS_POST_SCRIPT_ARGS="laptop cable"'
+    fi
     # The b43 firmware is owner-sourced and staged with lab/b43_firmware.py.
     if [ -d out/firmware-overlay/usr/lib/firmware/b43 ]; then
         laptop_set 'BR2_ROOTFS_OVERLAY="/src/out/firmware-overlay"'
     else
         echo "Note: no out/firmware-overlay/usr/lib/firmware/b43; the internal Wi-Fi will lack firmware (docs/HARDWARE.md)." >&2
     fi
-    # Refuse a laptop configuration that carries lab access.
+    # Refuse a laptop configuration that carries lab access, and the cable
+    # link anywhere but the cable tree.
     run bash -euo pipefail -c '
-        cfg=$1/.config
+        cfg=$1/.config maintenance=$2 cable=$3
         for key in BR2_PACKAGE_BEING_LAB_BODY BR2_TARGET_ENABLE_ROOT_LOGIN BR2_TARGET_GENERIC_GETTY; do
             if grep -qx "$key=y" "$cfg"; then echo "Laptop config has lab-only $key=y" >&2; exit 1; fi
         done
-        if [ "$2" != 1 ] && grep -qx "BR2_PACKAGE_OPENSSH=y" "$cfg"; then
+        if [ "$maintenance" != 1 ] && [ "$cable" != 1 ] && grep -qx "BR2_PACKAGE_OPENSSH=y" "$cfg"; then
             echo "Laptop config has OpenSSH without BEING_LAPTOP_MAINTENANCE=1" >&2; exit 1
         fi
-    ' laptop-check "$OUT" "${BEING_LAPTOP_MAINTENANCE:-0}"
+        if [ "$cable" != 1 ] && grep -qx "BR2_PACKAGE_BEING_CABLE_DEV=y" "$cfg"; then
+            echo "Laptop config has the cable development link without BEING_LAPTOP_CABLE=1" >&2; exit 1
+        fi
+        if [ "$cable" = 1 ]; then
+            if [ "$maintenance" = 1 ] || grep -qx "BR2_PACKAGE_BEING_LAN_MAINTENANCE=y" "$cfg"; then
+                echo "The cable development build must not carry LAN maintenance" >&2; exit 1
+            fi
+            for key in BR2_PACKAGE_OPENSSH_SERVER BR2_PACKAGE_BEING_CABLE_DEV; do
+                grep -qx "$key=y" "$cfg" || { echo "The cable development build lacks $key=y" >&2; exit 1; }
+            done
+            grep -q "^BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=.*/linux-cable.config\"\$" "$cfg" ||
+                { echo "The cable development build lacks the linux-cable.config kernel fragment" >&2; exit 1; }
+            grep -qx "BR2_ROOTFS_POST_SCRIPT_ARGS=\"laptop cable\"" "$cfg" ||
+                { echo "The cable development build does not tell the board scripts" >&2; exit 1; }
+        elif grep -q "linux-cable.config\|^BR2_ROOTFS_POST_SCRIPT_ARGS=.*cable" "$cfg"; then
+            echo "Laptop config has the cable kernel fragment or board option without BEING_LAPTOP_CABLE=1" >&2; exit 1
+        fi
+    ' laptop-check "$OUT" "${BEING_LAPTOP_MAINTENANCE:-0}" "$CABLE"
 }
 
 # Refuse a laptop tree that still holds lab-only files, then a lab boot config.
+# The cable files belong to the cable tree alone, and sshd to the maintenance
+# and cable trees.
 laptop_verify() {
     run bash -euo pipefail -c '
-        t=$1/target bad=0
+        t=$1/target bad=0 maintenance=$2 cable=$3
         lab="usr/lib/systemd/system/being-lab-body.service usr/lib/being/sim/body.py"
-        [ "$2" = 1 ] || lab="$lab usr/sbin/sshd usr/sbin/being-lab-access usr/lib/systemd/system/being-lab-observe.service usr/lib/systemd/system/being-lab-dev.service"
+        units=usr/lib/systemd/system
+        cable_files="usr/share/being/cable $units/being-cable-link.service $units/being-cable-ssh.service $units/being-cable-workbench.service"
+        [ "$maintenance" = 1 ] || lab="$lab usr/sbin/being-lab-access $units/being-lab-observe.service $units/being-lab-dev.service"
+        [ "$maintenance" = 1 ] || [ "$cable" = 1 ] || lab="$lab usr/sbin/sshd"
         for f in $lab; do
             if [ -e "$t/$f" ]; then echo "Laptop image contains lab-only /$f" >&2; bad=1; fi
         done
+        if [ "$cable" != 1 ]; then
+            for f in $cable_files; do
+                if [ -e "$t/$f" ]; then echo "Laptop image contains /$f, which only BEING_LAPTOP_CABLE=1 builds may" >&2; bad=1; fi
+            done
+        else
+            for f in usr/sbin/sshd $cable_files usr/share/being/cable/authorized_keys usr/share/being/cable/sshd_config \
+                     usr/share/being/cable/ssh_host_ed25519_key usr/share/being/cable/ssh_host_ed25519_key.pub; do
+                if [ ! -e "$t/$f" ]; then echo "The cable development image lacks /$f" >&2; bad=1; fi
+            done
+        fi
         if grep -q "ttyS0\|^serial " "$1/images/efi-part/EFI/BOOT/grub.cfg" "$t/usr/share/being/installed-grub.cfg"; then
             echo "Laptop boot configuration still names the serial console" >&2; bad=1
         fi
@@ -433,7 +529,7 @@ laptop_verify() {
             echo "Note: this laptop image trusts the lab key for updates (no release certificate imported). Use it for Try only." >&2
         fi
         exit $bad
-    ' laptop-verify "$OUT" "${BEING_LAPTOP_MAINTENANCE:-0}"
+    ' laptop-verify "$OUT" "${BEING_LAPTOP_MAINTENANCE:-0}" "$CABLE"
 }
 
 # release-key DIR [DIR2], on the Mac (not in the builder): the owner's update
@@ -561,11 +657,98 @@ release_cert() {
     echo "Imported. The next laptop builds trust only this certificate for updates."
 }
 
+# The real path of an existing file, links resolved, for the repository test.
+real_path() {
+    python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
+}
+
+# cable-key PUBKEY HOSTKEY: copy the cable development keys into the builder
+# volume. Both stay outside this repository; only the builder volume and the
+# cable images ever hold them. PUBKEY is one Ed25519 public key (its comment
+# is dropped). HOSTKEY is an unencrypted OpenSSH Ed25519 private key, which
+# every cable stick presents, so the Mac can pin it once.
+cable_key() {
+    if [ "$#" -ne 2 ]; then
+        echo "usage: lab/build.sh cable-key PUBKEY HOSTKEY" >&2
+        exit 2
+    fi
+    local pub=$1 host=$2 file repo key host_pub fingerprint
+    repo=$(cd "$ROOT" && pwd -P)
+    for file in "$pub" "$host"; do
+        [ -f "$file" ] || { echo "No such file: $file" >&2; exit 1; }
+        case "$(real_path "$file")/" in
+            "$repo/"*|"$ROOT/"*) echo "Refusing: $file is inside the repository. Keep the cable keys outside it." >&2; exit 1 ;;
+        esac
+    done
+    if grep -q 'PRIVATE KEY' "$pub"; then
+        echo "Refusing: $pub holds a private key. Give the .pub file of the login key." >&2; exit 1
+    fi
+    key=$(PYTHONDONTWRITEBYTECODE=1 python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from mind.lab_access import public_key
+try:
+    print(public_key(open(sys.argv[2], encoding="ascii").read().strip()))
+except (OSError, UnicodeDecodeError, ValueError) as error:
+    sys.exit(f"Refusing {sys.argv[2]}: {error}")
+' "$ROOT" "$pub") || exit 1
+    if [ "$(head -n 1 "$host")" != "-----BEGIN OPENSSH PRIVATE KEY-----" ]; then
+        echo "Refusing: $host is not an OpenSSH private key (ssh-keygen -t ed25519 -N '' makes one)." >&2; exit 1
+    fi
+    # Only an unencrypted key gives its public half with an empty passphrase.
+    if ! host_pub=$(ssh-keygen -y -P '' -f "$host" 2>/dev/null); then
+        echo "Refusing: $host is encrypted or unreadable; the stick needs an unencrypted host key (ssh-keygen -N '')." >&2
+        exit 1
+    fi
+    host_pub=$(printf '%s\n' "$host_pub" | PYTHONDONTWRITEBYTECODE=1 python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from mind.lab_access import public_key
+try:
+    print(public_key(sys.stdin.read().strip()))
+except ValueError:
+    sys.exit("Refusing: the host key is not an Ed25519 key.")
+' "$ROOT") || exit 1
+    if [ "$key" = "$host_pub" ]; then
+        echo "Refusing: the login key and the host key are the same key; make two." >&2; exit 1
+    fi
+    up
+    { printf '%s\n' "$key"; cat "$host"; } | docker_ run --rm -i -v "$VOLUME:/work" "$IMAGE" bash -euo pipefail -c '
+        dir=$1
+        umask 077
+        mkdir -p "$dir"
+        chmod 0700 "$dir"
+        key=$(mktemp "$dir/.authorized_key.XXXXXX")
+        host=$(mktemp "$dir/.ssh_host_ed25519_key.XXXXXX")
+        trap "rm -f \"$key\" \"$host\"" EXIT
+        IFS= read -r line
+        case "$line" in
+            "ssh-ed25519 "*) printf "%s\n" "$line" > "$key" ;;
+            *) echo "Refusing: not an Ed25519 public key" >&2; exit 1 ;;
+        esac
+        cat > "$host"
+        head -n 1 "$host" | grep -qx -- "-----BEGIN OPENSSH PRIVATE KEY-----" ||
+            { echo "Refusing: not an OpenSSH private key" >&2; exit 1; }
+        chmod 0600 "$key" "$host"
+        mv -f "$key" "$dir/authorized_key"
+        mv -f "$host" "$dir/ssh_host_ed25519_key"
+    ' cable-key "$CABLE_DIR"
+    fingerprint=$(printf '%s\n' "$host_pub" | ssh-keygen -l -f - 2>/dev/null || true)
+    echo "Imported the cable keys. The next BEING_LAPTOP_CABLE=1 build carries them."
+    echo "Host key: ${fingerprint:-$host_pub}"
+    echo "Its pin for ~/.ssh/known_hosts_pipos (lab/cable.sh ssh-config writes it):"
+    printf 'pip,169.254.77.1,fe80::77:1 %s\n' "$host_pub"
+}
+
 # laptop-bundle KEY [VERSION]: sign the laptop rootfs for installed laptops.
 # The encrypted key and the passphrase reach the builder only on stdin, into
 # a RAM file inside a throwaway container; neither is written to the volume.
 laptop_bundle() {
     local key="${1:?usage: lab/build.sh laptop-bundle KEY [VERSION]}" version="${2:-}"
+    if [ "$CABLE" = 1 ]; then
+        echo "Refusing: a cable development build is never signed as an update (unset BEING_LAPTOP_CABLE)." >&2
+        exit 1
+    fi
     [ -f "$key" ] || { echo "No such key file: $key" >&2; exit 1; }
     case "$(cd "$(dirname "$key")" && pwd -P)/" in
         "$(cd "$ROOT" && pwd -P)/"*) echo "Refusing: the release key must not be inside the repository." >&2; exit 1 ;;
@@ -601,6 +784,11 @@ laptop_bundle() {
             { echo "This rootfs is not a laptop image." >&2; exit 1; }
         unsquashfs -cat "$image" usr/share/being/update-trust | grep -qx trust=release ||
             { echo "This laptop rootfs trusts the lab key; rebuild it after release-cert." >&2; exit 1; }
+        # A cable development rootfs is never signed, whatever tree it is in.
+        unsquashfs -l -no-progress "$image" > "$work/listing"
+        if grep -Eq "^squashfs-root/usr/share/being/cable(/|\$)" "$work/listing"; then
+            echo "Refusing: this rootfs holds the cable development link; it is never signed as an update." >&2; exit 1
+        fi
         unsquashfs -cat "$image" etc/rauc/keyring.pem > "$work/keyring.pem"
         cmp -s "$work/keyring.pem" "$cert" || { echo "This rootfs trusts a different certificate." >&2; exit 1; }
         build=$(unsquashfs -cat "$image" etc/being/build-id 2>/dev/null | head -c 64 || true)
@@ -646,6 +834,10 @@ cmd="${1:-build}"
 [ $# -gt 0 ] && shift
 case "$cmd" in
     candidate)
+        if [ "${BEING_LAPTOP_CABLE:-0}" != 0 ]; then
+            echo "Refusing: a release candidate never carries the cable development link (unset BEING_LAPTOP_CABLE)." >&2
+            exit 2
+        fi
         . lab/candidate-build.sh
         build_candidate "$@"
         ;;
@@ -769,11 +961,12 @@ case "$cmd" in
         run bash -euo pipefail -c '
             stage=$(mktemp -d /src/out/images/.laptop-try.XXXXXX)
             trap "rm -rf \"\$stage\"" EXIT
-            BEING_TRY_SCREEN=1 BEING_TRY_LAPTOP=1 BEING_TRY_BENCH="$3" sh /src/os/board/beingos/try-image.sh \
+            BEING_TRY_SCREEN=1 BEING_TRY_LAPTOP=1 BEING_TRY_BENCH="$3" BEING_TRY_CABLE="$5" \
+                sh /src/os/board/beingos/try-image.sh \
                 "$1/host" "$1/images/efi-part/EFI/BOOT/bootx64.efi" \
                 "$1/images/rootfs.squashfs" "$1/images/models.ext4" "$stage"
             mv -f "$stage/beingos-laptop-try$4.img" "/src/out/images/$2-try$4.img"
-        ' laptop-try "$OUT" "$LAPTOP_NAME" "$TRY_BENCH" "$(try_bench_suffix)"
+        ' laptop-try "$OUT" "$LAPTOP_NAME" "$TRY_BENCH" "$(try_bench_suffix)" "$CABLE"
         stamp_image "out/images/$LAPTOP_NAME-try$(try_bench_suffix).img"
         ls -lh "out/images/$LAPTOP_NAME-try$(try_bench_suffix).img"
         ;;
@@ -791,6 +984,9 @@ case "$cmd" in
     release-cert)
         up
         release_cert "$@"
+        ;;
+    cable-key)
+        cable_key "$@"
         ;;
     laptop-bundle)
         laptop_select

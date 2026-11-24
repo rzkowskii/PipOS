@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from mind.local_screen import serve_panel
+from mind.local_screen import GATE_REQUESTS, serve_panel
 
 
 class PanelBus:
@@ -53,6 +53,52 @@ class PanelHandoff(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(bus.sent[-1], ("key.mute", {}))
                     await bus.events.put({"t": "body.lid", "closed": True, "seq": 1})
                     await self.until(lambda: not (directory / "show").exists())
+                finally:
+                    stop.set()
+                    await panel
+
+    async def test_setup_screen_keys_reach_the_bus_as_the_faces(self):
+        # The names being-console.c writes for the top row (media_request, and
+        # F9 / F10), each sent on once as the face would send it.
+        expected = [
+            ("mute", ("key.mute", {})),
+            ("recover", ("key.panel_recover", {})),
+            ("brightness-up", ("key.brightness", {"dir": "up"})),
+            ("brightness-down", ("key.brightness", {"dir": "down"})),
+            ("kbd-light-up", ("key.kbd_light", {"dir": "up"})),
+            ("kbd-light-down", ("key.kbd_light", {"dir": "down"})),
+            ("kbd-light-toggle", ("key.kbd_light", {"dir": "toggle"})),
+            ("volume-up", ("key.volume", {"dir": "up"})),
+            ("volume-down", ("key.volume", {"dir": "down"})),
+            ("speaker-mute", ("key.mute_speaker", {})),
+        ]
+        self.assertEqual([name for name, _, _ in GATE_REQUESTS], [name for name, _ in expected])
+        console = (Path(__file__).resolve().parents[1] / "os/package/being/being-console.c").read_text()
+        for name, _ in expected:
+            with self.subTest(name=name):
+                self.assertIn(f'"{name}"', console)
+        with tempfile.TemporaryDirectory() as work:
+            directory = Path(work)
+            stop = threading.Event()
+            bus = PanelBus()
+            with patch("mind.local_screen.Bus", return_value=bus):
+                panel = asyncio.create_task(serve_panel(directory, stop))
+                try:
+                    await self.until(bus.connected.is_set)
+                    for name, event in expected:
+                        (directory / name).touch()
+                        await self.until(lambda: len(bus.sent) and bus.sent[-1] == event)
+                        self.assertFalse((directory / name).exists())
+                    await asyncio.sleep(0.15)
+                    self.assertEqual(bus.sent, [event for _, event in expected])
+                    # A request left while the bus is away waits for it.
+                    bus.connected.clear()
+                    (directory / "volume-up").touch()
+                    await asyncio.sleep(0.15)
+                    self.assertTrue((directory / "volume-up").exists())
+                    bus.connected.set()
+                    await self.until(lambda: not (directory / "volume-up").exists())
+                    self.assertEqual(bus.sent[-1], ("key.volume", {"dir": "up"}))
                 finally:
                     stop.set()
                     await panel

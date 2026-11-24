@@ -130,7 +130,8 @@ class Controls(unittest.TestCase):
             path = Path(folder) / "build-id"
             path.write_text("3f2a9c1b" + "0" * 56 + "\n")
             self.assertEqual(device.version_line(path),
-                             "[neutral] I'm PipOS, build 3f2a9c1b. The full number is on the Update page under F2.")
+                             "[neutral] I'm PipOS, build 3f2a9c1b. The full number is on the Update page in my menu: "
+                             "press Mission Control, or fn and F2.")
             path.write_text("<script>\n")
             self.assertIn("can't find my build number", device.version_line(path))
         self.assertIn("can't find", device.version_line(Path("/nonexistent/build-id")))
@@ -186,7 +187,7 @@ class Backups(unittest.TestCase):
         self.assertIn("my owner", reply.line)
 
     def test_back_yourself_up_says_what_is_missing_then_asks(self):
-        for reason, words in (("no_stick", "labelled being-backup"), ("no_key", "F2 menu"), ("no_tool", "no backup tool")):
+        for reason, words in (("no_stick", "labelled being-backup"), ("no_key", "Mission Control, or fn and F2"), ("no_tool", "no backup tool")):
             def missing(state_dir, reason=reason):
                 raise backup.Unavailable(reason)
             reply = run(device.back_up(make_ctx(self.mind), readiness=missing))

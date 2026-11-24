@@ -1,0 +1,43 @@
+# The cable development link's SSH server (development Try sticks only,
+# BEING_LAPTOP_CABLE=1, docs/LAB.md "Cable development build").
+#
+# Root only, one Ed25519 key only, and only from the link-local networks a
+# Mac on the other end of an Ethernet cable uses. The firewall
+# (mind/network_enforce.py) admits port 22 from those networks on the wired
+# port alone; this file refuses everyone else a second time. The key and the
+# host key are baked in by post-build.sh from the builder volume, never from
+# this repository, and the authorized key carries the same from= networks.
+Port 22
+AddressFamily any
+ListenAddress 0.0.0.0
+ListenAddress ::
+HostKey /usr/share/being/cable/ssh_host_ed25519_key
+HostKeyAlgorithms ssh-ed25519
+PubkeyAcceptedAlgorithms ssh-ed25519
+AuthorizedKeysFile /usr/share/being/cable/authorized_keys
+# IPv6 is a pattern, not fe80::/10: sshd sees a link-local peer as
+# fe80::x%enp1s0f0, and OpenSSH's CIDR match compares that scope with the
+# network's (none), so fe80::/10 never matches. A pattern is matched against
+# the address text, scope included. The firewall's fe80::/10 rule still
+# limits the source on the wired port.
+AllowUsers root@169.254.0.0/16 root@fe80:*
+AuthenticationMethods publickey
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+# No UsePAM: this OpenSSH is built without PAM and would warn at every start.
+StrictModes yes
+DisableForwarding yes
+PermitTunnel no
+PermitUserEnvironment no
+PermitUserRC no
+MaxAuthTries 2
+MaxStartups 4:50:8
+LoginGraceTime 20
+ClientAliveInterval 15
+ClientAliveCountMax 4
+PidFile /run/being-cable-sshd.pid
+LogLevel VERBOSE
+Subsystem sftp internal-sftp

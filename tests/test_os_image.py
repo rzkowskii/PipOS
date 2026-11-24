@@ -71,11 +71,13 @@ class GrubTests(unittest.TestCase):
         self.assertEqual(normal.split(), ["loglevel=3", "panic=10", "oops=panic", "console=ttyS0,115200"])
         self.assertNotRegex(config, r"BEING_[A-Z]+_ARGS|hid_apple|vt.global_cursor_default")
 
-    def test_every_laptop_kernel_line_sends_function_keys_and_keeps_msr_read_only(self):
+    def test_every_laptop_kernel_line_keeps_the_printed_top_row_and_msr_read_only(self):
+        # fnmode=1: the top row does what is printed on it; fn+key is F1-F12.
         installed = render(BOARD / "grub.cfg", "laptop")
         for mode, args in extra_args(installed).items():
             with self.subTest(mode=mode):
-                self.assertIn("hid_apple.fnmode=2", args.split())
+                self.assertIn("hid_apple.fnmode=1", args.split())
+                self.assertNotIn("hid_apple.fnmode=2", args.split())
                 self.assertIn("msr.allow_writes=off", args.split())
         try_config = render(BOARD / "try-grub.cfg", "laptop")
         lines = kernel_lines(try_config)
@@ -83,7 +85,7 @@ class GrubTests(unittest.TestCase):
         # (two microphone quirks and the measuring boot) once they exist.
         self.assertIn(len(lines), (3, 6), lines)
         for line in lines:
-            self.assertIn("hid_apple.fnmode=2", line)
+            self.assertIn("hid_apple.fnmode=1", line.split())
             self.assertIn("msr.allow_writes=off", line)
 
     def test_only_the_normal_installed_boot_is_quiet(self):

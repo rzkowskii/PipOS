@@ -184,6 +184,14 @@ class Repairs(unittest.TestCase):
         doctor.repair(system, self.facts(), doctor.check(system, self.facts()), now=time.monotonic() + 700)
         self.assertEqual(len(system.restarted), 3)
 
+    def test_stopped_hands_are_named_and_restarted(self):
+        self.assertIn("being-hands.service", doctor.ORGANS)
+        system = FakeSystem(units=unit("being-hands.service", "failed"), backup=time.time())
+        self.assertIn("My hands have stopped.", [f.line for f in doctor.check(system, self.facts())])
+        findings, repairs = doctor.examine(system, self.facts())
+        self.assertEqual(system.restarted, ["being-hands.service"])
+        self.assertEqual(repairs, ["I restarted my hands."])
+
     def test_never_the_mind_and_never_the_cortex_mid_turn(self):
         system = FakeSystem(units=unit("being-mind.service", "failed"), backup=time.time())
         doctor.examine(system, self.facts())

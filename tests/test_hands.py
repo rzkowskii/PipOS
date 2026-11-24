@@ -810,6 +810,107 @@ class RealCageForgetTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bus.stopped)
 
 
+class NoFaceTest(unittest.IsolatedAsyncioTestCase):
+    """With the Try menu holding the screen the face is stopped, so an open is
+    refused with no_face instead of reporting a panel nobody can see."""
+
+    async def asyncSetUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.dir.name)
+        self.states = "inactive\nactive"
+        self.calls = []
+
+        def run(argv, timeout=10.0):
+            self.calls.append(argv)
+            if argv[:2] == ["systemctl", "is-active"]:
+                return 3, self.states
+            return 0, ""
+        self.bus = _Bus()
+        self.hands = hands.Hands(self.bus, cage=hands.SystemdCage(run=run), cortex=_Cortex(),
+                                 workshop=self.root / "workshop", disabled=None, body_root=self.root / "root",
+                                 state_dir=self.root / "mind")
+
+    async def asyncTearDown(self):
+        self.dir.cleanup()
+
+    async def test_refused_while_the_menu_has_the_screen(self):
+        for app in ("terminal", "monitor", "clock"):
+            await self.hands.on_event({"t": "app.open", "app": app, "req": f"r-{app}"})
+        refused = [e for e in self.bus.sent if e["t"] == "app.refused"]
+        self.assertEqual([(e["app"], e["reason"], e["req"]) for e in refused],
+                         [("terminal", "no_face", "r-terminal"), ("monitor", "no_face", "r-monitor"),
+                          ("clock", "no_face", "r-clock")])
+        self.assertEqual([e for e in self.bus.sent if e["t"] == "app.state"], [])
+        self.assertEqual(self.hands.view, {"terminal": "closed", "monitor": "closed", "clock": "closed"})
+        self.assertIn(["systemctl", "is-active", "being-face.service", "being-local-screen.service"], self.calls)
+        self.assertFalse(any(argv[:2] == ["systemctl", "stop"] and "being-local-screen.service" in argv
+                             for argv in self.calls), "the menu is never closed for the owner")
+
+    async def test_the_menu_check_only_refuses_when_it_is_sure(self):
+        for states in ("active\ninactive", "activating\ndeactivating", "inactive\ninactive", "failed\nfailed", ""):
+            self.states = states
+            self.assertFalse(await self.hands._menu_has_the_screen(), states)
+        self.states = "failed\nactivating"
+        self.assertTrue(await self.hands._menu_has_the_screen())
+        self.hands.cage = object()      # a cage that cannot ask systemd (the Mac's local shell)
+        self.assertFalse(await self.hands._menu_has_the_screen())
+
+    async def test_probe_is_short_and_a_timeout_lets_the_open_go_ahead(self):
+        seen = []
+
+        def slow(argv, timeout=10.0):
+            seen.append((argv[:2], timeout))
+            if argv[:2] == ["systemctl", "is-active"]:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            return 0, ""
+        self.hands.cage = hands.SystemdCage(run=slow)
+        self.assertFalse(await self.hands._menu_has_the_screen())
+        probe = [t for head, t in seen if head == ["systemctl", "is-active"]]
+        self.assertEqual(probe, [hands.SCREEN_PROBE_SECONDS])
+        self.assertLess(hands.SCREEN_PROBE_SECONDS, 4.0, "well inside the mind's OPEN_WAIT")
+
+    async def test_open_reports_whether_it_went_ahead(self):
+        self.assertFalse(await self.hands.open("terminal", "r1"))
+        self.states = "active\ninactive"
+        self.hands.view["terminal"] = "minimised"
+        self.assertTrue(await self.hands.open("terminal", "r2"))
+        self.assertEqual(self.hands.view["terminal"], "shown")
+
+    async def test_a_task_that_must_bring_the_terminal_forward_does_not_start(self):
+        """The terminal is minimised under the monitor and the Try menu has
+        the screen: the refusal answers the job's req and nothing runs in a
+        terminal nobody can see."""
+        started = []
+
+        async def start_model(job):
+            started.append(job.id)
+
+        async def start_shelf(job, app):
+            started.append(job.id)
+        self.hands._start_model = start_model
+        self.hands._start_shelf = start_shelf
+        for kind, job_id, monitor in (("script", "j9", "shown"), ("run_app", "j10", "closed")):
+            self.bus.sent.clear()
+            self.hands.view.update(terminal="minimised", monitor=monitor)
+            await self.hands.on_event({"t": "term.task", "kind": kind, "text": "say hello", "id": job_id,
+                                       "app": "snake"})
+            self.assertEqual([(e["t"], e.get("reason"), e.get("req")) for e in self.bus.sent],
+                             [("app.refused", "no_face", job_id)], kind)
+        self.assertEqual(started, [])
+        self.assertIsNone(self.hands.job)
+
+    async def test_a_minimised_terminal_still_takes_a_script_when_nothing_must_be_shown(self):
+        started = []
+
+        async def start_model(job):
+            started.append(job.id)
+        self.hands._start_model = start_model
+        self.hands.view["terminal"] = "minimised"
+        await self.hands.on_event({"t": "term.task", "kind": "script", "text": "say hello", "id": "j11"})
+        self.assertEqual(started, ["j11"])
+        self.assertEqual([e for e in self.bus.sent if e["t"] == "app.refused"], [])
+
+
 class ForgetReplyTest(unittest.IsolatedAsyncioTestCase):
     """The forget's req is answered by 'forgotten', never by the status of a
     job it cancelled on the way."""

@@ -66,15 +66,33 @@ does not unmount before its read-back: if it reports MISMATCH, run the
 | Try PipOS (safe graphics) | **s** | If the boot-messages entry shows graphics (i915) errors or a garbled screen |
 
 3. The Try menu says Hello. Press **1** (Try PipOS) to meet the being. **F2**
-   (on the first stick, hold **fn**) brings the menu back later; **Q** leaves it.
+   brings the menu back later (hold **fn** on the first stick and on sticks
+   from 24 November, or press Mission Control on those); **Q** leaves it.
 4. **Talking.** Say **"Hey Pip"**, pause until the eyes brighten, *then* talk.
    "Say hello" alone does nothing on this image.
-5. **Keys.** On the first stick the top row sent media keys unless you held
-   **fn**: fn+F2 was the menu, fn+F10 or **M** muted, fn+F9 recovered a face
-   with no lid reading. Every Try entry on a round-2 stick boots with
-   `hid_apple.fnmode=2`, so the top row sends F1-F12 itself: **F2** is the
-   menu, **F10** or **M** mutes, **F9** recovers the face. **Esc** interrupts
-   a reply on both.
+5. **Keys.** The first stick and the round-2 sticks differ:
+   - The first stick sent media keys unless you held **fn**, but nothing
+     answered them: fn+F2 was the menu, fn+F10 or **M** muted, fn+F9
+     recovered a face with no lid reading.
+   - Round-2 sticks before 24 November booted with `hid_apple.fnmode=2`, so
+     the top row sent F1-F12 itself: **F2** was the menu, **F10** or **M**
+     muted, **F9** recovered the face.
+   - Sticks from 24 November boot with `hid_apple.fnmode=1`, as a Mac does.
+     Most top-row keys do what is printed on them: brightness (F1, F2),
+     Mission Control opens the menu (F3, as fn+F2 does), Launchpad opens the
+     terminal (F4), keyboard light (F5, F6), play/pause listens or stops a
+     reply (F8), speaker mute (F10) and volume (F11, F12). Previous (F7),
+     next (F9) and eject do nothing; the face only logs them. A bar on the
+     face shows the new level. Hold **fn** for Pip's own keys: **fn+F2** is the
+     menu, **fn+F10** or **M** mutes the microphone, **fn+F9** recovers the
+     face. The footers show this as **fn F10 Mic**, **fn F9 Panel** and
+     **fn F3 Hide**. The speaker mute leaves a faint "speaker muted" on the
+     face and ends by itself for a ring or a restart. The volume keys click once
+     at the new level, as on a Mac. On the Try menu and the setup screens the
+     brightness, keyboard-light, volume and speaker-mute keys work too, with
+     no bar there. Note whether each key works; the keyboard light and
+     Launchpad have not been tried on the laptop yet.
+   - **Esc** interrupts a reply on every stick.
 6. **Shutting down.** A short press of the power button. Holding it (a hard
    power-off) loses the last few seconds of the log.
 
@@ -144,7 +162,8 @@ stick stays as it is.
 
 - **The top row sends F-keys.** Press **F2** on its own for the menu, and
   **F10** to mute. Hold **fn** only for brightness and volume. If F2 changes
-  the brightness instead, hold fn and tell us.
+  the brightness instead, hold fn and tell us. (Sticks built from 24
+  November work the other way round, as a Mac does: section 3, step 5.)
 - **Typing to Pip.** F2, then **6** "Talk to Pip by typing". What you type is
   answered on screen and out loud. **Esc** leaves it.
 - **Space to attend.** While the eyes rest, press **Space** or **Return**, or
@@ -198,3 +217,54 @@ As in sections 6 and 7, but copy the `PIPLOGS` folder to
 so the microphone entries can be compared side by side. Keep the folder
 private: `journal.txt` may hold what you said and typed.
 
+
+## 9. Cable stick (v6)
+
+The sixth stick is a development stick for the owner's own bench. The Mac
+Studio reaches it over a plain Ethernet cable, so the diagnostics can be run
+and their results read without moving the logs stick. How it is built and
+used from the Mac is in [LAB.md](LAB.md#cable-development-build). It is
+never for installing: **Install PipOS** refuses with "This is a cable
+development stick. It never installs; use a release Try stick." The image
+holds the stick's SSH host key, so keep the image and the stick private and
+label the stick as development-only.
+
+### Booting it
+
+1. Connect the MacBook's Ethernet port straight to the Mac Studio's with one
+   cable: no switch, no router.
+2. Write and boot the stick as in sections 2 and 3 (Option, **EFI Boot**).
+   GRUB shows the same six entries as in section 8; every one of them has
+   the cable link on.
+3. On the Mac Studio, `lab/cable.sh ping`, then `lab/cable.sh ssh`, from the
+   repository. Pip answers on `169.254.77.1` and `fe80::77:1` while the
+   stick is running.
+
+### What to expect
+
+- The same Try menu and the same being as on the other round-2 sticks, with
+  the keys of section 3, step 5 (Mission Control or fn+F2 for the menu).
+- Pip speaks with its natural voice (Alba) from the first reply. It changes
+  to the original voice only if the natural one fails its check, or later
+  measures too slow on this laptop.
+- Menu item **8**, "Run diagnostics", offers **1** Quick (about a minute,
+  nothing to do), **2** Full (10 to 15 minutes of test sounds) and **3**
+  Voice (about 10 minutes: you speak and listen). The results are saved in
+  a `diag-…` folder in that boot's PIPLOGS folder, and a summary is shown.
+  Over the cable the same runs are `pip-diag quick`, `pip-diag full` and so
+  on.
+- The voice writes what it hears into the journal (`being.voice_debug=1`).
+  The first line of `summary.txt` ends with "(CABLE DEVELOPMENT BOOT)", and
+  its "Cable link" and "Voice debug" lines say ON. Keep the PIPLOGS folder
+  private.
+- Only root, with the one key made for this Mac, from a link-local address
+  can log in. Nothing else is reachable on the cable.
+
+### The kill switch
+
+To boot the stick with the cable link off: at the GRUB menu, highlight an
+entry, press **e**, change `being.cable=1` to `being.cable=0`, and press
+**Ctrl-X** to boot. Nothing then listens on the cable, the port gets no
+address, and Pip's code stays read-only. To keep what you say out of the
+journal too, change `being.voice_debug=1` to `being.voice_debug=0` in the
+same line. The change lasts for that boot only.

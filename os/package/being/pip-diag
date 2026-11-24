@@ -1,0 +1,4 @@
+#!/bin/sh
+# pip-diag: measure Pip's hearing, voice, commands and body (mind/diag.py).
+# `pip-diag --help` lists the subcommands. Installed as /usr/sbin/pip-diag.
+PYTHONPATH=/usr/lib/being exec /usr/bin/python3 -m mind.diag "$@"

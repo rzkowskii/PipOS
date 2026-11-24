@@ -28,6 +28,9 @@ MEMINFO = Path("/proc/meminfo")
 MODELS = Path("/models")
 BOOTLOADER = Path("/usr/share/being/install/bootx64.efi")
 GRUB_TEMPLATE = Path("/usr/share/being/installed-grub.cfg")
+# Present only on a cable development stick (BEING_LAPTOP_CABLE=1), which
+# holds its SSH keys in the image and must never become an installed system.
+CABLE_MEDIA = Path("/usr/share/being/cable")
 BLKSSZGET = 0x1268
 BLKFLSBUF = 0x1261
 BLKDISCARD = 0x1277
@@ -497,6 +500,8 @@ def apply_installation(plan, recheck, *, progress=print, meter=None, profile=Non
     """
     if sys.platform != "linux" or os.geteuid() != 0 or not is_try_boot():
         raise ValueError("Installation requires a root session booted from Try PipOS USB.")
+    if os.path.lexists(CABLE_MEDIA):
+        raise ValueError("This is a cable development stick. It never installs; use a release Try stick.")
     if ((profile is not None and not isinstance(profile, Profile))
             or (initiative is not None and not isinstance(initiative, InitiativePolicy))
             or (restore is not None and not callable(restore))

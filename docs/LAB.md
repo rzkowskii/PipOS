@@ -150,6 +150,152 @@ OpenSSH and `being-lab-access` added, and names the media
 Nothing listens until the owner runs `being-lab-access enroll`
 ([HARDWARE.md](HARDWARE.md)). Use a fresh tree rather than toggling
 options in one: Buildroot never removes files a package already installed.
+Its listeners never start on a Try boot (`being-lab-dev.service` has
+`ConditionKernelCommandLine=!being.try=1`, and the enrolment would be lost
+on Try's RAM-only `/mind`), so a maintenance Try stick cannot be reached
+over SSH. For a Try stick on the bench, use the cable development build
+below.
+
+### Cable development build
+
+A development-only Try stick that the Mac reaches over a plain Ethernet
+cable, with no router, no DHCP and no pairing. It is the laptop image
+(not the LAN maintenance one) plus OpenSSH's server, the cable link
+(`BR2_PACKAGE_BEING_CABLE_DEV`), and a kernel fragment
+(`os/board/beingos/linux-cable.config`) with the HD-audio hwdep,
+reconfiguration and patch-loader interfaces and ALSA debug messages, so
+`pip-diag codec --model` and `--coef` can try codec fixups live. (`pip-diag`
+itself is on every image; without that fragment those two options report a
+skip.) Every entry of its GRUB menu adds `being.cable=1 being.voice_debug=1`;
+there are still six entries.
+
+Make the two keys once, on the Mac and outside this repository. The login
+key may have a passphrase. The host key may not: sshd on the stick reads it
+at boot with nobody there to type one, and every cable stick presents the
+same host key, so the Mac pins it once.
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/pipos_cable_ed25519
+mkdir -p ~/.config/pipos-cable
+ssh-keygen -t ed25519 -N '' -f ~/.config/pipos-cable/ssh_host_ed25519_key
+lab/build.sh cable-key ~/.ssh/pipos_cable_ed25519.pub ~/.config/pipos-cable/ssh_host_ed25519_key
+```
+
+`cable-key` refuses a path inside the repository, a private key or a
+non-Ed25519 key given as the login key, an encrypted or non-Ed25519 host
+key, and the same key given twice. It starts the builder if needed, copies
+both into the builder volume (`/work/beingos-cable`, folder mode 0700, files
+0600) and prints the host key's fingerprint and its line for the pin file.
+Post-build checks both again and adds the key to the stick's
+`authorized_keys` with `from="169.254.0.0/16,fe80:*"`. Then build the stick
+in its own tree, `/work/output/laptop-cable` (a cold build takes about an
+hour; three package jobs avoid running out of memory):
+
+```bash
+BEING_LAPTOP_CABLE=1 BEING_LAPTOP_PACKAGE_JOBS=3 lab/build.sh laptop-try
+```
+
+The result is `out/images/beingos-laptop-cable-try.img`. `BEING_LAPTOP_CABLE=1`
+is refused together with `BEING_LAPTOP_MAINTENANCE=1` or
+`BEINGOS_REQUIRE_RELEASE_KEY=1`, and post-build refuses the cable files in
+every other image.
+
+On a Try boot the first wired port (chosen by type, never by name) gets
+`169.254.77.1/16` and `fe80::77:1/64`, and root may log in with that one key,
+from link-local addresses only: the firewall, `AllowUsers` and the key's
+`from=` option each refuse everything else. If another device on the cable
+already answers for `169.254.77.1`, Pip does not take the address and the
+link stays off. The Mac keeps its own self-assigned 169.254.x address on its
+Ethernet port (`en0` here; set `PIPOS_CABLE_IF` for another). On the Mac:
+
+```bash
+lab/cable.sh ssh-config >> ~/.ssh/config   # Host pip (IPv6) and pip4 (IPv4); writes the pin file ~/.ssh/known_hosts_pipos
+lab/cable.sh ping
+ssh pip 'being-network status; pip-diag quick --json'
+lab/cable.sh ssh         # the same without ~/.ssh/config (a root shell, or ssh COMMAND)
+lab/cable.sh push        # this tree's mind/*.py onto Pip, then restart the organs that run it
+lab/cable.sh pull-logs   # /run/being-diag and the PIPLOGS boot folder to out/hardware-logs/cable-YYYYMMDD-HHMMSS/ (UTC)
+```
+
+`PIPOS_CABLE_HOST=pip4` makes `ssh`, `push` and `pull-logs` use IPv4, and
+`PIPOS_CABLE_IDENTITY` and `PIPOS_CABLE_HOST_KEY` name other key files.
+`push --no-restart` copies without restarting anything.
+
+The Wi-Fi port has a 169.254 route too, so `pip4` binds to the Ethernet
+port, and `pip` uses the scoped IPv6 address. `/usr/lib/being` and
+`/etc/being` are a writable copy for that boot (`being-cable-workbench`),
+recompiled with timestamp-checked `.pyc` files, so an edited module takes
+effect after `systemctl restart` of its organ. `push` try-restarts every
+running organ that runs mind code (being-mind, being-voice, being-hands,
+being-eyes, being-local-screen and being-wifi); being-usb-logs holds the
+PIPLOGS mount, so restart it by hand when `mind/usb_logs.py` changed. Unit tweaks go in
+`/run/systemd/system/UNIT.d/*.conf`, then `systemctl daemon-reload`.
+
+On an ordinary cable boot, `summary.txt` on PIPLOGS says "CABLE
+DEVELOPMENT BOOT" on its first line and has "Cable link" and "Voice debug"
+lines that both say ON, so a development boot's logs are never read as a
+release boot's.
+
+The kill switch: press `e` on a GRUB entry, change `being.cable=1` to
+`being.cable=0`, and boot with Ctrl-X. The three cable units then do not
+start (each has `ConditionKernelCommandLine=!being.cable=0`), so nothing
+listens, the port gets no address and the code stays read-only. The voice
+still writes what it hears into the journal; change `being.voice_debug=1`
+to `being.voice_debug=0` as well to keep that out. On such a boot the first
+line of `summary.txt` has no "(CABLE DEVELOPMENT BOOT)", the "Cable link"
+line says off, and the "Voice debug" line says ON unless
+`being.voice_debug=0` was also set.
+
+The stick holds the SSH host key, so the image file is a secret: label the
+stick as development-only, and never commit, attach or share the image.
+It never installs to the internal disk (`mind/install_apply.py` refuses),
+is never made into an ISO (`lab/make-iso.sh` refuses), and is never signed
+as an update (`laptop-bundle` and candidates refuse). No candidate seals
+it (`lab/candidate_tests.py` lists `cable_dev` as unsealed), so its QEMU
+suite is run by hand:
+
+```bash
+BEING_LAPTOP_CABLE_TRY_IMAGE=out/images/beingos-laptop-cable-try.img \
+BEING_CABLE_IDENTITY=~/.ssh/pipos_cable_ed25519 \
+    python3 -m unittest lab.tests.test_cable_dev -v
+```
+
+It boots the stick over virtual USB beside a blank internal disk. QEMU's
+user network, given the link-local network, stands in for the cable. It
+logs in as root and checks the addresses, the firewall, the refused keys,
+passwords and networks, the units, the writable workbench and an edited
+module taking effect after a restart, `pip-diag quick`, and that power-off
+leaves the internal disk untouched. A second boot, from a copy of the
+stick with `being.cable=0` in every entry, checks that nothing answers.
+Both variables shown are the defaults. `BEING_CABLE_HOST_KEY` names the
+host key's `.pub` file (by default
+`~/.config/pipos-cable/ssh_host_ed25519_key.pub`), which the connection
+pins, and `BEING_LAPTOP_PATIENCE` multiplies every wait. Without the image
+or the keys the suite skips.
+
+### Voice opens the terminal (lab gate)
+
+`lab.tests.test_voice_terminal` checks on the lab image that "Hey Pip, open
+a terminal." said in one breath opens the workshop terminal by code (route
+`workshop.open`); if the model was asked anything during the command, it
+prints a note. It plays fixtures made with macOS `say` (Samantha and Karen)
+and FFmpeg into the ALSA loopback, as `test_l4` does: the sentence at full
+level, 30 dB and 45 dB down over a quiet noise floor, a second voice, and
+the wake followed by "Open a terminal." For each it checks the wake, the
+final transcript, the mind's `route {"route": "workshop.open", ...}` line,
+`app.state` shown, the panel's frame and the spoken "Here's my terminal.",
+and prints the transcript and which recognition pass gave it.
+
+```bash
+lab/build.sh                  # the lab image, from this tree
+python3 -m unittest -v lab.tests.test_voice_terminal
+BEING_GATE=1 python3 -m unittest -v lab.tests.test_voice_terminal   # a skip counts as a failure
+```
+
+It uses `out/images/beingos.img` (or `BEING_FACTORY_IMAGE`) and skips when
+`say` or `ffmpeg` is missing, or when the image was not built from this
+tree (`BEING_ALLOW_STALE=1` runs it on an older image anyway). It is one
+of the candidate suites (`voice_terminal`).
 
 The b43 firmware is owner-sourced. When
 `out/firmware-overlay/usr/lib/firmware/b43/` exists (staged with

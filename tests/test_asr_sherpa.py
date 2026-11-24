@@ -85,6 +85,16 @@ def until_final(recognizer, attending=True, timeout=3.0):
     return events
 
 
+class WakeScoreTests(unittest.TestCase):
+    def test_the_wake_spotters_score_is_the_engines(self):
+        wake = FakeWake()
+        recognizer = engine(wake=wake)
+        self.assertIsNone(recognizer.wake_score)
+        wake.wake_score = -1805
+        self.assertEqual(recognizer.wake_score, -1805)
+        recognizer.close()
+
+
 class AttendingTests(unittest.TestCase):
     def test_event_order_speech_start_then_one_final_and_no_partials(self):
         recognizer = engine(moonshine=FakeMoonshine(["set a timer for five minutes"]))

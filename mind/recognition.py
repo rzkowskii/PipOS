@@ -5,6 +5,7 @@ from collections import deque
 import ctypes as c
 import math
 import operator
+import re
 from pathlib import Path
 
 RATE = 16000
@@ -30,6 +31,16 @@ WAKE_HISTORY_FRAMES = int((WAKE_DECODE_CAP_SECONDS + ONESHOT_AFTER_SECONDS) / FR
 # Longest utterance, in frames, before dictation closes it.
 MAX_UTTERANCE_FRAMES = 600
 SKIP = "skip"
+# The second search, over a grammar of the commands, that mind/voice.py may
+# run on the audio of a dictation the open-vocabulary search did not hear as
+# one. A grammar always finds its closest command, so a free phone loop
+# decodes the same audio as the garbage model: only a command path that
+# scores well above it (per 10 ms frame, in the library's log units) counts.
+GRAMMAR_SEARCH = b"commands"
+PHONE_SEARCH = b"phones"
+PHONE_LM = "en-us-phone.lm.bin"
+# Words around a command that change nothing about it.
+COURTESY_WORDS = frozenset(("hey", "hi", "ok", "okay", "pip", "please", "now", "thanks", "thank", "you"))
 
 FULL_SCALE = 32768
 SILENT_DBFS = -120.0
@@ -123,6 +134,50 @@ class MicLevel:
             self.lift = min(wanted, self.lift * AUTO_GAIN_RAISE)
 
 
+def grammar_words(phrase):
+    """The words of a grammar phrase, or None if it is not plain lowercase words."""
+    if not isinstance(phrase, str):
+        return None
+    words = phrase.split()
+    if not words or not all(re.fullmatch(r"[a-z]+(?:'[a-z]+)?", word) for word in words):
+        return None
+    return words
+
+
+def command_jsgf(phrases):
+    """A JSGF grammar of the commands, with an optional "hey pip" before and "please" after."""
+    commands = sorted({" ".join(grammar_words(phrase)) for phrase in phrases if grammar_words(phrase)})
+    if not commands:
+        raise ValueError("a command grammar needs commands")
+    return ("#JSGF V1.0;\ngrammar pip;\n"
+            f"<command> = {' | '.join(commands)};\n"
+            "public <utterance> = [hey | hi | okay] [pip] <command> [please | now];\n")
+
+
+def find_command(hypothesis, phrases):
+    """(phrase, extra words) for the one whole command in a grammar hypothesis, or None.
+
+    The extra words are those around it other than courtesy words such as
+    "please" or the name (the grammar allows none, so any is a decoding fault).
+    """
+    words = (hypothesis or "").split()
+    best = None
+    for phrase in phrases:
+        wanted = grammar_words(phrase)
+        if not wanted:
+            continue
+        for start in range(len(words) - len(wanted) + 1):
+            if words[start:start + len(wanted)] == wanted:
+                if best is None or len(wanted) > len(best[1]):
+                    best = (" ".join(wanted), wanted, start)
+                break
+    if best is None:
+        return None
+    phrase, wanted, start = best
+    rest = words[:start] + words[start + len(wanted):]
+    return phrase, sum(word not in COURTESY_WORDS for word in rest)
+
+
 class RecognizerEngine:
     """What the voice organ needs from a speech recognizer.
 
@@ -136,7 +191,8 @@ class RecognizerEngine:
       `hear.sound` on a voice onset while not attending (no transcript),
       `hear.wake` when the wake phrase opens a segment and ends within
       WAKE_TAIL_SECONDS, or `hear.wake {oneshot}` plus dictation events when
-      speech runs on for ONESHOT_AFTER_SECONDS after it (only if `oneshot`), and while attending
+      speech runs on for ONESHOT_AFTER_SECONDS after it (only if `oneshot`;
+      otherwise, with `run_on_wake` set, a plain `hear.wake {run_on}`), and while attending
       `hear.speech_start`, `hear.partial {text}`, `hear.final {text}` and
       `hear.cancel`.
     - `close()` frees the engine.
@@ -192,8 +248,8 @@ def engine_choice(name, root=SHERPA_ROOT, library=SHERPA_LIBRARY):
 
 
 class Recognizer(RecognizerEngine):
-    def __init__(self, wake_word, model=MODEL):
-        self.lib = c.CDLL("libpocketsphinx.so.5")
+    def __init__(self, wake_word, model=MODEL, library="libpocketsphinx.so.5"):
+        self.lib = c.CDLL(library)
         pointer, string, integer = c.c_void_p, c.c_char_p, c.c_int
         sample_ptr = c.POINTER(c.c_int16)
         signatures = {
@@ -209,7 +265,7 @@ class Recognizer(RecognizerEngine):
             "ps_start_utt": (integer, pointer),
             "ps_end_utt": (integer, pointer),
             "ps_process_raw": (integer, pointer, sample_ptr, c.c_size_t, integer, integer),
-            "ps_get_hyp": (string, pointer, pointer),
+            "ps_get_hyp": (string, pointer, c.POINTER(c.c_int32)),
             "ps_seg_iter": (pointer, pointer),
             "ps_seg_frames": (None, pointer, c.POINTER(integer), c.POINTER(integer)),
             "ps_seg_next": (pointer, pointer),
@@ -230,6 +286,16 @@ class Recognizer(RecognizerEngine):
         self._logmath_exp = self._optional("logmath_exp", c.c_double, pointer, c.c_int32)
         int_ptr = c.POINTER(c.c_int32)
         self._seg_prob = self._optional("ps_seg_prob", c.c_int32, pointer, int_ptr, int_ptr, int_ptr)
+        self._log_to_ln = self._optional("logmath_log_to_ln", c.c_double, pointer, c.c_int32)
+        # The command grammar second pass and the n-best list are optional too.
+        self._add_jsgf = self._optional("ps_add_jsgf_string", integer, pointer, string, string)
+        self._add_allphone = self._optional("ps_add_allphone_file", integer, pointer, string, string)
+        self._lookup_word = self._optional("ps_lookup_word", pointer, pointer, string)
+        self._ckd_free = self._optional("ckd_free", None, pointer)
+        self._nbest = self._optional("ps_nbest", pointer, pointer)
+        self._nbest_next = self._optional("ps_nbest_next", pointer, pointer)
+        self._nbest_hyp = self._optional("ps_nbest_hyp", string, pointer, int_ptr)
+        self._nbest_free = self._optional("ps_nbest_free", None, pointer)
 
         config = self.lib.ps_config_init(None)
         if not config:
@@ -253,6 +319,7 @@ class Recognizer(RecognizerEngine):
             self.lib.ps_free(self.decoder)
             raise ValueError(f"the speech dictionary does not contain {wake_word!r}")
         self.wake_phrase = wake_word
+        self.model = Path(model)
         self.endpoint = None
         self.mode = None
         self.frames = 0
@@ -262,6 +329,8 @@ class Recognizer(RecognizerEngine):
         self.wake_track_from = 0
         self.in_speech = False
         self.wake_score = None
+        self.command_phrases = ()
+        self.utterance = []
 
     def _optional(self, name, result, *args):
         try:
@@ -289,23 +358,143 @@ class Recognizer(RecognizerEngine):
 
     def confidence(self):
         """Posterior probability of the last dictation, 0 to 1, if the library reports it."""
+        return self.scores()[0]
+
+    def log_posterior(self):
+        """The last search's posterior as a natural logarithm (0 is certain), if the library reports it."""
+        return self.scores()[1]
+
+    def scores(self):
+        """(probability, natural-log posterior) of the last search; either may be None.
+
+        A probability below 0.005 prints as 0.00, so the logarithm is what
+        tells a near miss from noise."""
         get_prob = getattr(self, "_get_prob", None)
         get_logmath = getattr(self, "_get_logmath", None)
-        logmath_exp = getattr(self, "_logmath_exp", None)
-        if get_prob is None or get_logmath is None or logmath_exp is None:
-            return None
+        if get_prob is None or get_logmath is None:
+            return None, None
         try:
             logmath = get_logmath(self.decoder)
             if not logmath:
-                return None
+                return None, None
             raw = get_prob(self.decoder)
             # The library reports 0 (probability 1) when it computed no posterior.
             if not isinstance(raw, int) or isinstance(raw, bool) or raw == 0:
-                return None
-            value = logmath_exp(logmath, raw)
+                return None, None
+            return self._probability(logmath, raw), self._natural_log(logmath, raw)
         except (c.ArgumentError, OSError):
-            return None
+            return None, None
+
+    def _probability(self, logmath, raw):
+        logmath_exp = getattr(self, "_logmath_exp", None)
+        value = logmath_exp(logmath, raw) if logmath_exp is not None else None
         return value if isinstance(value, float) and 0.0 <= value <= 1.0 else None
+
+    def _natural_log(self, logmath, raw):
+        log_to_ln = getattr(self, "_log_to_ln", None)
+        value = log_to_ln(logmath, raw) if log_to_ln is not None else None
+        return value if isinstance(value, float) and math.isfinite(value) and value <= 0.0 else None
+
+    def nbest(self, limit=5):
+        """Up to `limit` alternative transcripts of the last dictation, best first (diagnostics only)."""
+        functions = [getattr(self, name, None) for name in ("_nbest", "_nbest_next", "_nbest_hyp", "_nbest_free")]
+        if None in functions:
+            return []
+        first, following, hypothesis, release = functions
+        found = []
+        try:
+            iterator = first(self.decoder)
+            while iterator and len(found) < limit:
+                text = hypothesis(iterator, None)
+                if text:
+                    found.append(text.decode(errors="replace"))
+                nxt = following(iterator)
+                if not nxt:
+                    # The last step frees the iterator itself.
+                    iterator = None
+                    break
+                iterator = nxt
+            if iterator:
+                release(iterator)
+        except (c.ArgumentError, OSError):
+            return found
+        return found
+
+    # The command grammar ----------------------------------------------------------
+
+    def knows(self, word):
+        """True if the pronouncing dictionary has `word`."""
+        lookup = getattr(self, "_lookup_word", None)
+        if lookup is None:
+            return False
+        phones = lookup(self.decoder, word.encode())
+        if not phones:
+            return False
+        release = getattr(self, "_ckd_free", None)
+        if release is not None:
+            release(phones)
+        return True
+
+    def load_command_grammar(self, phrases):
+        """Add the command grammar and the phone loop it is judged against.
+
+        Returns the phrases the grammar holds, or () when either search could
+        not load (then there is no second pass). Phrases with a word the
+        dictionary lacks are left out; the grammar would not load with them."""
+        add, allphone = getattr(self, "_add_jsgf", None), getattr(self, "_add_allphone", None)
+        if add is None or allphone is None or getattr(self, "_lookup_word", None) is None:
+            return ()
+        known = tuple(dict.fromkeys(" ".join(words) for words in map(grammar_words, phrases)
+                                    if words and all(self.knows(word) for word in words)))
+        phones = Path(getattr(self, "model", MODEL)) / PHONE_LM
+        if not known or not phones.is_file():
+            return ()
+        if allphone(self.decoder, PHONE_SEARCH, str(phones).encode()) < 0:
+            return ()
+        if add(self.decoder, GRAMMAR_SEARCH, command_jsgf(known).encode()) < 0:
+            return ()
+        self.command_phrases = known
+        return known
+
+    def utterance_audio(self):
+        """The audio the last dictation search decoded, as 16 kHz mono S16_LE bytes."""
+        return b"".join(self.utterance)
+
+    def decode_command(self, audio):
+        """The command grammar's reading of `audio`, or None.
+
+        A dict: `text` (empty when the grammar's final state was not reached,
+        as PocketSphinx then gives no hypothesis), `log_posterior` (natural
+        log, or None) and `margin`: how much better the grammar's path scored
+        than the free phone loop, per 10 ms frame (None without a text).
+        Only between searches. Blocking: a few hundredths of the audio's length."""
+        if not self.command_phrases or self.mode not in (None, SKIP) or len(audio) < 2:
+            return None
+        count = len(audio) // 2
+        samples = (c.c_int16 * count).from_buffer_copy(audio[:count * 2])
+        try:
+            text, score, log_posterior = self._search(GRAMMAR_SEARCH, samples)
+            margin = None
+            if text:
+                _, garbage, _ = self._search(PHONE_SEARCH, samples)
+                margin = (score - garbage) / (count / (RATE / 100))
+            return {"text": text, "log_posterior": log_posterior, "margin": margin}
+        except RuntimeError:
+            return None
+        finally:
+            self.lib.ps_activate_search(self.decoder, self.dictation)
+
+    def _search(self, name, samples):
+        """(hypothesis, path score, natural-log posterior) of one whole-utterance search."""
+        if self.lib.ps_activate_search(self.decoder, name) < 0 or self.lib.ps_start_utt(self.decoder) < 0:
+            raise RuntimeError("could not start the search")
+        status = self.lib.ps_process_raw(self.decoder, samples, len(samples), 0, 1)
+        self.lib.ps_end_utt(self.decoder)
+        if status < 0:
+            raise RuntimeError("could not decode the audio")
+        score = c.c_int32()
+        text = (self.lib.ps_get_hyp(self.decoder, c.byref(score)) or b"").decode(errors="replace")
+        return text, score.value, self.log_posterior() if text else None
 
     # Read-only fallbacks for instances built without __init__ in tests.
     oneshot = False
@@ -314,6 +503,11 @@ class Recognizer(RecognizerEngine):
     in_speech = False
     wake_score = None
     wake_candidate_score = None
+    command_phrases = ()
+    utterance = ()
+    # Set by the voice while asleep: a wake phrase that runs on into more words
+    # still wakes (plainly, without them) instead of being ignored.
+    run_on_wake = False
 
     def start_capture(self):
         self.capture_frames = 0
@@ -352,11 +546,16 @@ class Recognizer(RecognizerEngine):
         self.last_partial = ""
         self.wake_end = None
         self.wake_candidate_score = None
+        if mode == getattr(self, "dictation", None):
+            # Kept for the command grammar's second look, then replaced by the next dictation.
+            self.utterance = []
 
     def decode(self, samples):
         if self.lib.ps_process_raw(self.decoder, samples, FRAME_SAMPLES, 0, 0) < 0:
             raise RuntimeError("could not decode speech audio")
         self.frames += 1
+        if self.mode == getattr(self, "dictation", None) and isinstance(self.utterance, list):
+            self.utterance.append(c.string_at(samples, FRAME_BYTES))
 
     def track_wake(self):
         segment = self.lib.ps_seg_iter(self.decoder)
@@ -427,6 +626,14 @@ class Recognizer(RecognizerEngine):
             if oneshot:
                 return self.begin_oneshot()
             self.end_search(SKIP)
+            if self.run_on_wake:
+                # Asleep, the words cannot be taken in one breath, but the
+                # name was said: wake as for the name alone. `run_on` tells
+                # the voice why (it is not sent on the bus).
+                self.wake_preroll.clear()
+                self.wake_history = ()
+                self.wake_score = getattr(self, "wake_candidate_score", None)
+                return [("hear.wake", {"run_on": True})]
         elif self.wake_end is None and decoded - self.lib.ps_endpointer_speech_start(self.endpoint) \
                 > WAKE_DECODE_CAP_SECONDS:
             self.end_search(SKIP)

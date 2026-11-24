@@ -7,14 +7,17 @@ slot_ids() {
 }
 
 # Kernel arguments the GRUB templates carry as tokens:
-#   BEING_LAPTOP_ARGS  every laptop boot entry: the top row sends F1-F12
-#                      without fn (hid_apple is built in, so it is a boot
-#                      argument, not a modprobe option). /dev/cpu/*/msr is
+#   BEING_LAPTOP_ARGS  every laptop boot entry: the top row does what is
+#                      printed on it (brightness, volume and the rest) and
+#                      fn+key sends F1-F12, as on a Mac (hid_apple is built
+#                      in, so it is a boot argument, not a modprobe option;
+#                      the face and the Try menu answer the keys, see
+#                      crates/face/src/keys.rs). /dev/cpu/*/msr is
 #                      read-only until bodycare's battery-out mode (plan
 #                      section 4, Mode B) turns writes on at run time.
 #   BEING_QUIET_ARGS   the normal installed laptop boot: only the eyes show,
 #                      no cursor and no systemd status unless something fails.
-being_laptop_args='hid_apple.fnmode=2 msr.allow_writes=off'
+being_laptop_args='hid_apple.fnmode=1 msr.allow_writes=off'
 being_quiet_args='quiet vt.global_cursor_default=0 systemd.show_status=error'
 
 # The laptop image (BR2_ROOTFS_POST_SCRIPT_ARGS="laptop") has no serial line:

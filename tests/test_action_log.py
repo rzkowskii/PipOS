@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -154,6 +155,43 @@ class HandlerTests(unittest.TestCase):
         self.assertNotIn("timer", today.line)
         # The last day holds four kinds; the lightest is only alluded to.
         self.assertTrue(self.ask("what have you been up to").line.endswith("And a few small things."))
+
+    def test_last_night_means_the_night_before_even_in_the_evening(self):
+        evening = datetime(2026, 11, 24, 19, 30, tzinfo=SYDNEY)
+
+        def at(hour, minute=0, days=0):
+            return (datetime(2026, 11, 24, hour, minute, tzinfo=SYDNEY) + timedelta(days=days)).timestamp()
+
+        action_log.record(self.mind, "night.tidy", now=at(23, 30, days=-1))   # last night
+        action_log.record(self.mind, "backup.auto", now=at(3))                # last night
+        action_log.record(self.mind, "timer.set", now=at(12))                 # today, not the night
+        action_log.record(self.mind, "list.add", now=at(18, 45))              # tonight
+        reply = self.ask("What did you do last night?", now=evening)
+        self.assertEqual(reply.line, "[neutral] Last night I tidied my memory and backed myself up.")
+        self.assertEqual(self.ask("what did you do overnight", now=evening).line, reply.line)
+        tonight = self.ask("what did you do tonight", now=evening)
+        self.assertEqual(tonight.line, "[neutral] Tonight I added something to your lists.")
+
+    def test_periods_at_nine_and_at_seven(self):
+        for hour in (9, 19):
+            now = datetime(2026, 11, 24, hour, 0, tzinfo=SYDNEY)
+            since, until, words = action_log.period("last night", now)
+            self.assertEqual(words, "last night", hour)
+            self.assertEqual(datetime.fromtimestamp(since, SYDNEY), datetime(2026, 11, 23, 18, 0, tzinfo=SYDNEY))
+            self.assertEqual(datetime.fromtimestamp(until, SYDNEY), datetime(2026, 11, 24, 9, 0, tzinfo=SYDNEY))
+        early = datetime(2026, 11, 24, 2, 0, tzinfo=SYDNEY)
+        self.assertEqual(action_log.period("last night", early)[1], early.timestamp(), "never past now")
+        self.assertEqual(action_log.period("tonight", early)[2], "last night")
+        evening = datetime(2026, 11, 24, 21, 0, tzinfo=SYDNEY)
+        since, until, words = action_log.period("tonight", evening)
+        self.assertEqual((datetime.fromtimestamp(since, SYDNEY).hour, until, words), (18, evening.timestamp(), "tonight"))
+
+    def test_without_a_time_zone_the_device_clock_is_used(self):
+        evening = datetime(2026, 11, 24, 19, 0, tzinfo=SYDNEY)
+        action_log.record(self.mind, "night.tidy", now=(evening - timedelta(hours=20)).timestamp())  # 23:00
+        with mock.patch.object(action_log, "local_now", return_value=evening):
+            reply = asyncio.run(action_log.handle("what did you do last night", context(self.mind, None)))
+        self.assertEqual(reply.line, "[neutral] Last night I tidied my memory.")
 
     def test_guests_are_not_told(self):
         action_log.record(self.mind, "forget", 3, now=self.at(hours=-1))

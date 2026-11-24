@@ -21,6 +21,7 @@ from pathlib import Path
 
 from . import console_ui as ui
 from .bus import Bus
+from .keys import MENU_KEYS
 from .profile import FACTORY_CONFIG, load_profile
 
 
@@ -46,11 +47,12 @@ TRY_MENU_KEY = "6"
 
 
 def typing_hint(try_boot=None):
-    """The spoken pointer to typing, or None where no F2 menu offers it.
+    """The spoken pointer to typing, or None where no menu offers it.
 
-    On a Try stick F2 opens the Try menu, whose entry 6 is typing. An installed
-    being's F2 opens Setup, which names its own key in `setup.TYPE_CHAT_KEY`;
-    without one, nothing is promised.
+    The menu key is Mission Control, or fn and F2 (keys.MENU_KEYS: the laptop's
+    printed F2 is brightness up). On a Try stick it opens the Try menu, whose
+    entry 6 is typing. On an installed being it opens Setup, which names its
+    own key in `setup.TYPE_CHAT_KEY`; without one, nothing is promised.
     """
     if try_boot is None:
         try:
@@ -60,7 +62,7 @@ def typing_hint(try_boot=None):
         except Exception:
             try_boot = False
     key = TRY_MENU_KEY if try_boot else installed_key()
-    return f"You can also type to me: press F2, then {key}." if key else None
+    return f"You can also type to me: press {MENU_KEYS}, then {key}." if key else None
 
 
 def installed_key():

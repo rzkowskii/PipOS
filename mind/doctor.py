@@ -68,6 +68,7 @@ ORGANS = {
     "being-cortex.service": "thinking model",
     "being-eyes.service": "eyes",
     "being-bodycare.service": "body care",
+    "being-hands.service": "hands",
     "being-mind.service": "mind",
 }
 NEVER_RESTART = {"being-mind.service"}

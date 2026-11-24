@@ -7,7 +7,11 @@ a stand-in hands organ and a stand-in model server that counts its calls.
 
 import asyncio
 import importlib.util
+from contextlib import contextmanager, nullcontext
+from datetime import datetime
+from unittest import mock
 
+from mind import action_log
 from tests.test_mind import MindCase
 from tests.test_turn_apps import Hands
 
@@ -192,6 +196,9 @@ EXPECT = {
 # 2.4 The workshop: said with the terminal open and a script on the go.
 WORKSHOP_PHRASES = [
     "Open the terminal",
+    "Hey Pip, open a new terminal, Pip",
+    "And open a terminal",
+    "Open a terminal window",
     "Minimise the terminal",
     "Bring back the terminal",
     "Show me your face",
@@ -234,6 +241,8 @@ NEAR_MISSES = [
     "I had a lovely walk by the river today",
     "my sister called me this morning",
     "the terminal at the airport was packed",
+    "they opened a new terminal at the airport",
+    "a terminal",
     "I need to remember to buy a present for Sam",
     "what do you think about rainy days",
     "why is the sky blue",
@@ -271,6 +280,13 @@ NEAR_MISSES = [
 ]
 
 
+# Phrases about a time of day are asked at a fixed local time, so the test
+# passes whenever it runs (MindCase's body.state says 19:05).
+EVENING = datetime(2026, 11, 24, 19, 5).astimezone()
+MORNING = datetime(2026, 11, 24, 9, 0).astimezone()
+CLOCKED = ("action_log",)
+
+
 def present(module):
     return module == "commands" or importlib.util.find_spec(f"mind.{module}") is not None
 
@@ -295,6 +311,13 @@ class OwnerPhrases(MindCase):
         spoken = " ".join(e["text"] for e in self.bus.of("say.request")[start:] if e["text"])
         return spoken, len(self.cortex_server.chats) - calls
 
+    @contextmanager
+    def clock(self, now):
+        """The handlers' local time is `now`, with or without a known time zone."""
+        with mock.patch.object(self.mind, "_local_now", return_value=now), \
+                mock.patch.object(action_log, "local_now", return_value=now):
+            yield
+
     def settle(self):
         """Each phrase on its own: no question left open from the one before."""
         self.mind._pending_forget = None
@@ -309,11 +332,22 @@ class OwnerPhrases(MindCase):
                 if not present(module):
                     self.skipTest(f"mind/{module}.py is not in this build")
                 self.settle()
-                reply, calls = await self.say(phrase)
+                with self.clock(EVENING) if module in CLOCKED else nullcontext():
+                    reply, calls = await self.say(phrase)
                 self.assertEqual(calls, 0, f"{phrase!r} reached the model; it said {reply!r}")
                 self.assertTrue(reply, f"{phrase!r} got no reply")
                 if phrase in EXPECT:
                     self.assertIn(EXPECT[phrase].casefold(), reply.casefold(), f"{phrase!r} reached the wrong handler")
+
+    async def test_last_night_is_last_night_in_the_morning_and_the_evening(self):
+        for now in (MORNING, EVENING):
+            with self.subTest(hour=now.hour):
+                self.settle()
+                with self.clock(now):
+                    reply, calls = await self.say("What did you do last night?")
+                self.assertEqual(calls, 0)
+                self.assertIn("last night", reply.casefold())
+                self.assertNotIn("tonight", reply.casefold())
 
     async def test_every_workshop_phrase_is_answered_without_the_model(self):
         for phrase in WORKSHOP_PHRASES:

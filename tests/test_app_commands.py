@@ -36,6 +36,23 @@ class NormaliseTest(unittest.TestCase):
         self.assertEqual(normalise("Pip, go ahead and run it please"), "run it")
         self.assertEqual(normalise("Hey Nova, hide it", name="Nova"), "hide it")
 
+    def test_the_name_may_come_last(self):
+        self.assertEqual(normalise("Open the terminal, Pip."), "open the terminal")
+        self.assertEqual(normalise("open the terminal please, hey Pip"), "open the terminal")
+        self.assertEqual(normalise("open the terminal hey pip"), "open the terminal")
+        self.assertEqual(normalise("open the terminal, okay pip, please"), "open the terminal")
+        self.assertEqual(normalise("close it, Nova", name="Nova"), "close it")
+        # After a plain space the name is a word of the request ("a program
+        # called pip", "install pip") unless asked for: parse() asks only on
+        # its second try, for opening, showing, hiding and closing an app.
+        self.assertEqual(normalise("open the terminal pip"), "open the terminal pip")
+        self.assertEqual(normalise("open the terminal pip", bare_name=True), "open the terminal")
+        self.assertEqual(normalise("open the terminal please pip", bare_name=True), "open the terminal")
+        self.assertEqual(normalise("close it Nova", name="Nova", bare_name=True), "close it")
+        # Only the being's own name, and only at the very end.
+        self.assertEqual(normalise("open the terminal pippa"), "open the terminal pippa")
+        self.assertEqual(normalise("there is a pip in my apple"), "there is a pip in my apple")
+
     def test_spoken_numbers(self):
         self.assertEqual(spoken_numbers("count down from twenty five"), "count down from 25")
         self.assertEqual(spoken_numbers("the seven times table"), "the 7 times table")
@@ -65,6 +82,73 @@ class OwnerPhrasesTest(unittest.TestCase):
         self.assertEqual(self.kind("show me the terminal", MINIMISED), ("restore", "terminal"))
         self.assertEqual(self.kind("show me the terminal"), ("open", "terminal"))
         self.assertEqual(parse("open the terminal", SHOWN).say, REPLIES["already_open"])
+
+    def test_new_window_and_plural_terminals(self):
+        for text in ("open a new terminal", "launch a new terminal", "start a new terminal", "open new terminal",
+                     "open the terminal window", "open a new terminal window", "open terminals", "start the terminal",
+                     "open my terminal", "Hey Pip, open a terminal, Pip", "open a terminal pip"):
+            self.assertEqual(self.kind(text), ("open", "terminal"), text)
+        self.assertEqual(parse("open a new terminal", SHOWN).say, REPLIES["already_open"])
+
+    def test_filler_words_only_on_a_whole_command(self):
+        for text in ("and open a terminal", "i open up the terminal", "and open the terminal", "open it the terminal",
+                     "hey pip and open a new terminal"):
+            self.assertEqual(self.kind(text), ("open", "terminal"), text)
+        self.assertEqual(self.kind("and close the terminal", SHOWN), ("close", "terminal"))
+        self.assertEqual(self.kind("and show me the clock"), ("open", "clock"))
+        # Never a bare noun, never words that only look like a command, and
+        # never a job, an install or a forget.
+        for text in ("a terminal", "and terminal", "up the terminal", "i terminal", "it a console",
+                     "they opened a new terminal at the airport", "the new terminal at the airport is open",
+                     "and open it up", "a terminal at the airport"):
+            self.assertIsNone(parse(text, CLOSED), text)
+        self.assertIsNone(parse("and run it", WAITING), "a job control is never taken on the retry")
+        self.assertIsNone(parse("and install snake", SHOWN), "an install is never taken on the retry")
+        self.assertIsNone(parse("and write a script that counts down from ten", SHOWN))
+        self.assertIsNone(parse("and yes", ctx(terminal="shown", job="running", pending="close")))
+        self.assertIsNone(parse("and forget that script", WAITING))
+        self.assertIsNone(parse("i start guest mode", CLOSED))
+
+    def test_filler_inside_the_verb_is_kept(self):
+        """Leading filler goes first, so "bring up", "pull up" and "give me a"
+        keep their own small words."""
+        for text in ("and bring up the terminal", "and pull up the terminal", "and give me a terminal",
+                     "and fire up the terminal", "i bring up the console"):
+            self.assertEqual(self.kind(text), ("open", "terminal"), text)
+            self.assertTrue(may_be_app_command(text), text)
+        self.assertEqual(self.kind("i bring up the monitor"), ("open", "monitor"))
+        self.assertEqual(self.kind("i put it away", SHOWN), ("minimise", "terminal"))
+
+    def test_a_trailing_name_is_kept_in_a_request(self):
+        command = parse("make me a program called pip", SHOWN)
+        self.assertEqual((command.kind, command.task, command.text), ("task", "script", "make me a program called pip"))
+        command = parse("write a script that prints hello pip", SHOWN)
+        self.assertEqual(command.text, "write a script that prints hello pip")
+        for text in ("install pip", "download pip"):
+            self.assertEqual(parse(text, SHOWN).say, REPLIES["no_download"], text)
+        # ...while a bare name after a command to open, hide or close an app goes.
+        self.assertEqual(self.kind("close it pip", SHOWN), ("close", "terminal"))
+        self.assertEqual(self.kind("open the terminal please pip"), ("open", "terminal"))
+        self.assertIsNone(parse("and run it pip", WAITING), "a job control is never taken on the name retry")
+
+    def test_the_read_ahead_gate_mirrors_the_new_words(self):
+        for text in ("open a new terminal", "open a new", "start a new terminal window", "open terminals",
+                     "and open the terminal", "i open up the terminal", "open the terminal pip"):
+            self.assertTrue(may_be_app_command(text), text)
+        for text in ("a terminal", "they opened a new terminal at the airport", "close it", "and close it"):
+            self.assertFalse(may_be_app_command(text), text)
+
+    def test_the_read_ahead_gate_mirrors_the_filler_retry_on_screen(self):
+        """With the terminal shown, what the retry takes as a hide or a close
+        also stops the read-ahead, partials included; with nothing open it
+        is conversation."""
+        for text in ("i minimise", "a minimise", "and minimize", "i close that", "and put it away", "and hide it"):
+            self.assertTrue(may_be_app_command(text, SHOWN), text)
+            self.assertIsNotNone(parse(text, SHOWN), text)
+            self.assertFalse(may_be_app_command(text, CLOSED), text)
+            self.assertIsNone(parse(text, CLOSED), text)
+        self.assertFalse(may_be_app_command("and close the door", CLOSED))
+        self.assertFalse(may_be_app_command("and close the door", SHOWN))
 
     def test_minimise_restore_close(self):
         for text in ("minimize the terminal", "hide the terminal", "put away the terminal", "show me your face"):
@@ -303,6 +387,40 @@ class OwnerPhrasesTest(unittest.TestCase):
         self.assertEqual(parse("forget that script", WRITING).action, "cancel")
 
 
+class GrammarPhrasesTest(unittest.TestCase):
+    """grammar_phrases(): what a recogniser's command grammar may say."""
+
+    CONTEXTS = (CLOSED, SHOWN, MINIMISED, WRITING, RUNNING, WAITING, CANCELLED, ctx(monitor="shown"),
+                ctx(clock="shown"), ctx(monitor="shown", terminal="minimised"))
+
+    def test_every_phrase_parses_and_none_is_destructive(self):
+        phrases = app_commands.grammar_phrases()
+        self.assertGreaterEqual(len(phrases), 20)
+        self.assertEqual(len(phrases), len(set(phrases)))
+        for phrase in phrases:
+            with self.subTest(phrase=phrase):
+                self.assertEqual(phrase, phrase.lower().strip())
+                self.assertRegex(phrase, r"^[a-z' ]+$")
+                commands = [parse(phrase, context) for context in self.CONTEXTS]
+                self.assertTrue(any(command is not None for command in commands), "parse() never takes it")
+                for command in commands:
+                    if command is not None:
+                        self.assertNotIn(command.kind, app_commands.DESTRUCTIVE_KINDS)
+                        self.assertIn(command.kind, app_commands.GRAMMAR_KINDS)
+
+    def test_the_core_phrases_are_there(self):
+        phrases = set(app_commands.grammar_phrases())
+        for phrase in ("open a terminal", "open the terminal", "open a new terminal", "close the terminal",
+                       "minimise the terminal", "show me the clock", "open the monitor", "close the clock"):
+            self.assertIn(phrase, phrases)
+        for phrase in phrases:
+            self.assertNotRegex(phrase, r"\b(?:install|uninstall|remove|delete|forget|clear|run|write|yes|no)\b")
+
+    def test_a_copy_is_returned(self):
+        app_commands.grammar_phrases().append("delete everything")
+        self.assertNotIn("delete everything", app_commands.grammar_phrases())
+
+
 class LinesTest(unittest.TestCase):
     def test_status_lines(self):
         self.assertEqual(status_line({"phase": "waiting", "speakable": True}), "It's ready. Say run it.")
@@ -386,6 +504,35 @@ class BridgeTest(unittest.IsolatedAsyncioTestCase):
         self.answer_with(t="app.refused", reason="no_session", app="clock")
         await self.bridge.handle(parse("close the clock", ctx(clock="shown")), self.say)
         self.assertEqual(self.said[-1], REPLIES["clock_not_open"])
+
+    async def test_no_face_says_to_close_the_try_menu(self):
+        for text, app in (("open the terminal", "terminal"), ("show me the clock", "clock")):
+            self.bus.sent.clear()
+
+            async def answer():
+                await asyncio.sleep(0.01)
+                self.bridge.observe({"t": "app.refused", "reason": "no_face", "app": app,
+                                     "req": self.bus.sent[0]["req"]})
+            asyncio.get_running_loop().create_task(answer())
+            await self.bridge.handle(parse(text, CLOSED), self.say)
+        self.assertEqual(self.said, ["Close the Try menu to see my terminal.", "Close the Try menu to see my clock."])
+        self.assertEqual(self.bridge.view["terminal"], "closed", "a refused open is never reported as shown")
+
+    async def test_no_face_on_restore_and_on_a_task_says_to_close_the_try_menu(self):
+        """Hands restores through its open, and a task that must bring the
+        terminal forward is refused the same way: both say why."""
+        for text, context, topic in (("bring back the terminal", MINIMISED, "app.restore"),
+                                     ("write a script that prints hello", MINIMISED, "term.task")):
+            self.bus.sent.clear()
+
+            async def answer():
+                await asyncio.sleep(0.01)
+                self.bridge.observe({"t": "app.refused", "reason": "no_face", "app": "terminal",
+                                     "req": self.bus.sent[0]["req"]})
+            asyncio.get_running_loop().create_task(answer())
+            await self.bridge.handle(parse(text, context), self.say)
+            self.assertEqual(self.bus.sent[0]["t"], topic, text)
+            self.assertEqual(self.said[-1], "Close the Try menu to see my terminal.", text)
 
     async def test_refusal_is_reported(self):
         async def answer():
@@ -558,5 +705,18 @@ class ForgetAnswerTest(unittest.IsolatedAsyncioTestCase):
         await self.bridge.privacy(False)
         self.bus.sent.clear()
         self.bridge.observe({"t": "organ.up", "name": "hands"})
+        await asyncio.sleep(0)
+        self.assertEqual(self.bus.sent, [])
+
+    async def test_a_restarted_voice_hears_about_the_guest_again(self):
+        await self.bridge.privacy(True)
+        self.bus.sent.clear()
+        self.bridge.observe({"t": "organ.up", "name": "voice"})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.assertEqual(self.bus.sent, [{"t": "app.privacy", "guest": True}])
+        await self.bridge.privacy(False)
+        self.bus.sent.clear()
+        self.bridge.observe({"t": "organ.up", "name": "voice"})
         await asyncio.sleep(0)
         self.assertEqual(self.bus.sent, [])

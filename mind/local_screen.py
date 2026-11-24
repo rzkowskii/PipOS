@@ -8,6 +8,24 @@ from pathlib import Path
 from . import local_menu
 from .bus import Bus
 
+# The requests being-console.c leaves in the screen gate (one empty file per
+# name, made with O_EXCL, so a held key steps no faster than this loop reads)
+# and the face's key event each one becomes: the same topics and fields the
+# face sends (crates/face/src/keys.rs), which the brainstem passes to the
+# mind (mind/keys.py). fn+F10 and fn+F9 are the mic mute and panel recover.
+GATE_REQUESTS = (
+    ("mute", "key.mute", {}),
+    ("recover", "key.panel_recover", {}),
+    ("brightness-up", "key.brightness", {"dir": "up"}),
+    ("brightness-down", "key.brightness", {"dir": "down"}),
+    ("kbd-light-up", "key.kbd_light", {"dir": "up"}),
+    ("kbd-light-down", "key.kbd_light", {"dir": "down"}),
+    ("kbd-light-toggle", "key.kbd_light", {"dir": "toggle"}),
+    ("volume-up", "key.volume", {"dir": "up"}),
+    ("volume-down", "key.volume", {"dir": "down"}),
+    ("speaker-mute", "key.mute_speaker", {}),
+)
+
 
 async def serve_panel(directory, stop):
     show = directory / "show"
@@ -46,12 +64,12 @@ async def serve_panel(directory, stop):
                     close_panel()
             if not bus.connected.is_set():
                 continue
-            for filename, topic in (("mute", "key.mute"), ("recover", "key.panel_recover")):
+            for filename, topic, fields in GATE_REQUESTS:
                 try:
                     (directory / filename).unlink()
                 except FileNotFoundError:
                     continue
-                await bus.send(topic)
+                await bus.send(topic, **fields)
             if current is not None and acknowledged != current:
                 try:
                     rendered = presented.read_text(encoding="ascii").strip()

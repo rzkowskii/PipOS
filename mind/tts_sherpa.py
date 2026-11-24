@@ -8,6 +8,11 @@ loop, the face and the language model keep their cores.
 `synthesize(text, wav, rate)` writes a 16-bit mono WAV with
 `length_scale = 1 / rate`. Every failure raises, so the voice organ can say
 that clause with Flite instead.
+
+A voice that once fails a clause, or makes no sound, is silenced for the rest
+of the process: it says so in one log line, reports its name as "flite", and
+hands the voice organ Flite's command for every later clause, so Pip never goes
+quiet and never claims the natural voice while speaking with the original one.
 """
 
 import asyncio
@@ -25,6 +30,11 @@ DEFAULT_VOICE = VOICES / "default"
 # The owner-facing name of the bundled voice, used when its card cannot be read.
 DEFAULT_LABEL = "Alba"
 MAX_TEXT = 600
+# A clause the natural voice takes longer than this to say is said by Flite
+# instead (the voice organ's own limit for a clause is 20 s plus 1 s per 25
+# characters, so this always leaves Flite time to say it).
+CLAUSE_BASE_S = 8.0
+CLAUSE_CHARS_PER_S = 20
 
 
 def length_scale(rate):
@@ -33,6 +43,17 @@ def length_scale(rate):
     if not 0.25 <= rate <= 4:
         raise ValueError(f"speaking rate {rate!r} is out of range")
     return 1 / rate
+
+
+def clause_timeout(text):
+    """Seconds the natural voice may take over one clause."""
+    return CLAUSE_BASE_S + len(str(text)) / CLAUSE_CHARS_PER_S
+
+
+def reason(error):
+    """A short plain reason for a failure, for a log line."""
+    text = " ".join(str(error).split())
+    return (text or type(error).__name__)[:200]
 
 
 def spoken(text):
@@ -44,7 +65,6 @@ def spoken(text):
 
 
 class PiperEngine:
-    name = "piper"
     supports_segment_times = False
 
     def __init__(self, voice_dir=DEFAULT_VOICE, *, library=None, threads=1, loader=None):
@@ -56,6 +76,20 @@ class PiperEngine:
         self._lock = threading.Lock()
         self._executor = None
         self._error = None
+        # Why the voice was silenced for this process (a plain reason), or None.
+        self.silenced = None
+        self._silent_error = None
+        # Told the reason once, when the voice is silenced (voice_engines keeps it for this build).
+        self.on_silent = None
+        # Set while voice_engines probes the voice: its own note says what happened.
+        self.quiet = False
+        # False for a measuring tool (pip-diag), which tries every sentence and reports each failure.
+        self.sticky = True
+
+    @property
+    def name(self):
+        """"piper", or "flite" once silenced: the engine that really speaks."""
+        return "flite" if self.silenced else "piper"
 
     # Files --------------------------------------------------------------------------
 
@@ -153,16 +187,64 @@ class PiperEngine:
         return self._executor
 
     def synthesize_blocking(self, text, wav, rate=1.0):
-        """Write `wav` and return its length in seconds. Raises on any failure."""
-        tts = self.resident()
-        seconds = tts.write(spoken(text), Path(wav), length_scale=length_scale(rate))
-        if not seconds or seconds <= 0:
-            raise RuntimeError("the natural voice produced no audio")
+        """Write `wav` and return its length in seconds. Raises on any failure.
+
+        Text with nothing to say, or a rate out of range, is the caller's
+        mistake and raises ValueError without silencing the voice. Any other
+        failure silences it for the rest of the process."""
+        said, scale = spoken(text), length_scale(rate)
+        if self._silent_error is not None:
+            raise self._silent_error
+        try:
+            tts = self.resident()
+            seconds = tts.write(said, Path(wav), length_scale=scale)
+            if not seconds or seconds <= 0:
+                raise RuntimeError("the natural voice produced no audio")
+        except Exception as error:
+            self.silence(error)
+            raise
         return seconds
 
-    async def synthesize(self, text, wav, rate=1.0):
+    async def _synthesize(self, text, wav, rate=1.0):
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self.executor(), self.synthesize_blocking, text, wav, rate)
+        job = loop.run_in_executor(self.executor(), self.synthesize_blocking, text, wav, rate)
+        try:
+            return await asyncio.wait_for(job, clause_timeout(text))
+        except TimeoutError as error:
+            # The worker may still finish this clause; nothing waits for it.
+            self.silence(TimeoutError(f"a clause took more than {clause_timeout(text):.0f} s"))
+            raise self._silent_error from error
+
+    @property
+    def synthesize(self):
+        """The resident voice's async synthesis, or None once silenced.
+
+        The voice organ speaks through `synthesize` when an engine has one,
+        and otherwise runs `command`, which then is Flite's."""
+        return None if self.silenced else self._synthesize
+
+    def command(self, voice, rate, text, output, *, segment_times=False):
+        """Flite's command line, for the clauses after the voice was silenced."""
+        from .tts import synthesis_command
+
+        return synthesis_command(voice, rate, text, output, segment_times=segment_times)
+
+    def silence(self, error):
+        """Stop using the natural voice for this process, with one log line."""
+        if self.silenced or not self.sticky:
+            return
+        why = reason(error)
+        self._silent_error = error if isinstance(error, Exception) else RuntimeError(why)
+        self.silenced = why
+        if not self.quiet:
+            print(f"voice: The natural voice made no sound for a clause ({why}). "
+                  "Using the original voice for the rest of this session.", file=sys.stderr, flush=True)
+        if callable(self.on_silent):
+            try:
+                self.on_silent(why)
+            except Exception as hook_error:  # the switch to Flite stands either way
+                print(f"voice: could not keep the natural voice's failure ({hook_error!r})",
+                      file=sys.stderr, flush=True)
 
     async def warm(self):
         """Load the voice on its worker thread, off the event loop."""

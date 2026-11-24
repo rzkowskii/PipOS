@@ -5,6 +5,7 @@ mod battery;
 mod body;
 mod brightness;
 mod camera;
+mod kbd_light;
 mod life;
 #[cfg(target_os = "linux")]
 mod linux_body;
@@ -135,8 +136,10 @@ fn allowed_from(topic: &str, from: &str, hardware_body: bool) -> bool {
     match topic {
         "mind.progress" | "mind.shutdown_ready" | "mind.announce" | "mind.clock" | "mind.dream_committed"
         | "mind.dreaming" => from == "mind",
-        // "Brighter" and "dimmer" are the owner's, through the mind.
-        "being.brightness" => from == "mind",
+        // "Brighter" and "dimmer" are the owner's, through the mind, and so
+        // are the brightness and keyboard-light keys (the face presses them,
+        // the mind decides the step).
+        "being.brightness" | "being.kbd_light" => from == "mind",
         // The owner's "louder" or "no chirps" reaches the voice through the
         // mind; the voice answers with what it really set. "Which voice"
         // and "how well can you hear me" ask the voice the same way.
@@ -555,6 +558,19 @@ fn main() {
         let level = brightness.level().map_or("unknown".to_string(), |l| format!("{l}%"));
         eprintln!("brainstem: brightness through {name}, now {level}");
     }
+    // The keyboard's light, the same way (applesmc on the MacBook).
+    let mut kbd_light = if hardware_body {
+        kbd_light::KbdLight::discover(Path::new("/"))
+    } else {
+        kbd_light::KbdLight::none()
+    };
+    if let Some(name) = kbd_light.name() {
+        let level = kbd_light.level().map_or("unknown".to_string(), |l| format!("{l}%"));
+        eprintln!("brainstem: keyboard light through {name}, now {level}");
+    }
+    // Whether the keyboard light was last told the panel is dark.
+    #[cfg(target_os = "linux")]
+    let mut kbd_dark = false;
     let mut next_tick = started + TICK_INTERVAL;
 
     while let Some(input) = next_input(&rx, next_tick) {
@@ -563,6 +579,9 @@ fn main() {
             watchdog.stopping();
             if let Err(e) = brightness.restore() {
                 eprintln!("brainstem: could not put the brightness back: {e}");
+            }
+            if let Err(e) = kbd_light.restore() {
+                eprintln!("brainstem: could not put the keyboard light back: {e}");
             }
             // Going to sleep properly: the next wake will know it was not a power cut.
             if let Some(life) = &life {
@@ -665,6 +684,7 @@ fn main() {
                             }
                             "mind.shutdown_ready" => body.mind_saved(),
                             "being.brightness" => pending.push((brightness.request(&ev), None)),
+                            "being.kbd_light" => pending.push((kbd_light.request(&ev), None)),
                             "mind.dream_committed" => {
                                 if body.lid_confirmed_closed()
                                     && machine.state() == machine::State::Asleep
@@ -786,6 +806,15 @@ fn main() {
         pending.extend(camera.update(machine.state(), body.lid_blocked(), body.lid_seq(), now)
             .into_iter().map(|e| (e, None)));
 
+        // The keyboard light goes out with the panel and comes back with it.
+        #[cfg(target_os = "linux")]
+        if body.panel_blank() != kbd_dark {
+            kbd_dark = body.panel_blank();
+            if let Err(e) = kbd_light.panel(kbd_dark) {
+                eprintln!("brainstem: keyboard light: {e}");
+            }
+        }
+
         #[cfg(target_os = "linux")]
         if let Some((_, panel)) = &mut hardware {
             if !body.panel_blank() {
@@ -905,6 +934,11 @@ fn wave_two_topics_are_allowed_only_from_their_owners() {
         }
         assert!(allowed_from("being.brightness", "mind", hardware));
         assert!(!allowed_from("being.brightness", "face", hardware) && !allowed_from("being.brightness", "hands", hardware));
+        assert!(allowed_from("being.kbd_light", "mind", hardware));
+        for organ in ["face", "hands", "keyboard", "voice", "eyes"] {
+            assert!(!allowed_from("being.kbd_light", organ, hardware), "{organ} may not set the keyboard light");
+        }
+        assert!(!allowed_from("body.kbd_light", "mind", hardware), "body.* is the brainstem's");
         assert!(allowed_from("key.attend", "face", hardware));
         assert!(!allowed_from("body.brightness", "mind", hardware), "body.* is the brainstem's");
         assert!(!allowed_from("body.state", "bodycare", hardware));
@@ -972,5 +1006,21 @@ mod tick_tests {
         let (tx, rx) = mpsc::channel();
         tx.send(Input::Gone(1)).unwrap();
         assert!(matches!(next_input(&rx, next_tick), Some(Input::Gone(1))));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn the_top_row_keys_come_from_the_face_and_reach_the_mind() {
+    // Every top-row key the face sends (crates/face/src/keys.rs) is the
+    // face's alone on the laptop, like the keys before them, and is routed
+    // on to the mind, which subscribes to them (mind/keys.py).
+    for topic in ["key.brightness", "key.volume", "key.mute_speaker", "key.kbd_light", "key.apps"] {
+        assert!(allowed_from(topic, "face", true), "{topic}");
+        for organ in ["mind", "keyboard", "voice", "hands", "eyes", "bodycare", "rogue"] {
+            assert!(!allowed_from(topic, organ, true), "{organ} may not press {topic} on the laptop");
+        }
+        assert!(allowed_from(topic, "console", false), "the lab's console stands in");
+        assert!(!blocked_by_lid(topic), "{topic}");
     }
 }

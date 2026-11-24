@@ -1,0 +1,26 @@
+# Cable development builds only (BR2_PACKAGE_BEING_CABLE_DEV, docs/LAB.md).
+# On a Try boot of a stick that carries the cable key, and unless the boot
+# has the kill switch being.cable=0, the first wired port gets the fixed
+# link-local addresses 169.254.77.1/16 and fe80::77:1/64, networkd leaves it
+# alone, and the firewall admits SSH on it from the link-local networks only.
+[Unit]
+Description=PipOS cable development link (Try only)
+DefaultDependencies=no
+Requires=being-network-lockdown.service
+RequiresMountsFor=/mind
+After=being-network-lockdown.service being-cable-workbench.service systemd-udevd.service
+After=systemd-udev-trigger.service local-fs.target
+Before=being-network-policy.service being-cable-ssh.service sysinit.target shutdown.target
+Conflicts=shutdown.target
+ConditionKernelCommandLine=being.try=1
+ConditionKernelCommandLine=!being.cable=0
+ConditionPathExists=/usr/share/being/cable/authorized_keys
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/being-network cable-up
+RemainAfterExit=yes
+TimeoutStartSec=60
+
+[Install]
+WantedBy=sysinit.target

@@ -89,5 +89,42 @@ class TimingLines(unittest.TestCase):
         self.assertEqual(groups["code"], [])
 
 
+ROUTES = """\
+[   40.000000] pipos being-mind[500]: mind: route {"route": "workshop.open", "chars": 24, "text": "hey pip open a terminal"}
+[   50.000000] pipos being-mind[500]: mind: route {"route": "model", "chars": 7}
+[   60.000000] pipos being-mind[500]: mind: route {"route": "model", "chars": 11}
+[   70.000000] pipos being-mind[500]: mind: route {"route": "private"}
+[   80.000000] pipos being-mind[500]: mind: route {"route": "Not A Route!", "chars": 3}
+[   90.000000] pipos being-mind[500]: mind: route {broken
+"""
+
+
+class RouteLines(unittest.TestCase):
+    def test_routes_are_counted_and_the_words_never_read(self):
+        journal = try_timings.parse_journal(ROUTES)
+        self.assertEqual([r["route"] for r in journal["routes"]], ["workshop.open", "model", "model", "private"])
+        self.assertEqual(journal["routes"][0], {"t": 40.0, "route": "workshop.open", "chars": 24})
+        self.assertIsNone(journal["routes"][3]["chars"])
+        self.assertNotIn("terminal", json.dumps(journal))
+        self.assertEqual(try_timings.route_counts(journal["routes"]), {"model": 2, "private": 1, "workshop.open": 1})
+
+    def test_the_report_prints_routes_and_a_cable_boot(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory())) / "PIPLOGS"
+        boot = root / "boot-0009-20261125-091500Z"
+        boot.mkdir(parents=True)
+        (boot / "journal.txt").write_text(ROUTES)
+        (boot / "hardware-report.txt").write_text("Command line: being.try=1 being.cable=1 being.voice_debug=1\n")
+        (boot / "summary.txt").write_text("Cable link:     ON: a cable development boot\n"
+                                          "Codec IDs:      hdaudioC0D0 0x10134206 subsystem 0x106b5200 rev 0x100302\n")
+        data = try_timings.report(root)
+        self.assertTrue(data["boots"][0]["cable"])
+        self.assertIn("0x106b5200", data["boots"][0]["summary"]["Codec IDs"])
+        text = try_timings.render(data)
+        self.assertIn("(default entry, CABLE development boot)", text)
+        self.assertIn("Routes (4 turns): model x2, private x1, workshop.open x1", text)
+        self.assertNotIn("open a terminal", text)
+        self.assertNotIn("open a terminal", json.dumps(data))
+
+
 if __name__ == "__main__":
     unittest.main()

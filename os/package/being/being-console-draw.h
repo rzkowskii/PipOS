@@ -409,6 +409,59 @@ static void draw_header_eyes(const struct canvas *canvas, int header, int pad_x,
     draw_eye(canvas, header - 1, cx + spacing, cy, rx, ry, open, 1.0f);
 }
 
+/* Whether Pip's own F-keys need fn held on this keyboard: true when a
+ * keyboard is bound to hid-apple (the MacBookPro9,2's own) and its fnmode is
+ * 1, or 3 ("auto", which is 1 for Apple's keyboards). The laptop boots with
+ * hid_apple.fnmode=1 (os/board/beingos/slots.sh), so the printed F10 is the
+ * speaker's mute and Pip's microphone mute is fn+F10. Any other keyboard
+ * sends plain F-keys. Looked up again every few seconds (a USB keyboard can
+ * bind after the screen starts). BEING_SYSFS points the tests at a fake tree. */
+static bool function_keys_need_fn_at(const char *root)
+{
+    char path[512], mode[8] = "";
+    snprintf(path, sizeof(path), "%s/module/hid_apple/parameters/fnmode", root);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    ssize_t size = read(fd, mode, sizeof(mode) - 1);
+    close(fd);
+    if (size <= 0 || (mode[0] != '1' && mode[0] != '3') || (mode[1] != '\0' && mode[1] != '\n'))
+        return false;
+    snprintf(path, sizeof(path), "%s/bus/hid/drivers/apple", root);
+    DIR *directory = opendir(path);
+    struct dirent *entry;
+    bool bound = false;
+    /* A bound device is a link named like 0003:05AC:0252.0001; the driver's
+     * own files (bind, new_id, uevent ...) have no colon. */
+    while (directory && !bound && (entry = readdir(directory)))
+        bound = strchr(entry->d_name, ':') != NULL;
+    if (directory)
+        closedir(directory);
+    return bound;
+}
+
+static bool function_keys_need_fn(void)
+{
+    static bool known, need;
+    static Uint32 checked;
+    Uint32 now = SDL_GetTicks();
+    if (!known || now - checked >= 5000) {
+        const char *root = getenv("BEING_SYSFS");
+        need = function_keys_need_fn_at(root && *root ? root : "/sys");
+        known = true;
+        checked = now;
+    }
+    return need;
+}
+
+/* The key caps for one of Pip's F-keys: "fn" then the key where fn is
+ * needed, the key alone otherwise. */
+static void function_key_caps(const char *key, bool fn, const char *caps[2])
+{
+    caps[0] = fn ? "fn" : key;
+    caps[1] = fn ? key : NULL;
+}
+
 /* The footer: key caps with what they do, and a note when scrolled back. */
 static void draw_footer(const struct canvas *canvas, int face, int footer, int pad_x, bool panel_controls,
                         bool scrolled)
@@ -426,6 +479,9 @@ static void draw_footer(const struct canvas *canvas, int face, int footer, int p
         { "F9", NULL, "Panel" },
         { "PgUp", "PgDn", "Scroll" },
     };
+    bool fn = function_keys_need_fn();
+    function_key_caps("F10", fn, items[0]);
+    function_key_caps("F9", fn, items[1]);
     int x = pad_x;
     for (int item = panel_controls ? 0 : 2; item < 3; ++item) {
         int needed = text_width(text_face, items[item][2]) + gap;

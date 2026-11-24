@@ -29,7 +29,6 @@ case "${BEING_TRY_BENCH:-0}" in
     1) bench_option=being.bench=1 ;;
     *) echo "BEING_TRY_BENCH must be 0 or 1" >&2; exit 2 ;;
 esac
-try_options="$screen_option${screen_option:+${bench_option:+ }}$bench_option"
 # BEING_TRY_LAPTOP=1: media from the laptop image, with no serial console.
 BEINGOS_VARIANT=lab
 case "${BEING_TRY_LAPTOP:-0}" in
@@ -37,6 +36,24 @@ case "${BEING_TRY_LAPTOP:-0}" in
     1) BEINGOS_VARIANT=laptop; output_name=beingos-laptop-try.img ;;
     *) echo "BEING_TRY_LAPTOP must be 0 or 1" >&2; exit 2 ;;
 esac
+# BEING_TRY_CABLE=1: the cable development stick (BEING_LAPTOP_CABLE=1
+# lab/build.sh laptop-try). Its rootfs carries the cable link, which every
+# Try boot runs unless the kernel command line has being.cable=0; every entry
+# says so on its command line, and the voice logs what it hears.
+cable_option=
+case "${BEING_TRY_CABLE:-0}" in
+    0) ;;
+    1)
+        if [ "$BEINGOS_VARIANT" != laptop ]; then
+            echo "BEING_TRY_CABLE=1 needs BEING_TRY_LAPTOP=1: the cable link is a laptop build" >&2
+            exit 2
+        fi
+        cable_option="being.cable=1 being.voice_debug=1"
+        ;;
+    *) echo "BEING_TRY_CABLE must be 0 or 1" >&2; exit 2 ;;
+esac
+try_options=$(printf '%s ' $screen_option $bench_option $cable_option)
+try_options=${try_options% }
 # A bench stick has its own name (lab/build.sh expects it).
 if [ -n "$bench_option" ]; then
     output_name="${output_name%.img}-bench.img"
@@ -55,6 +72,20 @@ mkdir -p "$output_dir"
 stage=$(mktemp -d "$output_dir/.beingos-try.XXXXXX")
 trap 'rm -rf -- "$stage"' EXIT
 trap 'exit 1' HUP INT TERM
+
+# The stick's name and command line must match its rootfs: only a cable
+# stick may hold the cable link, and a cable stick must hold it.
+unsquashfs -l -no-progress "$rootfs" > "$stage/rootfs-listing"
+if grep -Eq '^squashfs-root/usr/share/being/cable(/|$)' "$stage/rootfs-listing"; then
+    if [ -z "$cable_option" ]; then
+        echo "This rootfs holds the cable development link: build its Try stick with BEING_LAPTOP_CABLE=1" >&2
+        exit 1
+    fi
+elif [ -n "$cable_option" ]; then
+    echo "BEING_TRY_CABLE=1, but this rootfs has no cable development link" >&2
+    exit 1
+fi
+rm -f "$stage/rootfs-listing"
 
 read -r disk_uuid < /proc/sys/kernel/random/uuid
 read -r esp_uuid < /proc/sys/kernel/random/uuid

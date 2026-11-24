@@ -32,3 +32,18 @@ config BR2_PACKAGE_BEING_LAN_MAINTENANCE
 	  and the restricted being-observe account. Nothing listens
 	  until the owner runs being-lab-access enroll. The default
 	  laptop image leaves this out; the owner opts in at build time.
+
+config BR2_PACKAGE_BEING_CABLE_DEV
+	bool "cable development link"
+	depends on BR2_PACKAGE_BEING
+	depends on BR2_PACKAGE_OPENSSH_SERVER
+	help
+	  For a development Try stick only (BEING_LAPTOP_CABLE=1
+	  lab/build.sh laptop-try): on a Try boot the first wired port
+	  gets 169.254.77.1 and fe80::77:1, and root can log in over
+	  SSH from the Mac on the other end of the cable with one baked-in
+	  Ed25519 key, from link-local addresses only. The being's code
+	  becomes a writable copy for that boot. being.cable=0 on the
+	  kernel command line switches it off. Such a stick never installs,
+	  never becomes an ISO and is never signed as an update; the image
+	  holds its SSH host key, so keep it private.

@@ -281,9 +281,10 @@ static void draw_panel_status(const struct canvas *canvas, int face, int pad_x, 
     draw_text(canvas, text_face, WEIGHT_REGULAR, x - 2 * info->width, y, "●", dot);
 }
 
-/* The footer: Esc Stop Pip · F3 Hide · F10 Mic · PgUp/PgDn, and a note when
- * scrolled back. Hints that do not fit are left out from the right. */
-static void draw_panel_footer(const struct canvas *canvas, int face, int pad_x, bool scrolled)
+/* The footer: Esc Stop Pip · F3 Hide · F10 Mic · PgUp/PgDn (fn F3 and fn F10
+ * where the top row is printed-first, see function_keys_need_fn()), and a
+ * note when scrolled back. Hints that do not fit are left out from the right. */
+static void draw_panel_footer(const struct canvas *canvas, int face, int pad_x, bool scrolled, bool fn)
 {
     int text_face = panel_chrome_face(face);
     const struct console_face *info = &console_faces[text_face];
@@ -301,6 +302,8 @@ static void draw_panel_footer(const struct canvas *canvas, int face, int pad_x, 
         { "F10", NULL, "Mic" },
         { "PgUp", "PgDn", "Scroll" },
     };
+    function_key_caps("F3", fn, items[1]);
+    function_key_caps("F10", fn, items[2]);
     const char *note = "↑ Earlier output";
     int right = canvas->width - pad_x - (scrolled ? text_width(text_face, note) + group : 0);
     int x = pad_x;

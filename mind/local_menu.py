@@ -51,10 +51,21 @@ MENU = (
     ("5", "Check hardware", "See what PipOS can find."),
     ("6", "Talk to Pip by typing", "When Pip can't hear you."),
     ("7", "Back up to a USB stick", "Save this Try being to a stick."),
+    ("8", "Run diagnostics", "Test the mic, speakers and voice."),
     ("Q", "Return to PipOS", None),
 )
 TYPE_CHAT_KEY = "6"
 BACKUP_KEY = "7"
+DIAG_KEY = "8"
+DIAG_CHOICES = (
+    ("1", "Quick", "About a minute. Nothing for you to do."),
+    ("2", "Full", "10 to 15 minutes. Pip plays test sounds."),
+    ("3", "Voice", "You speak and listen. About 10 minutes."),
+    ("Q", "Back", None),
+)
+DIAG_MODES = {"1": "quick", "2": "full", "3": "voice"}
+DIAG_LAST_RUN = Path("/run/being-diag/last-run.json")
+DIAG_SUMMARY_LINES = 28
 RESTORE_CHOICES = (
     ("1", "Restore with conversation archive",
      "Who the being is, its settings and past conversations. Reminders, Wi-Fi and the weather city start fresh."),
@@ -274,7 +285,20 @@ def choose_disk(report, flow=("Install", 1, 2)):
         warn("Choose a numbered disk, or press Enter to go back.")
 
 
+def cable_refusal():
+    """On a cable development stick, say up front that it never installs. True when refused."""
+    if not installer.cable_media():
+        return False
+    if ui.enabled():
+        ui.note(installer.CABLE_MESSAGE, "warning")
+    else:
+        print(installer.CABLE_MESSAGE)
+    return True
+
+
 def install(*, restore=None):
+    if cable_refusal():
+        return False
     if restore is None:
         settings = try_settings_present()
         name, total = "Install", 3 if settings else 2
@@ -581,6 +605,9 @@ def restore_inputs(executable, *, archive, files=None):
 
 
 def restore_menu():
+    # A restore installs too: a cable stick refuses before any media or disk is chosen.
+    if cable_refusal():
+        return False
     executable = shutil.which("being-backup")
     if executable is None or not all(shutil.which(tool) for tool in ("age", "age-keygen")):
         ui.note("Backup restore is still pending on this image. Install PipOS starts a new being.", "warning")
@@ -626,9 +653,11 @@ def flush_keys():
     """Drop key presses typed during a check, so they don't answer the next prompt."""
     try:
         import termios
-
+    except ImportError:
+        return
+    try:
         termios.tcflush(sys.stdin, termios.TCIFLUSH)
-    except (ImportError, OSError, ValueError):
+    except (termios.error, OSError, ValueError):  # termios.error is not an OSError: stdin is not a terminal
         pass
 
 
@@ -736,6 +765,86 @@ def welcome():
     ui.options(menu_entries(name))
 
 
+def run_diagnostic(mode):
+    """Run pip-diag MODE on this screen and keyboard; its exit code.
+
+    The child gets Ctrl-C itself and puts the voice back; the menu only waits,
+    so it never kills a run halfway through its restore."""
+    import signal
+
+    command = [sys.executable, "-m", "mind.diag", mode]
+    try:
+        child = subprocess.Popen(command)
+    except OSError:
+        return 2
+    previous = signal.signal(signal.SIGINT, lambda *_: None)
+    try:
+        while True:
+            try:
+                return child.wait()
+            except InterruptedError:
+                continue
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def diagnostic_summary(last_run=None):
+    """(folder, the summary lines of diag.txt), or (None, []) when no run finished."""
+    import json
+
+    try:
+        folder = Path(json.loads((last_run or DIAG_LAST_RUN).read_text(encoding="utf-8"))["folder"])
+        text = (folder / "diag.txt").read_text(encoding="utf-8")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, []
+    lines = [line for line in text.split("Every check", 1)[0].splitlines() if line.strip()]
+    keep = [line for line in lines if not line.startswith(("command:", "started utc:", "finished utc:", "folder:",
+                                                          "clock:", "entry:", "boot id:", "build id:"))]
+    return folder, keep[:DIAG_SUMMARY_LINES]
+
+
+def diagnostics_menu():
+    """Quick, Full or Voice diagnostics; the summary is shown here and saved to the stick."""
+    while True:
+        if ui.enabled():
+            ui.screen("Run diagnostics", context="Diagnostics",
+                      subtitle="Measure the microphone, speakers, voice and spoken commands. "
+                               "Results go to the logs stick when there is one.")
+            ui.options(DIAG_CHOICES, below=True)
+        else:
+            print("\nRun diagnostics")
+            ui.options(DIAG_CHOICES)
+        choice = input(ui.prompt("Choice: ")).strip().lower()
+        if choice in {"", "q"}:
+            return
+        if choice not in DIAG_MODES:
+            warn("Choose 1, 2 or 3, or press Q.")
+            continue
+        mode = DIAG_MODES[choice]
+        if ui.enabled():
+            ui.screen(f"Diagnostics: {DIAG_CHOICES[int(choice) - 1][1]}", context="Diagnostics",
+                      subtitle="Pip's ears and voice pause while the sound card is tested.")
+        flush_keys()
+        started = time.time()
+        code = run_diagnostic(mode)
+        flush_keys()
+        folder, lines = diagnostic_summary()
+        try:
+            fresh = folder is not None and (folder / "diag.txt").stat().st_mtime >= started - 1
+        except OSError:
+            fresh = False
+        if ui.enabled():
+            ui.screen("Diagnostics finished" if code != 2 else "Diagnostics could not run", context="Diagnostics",
+                      subtitle=f"Saved in {installer.display_text(str(folder))}" if fresh else None)
+            for line in lines if fresh else []:
+                for part in ui.wrap(installer.display_text(line), ui.width() - 2) or [""]:
+                    ui.line(part)
+        else:
+            print("\n".join(lines) if fresh else "No diagnostics report was written.")
+        input(ui.prompt("Press Enter to go back. "))
+        return
+
+
 IDLE_SECONDS = 240
 
 
@@ -801,6 +910,8 @@ def try_menu():
                 from . import care
 
                 care.backup_menu(MIND_DIR, temporary=True)
+            elif choice == DIAG_KEY:
+                diagnostics_menu()
             else:
                 warn("Choose a number from the menu or press Q.")
         except (OSError, ValueError, subprocess.SubprocessError) as error:

@@ -227,8 +227,10 @@ class SystemEntries(unittest.TestCase):
         self.assertIn(f"{setup.TYPE_CHAT_KEY}  Talk to ", text)
         chat.assert_called_once_with(mind_dir=self.mind_dir)
         self.assertEqual(type_chat.typing_hint(try_boot=False),
-                         f"You can also type to me: press F2, then {setup.TYPE_CHAT_KEY}.")
-        self.assertEqual(type_chat.typing_hint(try_boot=True), "You can also type to me: press F2, then 6.")
+                         "You can also type to me: press Mission Control, or fn and F2, "
+                         f"then {setup.TYPE_CHAT_KEY}.")
+        self.assertEqual(type_chat.typing_hint(try_boot=True),
+                         "You can also type to me: press Mission Control, or fn and F2, then 6.")
 
     def test_try_setup_has_care_but_no_update_or_backup_entries(self):
         with patch.object(setup.care, "care_menu") as care_menu:

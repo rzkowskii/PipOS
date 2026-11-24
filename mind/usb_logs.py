@@ -29,6 +29,7 @@ import math
 import os
 import re
 import selectors
+import shlex
 import shutil
 import signal
 import subprocess
@@ -71,6 +72,11 @@ MIC_SETTLE = 0.1                      # seconds left out at the start, while the
 MIC_CHANNEL_SECONDS = 1               # the short two-channel look at left against right
 CHANNEL_NAMES = ("Mono", "Front Left", "Front Right", "Rear Left", "Rear Right", "Front Center",
                  "Woofer", "Side Left", "Side Right", "Rear Center")
+# snd_hda_codec's switch for the processing coefficients in the codec#N
+# proc files (-1 auto, 0 off, 1 on). Turned on just while the files are read.
+DUMP_COEF = Path("sys/module/snd_hda_codec/parameters/dump_coef")
+CODEC_LIMIT = 2 * 1024 * 1024          # a whole codec#N dump with coefficients is 20-200 KB
+HDA_IDS = ("vendor_id", "subsystem_id", "revision_id", "chip_name", "vendor_name")
 
 
 # --- small readers -----------------------------------------------------------
@@ -680,6 +686,177 @@ def sound(root):
     return cards, codecs, read(root / "proc/asound/pcm") or ""
 
 
+class coefficients_shown:
+    """While open, the codec proc files include the processing coefficients
+    (snd_hda_codec dump_coef=1). The old value is always put back. Without
+    the parameter, or without the right to write it (not root), the files are
+    read as they are; `state` says which."""
+
+    def __init__(self, root=Path("/")):
+        self.path = Path(root) / DUMP_COEF
+        self.old = None
+        self.state = "unchanged"
+
+    def __enter__(self):
+        self.old = field(self.path)
+        if self.old is None:
+            self.state = "no dump_coef parameter"
+        elif self.old == "1":
+            self.state = "already on"
+        else:
+            try:
+                self.path.write_text("1\n", encoding="ascii")
+                self.state = f"on while read (was {self.old})"
+            except OSError as error:
+                self.state = f"could not switch on: {error.strerror or error}"
+                self.old = None
+        return self
+
+    def __exit__(self, *exc):
+        if self.old is not None and self.old != "1":
+            try:
+                self.path.write_text(f"{self.old}\n", encoding="ascii")
+            except OSError as error:
+                log(f"could not put dump_coef back to {self.old}: {error!r}")
+        return False
+
+
+def codec_dumps(root=Path("/")):
+    """{file name: whole text} of every /proc/asound/cardN/codec#M, read with
+    the coefficients shown: 'card0-codec0.txt', 'card0-codec3.txt'..."""
+    paths = sorted(Path(root).glob("proc/asound/card*/codec#*"))
+    if not paths:
+        return {}
+    dumps = {}
+    with coefficients_shown(root) as coefficients:
+        for path in paths:
+            text = read(path, CODEC_LIMIT)
+            if text is not None:
+                number = path.name.split("#", 1)[1]
+                dumps[f"{path.parent.name}-codec{number}.txt"] = (
+                    f"{path} (coefficients: {coefficients.state})\n\n{text}")
+    return dumps
+
+
+def hda_codecs(root=Path("/")):
+    """The HDA codecs' own ids from sysfs (the real subsystem id, which the
+    'picked fixup' line does not print), and the hwdep node's model if any."""
+    found = []
+    for path in sorted((Path(root) / "sys/bus/hdaudio/devices").glob("hdaudioC*D*")):
+        entry = {"name": path.name, **{key: field(path / key) for key in HDA_IDS}}
+        match = re.fullmatch(r"hdaudioC(\d+)D(\d+)", path.name)
+        if match:
+            hwdep = Path(root) / f"sys/class/sound/hwC{match[1]}D{match[2]}"
+            entry["hwdep_modelname"] = field(hwdep / "modelname")
+        found.append(entry)
+    return found
+
+
+def module_parameters(root=Path("/"), module="snd_hda_intel"):
+    """{name: value} from /sys/module/<module>/parameters."""
+    return {path.name: field(path) for path in sorted((Path(root) / "sys/module" / module / "parameters").glob("*"))
+            if path.is_file()}
+
+
+def codec_line(codecs):
+    """'hdaudioC0D0 0x10134206 subsystem 0x106b5200 rev 0x100302' for each codec."""
+    return "; ".join(f"{c['name']} {c['vendor_id'] or '?'} subsystem {c['subsystem_id'] or '?'} "
+                     f"rev {c['revision_id'] or '?'}" for c in codecs)
+
+
+# Where the voice and the mind get BEING_VOICE_DEBUG: their units load
+# /etc/being/env (EnvironmentFile=), and a drop-in may set it too. This
+# logger's own environment does not have them, so they are read here.
+VOICE_DEBUG_UNITS = ("being-voice.service", "being-mind.service")
+UNIT_DIRS = ("etc/systemd/system", "run/systemd/system", "usr/lib/systemd/system", "lib/systemd/system")
+# The voice's own words in the journal when transcripts are on: its start-up
+# line, a final transcript, or the mind's route line with the words in it.
+TRANSCRIPT_EVIDENCE = re.compile(r'transcript text in the log on\b|\bheard: "|final transcript text: |'
+                                 r'\broute \{.*"text"\s*:')
+
+
+def env_file_sets(text, key="BEING_VOICE_DEBUG", value="1"):
+    """True if a systemd EnvironmentFile (KEY=value lines, # comments,
+    optional quotes or `export `) gives `key` the value `value`. The last
+    assignment wins, as it does for systemd."""
+    found = None
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        line = line.removeprefix("export ").strip()
+        name, sep, raw = line.partition("=")
+        if sep and name.strip() == key:
+            found = raw.strip().strip("'\"") == value
+    return bool(found)
+
+
+def dropin_sets(text, key="BEING_VOICE_DEBUG", value="1"):
+    """True if a unit file or drop-in's Environment= lines set `key=value`
+    (Environment=A=1 "B=2 3"; an empty Environment= clears what came before)."""
+    found = None
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line.startswith("Environment="):
+            body = line[len("Environment="):].strip()
+            if not body:
+                found = None
+                continue
+            try:
+                words = shlex.split(body)
+            except ValueError:
+                words = body.split()
+            for word in words:
+                name, sep, raw = word.partition("=")
+                if sep and name == key:
+                    found = raw == value
+    return bool(found)
+
+
+def voice_debug_sources(root=Path("/"), environ=None):
+    """Where BEING_VOICE_DEBUG=1 reaches the voice or the mind, as short
+    names ('/etc/being/env', 'being-voice.service.d/debug.conf', ...); []
+    if nowhere. Only the variable's value is read, never anything else."""
+    root = Path(root)
+    environ = os.environ if environ is None else environ
+    found = []
+    if environ.get("BEING_VOICE_DEBUG") == "1":
+        found.append("environment")
+    if env_file_sets(read(root / "etc/being/env")):
+        found.append("/etc/being/env")
+    for unit in VOICE_DEBUG_UNITS:
+        for folder in UNIT_DIRS:
+            files = [root / folder / unit]
+            try:
+                files += sorted((root / folder / f"{unit}.d").glob("*.conf"))
+            except OSError:
+                pass
+            for path in files:
+                if path.is_file() and dropin_sets(read(path)):
+                    found.append(str(path.relative_to(root / folder)))
+    return found
+
+
+def boot_flags(root=Path("/"), environ=None, journal_transcripts=False):
+    """Whether this is a cable development boot (being.cable=1 without the
+    being.cable=0 kill switch) and whether the voice writes what it heard
+    into the journal: being.voice_debug=1 on a Try boot, or
+    BEING_VOICE_DEBUG=1 where the voice and the mind get it (/etc/being/env,
+    a unit drop-in, this environment), or transcripts already seen in the
+    journal (`journal_transcripts`). `voice_debug_from` says which."""
+    words = (read(Path(root) / "proc/cmdline") or "").split()
+    cable = "being.cable=1" in words and "being.cable=0" not in words
+    sources = []
+    from .try_mode import voice_debug_words
+
+    if voice_debug_words(words):  # the last being.voice_debug= counts, as for the voice
+        sources.append("the kernel command line")
+    sources += voice_debug_sources(root, environ)
+    if journal_transcripts:
+        sources.append("transcripts seen in the journal")
+    return {"cable": cable, "voice_debug": bool(sources), "voice_debug_from": sources}
+
+
 def simple_mixer(root):
     """``amixer -c 0 scontents`` now, or the copy being-audio-init kept."""
     text = run(["amixer", "-c", "0", "scontents"]) if root == Path("/") else None
@@ -864,6 +1041,9 @@ def hardware_report(root=Path("/"), *, slow=False, load=False):
     add("alsa cards", lambda: sound(root)[0])
     add("alsa codecs", lambda: sound(root)[1])
     add("alsa pcm", lambda: sound(root)[2])
+    add("hda codecs (sysfs ids)", lambda: hda_codecs(root))
+    add("snd_hda_intel parameters", lambda: module_parameters(root, "snd_hda_intel"))
+    add("snd_hda_codec parameters", lambda: module_parameters(root, "snd_hda_codec"))
     add("alsa mixer (amixer -c 0 scontents)", lambda: simple_mixer(root))
     add("alsa mixer controls (amixer -c 0 contents)", lambda: card_controls(root))
     add("microphone level test", lambda: mic_result(root))
@@ -910,9 +1090,13 @@ def kernel_features(root=Path("/")):
     found = {"cgroup controllers": (read(root / "sys/fs/cgroup/cgroup.controllers") or "").split() or None,
              "cpu pressure (/proc/pressure/cpu)": (root / "proc/pressure/cpu").exists()}
     config = root / "proc/config.gz"
-    if config.is_file():
+    try:
         import gzip
-
+    except ImportError:             # the device's Python has no zlib
+        gzip = None
+    if config.is_file() and gzip is None:
+        found["kernel config"] = "(not read: this Python has no zlib to unpack /proc/config.gz)"
+    elif config.is_file():
         options = {}
         with gzip.open(config, "rt", errors="replace") as text:
             for line in text:
@@ -977,6 +1161,14 @@ def summary(root=Path("/"), *, boot=None, notable=None, journal_bytes=None, fail
     say("Audio", "; ".join(line.strip() for line in cards.splitlines() if re.match(r"\s*\d+ \[", line)) or "NO sound card")
     if codecs:
         say("Audio codecs", "; ".join(codecs))
+    hda = guard(lambda: hda_codecs(root), [])
+    if hda:
+        say("Codec IDs", codec_line(hda))
+    parameters = guard(lambda: module_parameters(root, "snd_hda_intel"), {}) or {}
+    if parameters:
+        # A per-card list: "mbp81,(null),(null),..." or all "(null)".
+        given = [part for part in (parameters.get("model") or "").split(",") if part.strip() not in ("", "(null)")]
+        say("HDA model", ",".join(given) if given else "none given (default fixup)")
     inputs = guard(lambda: input_devices(root), [])
     inputs = inputs if isinstance(inputs, list) else []
     lid = [d for d in inputs if "lid" in d["name"].lower()]
@@ -1029,11 +1221,18 @@ def summary(root=Path("/"), *, boot=None, notable=None, journal_bytes=None, fail
     say("Ethernet", "; ".join(f"{KNOWN.get(d['id'], d['id'])} driver={d['driver'] or 'NONE'}" for d in wired) or "none found")
     memory = re.search(r"^MemTotal:\s*(\d+)", read(root / "proc/meminfo") or "", re.M)
     say("Memory", f"{int(memory[1]) // 1024} MiB" if memory else "unknown")
+    # What kind of boot this was, so a development boot is never read as a
+    # release one (the first line says so too).
+    flags = guard(lambda: boot_flags(root, journal_transcripts=bool(notable.get("transcripts"))), {}) or {}
+    say("Cable link", "ON: a cable development boot (being.cable=1), not a release boot" if flags.get("cable")
+        else "off")
+    say("Voice debug", "ON: what the voice heard is written in journal.txt (from "
+        + ", ".join(flags.get("voice_debug_from") or ["unknown"]) + ")" if flags.get("voice_debug") else "off")
     if failed_units is not None:
         say("Failed units", failed_units.strip().replace("\n", "; ") or "none")
     if journal_bytes is not None:
         say("Journal copied", f"{journal_bytes // 1024} KiB")
-    head = [f"PipOS Try boot {boot or ''}".rstrip(),
+    head = [f"PipOS Try boot {boot or ''}".rstrip() + (" (CABLE DEVELOPMENT BOOT)" if flags.get("cable") else ""),
             f"Written {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}, "
             f"{uptime(root)} after power-on", ""]
     tail = []
@@ -1095,6 +1294,9 @@ class Journal:
         self.partial = lines.pop()[-4096:]
         for raw in lines:
             text = raw.decode("utf-8", "replace")
+            if not self.notable.get("transcripts") and TRANSCRIPT_EVIDENCE.search(text):
+                # Only that it happened, never the words: summary.txt says so.
+                self.notable["transcripts"] = ["seen"]
             for key, pattern in NOTABLE:
                 kept = self.notable.setdefault(key, [])
                 if len(kept) < NOTABLE_KEEP and pattern.search(text):
@@ -1188,6 +1390,12 @@ def snapshot(folder, number, journal, label, *, slow=False):
             write_file(folder / name, make())
         except Exception as error:
             log(f"could not write {name}: {error!r}")
+    try:
+        # The whole codec dumps, coefficients and all, in files of their own.
+        for name, text in codec_dumps().items():
+            write_file(folder / name, scrub(text))
+    except Exception as error:
+        log(f"could not write the codec dumps: {error!r}")
 
 
 def going_down():
@@ -1380,23 +1588,67 @@ def save_mic_result(result, path=MIC_RESULT):
     os.replace(temporary, path)
 
 
+def write_new_file(path, text):
+    """Write a file that is new on the stick and return its size on disk.
+
+    Written in place, not renamed into place (a renamed file on the FAT
+    stick was once found empty after a power-off), flushed, fsynced, then
+    the whole system synced, and only then measured."""
+    data = text.encode("utf-8", "replace")
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(descriptor, view):]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    sync_dir(path.parent)
+    os.sync()
+    return os.stat(path).st_size
+
+
+def saved_line(path):
+    """'Saved (42 KB): /run/beinglogs/boot-0001-.../check-hardware-101500.txt', or why not."""
+    if path is None:
+        return "Not saved: no PIPLOGS partition is in use on this boot, or the stick could not be written."
+    try:
+        size = os.stat(path).st_size
+    except OSError as error:
+        return f"Not saved: {path} cannot be read back ({error.strerror or error})."
+    return f"Saved ({max(1, round(size / 1024))} KB): {path}"
+
+
 def save_check(menu_report=None):
     """Save a 'Check hardware' result to the stick. Returns the file, or None.
 
     For mind/local_menu.py: ``usb_logs.save_check(report)`` after showing
-    ``installer.hardware_report()``. It never raises.
+    ``installer.hardware_report()``, then ``saved_line(path)`` to say so.
+    The file counts as saved only once it is synced and has a size on the
+    stick: an empty file is removed and None returned. It never raises.
     """
     try:
         folder = current_folder()
         if folder is None or not folder.is_dir():
             return None
-        path = folder / f"check-hardware-{time.strftime('%H%M%S', time.gmtime())}.txt"
+        stamp = time.strftime('%H%M%S', time.gmtime())
+        path = folder / f"check-hardware-{stamp}.txt"
+        for number in range(2, 100):
+            if not path.exists():
+                break
+            path = folder / f"check-hardware-{stamp}-{number}.txt"   # a second check within the second
         body = ""
         if menu_report is not None:
             body += section("Check hardware (menu)", json.dumps(menu_report, indent=1, default=str))
         body += section("summary", summary())
         body += hardware_report(slow=True, load=True)
-        write_file(path, scrub(body))
+        for name, text in codec_dumps().items():
+            body += section(f"codec dump {name}", text)
+        size = write_new_file(path, scrub(body))
+        if size <= 0:
+            log(f"the hardware check reached the stick empty: {path}")
+            path.unlink(missing_ok=True)
+            return None
         return path
     except Exception as error:
         log(f"could not save the hardware check: {error!r}")
@@ -1552,7 +1804,7 @@ def main(argv=None):
         sys.stdout.write(summary())
         return 0
     path = save_check()
-    print(f"Saved to the USB stick: {path}" if path else "No PIPLOGS partition is in use on this boot.")
+    print(saved_line(path))
     return 0 if path else 1
 
 

@@ -837,10 +837,64 @@ static char key_character(SDL_Keysym key)
     return shift && position ? shifted[position - plain] : (char)code;
 }
 
+/* The top row as printed on a Mac (the laptop boots with hid_apple.fnmode=1;
+ * fn+key sends F1 to F12). A level key leaves its request in the screen gate,
+ * as F9 and F10 do, for mind/local_screen.py to send on to the brainstem as
+ * the face's key (crates/face/src/keys.rs sends the same ones): "" for a
+ * media key with nothing to do here, NULL for any other key. None of them is
+ * ever typed into the session. Mission Control and Launchpad have no SDL
+ * scancode at all, so they never arrive. */
+static const char *media_request(SDL_Scancode code)
+{
+    switch (code) {
+    case SDL_SCANCODE_BRIGHTNESSDOWN:
+        return "brightness-down";
+    case SDL_SCANCODE_BRIGHTNESSUP:
+        return "brightness-up";
+    case SDL_SCANCODE_KBDILLUMDOWN:
+        return "kbd-light-down";
+    case SDL_SCANCODE_KBDILLUMUP:
+        return "kbd-light-up";
+    case SDL_SCANCODE_KBDILLUMTOGGLE:
+        return "kbd-light-toggle";
+    case SDL_SCANCODE_MUTE:
+    case SDL_SCANCODE_AUDIOMUTE:
+        return "speaker-mute";
+    case SDL_SCANCODE_VOLUMEDOWN:
+        return "volume-down";
+    case SDL_SCANCODE_VOLUMEUP:
+        return "volume-up";
+    case SDL_SCANCODE_AUDIOPLAY:
+    case SDL_SCANCODE_AUDIOPREV:
+    case SDL_SCANCODE_AUDIONEXT:
+    case SDL_SCANCODE_AUDIOSTOP:
+    case SDL_SCANCODE_EJECT:
+        return "";
+    default:
+        return NULL;
+    }
+}
+
+/* Held down, a level key keeps stepping; a toggle acts once per press. The
+ * gate holds one request of each name until it is taken, so a held key steps
+ * no faster than mind/local_screen.py reads (ten times a second). */
+static bool media_repeats(const char *request)
+{
+    size_t length = strlen(request);
+    return (length > 3 && strcmp(request + length - 3, "-up") == 0) ||
+           (length > 5 && strcmp(request + length - 5, "-down") == 0);
+}
+
 static bool handle_key(SDL_KeyboardEvent event, struct session *session, struct terminal *terminal,
                        const struct layout *geometry, bool visible, bool kms, int gate)
 {
     SDL_Keysym key = event.keysym;
+    const char *media = media_request(key.scancode);
+    if (media) {
+        if (gate >= 0 && *media && (!event.repeat || media_repeats(media)))
+            request_panel_action(gate, media);
+        return false;
+    }
     if (gate >= 0 && !event.repeat && (key.sym == SDLK_F9 || key.sym == SDLK_F10)) {
         request_panel_action(gate, key.sym == SDLK_F9 ? "recover" : "mute");
         return false;
@@ -1131,8 +1185,9 @@ static void panel_draw(struct panel *panel, struct terminal *terminal, bool full
     const char *title = panel->control.title[0] ? panel->control.title : panel->title;
     struct rgb dot;
     char chrome[sizeof(panel->chrome)];
-    snprintf(chrome, sizeof(chrome), "%s\n%s\n%d%d%d%d", title, panel_status(&panel->control, &dot),
-             panel->control.pip_typing, panel->control.pip_paused, panel->control.job_busy, scroll > 0);
+    bool fn = function_keys_need_fn();
+    snprintf(chrome, sizeof(chrome), "%s\n%s\n%d%d%d%d%d", title, panel_status(&panel->control, &dot),
+             panel->control.pip_typing, panel->control.pip_paused, panel->control.job_busy, scroll > 0, fn);
     if (full) {
         memcpy(canvas->pixels, panel->backdrop, pitch * (size_t)canvas->height);
         panel->hashes_valid = false;
@@ -1141,7 +1196,7 @@ static void panel_draw(struct panel *panel, struct terminal *terminal, bool full
     }
     if (full || strcmp(chrome, panel->chrome) != 0) {
         draw_panel_status(canvas, geometry->face, geometry->pad_x, title, &panel->control);
-        draw_panel_footer(canvas, geometry->face, geometry->pad_x, scroll > 0);
+        draw_panel_footer(canvas, geometry->face, geometry->pad_x, scroll > 0, fn);
         memcpy(panel->chrome, chrome, sizeof(chrome));
         low = 0;
         high = canvas->height - 1;
@@ -1540,8 +1595,9 @@ static int verbose_hold(const char *cmdline)
 }
 
 /* Leave the boot messages up on a verbose boot until the hold is over or a key
- * (Esc, F2, Enter, Space) is pressed, once per boot. Reads the keyboards
- * directly: nothing has opened the display yet. */
+ * (Esc, Enter, Space, F2, or Mission Control: the laptop's printed F2 is
+ * brightness up) is pressed, once per boot. Reads the keyboards directly:
+ * nothing has opened the display yet. */
 static void hold_for_boot_messages(void)
 {
     char cmdline[4096] = "";
@@ -1559,10 +1615,10 @@ static void hold_for_boot_messages(void)
     char note[200];
     if (hold > 0)
         snprintf(note, sizeof(note), "being-console: verbose boot: the screen stays on these messages for %d s;"
-                 " press Esc or F2 to go on now", hold);
+                 " press Esc or Enter to go on now", hold);
     else
         snprintf(note, sizeof(note), "being-console: verbose boot: the screen stays on these messages;"
-                 " press Esc or F2 to go on");
+                 " press Esc or Enter to go on");
     fprintf(stderr, "%s\n", note);
     int tty = open("/dev/tty0", O_WRONLY | O_NOCTTY | O_CLOEXEC);
     if (tty >= 0) {
@@ -1612,7 +1668,7 @@ static void hold_for_boot_messages(void)
                     unsigned code = events[k].code;
                     if (events[k].type == EV_KEY && events[k].value == 1 &&
                         (code == KEY_ESC || code == KEY_F2 || code == KEY_ENTER || code == KEY_SPACE ||
-                         code == KEY_KPENTER))
+                         code == KEY_KPENTER || code == KEY_SCALE))
                         pressed = true;
                 }
             }

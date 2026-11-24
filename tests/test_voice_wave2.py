@@ -27,7 +27,7 @@ from mind.voice import (
 from tests.test_voice_feedback import SILENCE, SPEECH, START, WAKE, Harness, real_sleep, tone
 
 REPO = Path(__file__).resolve().parents[1]
-HINT = "You can also type to me: press F2, then 6."
+HINT = "You can also type to me: press Mission Control, or fn and F2, then 6."
 
 
 def write_wav(path, frames=160, rate=16000):
@@ -107,7 +107,8 @@ class TypingHint(unittest.TestCase):
         with patch("mind.type_chat.installed_key", return_value=None):
             self.assertIsNone(typing_hint(False))
         with patch("mind.type_chat.installed_key", return_value="Y"):
-            self.assertEqual(typing_hint(False), "You can also type to me: press F2, then Y.")
+            self.assertEqual(typing_hint(False),
+                             "You can also type to me: press Mission Control, or fn and F2, then Y.")
 
 
 class ApologyReview(unittest.IsolatedAsyncioTestCase):

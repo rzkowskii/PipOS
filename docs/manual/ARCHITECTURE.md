@@ -1,7 +1,7 @@
 <!--
 doc: architecture
-verified: 2026-11-24T04:50
-sources: crates/bus/src/lib.rs crates/brainstem/src/main.rs crates/brainstem/src/machine.rs crates/brainstem/src/body.rs crates/brainstem/src/battery.rs crates/brainstem/src/brightness.rs crates/brainstem/src/peer.rs crates/brainstem/src/life.rs crates/brainstem/src/camera.rs crates/brainstem/src/linux_body.rs crates/bodycare/src/main.rs crates/bodycare/src/policy.rs crates/face/src/main.rs crates/face/src/anim.rs crates/face/src/link.rs crates/face/src/render.rs crates/face/src/eye.rs crates/face/src/pace.rs crates/face/src/dpms.rs crates/face/src/overlay.rs mind/turn.py mind/everyday.py mind/memory.py mind/embed.py mind/cortex.py mind/speech.py mind/voice.py mind/voice_engines.py mind/hands.py mind/night_shift.py mind/dream_model.py mind/dream_verify.py mind/eyes.py mind/retention.py mind/dream_policy.py mind/dream_store.py mind/boot_health.py mind/installer.py mind/network_policy.py mind/network_enforce.py os/package/being/being.mk os/package/cortex/being-cortex.service os/package/cortex/being-dream-cortex.service os/board/beingos/grub.cfg os/board/beingos/genimage.cfg os/board/beingos/post-build.sh os/board/beingos/rauc.conf mind/storage.py mind/backup.py mind/backup_crypto.py mind/wifi.py mind/initiative.py mind/consolidation.py mind/install_binding.py mind/usb_logs.py mind/model_pack.py mind/bus.py mind/local_screen.py mind/local_menu.py os/package/being/being-try-generator os/package/being/being-installed-generator os/package/being/being-screen-mode os/package/being/50-being.preset os/package/being/30-model-pack.conf os/board/beingos/being-update-ready os/board/beingos/slots.sh
+verified: 2026-11-24T22:17
+sources: crates/bus/src/lib.rs crates/brainstem/src/main.rs crates/brainstem/src/machine.rs crates/brainstem/src/body.rs crates/brainstem/src/battery.rs crates/brainstem/src/brightness.rs crates/brainstem/src/kbd_light.rs crates/face/src/keys.rs mind/keys.py mind/app_commands.py mind/mic_port.py mind/mic_channel.py mind/try_mode.py mind/diag.py mind/diag_sound.py mind/install_apply.py os/package/being/being-cable-link.service os/package/being/being-cable-ssh.service os/package/being/being-cable-workbench.service os/board/beingos/linux-cable.config crates/brainstem/src/peer.rs crates/brainstem/src/life.rs crates/brainstem/src/camera.rs crates/brainstem/src/linux_body.rs crates/bodycare/src/main.rs crates/bodycare/src/policy.rs crates/face/src/main.rs crates/face/src/anim.rs crates/face/src/link.rs crates/face/src/render.rs crates/face/src/eye.rs crates/face/src/pace.rs crates/face/src/dpms.rs crates/face/src/overlay.rs mind/turn.py mind/everyday.py mind/memory.py mind/embed.py mind/cortex.py mind/speech.py mind/voice.py mind/voice_engines.py mind/hands.py mind/night_shift.py mind/dream_model.py mind/dream_verify.py mind/eyes.py mind/retention.py mind/dream_policy.py mind/dream_store.py mind/boot_health.py mind/installer.py mind/network_policy.py mind/network_enforce.py os/package/being/being.mk os/package/cortex/being-cortex.service os/package/cortex/being-dream-cortex.service os/board/beingos/grub.cfg os/board/beingos/genimage.cfg os/board/beingos/post-build.sh os/board/beingos/rauc.conf mind/storage.py mind/backup.py mind/backup_crypto.py mind/wifi.py mind/initiative.py mind/consolidation.py mind/install_binding.py mind/usb_logs.py mind/model_pack.py mind/bus.py mind/local_screen.py mind/local_menu.py os/package/being/being-try-generator os/package/being/being-installed-generator os/package/being/being-screen-mode os/package/being/50-being.preset os/package/being/30-model-pack.conf os/board/beingos/being-update-ready os/board/beingos/slots.sh mind/diag_speech.py os/package/being/cable/sshd_config lab/build.sh
 -->
 
 # PipOS architecture
@@ -117,7 +117,11 @@ that matters for understanding the system:
   `body.care`. The brainstem also checks who sends certain topics:
   - On the laptop, `key.*` comes only from `face`, except `key.mute`
     from the mind (and only to mute, for "stop listening") and
-    `key.interrupt` from the typing chat.
+    `key.interrupt` from the typing chat. That includes the top row's
+    `key.brightness` and `key.volume` (`dir`: `up` or `down`),
+    `key.kbd_light` (`up`, `down` or `toggle`), `key.mute_speaker` and
+    `key.apps` (Launchpad), which the brainstem passes on to the mind
+    (`mind/keys.py`); none of them is held back by a closed lid.
   - On the laptop, `hear.*` comes only from `voice`, or from the typing
     chat (`keyboard`). No other organ can put words in the owner's mouth.
   - `see.*` comes only from `eyes`.
@@ -125,10 +129,25 @@ that matters for understanding the system:
     from `face`. The on-panel setup console joins under that name while
     it is showing.
   - `mind.announce`, `mind.clock`, `mind.progress`, `mind.shutdown_ready`,
-    `mind.dream_committed`, `mind.dreaming`, `being.brightness` and the
-    voice controls (`voice.volume`, `voice.chirps`,
-    `voice.level_request`, `voice.engine`) are accepted only from `mind`.
-    `voice.volume_state` and `voice.level` only from `voice`.
+    `mind.dream_committed`, `mind.dreaming`, `being.brightness`,
+    `being.kbd_light` and the voice controls (`voice.volume`,
+    `voice.chirps`, `voice.level_request`, `voice.engine`) are accepted
+    only from `mind`. `voice.volume_state` and `voice.level` only from
+    `voice`.
+  - The fields the keys added: `being.brightness` may carry `by` (1 to 50
+    points; a key steps by 6) and `being.kbd_light` takes `step` (1 or
+    −1), `level` (0 to 100) or `toggle: true`. A short `req` tag on either
+    comes back on the brainstem's answer (`body.brightness` or
+    `body.kbd_light`), so a spoken "brighter" never takes a key's answer;
+    the mind's keys tag theirs `req: "key"`. `body.kbd_light` carries `ok`,
+    `level`, `on`, `at_max`, `at_min` and `limited`, or `ok: false` with a
+    `reason`. `voice.volume` may carry `persist: false` (a key mute: applied
+    now, never saved) and `feedback: true` (the volume keys' click). The
+    voice also follows `mind.ready` (for its one speed measurement in a
+    Try session, and to report its level to a mind that connects later)
+    and `app.privacy` (no transcript text in the log while a guest is
+    here; the mind sends it again to a voice that restarts in guest
+    mode).
   - An announcement's `say.done` is accepted only from `voice`.
 - **Back-pressure.** Lines over 64 KiB are dropped. An organ whose
   512-line queue fills up, or whose write takes over a second, is
@@ -270,18 +289,45 @@ Only a hardware body (or a test naming `--poweroff-cmd`) powers off.
   battery or heat makes the lids a little heavier, a long quiet slows the
   idle glances, and after about half an hour alone the face greets a
   returning person more eagerly.
-- **Inputs.** The face turns these keys and clicks into events:
+- **Inputs.** The laptop boots with `hid_apple.fnmode=1`, as a Mac does:
+  the top row sends what is printed on it, and fn+key sends F1 to F12
+  (`crates/face/src/keys.rs`). The face turns these keys and clicks into
+  events:
 
   | Input | Event |
   |---|---|
   | Esc | `key.interrupt` |
-  | M, F10 | `key.mute` |
+  | M, F10 (fn+F10 on the MacBook) | `key.mute` (the microphone) |
   | F9 | `key.panel_recover` |
   | F1 | Toggles the captions and health overlay (local only; nothing logged) |
-  | F2 | Starts the local setup screen |
+  | F2, or Mission Control | Starts the local setup screen |
+  | Brightness down, up | `key.brightness` |
+  | Keyboard light down, up, toggle | `key.kbd_light` |
+  | Volume down, up | `key.volume` |
+  | Mute | `key.mute_speaker` (the speaker) |
+  | Launchpad | `key.apps` |
+  | Play/pause | `key.attend` while the eyes rest and no panel has focus, else `key.interrupt` |
+  | Previous, next, eject | Nothing; logged, never typed anywhere |
   | Click or touch | `key.touch`: a brief downward glance |
   | Space, Return, or a click, while the eyes rest and no panel has focus | `key.attend`: the brainstem treats it like hearing its name |
-  | Other keys while a workshop panel has focus | Sent to the hands organ |
+  | Other keys while a workshop panel has focus | Sent to the hands organ (never the top row's printed keys) |
+
+  The brightness, keyboard-light and volume keys repeat while held. SDL
+  has no code for Mission Control and Launchpad, so the face reads those
+  two from the keyboard's event device. The mind answers the top row's
+  events in code and never speaks for them (`mind/keys.py`): brightness
+  through `being.brightness` by 6 points, the keyboard light through
+  `being.kbd_light` in sixteenths (the brainstem owns the applesmc LED,
+  turns it off while the panel is dark and puts back the level it found
+  when it stops), the volume through `voice.volume` on a Mac's sixteen
+  steps, and Launchpad through the workshop, as "open the terminal". The
+  speaker mute is for now only: `voice.volume` with `level: 0` and
+  `persist: false`, a `speaker-muted` marker in `/mind`, and a ring, a
+  battery plea or the next start of the mind brings the sound back. For
+  1.5 s after a change, the face shows a level bar drawn from what the
+  brainstem and the voice report (`body.brightness`, `body.kbd_light`,
+  `voice.volume_state`), so a spoken "louder" shows it too. The full key
+  table is in the [reference](REFERENCE.md#keys-and-touch).
 
   `hear.missed` (heard, but nothing made out) shows `skepticism` for
   about a second.
@@ -306,7 +352,14 @@ Only a hardware body (or a test naming `--poweroff-cmd`) powers off.
    face sends `key.attend`). The brainstem moves to `attending`, and the
    voice chirps.
 2. The voice organ streams `hear.partial` messages, then sends
-   `hear.final`. The brainstem moves to `thinking`.
+   `hear.final`. The brainstem moves to `thinking`. With PocketSphinx, a
+   final of 4 s or less that is not a workshop command is decoded once
+   more with a JSGF grammar of the safe workshop phrases
+   (`app_commands.grammar_phrases()`: open, close, minimise, restore or
+   say, never anything destructive). The grammar's phrase replaces the
+   final only when it beats a free phone loop by 6 per 10 ms frame, the
+   final already holds the phrase's own words, nothing turns it around
+   ("don't …"), and at most two other words are left over.
 3. The mind cleans the text: it drops "please" and an address such as
    "Pip," or "hey Pip". A follow-up heard without the name is taken only
    with a sign it was meant for Pip (a question, its name, an answer to
@@ -325,6 +378,13 @@ Only a hardware body (or a test naming `--poweroff-cmd`) powers off.
       diary, voice engines;
    6. a greeting or check-in, or the morning brief;
    7. the model.
+
+   Each turn logs one line naming the step that answered it, such as
+   `route {"route": "workshop.open", "chars": 15}`; the words are added
+   only in voice-debug mode. While a guest is here, or while memory is
+   `session-only` or `explicit-only`, the line is
+   `route {"route": "private"}`
+   ([reference](REFERENCE.md#voice-debug-and-route-lines)).
 4. A code answer replies at once. It never invents anything.
 5. A model turn works like this:
    1. The mind builds the prompt from these parts:
@@ -360,6 +420,34 @@ Only a hardware body (or a test naming `--poweroff-cmd`) powers off.
 7. The voice organ speaks each clause with Piper or Flite and reports
    `say.started`, `say.level` and `say.done`. The microphone is closed
    while it speaks (half-duplex).
+
+### Choosing the speech engines
+
+The voice organ picks its engines at start (`mind/voice_engines.py`):
+
+- **Speaking.** On "auto" (the default), the natural voice, Piper's Alba,
+  speaks from the first reply when it is installed and its signed pack
+  verifies. Its real-time factor (compute time over audio time, idle,
+  over three runs of a fixed 12-word sentence) is measured later, at
+  rest; above 0.7 the voice goes back to Flite. Measurements are kept in
+  `/mind/audio/engines.json` by build and voice for a week. On a Try boot,
+  whose `/mind` is empty, the voice takes one measurement of its own
+  60 s after `mind.ready`, once Pip is at rest and the CPU is quiet
+  (CPU pressure under 5 %, or a load average under 0.7 without PSI),
+  giving up after 10 minutes.
+- **Hearing after the wake.** On "auto", Moonshine is used only when its
+  files are present, a passed Ivy Bridge speech smoke test is recorded
+  for the exact sherpa-onnx and ONNX Runtime bytes installed (no image
+  records one yet), and its real-time factor is at most 0.3. Otherwise
+  PocketSphinx writes the words.
+- **Forcing a choice.** `being.asr=` and `being.tts=` on the kernel
+  command line, or `BEING_ASR` and `BEING_TTS` in the environment (which
+  win), force an engine. A forced engine skips the speed rule (and, for
+  Moonshine, the smoke test) but is still loaded only if its pack
+  verifies.
+- **The microphone channel.** `auto` on the laptop image: it keeps the
+  one channel that carries speech when only one does. `mix` on the lab
+  image. `being.mic_channel=` and `BEING_MIC_CHANNEL` override it.
 
 ### Mind invariants
 
@@ -722,6 +810,9 @@ with nftables plus systemd units:
 | `paired-lan` | Local network | DHCPv4 to private ranges. SSH from the enrolled Mac on port 2222 (2223 for an opt-in development window) |
 | `internet` | Internet | IPv4 and IPv6 egress. NTP only to an owner-approved numeric server |
 
+A cable development stick adds its own link-local SSH link in every mode
+([Cable development link](#cable-development-link)).
+
 Weather also needs a separate **web lookups** permission. The weather
 client connects only to public IP addresses. The model servers, the bench
 and bodycare are confined to loopback (or no network) by their units,
@@ -756,8 +847,12 @@ Only one process owns the KMS display at a time:
    `/run/being-screen-dismissed` exists.
 3. When the console exits, `being-screen-mode face-return` creates that
    file and restarts the face.
-4. F2 from the face starts `being-local-screen.service`, which conflicts
-   with the face. The handoff then works the same way.
+4. F2 (or Mission Control) from the face starts
+   `being-local-screen.service`, which conflicts with the face. The
+   handoff then works the same way. While the face is down and the local
+   screen is up, the hands organ refuses to open a workshop panel with the
+   reason `no_face`, and the mind says "Close the Try menu to see my
+   terminal."
 
 This handoff is the first place to look when the screen is black.
 
@@ -767,20 +862,75 @@ On laptop Try sticks, `being-usb-logs run` writes evidence to the stick's
 own FAT32 `PIPLOGS` partition (GPT name `try-logs`). Each boot gets a
 folder with these files:
 
-- `summary.txt`
+- `summary.txt`, with the codec ids, the HDA model given to the driver,
+  and whether this is a cable boot and whether voice debugging is on
+  (and from where)
 - `hardware-report.txt`, with a kernel features section (cgroup
-  controllers, PSI, kernel options)
+  controllers, PSI; the kernel options are not read, because the
+  image's Python has no zlib to unpack `/proc/config.gz`), the HDA codecs'
+  sysfs ids and the `snd_hda_intel` and `snd_hda_codec` parameters
+- `card0-codec0.txt` and the other full codec dumps, read with
+  `snd_hda_codec`'s `dump_coef` switched on for the moment and then put
+  back
 - `dmesg.txt`
 - `services.txt`
 - `journal.txt`, synced every few seconds
 
-Check hardware's guided checks and bench mode add their results there.
-It looks only on the disk that holds the running root file system, and
-only when that disk is attached over USB. It never opens another disk.
-Hardware addresses and serial numbers are masked, and nothing Pip heard
-is written. This is the main channel for evidence from the physical
-MacBook; the first real boot's logs are in
+Check hardware's guided checks, bench mode and `pip-diag` runs (as
+`diag-<UTC>/` folders) add their results there. It looks only on the
+disk that holds the running root file system, and only when that disk is
+attached over USB. It never opens another disk. Hardware addresses and
+serial numbers are masked, and nothing Pip heard is written, except on a
+voice-debug boot (every entry of a cable development stick), where the
+voice's `heard:` lines and the mind's route words reach `journal.txt`.
+This is the main channel for evidence from the physical MacBook; the
+first real boot's logs are in
 `out/hardware-logs/first-real-boot-2026-11-23/` on the development Mac.
+
+### Diagnostics (pip-diag)
+
+`pip-diag` (`mind/diag.py` and `mind/diag_*.py`, standard library only)
+runs checks and writes `diag.json` and a plain-English `diag.txt`. It
+observes the running organs through the journal (the voice's debug lines,
+the mind's route lines, unit states) and tests routing in-process by
+importing the mind's own modules; it adds nothing to the brainstem's
+allow-lists. Because `hw:0,0` is exclusive and the image has no dmix, a
+section that opens the sound card sets the voice aside under a marker in
+`/run/being-diag` and always puts it back, on errors and signals too;
+as root, `systemd-run` wraps the run with `pip-diag restore` as its
+`ExecStopPost`. To hear test audio through the real voice path, it
+restarts `being-voice` with a runtime drop-in that sets `BEING_DIAG_MIC`:
+the voice then reads 16 kHz mono from that Unix socket instead of ALSA
+(`mind/mic_port.py`). Subcommands, flags, exit codes and files are in the
+[reference](REFERENCE.md#diagnostics-pip-diag).
+
+### Cable development link
+
+A development-only image (`BEING_LAPTOP_CABLE=1`,
+`BR2_PACKAGE_BEING_CABLE_DEV`) adds three units, which run only on a Try
+boot, only when `/usr/share/being/cable/authorized_keys` exists and only
+without `being.cable=0`:
+
+1. `being-cable-workbench` copies `/usr/lib/being` and `/etc/being` to
+   `/run/being-dev`, recompiles the copy with timestamp-checked `.pyc`
+   files and bind-mounts it back, before any organ starts.
+2. `being-cable-link` runs `being-network cable-up` after the lockdown:
+   the first wired port (by link type, with a device and no radio) gets
+   `169.254.77.1/16` and `fe80::77:1/64`, with no router advertisements or
+   addresses of its own choosing, and the state goes to
+   `/run/being-network/cable.json`.
+3. `being-cable-ssh` runs OpenSSH with its own configuration: root, one
+   Ed25519 key, from the link-local networks only, no forwarding.
+
+The firewall exception lives in `mind/network_enforce.render_rules`: in
+every network mode, SSH and ping on that port, from `169.254.0.0/16` and
+`fe80::/10` only, plus neighbour discovery. Without the cable state file
+the rules are exactly the release rules, and lockdown leaves the cable
+port up. The kernel adds `os/board/beingos/linux-cable.config` (HD-audio
+hwdep, reconfiguration and patch loader, ALSA debug) so `pip-diag codec`
+can try codec fixups live. Build-time guards keep the cable files out of
+every other image, and the installer, the ISO script, candidates and
+update signing refuse a cable rootfs.
 
 ### Try, Install and Restore
 
@@ -846,7 +996,8 @@ cannot be edited. A being therefore never wakes on a half-restored mind.
 
 | Concern | What PipOS does |
 |---|---|
-| Raw audio | Never written to disk, never on the bus. The microphone closes while Pip speaks and whenever the lid is not confirmed open |
+| Raw audio | Never written to disk by the voice, never on the bus. The microphone closes while Pip speaks and whenever the lid is not confirmed open. `pip-diag` keeps test signals, Pip's own voice and the microphone's recordings made while those play (`loop-*.wav`, `*-tone.wav`, `tts-*-room.wav`), which also pick up the room. Silent room-floor recordings and the owner's speech, and their transcripts, stay in RAM and are removed unless the owner agrees to keep them; after a run killed outright, the owner-speech folders stay in RAM until power-off |
+| Transcripts in logs | Only in voice-debug mode (`being.voice_debug=1` on a Try boot, or `BEING_VOICE_DEBUG=1`). The voice leaves them out while a guest is here (`app.privacy`, which the mind sends again to a voice that restarts during guest mode), and the mind's route line carries no words while a guest is here or in any memory mode but `persistent` |
 | Overheard speech | A follow-up not meant for Pip is counted and dropped, never stored or sent to the model |
 | Camera | Off by default. Needs a root-owned 0600 marker, the brainstem's per-epoch permission, an open lid and an awake state. Only `{present,x,y}` leaves the detector. Detections expire after 1.5 s |
 | Model servers | Loopback only, with no API key. Sandboxed units (`ProtectSystem=strict`, private devices, no network beyond localhost); the dream server cannot see `/mind` |
@@ -856,7 +1007,7 @@ cannot be edited. A being therefore never wakes on a half-restored mind.
 | Forgetting | Revision-aware deletion through derived replies, the search index, the prompt, reminders and the model cache. The lab verified a raw-disk scan on 4 KiB-cluster virtual disks. The physical SSD still needs a TRIM check |
 | Backups | `age` X25519 encryption, with an optional passphrase on the key. Deletions are carried as an encrypted proof plus an independently kept checkpoint |
 | Privilege | The organs still run as root, with systemd hardening where it is safe; the cortex, dream cortex, bench and bodycare units are sandboxed, and the eyes service is: AF_UNIX only, V4L only, `/mind` read-only |
-| Laptop image | No getty and no root login in any build. No SSH unless built with `BEING_LAPTOP_MAINTENANCE=1`, which adds key-only paired-Mac access |
+| Laptop image | No getty and no console or password root login in any build. No SSH unless built with `BEING_LAPTOP_MAINTENANCE=1`, which adds key-only paired-Mac access, or with `BEING_LAPTOP_CABLE=1`, a development-only Try stick that allows key-only root SSH from link-local addresses, never installs, and whose image holds its SSH host key |
 | Storage discipline | Small Python state files in `/mind` are written with the helpers in `mind/storage.py`. Directories are 0700, and are rejected unless they are real directories owned by the service user with no group or other bits. Files go to a temp file, are fsynced and renamed, then the directory is fsynced. The SQLite databases, the brainstem's `life.json` (its own atomic write) and the cortex slot saves are written by their own code. Readers of trust-bearing files `lstat` them and accept only regular files. New Python code should use these helpers |
 
 ## What is designed but not built
@@ -864,17 +1015,19 @@ cannot be edited. A being therefore never wakes on a half-restored mind.
 As of 24 November 2026:
 
 - **Speech on the real laptop.** Silero VAD, Moonshine and Piper (through
-  sherpa-onnx) are built in and chosen automatically by measured speed,
-  with PocketSphinx and Flite as the fallback. Whether they are fast
-  enough on Ivy Bridge has not been measured. Zipformer recognition and
+  sherpa-onnx) are built in. Piper's Alba speaks by default and is set
+  aside only if it measures too slow; Moonshine waits for a recorded
+  Ivy Bridge smoke test that no image carries yet. PocketSphinx and Flite
+  are the fallback. Whether they are fast enough on Ivy Bridge has not
+  been measured; `pip-diag full` and `engines` are built to measure it. Zipformer recognition and
   CAM++ speaker recognition from the design are not used: Pip cannot tell
   voices apart.
 - **Deliberate vision.** "What do you see?" says the camera is off, or
   that Pip can tell someone is there but cannot make out things. Eye
   contact does not open attention.
 - **Body.** These are not implemented: reactions to the accelerometer,
-  keyboard glow, the brightness and volume keys, light-responsive
-  backlight. Bodycare's controls are built but run in observe mode.
+  light-responsive backlight. The brightness, volume and keyboard-light
+  keys are built but have not been tried on the laptop. Bodycare's controls are built but run in observe mode.
 - **Drowsiness.** Long idle alone does not cause drowsiness; it needs
   dark or night. The panel stays lit during natural sleep with the lid
   open.

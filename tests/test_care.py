@@ -2,6 +2,8 @@
 
 import io
 import json
+import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -353,7 +355,8 @@ class Page(CareTestCase):
         with self.keys("q"):
             self.assertEqual(care.care_menu(self.mind), 0)
 
-    def test_health_page_shows_the_check_up_rows(self):
+    @staticmethod
+    def health_machine():
         from mind import doctor
 
         class Machine(doctor.System):
@@ -376,13 +379,60 @@ class Page(CareTestCase):
             def restart(self, unit):
                 raise AssertionError("the Health page only looks; it never repairs")
 
+        return Machine()
+
+    def test_health_page_shows_the_check_up_rows(self):
         self.assertIn("Health", {label for _, label, _ in care.summary_rows(self.mind, False)})
-        with self.keys(""):
-            care.health_page(self.mind, False, system=Machine())
+        with self.keys(""), patch.dict(os.environ, {"BEING_BUS": str(self.mind / "no-bus.sock")}):
+            started = time.monotonic()
+            care.health_page(self.mind, False, system=self.health_machine())
+            self.assertLess(time.monotonic() - started, 1.5, "no running being: no wait")
         shown = self.out.getvalue()
         for row in ("face: stopped (failed)", "ears and voice: running", "last backup: never", "memory disk:",
                     "are you okay?"):
             self.assertIn(row, shown)
+
+    def test_health_page_reads_the_body_from_the_running_being(self):
+        body = {"battery": 81, "health_pct": 55, "cycles": 900, "temp": 84}
+        with self.keys(""):
+            care.health_page(self.mind, False, system=self.health_machine(), facts=lambda: (body, {}))
+        shown = self.out.getvalue()
+        self.assertIn("battery health: 55%", shown)
+        self.assertIn("84", shown)
+        self.assertIn("how well can you hear me?", shown)
+
+    def test_live_facts_takes_the_retained_body_state_within_the_wait(self):
+        import asyncio
+        import socket
+        import threading
+
+        folder = Path(tempfile.mkdtemp(prefix="bus", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        path = folder / "bus.sock"
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(path))
+        server.listen(1)
+        hello = []
+
+        def brainstem():
+            connection, _ = server.accept()
+            with connection:
+                hello.append(json.loads(connection.makefile().readline()))
+                connection.sendall(b'{"t":"state.changed","state":"idle"}\n'
+                                   b'{"t":"body.lid","closed":false}\n'
+                                   b'{"t":"body.state","battery":64,"temp":51,"health_pct":81}\n')
+                connection.recv(1)
+        thread = threading.Thread(target=brainstem, daemon=True)
+        thread.start()
+        try:
+            body, voice = care.live_facts(wait=2.0, path=str(path))
+        finally:
+            server.close()
+        self.assertEqual(body, {"battery": 64, "temp": 51, "health_pct": 81, "lid_closed": False})
+        self.assertEqual(voice, {})
+        self.assertEqual(hello[0]["sub"], list(care.HEALTH_TOPICS))
+        self.assertNotIn("voice.level_request", json.dumps(hello), "only the mind may ask the voice")
+        self.assertEqual(care.live_facts(path=str(folder / "missing.sock")), ({}, {}))
 
     def test_a_damaged_memory_setting_is_shown_as_damaged(self):
         (self.mind / "memory-policy.json").write_text("{not json")

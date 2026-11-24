@@ -9,13 +9,13 @@ state is in RAM only and ends after ten quiet minutes, on "stop the game" or
 """
 
 import asyncio
+import binascii
 import itertools
 import json
 import random
 import re
 import threading
 import time
-import zlib
 from pathlib import Path
 
 from . import play_data
@@ -35,7 +35,9 @@ _GUEST_RECENT = {"joke": [], "fact": []}
 
 
 def item_id(text):
-    return f"{zlib.crc32(text.encode('utf-8')):08x}"
+    """A short stable id for a joke or fact. binascii's CRC-32 equals zlib's
+    and needs no zlib, which the device's Python is built without."""
+    return f"{binascii.crc32(text.encode('utf-8')):08x}"
 
 
 def _path(state_dir):

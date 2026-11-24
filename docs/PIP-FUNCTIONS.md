@@ -80,7 +80,7 @@ Pip does some things by itself. Each one is small, predictable and rate-limited,
 
 Asked "are you sentient?", it says, in code, that it is a small program aiming to be more, and that it does not know that it feels things the way you do.
 
-**Initiative budget.** Apart from timers, reminders, alarms and battery pleas, Pip makes at most 3 unprompted remarks a day. Each family (morning brief, nudges, questions) has its own switch in Care (F2). Saying "stop asking me things" turns questions off.
+**Initiative budget.** Apart from timers, reminders, alarms and battery pleas, Pip makes at most 3 unprompted remarks a day. Each family (morning brief, nudges, questions) has its own switch in Care (Mission Control, or fn+F2). Saying "stop asking me things" turns questions off.
 
 ---
 
@@ -100,13 +100,13 @@ How to read the tables:
 | Wake it | "Hey Pip" (wait for the chirp, then talk) | code (PocketSphinx keyphrase) | always-on spotting, a few percent of one core (estimate) | today |
 | One breath for commands | "Hey Pip, what time is it?" | code | as above | today |
 | Attention key | Press **Space**, or click the trackpad, while the eyes are resting | code | 0 | W2-L10 (face), W2-L6 (brainstem) |
-| Type to Pip | **F2**, then **6** "Talk to Pip by typing" (Try stick; installed: **F2**, then **Y**) | code; replies shown and spoken | 0 | W2-L1 (port of the hotfix) |
-| Pip owns up when it missed you | (automatic) "Sorry, I didn't catch that." Once per wake. The second time in 10 minutes it adds "You can also type to me: press F2, then 6." | code | 0 | W2-L1 |
+| Type to Pip | The menu key (**Mission Control**, or **fn+F2**; **F2** alone on round-2 sticks before 24 November, fn+F2 on the first stick), then **6** "Talk to Pip by typing" (Try stick; installed: the menu key, then **Y**) | code; replies shown and spoken | 0 | W2-L1 (port of the hotfix) |
+| Pip owns up when it missed you | (automatic) "Sorry, I didn't catch that." Once per wake. The second time in 10 minutes it adds "You can also type to me: press Mission Control, or fn and F2, then 6." | code | 0 | W2-L1 |
 | What did you hear? | "What did you hear?", "What did I just say?" | code: "I heard: 'set a timer for five minutes'." Kept in memory only for this wake, never stored | 0 | W2-L4 |
 | Say that again | "Say that again", "Repeat that", "Pardon?", "What did you say?" | code: repeats its last line | 0 | W2-L4 |
 | How well it hears | "How well can you hear me?", "Check your hearing" | code, from measured levels: "The room is quiet and your voice reaches me clearly." | 0 | W2-L1 (levels), W2-L6 (wording) |
 | Louder and quieter | "Speak up", "Be quieter", "Set your volume to 5" | code | 0 | today |
-| Natural voice | "Use your natural voice", "Use your original voice", "Which voice are you using?" | code | Piper on one thread: real-time factor 0.3-0.5 (estimate). It is chosen automatically only if it measures fast enough on this laptop | W2-L2 |
+| Natural voice | "Use your natural voice", "Use your original voice", "Which voice are you using?" | code | Piper on one thread: real-time factor 0.3-0.5 (estimate). Alba is the default from the first reply (the owner's choice, 24 November); "auto" sets it aside only if it fails its check or measures slower than 0.7 of real time on this laptop | W2-L2 |
 | Better hearing | (automatic) After "Hey Pip", Moonshine transcribes what you say | code (sherpa-onnx) | an estimated 0.3-0.8 s after you stop, while the model is idle | W2-L2 |
 | A microphone that wakes up right | (automatic) Boost and capture level are set at start; a quiet microphone gets a software lift | code | about 1% of one core (estimate; measured per frame tonight) | W2-L1 |
 
@@ -125,7 +125,7 @@ How to read the tables:
 | Repeating reminders | "Every weekday at 7, remind me to take my tablets", "Every Tuesday at 8 pm, remind me to put the bins out" | code | 0 | W2-L5 |
 | Snooze | "Snooze", "Five more minutes", "Snooze for ten minutes" | code | 0 | W2-L5 |
 | Morning brief | Your first words of the day ("Good morning", "Hey Pip", "How are you?") get a greeting, today's reminders, a body note if something matters, and one tentative dream remark | code | 0 tokens; about 4 s of speech once a day | W2-L5 (composer), W2-L3 (trigger) |
-| Quiet hours | Set in Care (F2) | code | 0 | today |
+| Quiet hours | Set in Care (Mission Control, or fn+F2) | code | 0 | today |
 | Weather (only online) | "What's the weather?" With no Internet mode it says so plainly | code | one web lookup, 0 tokens | today |
 
 ### 2.2 Memory, lists and notes
@@ -160,8 +160,8 @@ Lists and notes live in their own file on Pip's disk. They survive restarts, go 
 | Brightness | "Brighter", "Dimmer", "Set your brightness to 50 percent" | code | 0 | W2-L6 |
 | Sleep | "Go to sleep", "Good night" | code | 0 | today |
 | Switch off and restart | "Shut down", "Switch off", "Restart yourself" ("Shall I switch off? Say yes."), then it saves itself first | code | 0 | W2-L6 |
-| Version and updates | "What version are you?", "Did your update work?" Updates themselves stay on F2 | code | 0 | W2-L6 |
-| Care screen | F2: Care, with Health, Backup, Update, Camera, Dreams, Memory, Network, Workshop and Audio | code | 0 | today; Health page W2-L6 |
+| Version and updates | "What version are you?", "Did your update work?" Updates themselves stay in the menu (Mission Control, or fn+F2) | code | 0 | W2-L6 |
+| Care screen | Mission Control, or fn+F2: Care, with Health, Backup, Update, Camera, Dreams, Memory, Network, Workshop and Audio | code | 0 | today; Health page W2-L6 |
 | Privacy | Close the lid (eyes, ears and camera stop), M mutes, Esc interrupts | code | 0 | today |
 
 ### 2.4 Workshop and apps
@@ -351,7 +351,7 @@ A function is done when:
 | Recogniser after the wake | **PocketSphinx keeps "Hey Pip"; Silero VAD plus Moonshine v2 tiny transcribes**; Zipformer dropped | These files are downloaded and MIT-licensed, and the keyphrase spotter already heard "Hey Pip" on the real laptop |
 | Confirm commands when recognition confidence is low | **No; destructive commands always confirm** (forget, clear list, close a busy terminal, shut down) | Moonshine gives no confidence score; "What did you hear?" covers the rest |
 | Piper as a one-shot command per clause (wave 1), or resident | **Resident, through the sherpa-onnx C API from ctypes in the voice organ**, with Flite as the per-clause fallback | Reloading a 64 MB voice for every clause costs an estimated 0.3-1 s |
-| When Piper becomes the default | **Automatic: idle RTF ≤ 0.35 measured on this laptop** (a conservative stand-in for ≤ 0.5 under load); bench confirms | Owner decision 13 needs a measurement, so the measurement is built in |
+| When Piper becomes the default | **From the first reply; set aside only if its idle RTF measured on this laptop is above 0.7** (it was ≤ 0.35 before 24 November); bench confirms | The owner chose the natural voice (Alba) on 24 November, even if it starts a little later (owner decision 13) |
 | Workshop code slot | **`--parallel 2 --ctx-size 8192`** | hands already targets slot 1; parking slot 0 would cost 8.5 s or more each time |
 | Dream model quant | **Ship the downloaded Q4_K_M as the dream pack; bench Q4_0 later** | It is downloaded and hash-checked; overnight speed is not on the latency path |
 | Conversation quant | **Build Q4_0, IQ4_NL and Q8_0 candidates; do not switch tonight** | Plan principle 5: measure on the laptop first |
@@ -552,7 +552,7 @@ The speculative-read gate is `commands.may_be_command(text) or app_commands.may_
   - Accept: fake-library tests; an error raises so the voice falls back to Flite.
 - **L2.5 `voice_engines`.**
   - Do:
-    - `choose_tts`: "auto" picks Piper if its idle RTF over 3 runs of a fixed 12-word sentence is ≤ 0.35. The result is recorded in `/mind/audio/engines.json`, keyed by build-id and voice, and re-measured weekly.
+    - `choose_tts`: "auto" picks Piper from the first reply, and keeps it unless its idle RTF over 3 runs of a fixed 12-word sentence is above 0.7 (0.35 until 24 November). The result is recorded in `/mind/audio/engines.json`, keyed by build-id and voice, and re-measured weekly.
     - `choose_asr`: Moonshine if its files are present and its idle RTF on a test WAV is ≤ 0.3.
     - A handler for "use your natural voice", "use your original voice" and "which voice are you using?".
   - Accept: tests with injected measurements.

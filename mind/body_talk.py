@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .keys import MENU_KEYS
+
 try:
     from .reply import Confirm, Reply, clean as _clean
 except ImportError:  # the everyday skills' types, as frozen in the spec (5.2)
@@ -286,8 +288,9 @@ def hearing_line(voice):
     if floor is None:
         return "[neutral] I haven't measured my hearing yet. Ask me again in half a minute."
     if floor <= SILENT_FLOOR:
-        return ("[concern] My microphone is giving me silence. Say 'run a check-up' and I'll try to fix it, "
-                "or type to me: press F2, then 6.")
+        # The menu key's name is six words: the line stays within twenty-five.
+        return ("[concern] My microphone is giving me silence. Say 'run a check-up', "
+                f"or type to me: press {MENU_KEYS}, then 6.")
     if floor > NOISY_FLOOR:
         return "[concern] The room is noisy for me, so I may miss words. Coming a little closer would help."
     if peak is None:

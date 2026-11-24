@@ -1,8 +1,12 @@
 import asyncio
+import contextlib
+import io
 import json
 import tempfile
 import threading
+import time
 import unittest
+import unittest.mock
 import wave
 from pathlib import Path
 
@@ -53,7 +57,7 @@ class PiperEngineTests(unittest.TestCase):
 
     def test_errors_raise_so_the_voice_can_use_flite(self):
         engine = PiperEngine(self.folder, library=FakeLibrary(error=RuntimeError("boom")))
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(RuntimeError), contextlib.redirect_stderr(io.StringIO()):
             asyncio.run(engine.synthesize("Hello.", self.root / "x.wav", 1.0))
         with self.assertRaises(ValueError):
             engine.synthesize_blocking("   ", self.root / "x.wav", 1.0)
@@ -69,10 +73,89 @@ class PiperEngineTests(unittest.TestCase):
             raise sherpa.Unavailable("the voice would not load")
 
         engine = PiperEngine(self.folder, library=FakeLibrary(), loader=loader)
-        for _ in range(3):
-            with self.assertRaises(sherpa.Unavailable):
-                engine.synthesize_blocking("Hello.", self.root / "x.wav")
+        with contextlib.redirect_stderr(io.StringIO()):
+            for _ in range(3):
+                with self.assertRaises(sherpa.Unavailable):
+                    engine.synthesize_blocking("Hello.", self.root / "x.wav")
         self.assertEqual(len(calls), 1)
+
+    def test_a_clause_with_no_audio_silences_the_voice_for_the_session(self):
+        fake = FakeLibrary(error=RuntimeError("no espeak-ng"))
+        engine = PiperEngine(self.folder, library=fake)
+        told = []
+        engine.on_silent = told.append
+        self.assertEqual(engine.name, "piper")
+        self.assertTrue(callable(engine.synthesize))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            for _ in range(3):
+                with self.assertRaises(RuntimeError) as caught:
+                    engine.synthesize_blocking("Hello there.", self.root / "x.wav")
+                self.assertEqual(str(caught.exception), "the voice produced no audio")
+        # One log line, one generation attempt, and the reason kept once.
+        self.assertEqual(err.getvalue().count("\n"), 1)
+        self.assertIn("The natural voice made no sound for a clause (the voice produced no audio). "
+                      "Using the original voice for the rest of this session.", err.getvalue())
+        self.assertEqual(len(fake.configs["speeds"]), 1)
+        self.assertEqual(told, ["the voice produced no audio"])
+        # It now says it speaks with Flite, and hands the voice organ Flite's command.
+        self.assertEqual(engine.name, "flite")
+        self.assertIsNone(engine.synthesize)
+        self.assertEqual(engine.command("slt", 1, "Hi.", "/tmp/x.wav"),
+                         ["flite", "-voice", "slt", "-t", "Hi.", "-o", "/tmp/x.wav"])
+        # Bad input is still the caller's mistake.
+        with self.assertRaises(ValueError):
+            engine.synthesize_blocking("  ", self.root / "x.wav")
+        engine.close()
+
+    def test_a_measuring_tool_keeps_trying_every_sentence(self):
+        fake = FakeLibrary(error=RuntimeError("no espeak-ng"))
+        engine = PiperEngine(self.folder, library=fake)
+        engine.sticky = False
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            for _ in range(2):
+                with self.assertRaises(RuntimeError):
+                    engine.synthesize_blocking("Hello there.", self.root / "x.wav")
+        self.assertEqual(len(fake.configs["speeds"]), 2)
+        self.assertEqual((engine.name, engine.silenced, err.getvalue()), ("piper", None, ""))
+        engine.close()
+
+    def test_a_clause_that_takes_too_long_silences_the_voice(self):
+        class Slow:
+            sample_rate = 22050
+
+            def write(self, text, path, *, length_scale):
+                time.sleep(0.3)
+                return 1.0
+
+            def close(self):
+                pass
+
+        engine = PiperEngine(self.folder, library=FakeLibrary(), loader=Slow)
+        with unittest.mock.patch.object(tts_sherpa, "CLAUSE_BASE_S", 0.05), \
+                unittest.mock.patch.object(tts_sherpa, "CLAUSE_CHARS_PER_S", 10 ** 6), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(TimeoutError):
+                asyncio.run(engine.synthesize("Hello.", self.root / "x.wav", 1.0))
+        self.assertEqual(engine.name, "flite")
+        self.assertIn("a clause took more than", engine.silenced)
+        self.assertIn("for the rest of this session", err.getvalue())
+        engine.close()
+
+    def test_the_probe_of_a_real_engine_that_gives_no_audio_picks_flite(self):
+        from mind import voice_engines as ve
+        from mind.tts import FliteEngine
+
+        engine = PiperEngine(self.folder, library=FakeLibrary(error=RuntimeError("no espeak-ng")))
+        with unittest.mock.patch.dict(ve._silent, clear=True), \
+                unittest.mock.patch.object(engine, "verified", return_value=(True, None)), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            chosen, note = ve.choose_tts("auto", state_dir=self.root, build="b1", engine=engine)
+        self.assertIsInstance(chosen, FliteEngine)
+        self.assertEqual(note, "The natural voice made no sound in a test (the voice produced no audio). "
+                               "Using the original voice.")
+        self.assertEqual(err.getvalue(), "", "the probe's note is the only line")
+        self.assertEqual(engine.name, "flite")
+        engine.close()
 
     def test_missing_files_and_library_are_listed(self):
         empty = self.root / "empty"
@@ -82,7 +165,7 @@ class PiperEngineTests(unittest.TestCase):
         self.assertEqual(len(missing), 4)
         self.assertFalse(engine.available())
         self.assertEqual(engine.label(), "Alba")
-        with self.assertRaises(sherpa.Unavailable):
+        with self.assertRaises(sherpa.Unavailable), contextlib.redirect_stderr(io.StringIO()):
             engine.synthesize_blocking("Hello.", self.root / "x.wav")
 
     def test_two_models_in_one_folder_are_ambiguous(self):

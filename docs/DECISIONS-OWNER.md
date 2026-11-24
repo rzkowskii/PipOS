@@ -38,7 +38,7 @@ To change one: say so in any session, and the change is recorded in
 | # | Question | Default | If he picks otherwise | Status |
 |---|---|---|---|---|
 | 12 | **Camera default** | Off; switched on in Care ("you can use your camera"), with the green LED explained | On by default: presence greetings work from the first boot | Made |
-| 13 | **Voice** | Natural (Piper) once it benchmarks at RTF 0.5 or less on the laptop, with a light robot timbre; Flite stays as the fallback and as "Original voice" | Keep Flite only: more robotic, lighter on the CPU | Made (plan 5.3), waits on bench data |
+| 13 | **Voice** | Natural (Piper, Alba) from the first reply. Flite only as the fallback (Alba fails its check or will not load, or measures slower than 0.7 of real time on the laptop) and as "Original voice" in Setup | Keep Flite only: more robotic, lighter on the CPU | Made (his choice, 24 Nov, after hearing Flite on the laptop; [DECISIONS.md](DECISIONS.md) row 18) |
 | 14 | **Dream window** | Whenever the lid is closed on AC | Night only (midnight to 5 am, as today) | Made (plan 6.1) |
 | 15 | **Dream temperature target** | Package 80 °C held by bodycare; hard stops at 92 °C package or 40 °C battery | Cooler (70 °C) dreams slower; hotter is not offered | Made (plan 2.8) |
 | 16 | **Dream model** | Qwen3-1.7B Q4_0; a 4B only as an optional "long cool night" arm | 4B by default: hotter and slower, and may not fit the models partition with upgrades | Made (plan section 2) |
@@ -47,6 +47,7 @@ To change one: say so in any session, and the change is recorded in
 | 19 | **Studio-assisted mode** (a remote cortex on the Mac Studio) | Off; the appliance accepts only its own loopback model | On: an explicit opt-in host, shown on the face; conversations leave the laptop over the LAN | Made (default off; plan 7.10 waits on him) |
 | 20 | **Try logging** on the stick | On, with MAC and serial numbers masked (plan 3.16) | Off: a failed boot leaves nothing to read | Made |
 | 21 | **Speaker enrolment** (plan 5.4) | Offered in Setup, opt-in; until enrolled every voice is "unknown" and only addressed speech is kept | Required: nothing works until he enrols | Made |
+| 22 | **Which natural voice** | Alba (`en_GB-alba-medium`), chosen from a 27-voice audition. The packed sherpa-onnx archive is fine-tuned from Piper's U.S. English lessac voice, whose data is licensed for research only: fine for his own stick. Before any public release image ships Alba, replace it with Piper's retrain of 9 November 2026, fine-tuned from a base trained from scratch (it needs Piper 1.5 or later; whether sherpa-onnx runs it is not yet checked) | Another auditioned voice whose licence allows redistribution, such as Cori | Made (his choice, 24 Nov); the swap is open before a public release |
 
 ## Already decided by him
 
@@ -54,3 +55,6 @@ To change one: say so in any session, and the change is recorded in
 - Wi-Fi, Internet mode, default skills and the installer are his requests and stay (opt-in, offline by default).
 - "Merge all changes" (21 Nov): every staged patch is decided in plan 1.21.
 - Training never uses his conversations.
+- The natural voice is Alba, by default from the first reply (24 Nov; items 13 and 22).
+- The keyboard works as on a Mac: the top row does what is printed on it, and Pip's own F-keys need fn (24 Nov; [DECISIONS.md](DECISIONS.md) row 19).
+- The cable development stick is for development only and never installs (24 Nov; [DECISIONS.md](DECISIONS.md) row 20).

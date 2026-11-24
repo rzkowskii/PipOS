@@ -40,7 +40,8 @@
  * The renderer draws its own chrome; program output can never draw over it:
  * - a 28 px status bar: TITLE on the left, STATUS on the right (both set by
  *   hands through OSC 7770 below, never from the shell's bytes);
- * - a 40 px footer: "Esc Stop Pip · F3 Hide · F10 Mic · PgUp/PgDn";
+ * - a 40 px footer: "Esc Stop Pip · F3 Hide · F10 Mic · PgUp/PgDn" (on the
+ *   laptop's printed-first top row: "fn F3 Hide · fn F10 Mic");
  * - the text grid in between, in the medium 11x24 font: about 107 columns by
  *   23 rows at 1280x640. hands sets the pty to 107x23 (GRID_* in hands.py).
  *

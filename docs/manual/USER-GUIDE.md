@@ -1,7 +1,7 @@
 <!--
 doc: user-guide
-verified: 2026-11-24T04:50
-sources: mind/commands.py mind/reminder_language.py mind/reminders.py mind/turn.py mind/skills.py mind/setup.py mind/care.py mind/local_menu.py mind/retention.py mind/backup.py mind/device.py mind/initiative.py mind/initiative_setup.py mind/voice.py mind/voice_engines.py mind/installer.py mind/recognition.py crates/face/src/main.rs crates/brainstem/src/machine.rs crates/brainstem/src/body.rs crates/brainstem/src/battery.rs os/board/beingos/try-grub.cfg os/package/being/being-camera README.md docs/LAB.md docs/HARDWARE.md
+verified: 2026-11-24T22:17
+sources: mind/commands.py mind/reminder_language.py mind/reminders.py mind/turn.py mind/skills.py mind/local_screen.py mind/setup.py mind/care.py mind/local_menu.py mind/retention.py mind/backup.py mind/device.py mind/initiative.py mind/initiative_setup.py mind/voice.py mind/voice_engines.py mind/installer.py mind/recognition.py mind/app_commands.py mind/hands.py mind/usb_logs.py mind/diag.py mind/diag_report.py crates/face/src/main.rs crates/face/src/keys.rs mind/keys.py crates/brainstem/src/machine.rs crates/brainstem/src/body.rs crates/brainstem/src/battery.rs os/board/beingos/try-grub.cfg os/package/being/being-camera README.md docs/LAB.md docs/HARDWARE.md os/board/beingos/try-image.sh mind/diag_sound.py mind/diag_speech.py
 -->
 
 # Living with Pip: the PipOS user guide
@@ -90,8 +90,9 @@ Before you ever erase macOS, the design asks for three chores:
    The first stick, of 23 November, has only the first three entries.
 3. The start menu appears. Press **1 – Try PipOS**. The menu also offers
    **2** Install, **3** Restore a being, **4** Setup, **5** Check hardware,
-   **6** Talk to Pip by typing and **7** Back up to a USB stick. Left alone
-   for four minutes, the menu gives the screen back to the eyes.
+   **6** Talk to Pip by typing, **7** Back up to a USB stick and **8** Run
+   diagnostics (see [Running diagnostics](#running-diagnostics)). Left
+   alone for four minutes, the menu gives the screen back to the eyes.
 4. The screen goes black, and then two cyan eyes open. They peek,
    blink and settle. Pip is awake.
 
@@ -119,7 +120,8 @@ Europe London" (or your own zone), or use Setup **T**. The zone decides:
 If the boot goes wrong:
 
 - With **show boot messages**, the text stays up for 20 seconds before
-  the start menu appears. Press Esc, Enter, Space or F2 to go on sooner.
+  the start menu appears. Press Esc, Enter, Space, F2 or Mission Control to
+  go on sooner.
 - If the normal entry hits a fatal error, the message stays for 30
   seconds and the Mac then restarts. Hold Option again to come back to
   the stick. If the stick's system cannot be found within 60 seconds, the
@@ -175,22 +177,39 @@ weather city need its name there, as in "Pip, remind me to call Mum at 6
 pm.", or a question ("Can you remind me to call Mum at 6 pm?"). Other
 room talk in that window is ignored and not kept.
 
-Controls you can use at any time:
+Controls you can use at any time. The MacBook's top row works as it does
+on a Mac: each key does what is printed on it, and you hold **fn** for F1
+to F12. So in this guide **F2** means **fn+F2** (or the Mission Control
+key), **F9** means **fn+F9**, and so on. The footers on the start menu,
+the setup screens and the terminal say so too: **fn F10 Mic**, **fn F9
+Panel**, **fn F3 Hide**.
 
 | Key | Does |
 |---|---|
 | **Esc** | Stop Pip mid-sentence |
-| **M** or **F10** | Mute or unmute the microphone. The face shows when it is muted |
-| **F2** | Open settings. In Try mode it opens the start menu; choose **4 – Setup** |
-| **F1** | Show or hide captions: the last thing Pip heard, what it is saying and how its parts are. Off by default, never saved |
-| **F9** | Bring the face back if the screen stays blank because Pip has no lid reading |
+| **M** or **fn+F10** | Mute or unmute the microphone. The face shows when it is muted |
+| **fn+F2**, or **Mission Control** (F3) | Open settings. In Try mode it opens the start menu; choose **4 – Setup** |
+| **fn+F1** | Show or hide captions: the last thing Pip heard, what it is saying and how its parts are. Off by default, never saved |
+| **fn+F9** | Bring the face back if the screen stays blank because Pip has no lid reading |
+| **Brightness** (F1, F2) | *New.* The screen dimmer or brighter, never so dim that the eyes vanish. A bar shows the new level |
+| **Launchpad** (F4) | *New.* Open Pip's terminal; press again to put it away |
+| **Keyboard light** (F5, F6) | *New.* The keys' backlight dimmer or brighter. It goes out with the lid closed and comes back when you open it |
+| **Play/pause** (F8) | *New.* While the eyes rest: listen, as for "Hey Pip". While Pip talks: stop it, as Esc does |
+| **Mute** (F10) | *New.* Pip's speaker off, and back on at the same level. This is the speaker, not the microphone: Pip still hears you. "speaker muted" stays on the face while it is off. A timer, alarm or reminder, or a low-battery warning, turns the speaker back on before it rings, and so does restarting Pip |
+| **Volume** (F11, F12) | *New.* Pip's speaker quieter or louder. A bar shows it, and a short click at the new loudness, as on a Mac (not while Pip is listening to you or talking, or with its sounds switched off). The lowest step is silence, the same as the mute key |
 | **Space**, **Return** or a click | While the eyes rest: listen, as if you had said "Hey Pip". Not while the terminal has the keyboard, and not while muted |
-| **F2**, then **6** (Try stick) or **F2**, then **Y** (installed) | Type to Pip instead of talking. It answers on screen and out loud. **Esc** leaves |
+| **Mission Control** or **fn+F2**, then **6** (Try stick) or **Y** (installed) | Type to Pip instead of talking. It answers on screen and out loud. **Esc** leaves |
+
+The previous, next and eject keys do nothing. None of the top row's printed
+keys is ever typed into the terminal. On the start menu and setup screens
+the brightness, keyboard-light, volume and speaker-mute keys work as they do
+on the face, with **fn+F9** and **fn+F10**, but no bar or "speaker muted"
+note is shown there.
 
 If Pip hears you but cannot make out the words, it says "Sorry, I
 didn't catch that." (once each time you wake it). The second time within
-ten minutes it adds "You can also type to me: press F2, then 6." (on an
-installed Pip, "then Y"). Once it has answered you, a cough or the TV in the
+ten minutes it adds that you can type to it instead: the menu key (**fn+F2**
+or Mission Control), then **6** (on an installed Pip, then **Y**). Once it has answered you, a cough or the TV in the
 few seconds after its reply gets no apology.
 
 Tips for good conversations:
@@ -211,7 +230,7 @@ Tips for good conversations:
   within about three seconds after you stop talking. That has not been
   measured yet.
 - **Muted means deaf.** While muted, Pip does not react to "Hey Pip" at
-  all, even after you close and reopen the lid. Press **M** or **F10** to
+  all, even after you close and reopen the lid. Press **M** or **fn+F10** to
   unmute. "Stop listening" mutes it by voice, but nothing spoken can
   unmute it, because it cannot hear you.
 - **Time limits.**
@@ -224,9 +243,12 @@ Tips for good conversations:
   The wake phrase is always heard with PocketSphinx, whose dictionary is
   fixed, so Setup refuses a wake phrase with words outside it. What you
   say after the wake phrase is written down by Moonshine when that is
-  installed and fast enough on this laptop, and otherwise by PocketSphinx,
-  which can only write words it knows: unusual names may then be heard as
-  something else. To check how something was heard, ask "What did you
+  installed, has passed a speech test on this kind of processor and is
+  fast enough on this laptop, and otherwise by PocketSphinx, which can only
+  write words it knows: unusual names may then be heard as something else.
+  When PocketSphinx's words are not a workshop command, a short request is
+  read once more against the workshop's own phrases, so "Hey Pip, open a
+  terminal" said in one breath is not lost to a near miss. To check how something was heard, ask "What did you
   hear?" straight after saying it.
 
 ## Things you can say
@@ -249,7 +271,7 @@ they have been tested only on the development Mac, and
 | "Say that again" / "Pardon?" / "What did you say?" | *New.* Repeats its last line |
 | "How well can you hear me?" / "Check your hearing" | *New.* Says how quiet the room is and how clearly your voice reaches it, from measured levels |
 | "Speak up" / "Be quieter" / "Set your volume to 5" | Changes its volume |
-| "Use your natural voice" / "Use your original voice" / "Which voice are you using?" | *New.* Switches between the natural voice (Alba) and the original robot voice. The natural voice is only chosen by itself if it measured fast enough on this laptop |
+| "Use your natural voice" / "Use your original voice" / "Which voice are you using?" | *New.* Switches between the natural voice (Alba) and the original robot voice. Left on automatic, Pip speaks with the natural voice from its first reply, whenever that voice is installed and checks out. It measures the voice's speed later, while resting, and goes back to the original voice only if Alba takes more than 0.7 s to make each second of speech. "Which voice" says whether that has been checked yet |
 
 ### Time and routines
 
@@ -319,7 +341,7 @@ microphone reset, and that is logged, never spoken.
 
 | Say | Pip |
 |---|---|
-| "Open the terminal" / "Minimise the terminal" / "Show me your face" / "Close the terminal" | *New.* A small terminal beside its eyes |
+| "Open the terminal" / "Open a new terminal" / "Launch a terminal" / "Minimise the terminal" / "Show me your face" / "Close the terminal" | *New.* A small terminal beside its eyes. The name may come last too ("Open the terminal, Pip"). While the Try menu has the screen, Pip says "Close the Try menu to see my terminal." The **Launchpad** key opens and hides it as well |
 | "Write a script that counts down from ten" / "In the terminal, draw a box" | *New.* It types the program itself |
 | "Stop writing that script for a second" / "Carry on" / "Cancel that" | *New.* Pause, resume or stop |
 | "Run it" / "Did it work?" / "Fix it" | *New.* Runs only when you say so, and reports what happened |
@@ -665,7 +687,8 @@ permission.
 | Conversations and memories | Only on the laptop's `/mind` partition, and in backups you make |
 | Camera images | Off by default. When on, images never leave the face detector. Only "a face is here, at this position" is used |
 | Language model | Runs on the laptop. Nothing is sent to any AI service |
-| Boot diagnostics (Try sticks) | Hardware details and system messages on the stick's `PIPLOGS` partition, never what you say. Care **D** turns them off |
+| Boot diagnostics (Try sticks) | Hardware details and system messages on the stick's `PIPLOGS` partition, never what you say. Care **D** turns them off. The one exception is a *cable development stick*, which is for development only: it writes what Pip heard into those messages, and the **Voice debug** line of its `summary.txt` says ON |
+| Diagnostics (Try menu **8**) | Measurements, test sounds and Pip's own voice on the `PIPLOGS` partition, and also the microphone's recordings made while a test sound or Pip's voice plays, which pick up whatever else is in the room. Recordings of the quiet room and of you speaking, and what you said, stay in memory and are deleted, unless you answer yes when the Voice check asks |
 
 ## The camera
 
@@ -751,7 +774,8 @@ Disks the installer will not use appear under "Not available", with the
 reason: in use, too small, read-only, or could not be checked.
 
 **5 – Check hardware** also saves its report to the stick's `PIPLOGS`
-partition, so you can share it. Press **G** there for three guided checks
+partition, so you can share it, with the sound chip's full settings at the
+end. Press **G** there for three guided checks
 (the top-row keys, the screen going dark, and, with your permission, the
 camera light). Their results are saved with the boot's diagnostics.
 
@@ -868,10 +892,18 @@ a maintenance console:
   [the reference](REFERENCE.md#environment-variables).
 
 The **laptop** build of PipOS deliberately has no login console, so these
-commands need one of two things:
+commands need one of these:
 
 - a *maintenance* build, which adds paired-Mac SSH access;
-- a lab or virtual-laptop image.
+- a lab or virtual-laptop image;
+- for development only, a *cable development* Try stick, which a Mac
+  reaches over a plain Ethernet cable ([LAB.md](../LAB.md#cable-development-build)).
+  It never installs, and it holds a secret key, so it is never given to
+  anyone. Adding `being.cable=0` to a boot entry turns off the cable
+  link, SSH and the writable copy of the code. Voice debugging stays on,
+  because the entry also carries `being.voice_debug=1`; for an ordinary
+  Try boot, add `being.voice_debug=0` after it as well (the last value
+  counts).
 
 ## Troubleshooting
 
@@ -880,7 +912,8 @@ commands need one of two things:
 | Black screen after the boot menu | On a Try stick, reboot and choose **safe graphics** (**s**) or **show boot messages** (**v**) to see what happened. Diagnostics are saved to the stick's `PIPLOGS` partition. On an installed PipOS, press **Esc** within the first second after power-on to show its hidden boot menu, then choose **safe graphics** (**s**), **show messages** (**v**) or **previous slot** (**p**). After three starts in a row that never became healthy, it shows its messages by itself |
 | Screen blank with the lid open | Press **F9** |
 | Pip doesn't react to "Hey Pip" | Check the face isn't showing *muted* (press **M**). Wait for the chirp and for the eyes to lock on before speaking. Get closer and reduce background noise. The wake phrase must be one the recognizer knows. Or press **Space** |
-| Pip hears "Hey Pip" but not the rest | Ask "How well can you hear me?". Check the levels in **F2 → A**. On a Try stick, reboot and try **alternative microphone** (**m**) or **alternative microphone 2** (**n**). Meanwhile, type to it (**F2**, then **6** or **Y**) |
+| Pip hears "Hey Pip" but not the rest | Ask "How well can you hear me?". Check the levels in **F2 → A**. On a Try stick, run **8 – Run diagnostics** (below), or reboot and try **alternative microphone** (**m**) or **alternative microphone 2** (**n**). Meanwhile, type to it (**F2**, then **6** or **Y**) |
+| Pip's voice sounds garbled or broken up | On a Try stick, run **8 – Run diagnostics**, **2 – Full**: it plays test sounds through the speakers and records them, which tells a speaker or timing fault from the voice itself |
 | Pip wakes when you didn't call it | Phrases that sound like the wake phrase can sometimes trigger it, especially with background speech or TV. Choose a more distinctive wake phrase in setup |
 | Pip says "I can't think right now. My language model isn't answering." | The model is still loading or has restarted. Wait 20–30 seconds. Direct commands (time, reminders, memory) still work |
 | Pip's eyes look dazed | Part of Pip has stopped and is restarting by itself. If it lasts minutes, restart the laptop |
@@ -893,6 +926,30 @@ commands need one of two things:
 | The laptop switched itself off | It was on battery and either nearly empty or closed for 10 minutes. It saved itself first. Plug it in and power on |
 | The laptop rebooted after an update | It probably rolled back to the previous version. Your memory is untouched |
 
+### Running diagnostics
+
+On a Try stick, the start menu's **8 – Run diagnostics** measures Pip's
+microphone, speakers, voice and spoken commands, and says in plain words
+what looks wrong. Choose:
+
+| Key | Check | Takes |
+|---|---|---|
+| **1** | **Quick**: the system, the sound chip's set-up, how spoken commands are routed, the model, heat, battery and storage, and a short sound check. Nothing for you to do | About a minute |
+| **2** | **Full**: everything in Quick, plus test sounds through the speakers recorded by the microphone, every voice scored, and the speech engines' speed | 10 to 15 minutes |
+| **3** | **Voice**: you take part. Pip asks whether to keep your recordings (the answer is no unless you say yes), then asks you to say a few phrases, to rate each voice from 1 to 5, to say "Hey Pip" a few times from about a metre away, and to talk for a minute without its name | About 10 minutes |
+| **Q** | Back | |
+
+While the sound card is tested, Pip cannot hear or speak; it comes back by
+itself when the check ends, and also if you press Ctrl-C. At the end the
+screen shows the top problems and a verdict for the microphone, the
+speakers, Pip's voice, the wake word, spoken commands and opening the
+terminal by voice, and says where the full report was saved: a
+`diag-…` folder in this boot's folder on the stick's `PIPLOGS` partition,
+when the stick's logs are on (otherwise it is kept in memory only, until
+power-off). Bring that folder back for a closer look.
+A developer can run the same checks, and more, as `pip-diag` (see the
+[reference](REFERENCE.md#diagnostics-pip-diag)).
+
 ## Known limitations
 
 - **Few physical hardware results yet.** Pip has booted once on the real
@@ -904,9 +961,12 @@ commands need one of two things:
   laptop choose the real model. It can invent things and sometimes
   ignores a memory it was given.
 - **Speech.** The wake phrase is heard by PocketSphinx. After it, Pip
-  uses Moonshine and the natural Piper voice only if they are installed
-  and measure fast enough on this laptop; otherwise it falls back to
-  PocketSphinx and the robotic Flite voice. All of it is English-only.
+  uses Moonshine only if it is installed, has a recorded pass of the
+  speech test for this processor (no stick records one yet, so Pip uses
+  PocketSphinx) and measures fast enough on this laptop. It speaks with
+  the natural Piper voice, Alba, when that is installed, unless it
+  measures too slow here; otherwise with the robotic Flite voice. All of
+  it is English-only.
 - **Recall** finds paraphrases only roughly, and only with the meaning
   model installed.
 - **Pip cannot tell voices apart.** Whoever speaks is taken as the owner,
@@ -926,8 +986,11 @@ commands need one of two things:
 
 ```
 WAKE        "Hey Pip" … chirp … speak        follow-ups: 20 s, no wake phrase
-STOP        Esc          MUTE   M or F10       SETTINGS  F2      FACE BACK  F9
-CAPTIONS    F1           TYPE   F2 then 6 (Try) or Y (installed)
+STOP        Esc          MUTE   M or fn+F10    SETTINGS  fn+F2   FACE BACK  fn+F9
+CAPTIONS    fn+F1        TYPE   fn+F2 then 6 (Try) or Y (installed)
+TOP ROW     brightness, Mission Control (settings), Launchpad (terminal),
+            keyboard light, play/pause (listen or stop), speaker mute, volume
+DIAGNOSE    Try start menu 8: 1 Quick, 2 Full, 3 Voice (report on PIPLOGS)
 CLOCK       "What time is it?"  "What's the date?"  "Set my time zone to …"
 REMIND      "Remind me to … at …"   "Set a timer for … minutes"   "What are my reminders?"
             "Cancel reminder two"   "Wake me up at 7"   "Snooze"

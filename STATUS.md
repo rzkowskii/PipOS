@@ -120,6 +120,35 @@ asks for.
 
 - **2026-11-24 (night)** Waves 1 to 3 done and committed: wave 1 (first-boot fixes, installer ISO, `6ccf7f9`), wave 2 (the Pip functions, `04d00f0`, with image-build fixes after it) and wave 3 (an adversarial review's 49 findings fixed in `9fed87c`; forget-everything reaching reminders, a plain yes for switching off and clearing, battery pleas needing two readings, images recording their source, in `f414c51`). Wave 4 is in progress in the `wave4` worktree: model packs checked before the voice, recogniser and embedding models load; the night's upkeep without dream consent; brightness answers at the ends; real-model runs. The four manual pages were re-checked against the worktree and restamped. Host suites pass (above). Nothing of waves 2 to 4 has run in QEMU or on the laptop yet.
 
+- **2026-11-24 (evening)** Cable and diagnostics, uncommitted on the `cable-diag` branch. A cable development Try stick (`BEING_LAPTOP_CABLE=1`, `lab/cable.sh`): root SSH over an Ethernet cable from link-local addresses only, a writable copy of the code for that boot, and the kill switch `being.cable=0`; it never installs. `pip-diag` on every image and as Try menu item 8. Voice: a second pass over a command grammar when the ordinary transcript is not a command, a diagnostic microphone (`BEING_DIAG_MIC`), voice debugging (`being.voice_debug=1` on a Try boot), engine overrides (`being.asr=`, `being.tts=`), the laptop microphone channel picked automatically, and the natural voice (Alba) by default with a speed limit of 0.7 of real time. Keys work as on a Mac (`hid_apple.fnmode=1`): brightness, keyboard light, volume with a click, speaker mute for now only (`persist: false`), Mission Control for the menu and Launchpad for the terminal; Pip's own keys need fn. Mind fixes: a `route` line per turn, "last night" asked after 18:00, no mind module needing zlib (the laptop's Python has none), `no_face` when the Try menu has the screen, codec dumps in the USB logs, the doctor watching the hands, the hardware metrics listing the hands, eyes, bodycare and audio-init units, and guest mode reaching a restarted voice. The owner chose Alba after a 27-voice audition, Mac-style keys, and a development-only cable stick ([DECISIONS.md](docs/DECISIONS.md) rows 18 to 20). Host suites in the integration pass (about 21:40): Python 2,402 tests passed, 29 skipped; lab host checks 42 passed. `mind/voice.py` and `tests/test_voice_keys.py` changed at 21:40 and may not be covered by that run. Not yet built, run in QEMU or tried on the laptop.
+
+## Cable and diagnostics
+
+Written on 24 November 2026 (evening). Everything here is **host**
+evidence; nothing below has been built into an image, run in QEMU or
+tried on the laptop.
+
+- **Cable stick (v6).** `BEING_LAPTOP_CABLE=1 lab/build.sh laptop-try`
+  makes `out/images/beingos-laptop-cable-try.img` after `lab/build.sh
+  cable-key` has imported the keys. How to build, reach and test it is in
+  [LAB.md](docs/LAB.md#cable-development-build); how to boot it, in
+  [FIRST-BOOT.md section 9](docs/FIRST-BOOT.md#9-cable-stick-v6). Its QEMU
+  suite, `lab.tests.test_cable_dev`, has not run yet.
+- **Diagnostics.** `pip-diag` (quick, full, voice, commands, mic, speaker,
+  tts, codec, hear, engines, restore, report) and Try menu item 8 write
+  `diag.json` and `diag.txt` to a `diag-…` folder in the boot's PIPLOGS
+  folder (or `/run/being-diag`). The speaker
+  checks are meant to tell the laptop's garbled playback apart from the
+  voice itself; no run on the laptop yet.
+- **Voice.** Alba by default; the command grammar pass; the diagnostic
+  microphone. The lab gate `lab.tests.test_voice_terminal` ("Hey Pip, open
+  a terminal." at several levels) has not run yet.
+- **Keys.** Mac-style top row. The keyboard light and Launchpad have never
+  been pressed on the laptop.
+- **Still open.** Before any public release image ships Alba, the packed
+  voice must be replaced by Piper's retrain
+  ([DECISIONS-OWNER.md](docs/DECISIONS-OWNER.md) item 22).
+
 ## Wave 2 status
 
 Written after the integration pass of 24 November 2026 and brought up to
@@ -212,15 +241,14 @@ floor) against the real 81 % pack, the power-off after 10 minutes closed
 on battery, and plugging in during the 20 s grace; the backlight range and
 DPMS turning the LVDS panel off while dark; bodycare's charge limit, fan
 floor and caps (it ships in observe mode); the F1 captions overlay; the
-top-row keys with `hid_apple.fnmode=2`; the time-to-first-chirp after
+top-row keys with `hid_apple.fnmode=1` (it was `fnmode=2` until 24 November); the time-to-first-chirp after
 "Hey Pip"; the dream model's speed and heat with the lid closed. Nothing
 on the internal SSD until the owner says so.
 
 **Open owner decisions.** Alarms with the lid closed (default silence);
-whether Piper's Alba voice may be the default natural voice, since its
-model card says it was fine-tuned from a voice rejected earlier for its
-dataset licence; whether night maintenance should run without dreaming;
+whether night maintenance should run without dreaming;
 whether a clock panel may stay open past four hours as a bedside clock;
 where the model-pack verdict file lives (today the model server can write
 its folder); and, as before, the source tag, the LFM licence and the
-screenshots.
+screenshots. Whether Alba may be the default natural voice was settled on
+24 November ([DECISIONS-OWNER.md](docs/DECISIONS-OWNER.md) item 22).

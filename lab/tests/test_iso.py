@@ -189,7 +189,7 @@ class IsoMedia(unittest.TestCase):
             self.assertIn(f"root=PARTUUID={system}", body, f"{title!r} does not mount try-system")
             self.assertIn(f"being.models={models}", body, f"{title!r} does not mount try-models")
             self.assertRegex(body, r'linux\s+"\(\$pipos_disk,gpt3\)/boot/bzImage"', title)
-            for flag in ("being.try=1", "being.screen=1", "hid_apple.fnmode=2", "rootwait=60"):
+            for flag in ("being.try=1", "being.screen=1", "hid_apple.fnmode=1", "rootwait=60"):
                 self.assertIn(flag, body.split(), f"{title!r} lacks {flag}")
             self.assertNotRegex(body, r"\b(ISO|TRY)_[A-Z]+_UUID\b|BEING_[A-Z]+_ARGS", f"{title!r} kept a placeholder")
 

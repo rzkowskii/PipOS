@@ -1,0 +1,36 @@
+# Cable development builds only (BR2_PACKAGE_BEING_CABLE_DEV, docs/LAB.md).
+# A writable copy of the being's code for this boot: /usr/lib/being and
+# /etc/being are copied to /run/being-dev and bind-mounted back over the
+# read-only image (there is no overlayfs). The copy is recompiled with
+# timestamp-checked .pyc files, so an edited module takes effect at the next
+# `systemctl restart` of its organ; the image's own unchecked-hash .pyc files
+# would ignore the edit. Everything is gone at power-off.
+[Unit]
+Description=PipOS cable development workbench (Try only)
+DefaultDependencies=no
+After=local-fs.target being-network-lockdown.service
+Before=sysinit.target shutdown.target being-network-policy.service being-cable-link.service
+Before=being-usb-logs.service being-usb-screen-start.service being-local-screen.service being-audio-init.service
+Before=being-mind.service being-voice.service being-eyes.service being-hands.service being-wifi.service
+Before=being-bench.service
+Conflicts=shutdown.target
+ConditionKernelCommandLine=being.try=1
+ConditionKernelCommandLine=!being.cable=0
+ConditionPathExists=/usr/share/being/cable/authorized_keys
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -euc '\
+    if mountpoint -q /usr/lib/being; then exit 0; fi; \
+    rm -rf /run/being-dev/lib /run/being-dev/etc; \
+    mkdir -p -m 0755 /run/being-dev; \
+    cp -a /usr/lib/being /run/being-dev/lib; \
+    cp -a /etc/being /run/being-dev/etc; \
+    /usr/bin/python3 -m compileall -q -f --invalidation-mode timestamp -d /usr/lib/being /run/being-dev/lib; \
+    mount --bind /run/being-dev/lib /usr/lib/being; \
+    mount --bind /run/being-dev/etc /etc/being'
+TimeoutStartSec=180
+
+[Install]
+WantedBy=sysinit.target

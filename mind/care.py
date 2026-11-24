@@ -12,6 +12,7 @@ start restart the mind organ, and say so. In Try every change lands in the RAM
 """
 
 import array
+import asyncio
 import json
 import math
 import os
@@ -1127,14 +1128,65 @@ def summary_rows(mind, temporary):
     return rows
 
 
-def health_page(mind, temporary, *, system=None):
-    """The same check-up as "are you okay?", as rows. Battery, heat and
-    hearing come from the running being, so they are asked for by voice."""
+HEALTH_WAIT = 2.0          # seconds the Health page waits for the running being's readings
+HEALTH_TOPICS = ("body.state", "body.lid", "voice.level")
+
+
+async def _listen_for_facts(path, wait):
+    from .bus import Bus
+
+    bus = Bus(f"care-health-{os.getpid()}", HEALTH_TOPICS, path=path)
+    body, voice = {}, {}
+    await bus.start()
+    try:
+        async with asyncio.timeout(wait):
+            # body.state is retained, so the brainstem sends it the moment we
+            # join; a voice.level comes only if the voice happens to send one.
+            while "battery" not in body:
+                event = await bus.recv()
+                fields = {key: value for key, value in event.items() if key != "t"}
+                if event["t"] == "body.state":
+                    body.update(fields)
+                elif event["t"] == "body.lid" and isinstance(event.get("closed"), bool):
+                    body["lid_closed"] = event["closed"]
+                elif event["t"] == "voice.level":
+                    voice = fields
+    except TimeoutError:
+        pass
+    finally:
+        await bus.stop()
+    return body, voice
+
+
+def live_facts(wait=HEALTH_WAIT, path=None):
+    """(body, voice) from the running being, for the Health page: the
+    brainstem's retained body.state (battery, temperature) and the lid, and
+    the voice's last voice.level if one arrives within `wait` seconds. Only
+    the mind may ask the voice for a level (voice.level_request), so this
+    never asks. ({}, {}) when no being is running or nothing came in time;
+    never raises."""
+    path = path or os.environ.get("BEING_BUS", "/run/being/bus.sock")
+    if not Path(path).exists():
+        return {}, {}
+    try:
+        return asyncio.run(_listen_for_facts(path, wait))
+    except Exception:
+        return {}, {}
+
+
+def health_page(mind, temporary, *, system=None, facts=None):
+    """The same check-up as "are you okay?", as rows. Battery and heat come
+    from the running being's body.state (waited for at most HEALTH_WAIT);
+    hearing is measured by the voice, so it is asked for by voice."""
     from . import doctor
 
-    rows = doctor.health_rows(system or doctor.System(), doctor.Facts(state_dir=Path(mind)))
+    body, voice = (facts or live_facts)()
+    rows = doctor.health_rows(system or doctor.System(), doctor.Facts(state_dir=Path(mind), body=body, voice=voice))
     lines = [ui.mark(mark, text) for mark, text in rows]
-    lines += ["", "Battery, temperature and hearing: ask me \"are you okay?\"."]
+    if body:
+        lines += ["", "Hearing: ask me \"how well can you hear me?\" or \"are you okay?\"."]
+    else:
+        lines += ["", "Battery, temperature and hearing: ask me \"are you okay?\"."]
     if ui.enabled():
         ui.screen("Health", context="Care")
         ui.card(lines)

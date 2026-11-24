@@ -83,6 +83,10 @@ _LEADING = re.compile(
     r"|^(?:please |can you |could you |would you |will you |go ahead and |i want you to |i'd like you to )+"
 )
 _TRAILING = re.compile(r"(?:[, ]+(?:please|for me|thanks|thank you|now|right now))+$")
+# Small words a transcript may scatter through a command ("and open a
+# terminal", "i open up the terminal"). They are taken out only on a second
+# try, and only when what is left is a whole command (see _filler_retry).
+FILLER = frozenset(("a", "and", "i", "it", "up"))
 
 
 def spoken_numbers(text):
@@ -108,7 +112,17 @@ def spoken_numbers(text):
     return " ".join(out).replace(" ,", ",")
 
 
-def normalise(text, name="pip"):
+def normalise(text, name="pip", bare_name=False):
+    """The utterance in lower case without the being's name, the address
+    words, the politeness and the punctuation that does not matter.
+
+    The name at the end is taken off only after a comma or an address word
+    ("open the terminal, Pip", "... please, hey Pip"), because this text is
+    also a task's request and an install's program: "make me a program called
+    pip" and "install pip" keep their last word. `bare_name` also takes off a
+    name after a plain space ("open the terminal pip", as a recogniser without
+    punctuation hears it); parse() uses that only for a second try limited to
+    opening, showing, hiding and closing an app."""
     said = text.casefold().replace("’", "'").replace("‘", "'")
     said = re.sub(r"[^\w' ,:-]", " ", said)
     said = " ".join(said.split())
@@ -119,7 +133,15 @@ def normalise(text, name="pip"):
         said = _LEADING.sub("", said)
         if said == before:
             break
-    said = _TRAILING.sub("", said).strip(" ,:-")
+    for _ in range(3):
+        # The name may come last too: "open the terminal, Pip", "... please, hey Pip".
+        before = said
+        said = re.sub(rf"(?:\s*,\s*(?:(?:hey|hi|ok|okay)[, ]+)?|\s+(?:hey|hi|ok|okay)[, ]+){address}$", "", said)
+        if bare_name:
+            said = re.sub(rf"\s+{address}$", "", said)
+        said = _TRAILING.sub("", said).strip(" ,:-")
+        if said == before:
+            break
     said = re.sub(r"\s*,\s*", ", ", said)
     return spoken_numbers(said).strip()
 
@@ -201,6 +223,7 @@ _PATTERNS = [
     # A bare "terminal" or "the console" opens it; a bare "shell" or "a shell"
     # does not (it is too common an answer in conversation).
     ("open", rf"(?:open|start|launch|bring up|pull up|fire up|load)(?: up)? {_T}(?: for me)?|give me a (?:shell|terminal|console)"
+             r"|(?:open|launch|start)(?: up)? (?:a |the |your |my )?(?:new )?terminal(?:s| window)?(?: for me)?"
              r"|(?:the |your |my )?(?:terminal|console)"),
     ("open_monitor", r"show me how you(?:'re| are) (?:feeling|doing)|show me your (?:temperature|body|vitals|insides)"
                      r"|(?:open|show me|bring up|start|launch) (?:the |your )?(?:body )?monitor"),
@@ -240,11 +263,14 @@ _FORCE = re.compile(r"(?:[, ]+(?:and )?(?:write it yourself|from scratch|without
 # commands whatever is on screen, so the mind does not start reading the model
 # ahead for them. They are prefixes, because the gate may see a partial
 # transcript ("open the").
-_THING = r"(?:the |your |my |a |that )?(?:body )?(?:terminal|console|shell|command line|command prompt|monitor|clock|timers)\b"
+_THING = (r"(?:the |your |my |a |that )?(?:body )?(?:(?:new )?terminal(?:s| window)?|console|shell|command line"
+          r"|command prompt|monitor|clock|timers)\b")
+_VERB_THING = (r"(?:open|close|quit|exit|launch|start|bring up|pull up|fire up|load|show(?: me)?|switch to|go back to"
+               rf"|restore|unhide|reopen|minimi[sz]e|hide|put away|tuck away|shrink|get rid of|kill|turn off|shut(?: down)?) {_THING}")
+_VERB_ALONE = r"(?:open|bring up|pull up|show me|show|start|launch|close|hide)(?: (?:the|your|my|a|that))?(?: new)?\s*$"
 COMMAND_START = re.compile(
-    r"^(?:(?:open|close|quit|exit|launch|start|bring up|pull up|fire up|load|show(?: me)?|switch to|go back to|restore"
-    rf"|unhide|reopen|minimi[sz]e|hide|put away|tuck away|shrink|get rid of|kill|turn off|shut(?: down)?) {_THING}"
-    r"|(?:open|bring up|pull up|show me|show|start|launch|close|hide)(?: (?:the|your|my|a|that))?\s*$"
+    rf"^(?:{_VERB_THING}"
+    rf"|{_VERB_ALONE}"
     r"|show me how you(?:'re| are) (?:feeling|doing)|show me your (?:temperature|body|vitals|insides|clock|time)"
     r"|show me the (?:clock|time)|show (?:me )?my timers"
     r"|give me a (?:shell|terminal|console)|(?:install|uninstall|download)\b"
@@ -273,6 +299,51 @@ LIVE = ACTIVE + ("waiting",)
 _ANSWER_START = re.compile(r"^(?:yes|yeah|yep|no\b|nope|sure|okay|ok|do it|go ahead|leave it|keep it|close it|forget it all)")
 _SHELF_VERB = re.compile(r"^(?:run|play|start|launch|open|install|get|add|uninstall|remove|delete) (?:me )?(?P<p>[\w' -]+)$")
 _DEFAULT_SHELF = None
+# The second try with the filler words taken out: only these commands, which
+# open, show, hide or close an app (never a job, an install or a forget), and
+# never a bare noun ("a terminal" is not "terminal").
+_RETRY_KINDS = ("open", "open_monitor", "open_clock", "close_small", "show_terminal", "minimise", "close")
+# The gate's view of the retry: a verb and the app it names ("and open the
+# terminal"), never a verb alone ("close it" must not become "close").
+_RETRY_START = re.compile(rf"^(?:{_VERB_THING}|give me a (?:shell|terminal|console)\b)")
+_BARE = re.compile(r"^(?:the |your |my |a |that )?(?:terminal|console|shell|monitor|clock)s?$")
+# The context words the retry can turn into one of _RETRY_KINDS (a hide or a
+# close of what is on screen), for the gate after leading filler words.
+_RETRY_CONTEXT_START = re.compile(
+    r"^(?:show me your face|(?:go|come) back to your face|put it away|hide it|hide that|minimi[sz]e|close (?:it|that)"
+    r"|show (?:it|that)|bring it back)\b")
+
+
+def strip_filler(said):
+    """`said` (already normalised) without the FILLER words, or '' if none were in it."""
+    words = said.replace(",", " ").split()
+    kept = [word for word in words if word not in FILLER]
+    if len(kept) == len(words) or not kept:
+        return ""
+    return " ".join(kept)
+
+
+def strip_leading_filler(said):
+    """`said` without the FILLER words at its start ("and bring up the
+    terminal" -> "bring up the terminal"), or '' if it did not start with one.
+    The words inside are kept: "bring up" and "give me a" need them."""
+    words = said.replace(",", " ").split()
+    index = 0
+    while index < len(words) and words[index] in FILLER:
+        index += 1
+    if index == 0 or index == len(words):
+        return ""
+    return " ".join(words[index:])
+
+
+def retry_candidates(said):
+    """The texts the filler retry tries, in order: the leading filler words
+    out, then every filler word out. Never a bare noun ("a terminal")."""
+    out = []
+    for candidate in (strip_leading_filler(said), strip_filler(said)):
+        if candidate and candidate != said and candidate not in out and not _BARE.match(candidate):
+            out.append(candidate)
+    return out
 
 
 def may_be_app_command(text, ctx=None, name="pip"):
@@ -285,6 +356,13 @@ def may_be_app_command(text, ctx=None, name="pip"):
     if not said:
         return False
     if COMMAND_START.match(said):
+        return True
+    # The filler retry, seen the way parse() takes it: a verb and the app it
+    # names after any filler, and (only with something on screen, as for the
+    # plain words) the context words after leading filler ("and minimise",
+    # "i close that"). A verb alone is never enough: "close it" is not "close".
+    leading = strip_leading_filler(said)
+    if any(_RETRY_START.match(candidate) for candidate in retry_candidates(said)):
         return True
     if ctx is None:
         if _DEFAULT_SHELF is None:
@@ -301,6 +379,8 @@ def may_be_app_command(text, ctx=None, name="pip"):
         return True
     on_screen = ctx.terminal != "closed" or bool(ctx.small_app) or ctx.job in LIVE
     if on_screen and CONTEXT_START.match(said) and not _CHECK_IN.match(said):
+        return True
+    if on_screen and leading and _RETRY_CONTEXT_START.match(leading):
         return True
     # Otherwise only a whole command counts: with a finished script and the
     # terminal closed, "did it work?" is still ours, "running late" is not.
@@ -344,10 +424,38 @@ def parse(text, ctx, name="pip"):
     said = normalise(text, name)
     if not said:
         return None
+    command = _parse_said(said, ctx)
+    if command is None:
+        command = _filler_retry(said, ctx)
+    if command is None:
+        # "open the terminal pip": the name after a plain space, taken off
+        # only for opening, showing, hiding or closing an app, so a task or
+        # an install that ends in the word keeps it.
+        bare = normalise(text, name, bare_name=True)
+        if bare and bare != said:
+            command = _parse_said(bare, ctx, kinds=_RETRY_KINDS) or _filler_retry(bare, ctx)
+    return command
+
+
+def _filler_retry(said, ctx):
+    """The second try: "and open a terminal", "and bring up the terminal" or
+    "i open up the terminal" with the FILLER words out (first only the leading
+    ones, then all of them), accepted only if what is left is a whole command
+    of _RETRY_KINDS. Nothing is ever stripped before the first try."""
+    for retry in retry_candidates(said):
+        command = _parse_said(retry, ctx, kinds=_RETRY_KINDS)
+        if command is not None:
+            return command
+    return None
+
+
+def _parse_said(said, ctx, kinds=None):
+    """parse() on normalised words. `kinds`, on the filler retry, limits the
+    patterns tried (and leaves out answers and tasks)."""
     # Privacy commands always keep their memory meaning.
     if re.match(r"^(?:start|end) guest mode$|^don't remember this\b", said):
         return None
-    if ctx.pending:
+    if ctx.pending and kinds is None:
         if re.match(r"^(?:yes|yeah|yep|yes please|do it|go ahead|sure|okay|ok|close it|forget it all|yes close it)$", said):
             return AppCommand("answer", action="yes")
         if re.match(r"^(?:no|nope|no thanks|don't|leave it|keep it|keep it open|never ?mind)$", said):
@@ -356,10 +464,12 @@ def parse(text, ctx, name="pip"):
     job_exists = ctx.job is not None
     terminal = ctx.terminal != "closed"
     small = ctx.small_app
-    task = _task_command(said)
+    task = _task_command(said) if kinds is None else None
     if task is not None:
         return _gate(task, ctx) or task
     for kind, pattern in _COMPILED:
+        if kinds is not None and kind not in kinds:
+            continue
         match = pattern.match(said)
         if not match:
             continue
@@ -477,6 +587,71 @@ def _gate(command, ctx):
     return None
 
 
+# -- the phrase list for a command grammar -----------------------------------------------
+
+# What a phrase from grammar_phrases() may turn into, whatever is on screen:
+# opening, showing, hiding and closing apps, or a fixed line. Never a job, an
+# install, a forget, a yes or a no.
+GRAMMAR_KINDS = ("open", "close", "minimise", "restore", "say")
+# Kinds that write, run, remove or confirm something.
+DESTRUCTIVE_KINDS = ("task", "install", "uninstall", "run_app", "control", "answer", "forget_script",
+                     "clear_workshop")
+_GRAMMAR_TERMINAL = tuple(
+    f"{verb} {det}{new}terminal{tail}"
+    for verb in ("open", "launch", "start")
+    for det in ("", "a ", "the ", "your ", "my ")
+    for new in ("", "new ")
+    for tail in ("", " window")
+)
+_GRAMMAR_OTHERS = (
+    "bring up the terminal", "pull up the terminal", "give me a terminal", "open the console",
+    "show me the terminal", "show me your terminal", "show the terminal", "bring back the terminal",
+    "switch to the terminal", "go back to the terminal",
+    "minimise the terminal", "minimize the terminal", "hide the terminal", "put away the terminal",
+    "show me your face", "go back to your face",
+    "close the terminal", "close your terminal", "close the console", "quit the terminal", "exit the terminal",
+    "open the monitor", "open your monitor", "open the body monitor", "show me how you're feeling",
+    "show me how you are feeling", "show me how you're doing", "show me your vitals", "show me your body",
+    "close the monitor", "hide the monitor", "put the monitor away",
+    "open the clock", "open your clock", "show me the clock", "show me your clock", "show me the time",
+    "show me my timers", "show my timers", "close the clock", "hide the clock", "put the clock away",
+    "close my timers",
+)
+
+
+def _grammar_contexts():
+    """What may be on screen when a phrase is heard: nothing, the terminal
+    shown or minimised, or a small app up. With no shelf and no job."""
+    return (AppContext(), AppContext(terminal="shown"), AppContext(terminal="minimised"),
+            AppContext(monitor="shown"), AppContext(clock="shown"))
+
+
+_GRAMMAR = None
+
+
+def grammar_phrases():
+    """Lowercase canonical phrases that parse() accepts and that are never
+    destructive, for a recogniser's command grammar (a second pass when the
+    open-vocabulary transcript is not a command).
+
+    A phrase is listed only if parse() takes it in at least one ordinary
+    context, and in every context it turns into one of GRAMMAR_KINDS (or
+    nothing). The list is checked against parse() itself, so a pattern
+    change can never leave a phrase here that means something else."""
+    global _GRAMMAR
+    if _GRAMMAR is None:
+        contexts = _grammar_contexts()
+        found = []
+        for phrase in dict.fromkeys(_GRAMMAR_TERMINAL + _GRAMMAR_OTHERS):
+            commands = [parse(phrase, context) for context in contexts]
+            if all(command is None for command in commands):
+                continue
+            if all(command is None or command.kind in GRAMMAR_KINDS for command in commands):
+                found.append(phrase)
+        _GRAMMAR = tuple(found)
+    return list(_GRAMMAR)
+
+
 # -- what Pip says ---------------------------------------------------------------------
 
 REPLIES = {
@@ -513,6 +688,9 @@ REPLIES = {
     "guest_clock": "My clock stays closed while a guest is here. It shows your reminders.",
     "guest_monitor": "My monitor stays closed while a guest is here.",
     "no_hands": "My hands aren't working right now, so I can't open the terminal.",
+    # The Try menu holds the screen, so the face (which shows the panels) is
+    # not running. The menu is never closed for the owner: it may be installing.
+    "no_face": "Close the Try menu to see my terminal.",
     "unavailable": "I don't have that app yet. I can open my terminal.",
     "no_download": ("I can't download programs. I'm offline and my system is read-only. "
                     "But I have a shelf of little programs, or I can try to write you a small one."),
@@ -719,6 +897,9 @@ class AppBridge:
             elif self.guest:
                 # A restarted hands starts as if no guest were here: tell it again.
                 self._send_later("app.privacy", guest=True)
+        elif topic == "organ.up" and event.get("name") == "voice" and self.guest:
+            # So does a restarted voice, which keeps a guest's words out of its log.
+            self._send_later("app.privacy", guest=True)
         key = event.get("req")
         if (topic == "term.status" and key in self._forgets
                 and event.get("phase") not in ("forgotten", None)):
@@ -842,8 +1023,14 @@ class AppBridge:
             reply = await self._ask("app.open", ("app.state", "app.refused"), OPEN_WAIT, app=command.app)
             await say(self._open_line(reply, was))
         elif kind == "restore":
-            reply = await self._ask("app.restore", ("app.state", "app.refused"), app=command.app)
-            await say(REPLIES["restored"] if reply and reply.get("view") == "shown" else REPLIES["open_failed"])
+            # Hands restores through its open (the screen probe included), so
+            # it gets the open's wait, and a refusal says why (no_face: close
+            # the Try menu) rather than that the terminal failed to open.
+            reply = await self._ask("app.restore", ("app.state", "app.refused"), OPEN_WAIT, app=command.app)
+            if reply is not None and reply.get("t") == "app.refused":
+                await say(self._refused_line(reply))
+            else:
+                await say(REPLIES["restored"] if reply and reply.get("view") == "shown" else REPLIES["open_failed"])
         elif kind == "minimise":
             reply = await self._ask("app.minimise", ("app.state", "app.refused"), app=command.app)
             writing = (self.status or {}).get("phase") in GENERATING
@@ -919,6 +1106,9 @@ class AppBridge:
             return REPLIES["bad_slot"]
         if reason == "guest" and reply.get("app") in SMALL_APPS:
             return REPLIES[f"guest_{reply['app']}"]
+        if reason == "no_face":
+            app = reply.get("app")
+            return REPLIES["no_face"].replace("my terminal", f"my {app}") if app in SMALL_APPS else REPLIES["no_face"]
         return {
             "disabled": REPLIES["disabled"], "guest": REPLIES["guest"], "busy": REPLIES["busy"],
             "unavailable": REPLIES["unavailable"], "lid_closed": REPLIES["lid_closed"],

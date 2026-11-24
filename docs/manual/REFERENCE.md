@@ -1,7 +1,7 @@
 <!--
 doc: reference
-verified: 2026-11-24T04:50
-sources: mind/commands.py mind/reminder_language.py mind/turn.py mind/everyday.py mind/skills.py mind/profile.py mind/setup.py mind/care.py mind/local_menu.py mind/initiative_setup.py mind/retention.py mind/backup.py mind/dream_journal.py mind/network_enforce.py mind/network_policy.py mind/initiative.py mind/voice.py mind/voice_engines.py mind/mic_channel.py mind/tts.py mind/eyes.py mind/__main__.py crates/face/src/main.rs crates/brainstem/src/main.rs crates/brainstem/src/battery.rs crates/bodycare/src/main.rs sim/body.py lab/vm.py lab/build.sh scripts/run-sim.sh os/package/being/being.env os/package/being/being-camera os/package/being/50-being.preset os/package/cortex/being-cortex.service os/package/cortex/being-dream-cortex.service os/board/beingos/try-grub.cfg config/being.json mind/wifi.py mind/reminders.py os/package/being/being-usb-logs os/package/being/being-hardware-report
+verified: 2026-11-24T22:17
+sources: mind/commands.py mind/reminder_language.py mind/turn.py mind/everyday.py mind/skills.py mind/profile.py mind/setup.py mind/care.py mind/local_menu.py mind/initiative_setup.py mind/retention.py mind/backup.py mind/dream_journal.py mind/network_enforce.py mind/network_policy.py mind/initiative.py mind/voice.py mind/voice_engines.py mind/mic_channel.py mind/mic_port.py mind/try_mode.py mind/tts.py mind/eyes.py mind/__main__.py crates/face/src/main.rs crates/face/src/keys.rs crates/brainstem/src/main.rs crates/brainstem/src/battery.rs crates/brainstem/src/kbd_light.rs mind/keys.py mind/local_screen.py os/board/beingos/slots.sh crates/bodycare/src/main.rs sim/body.py lab/vm.py lab/build.sh lab/cable.sh scripts/run-sim.sh os/package/being/being.env os/package/being/being-camera os/package/being/50-being.preset os/package/cortex/being-cortex.service os/package/cortex/being-dream-cortex.service os/board/beingos/try-grub.cfg os/board/beingos/try-image.sh config/being.json mind/wifi.py mind/reminders.py os/package/being/being-usb-logs os/package/being/being-hardware-report mind/diag.py mind/diag_report.py mind/diag_sound.py mind/diag_speech.py mind/diag_codec.py mind/diag_system.py os/package/being/pip-diag os/package/being/being-cable-link.service os/package/being/being-cable-ssh.service os/package/being/being-cable-workbench.service os/package/being/cable/sshd_config
 -->
 
 # PipOS reference
@@ -14,12 +14,15 @@ source file it comes from. When that file changes, check the table.
 - [Keys and touch](#keys-and-touch)
 - [On-screen menus](#on-screen-menus)
 - [Maintenance commands](#maintenance-commands)
+- [Diagnostics (pip-diag)](#diagnostics-pip-diag)
+- [Voice debug and route lines](#voice-debug-and-route-lines)
 - [Files in /mind](#files-in-mind)
 - [Factory configuration](#factory-configuration)
 - [Services](#services)
 - [Environment variables](#environment-variables)
 - [Kernel command line](#kernel-command-line)
 - [Lab and simulator commands](#lab-and-simulator-commands)
+- [Cable development build](#cable-development-build)
 
 ## Spoken commands
 
@@ -193,21 +196,56 @@ battery level in a private conversation." A guest cannot set the clock.
 
 ## Keys and touch
 
-Sources: `crates/face/src/main.rs`, `os/package/being/being-console.c`
+Sources: `crates/face/src/main.rs`, `crates/face/src/keys.rs`, `mind/keys.py`,
+`crates/brainstem/src/kbd_light.rs`, `os/package/being/being-console.c`,
+`mind/local_screen.py`, `mind/voice.py`
+
+The laptop boots with `hid_apple.fnmode=1`, as a Mac does: the top row does
+what is printed on it, and **fn** with a top-row key sends F1 to F12. Pip's
+own function keys (F1, F2, F9, F10) therefore need **fn** on the MacBook; an
+external keyboard without media keys sends them as before.
 
 | Key | On the face | On a setup screen |
 |---|---|---|
 | **Esc** | Stop the current reply, including audio already playing (`key.interrupt`) | Leaves the typing chat |
 | **M** | Mute or unmute the microphone (`key.mute`). A letter while the terminal has the keyboard | Typed as text |
-| **F10** | Mute or unmute the microphone | Mute (for the **P** speaker preview) |
-| **F1** | Show or hide the captions and health overlay (off by default; nothing in it is saved) | — |
-| **F9** | Recover the face when the lid reading is unknown (`key.panel_recover`) | Same |
-| **F2** | Open setup on an installed Pip, or the start menu in Try | — |
+| **fn+F10** | Mute or unmute the microphone | Mute (for the **P** speaker preview) |
+| **fn+F1** | Show or hide the captions and health overlay (off by default; nothing in it is saved) | — |
+| **fn+F9** | Recover the face when the lid reading is unknown (`key.panel_recover`) | Same |
+| **fn+F2**, or **Mission Control** (F3) | Open setup on an installed Pip, or the start menu in Try | — |
+| **fn+F3** | While the workshop terminal has the keyboard: put it away (hands' control word `\0f3`) | — |
+| **Brightness** (F1, F2) | The panel, about a sixteenth a press, never below 5 % (`key.brightness`, then `being.brightness` with `by: 6` and `req: "key"`, which `body.brightness` carries back so a spoken "brighter" never takes a key's answer). Held, it keeps stepping | Same, without the bar (see below) |
+| **Launchpad** (F4) | Open the workshop terminal; pressed again, put it away, then show it again (`key.apps`). Nothing is said; a refusal (a guest, no hands) is logged | — |
+| **Keyboard light** (F5, F6) | The keyboard's backlight (applesmc `smc::kbd_backlight`) in sixteenths (`key.kbd_light` with `dir` `down` or `up`, then `being.kbd_light`). A keyboard's own light toggle key sends `dir: "toggle"`: off, and back on at the level it had. It goes out while the panel is dark and comes back with it | Same, without the bar |
+| **Play/pause** (F8) | While the eyes rest and no app panel has the keyboard: listen (`key.attend`). Otherwise: stop the reply (`key.interrupt`) | — |
+| **Previous**, **Next** (F7, F9), **Eject** | Nothing; the face logs the press | Nothing |
+| **Mute** (F10) | The speaker off, and on again at the level it had (`key.mute_speaker`). The microphone's mute is **M** or **fn+F10**. A key mute is for now only: `voice.volume` goes with `level: 0, persist: false`, which the voice applies without saving it or storing the sound card's state; the mind keeps the level from before it, the face keeps a faint "speaker muted" up, and a ring, a battery plea or a restart of the mind brings the sound back (`mind/keys.py`). A restart of the voice ends a key mute: it plays at the saved level and reports it (`voice.volume_state`), which clears the note and the mind's mute. A stored level under 10 never starts the voice quieter than 10; that level is saved and reported, and reported again when the mind connects | Same, without the note |
+| **Volume** (F11, F12) | The speaker in sixteenths (0, 6, 12 … 94, 100) (`key.volume`, then `voice.volume` with `feedback: true`). Each press clicks once at the new level, as a Mac does: a 30 ms tick that replaces one still playing, under the chirp rules (chirps on, lid open, microphone not muted, not while Pip speaks or in quiet hours) and never while the microphone is open for your words. The lowest step is silence, a key mute like the mute key's, and makes no click. Held, it keeps stepping | Same, without the bar |
 | **Click or tap** | Pip glances down (`key.touch`); while the eyes rest it also listens, as for "Hey Pip" | — |
 | **Space** or **Return** | While the eyes rest (idle, drowsy or asleep with the lid open, not muted) and no app panel has the keyboard: listen, as for "Hey Pip" (`key.attend`) | Typed as text |
-| Other keys | Typed into the workshop terminal while it has the keyboard | — |
-| **Page Up / Page Down** | — | Scroll the history |
+| Other keys | Typed into the workshop terminal while it has the keyboard (never the top row's printed keys) | — |
+| **Page Up / Page Down** | While the workshop terminal has the keyboard: scroll its history (`\0pgup`, `\0pgdn`) | Scroll the history |
 | **Number keys, Enter** | — | Choose menu items |
+
+After a brightness, volume or keyboard-light change the face shows a bar
+with the new level for 1.5 s, drawn from what the brainstem and the voice
+report they set (`body.brightness`, `voice.volume_state`, `body.kbd_light`),
+so a voice command ("louder", "dimmer") shows it too. On a setup screen a
+key leaves a request in the screen gate (`brightness-up`, `brightness-down`,
+`kbd-light-up`, `kbd-light-down`, `kbd-light-toggle`, `volume-up`,
+`volume-down`, `speaker-mute`, and `mute` and `recover` for fn+F10 and
+fn+F9), and `mind/local_screen.py` sends each on as the face's key event
+(`key.brightness {dir}`, `key.kbd_light {dir}`, `key.volume {dir}`,
+`key.mute_speaker`, `key.mute`, `key.panel_recover`), so they act as they do
+on the face. A held level key steps at most ten times a second there. The
+setup screens draw no level bar and no "speaker muted" note; the volume
+click still plays. Where the top row is printed-first (a keyboard bound to hid-apple
+with `fnmode` 1, or 3 for an Apple keyboard), the start menu's, setup's and
+terminal's footers show Pip's keys as **fn F10**, **fn F9** and **fn F3**;
+other keyboards see plain F-keys. A verbose boot's wait also ends on
+Mission Control. SDL has no code for Mission
+Control and Launchpad, so the face reads those two from the keyboard's
+event device itself.
 
 On the laptop Try stick, the GRUB menu (5 s timeout) offers these entries
 (the first stick, of 23 November, has only the first three):
@@ -222,7 +260,9 @@ On the laptop Try stick, the GRUB menu (5 s timeout) offers these entries
 | **measure speed** | **b** | `being.bench=1` |
 
 The ISO's boot menu (`os/board/beingos/iso-grub.cfg`) has the same six
-entries.
+entries. A [cable development stick](#cable-development-build) has the
+same six too, and each of them also adds `being.cable=1 being.voice_debug=1`
+(`os/board/beingos/try-image.sh`).
 
 ## On-screen menus
 
@@ -240,6 +280,7 @@ Sources: `mind/local_menu.py`, `mind/setup.py`, `mind/care.py`,
 | 5 | **Check hardware**. **G** there runs the guided key, screen and camera checks |
 | 6 | **Talk to Pip by typing** |
 | 7 | **Back up to a USB stick**: this Try being |
+| 8 | **Run diagnostics**: 1 *Quick* (about a minute, nothing to do), 2 *Full* (10 to 15 minutes, with test sounds) or 3 *Voice* (you speak and listen, about 10 minutes); **Q** goes back. It runs `pip-diag quick`, `full` or `voice` on the screen, then shows the top of `diag.txt` (at most 28 lines) and the folder it was saved in. Ctrl-C ends the run, and the run itself puts the voice back. See [Diagnostics (pip-diag)](#diagnostics-pip-diag) |
 | Q | Return to PipOS |
 
 Left for 240 s, the menu returns to the eyes.
@@ -309,10 +350,165 @@ controls are also in Setup and Care.
 | `being-backup keygen --identity F` / `create\|export-deletions --mind-dir D --output F --recipient R` / `checkpoint --mind-dir D` / `restore --mind-dir D --input F --identity F [--deletions F --current-checkpoint HEX]` | Encrypted backup and restore (see the [user guide](USER-GUIDE.md#backing-up-pip)) |
 | `being-installer [--check\|--list\|--plan DEV\|--install DEV] [--json]` | Hardware check, disk listing, layout preview, install |
 | `being-hardware-report [--save]` | Print the hardware report. With `--save` it instead saves the summary and report (MAC addresses masked) to this boot's folder on the `PIPLOGS` partition of a laptop Try stick, and prints only where it saved. It exits 1 when no stick is in use |
-| `being-usb-logs run\|report\|summary\|check\|mic-test` | Manage Try boot diagnostics on the `PIPLOGS` partition; `mic-test` measures the microphone level once (numbers only) |
+| `being-usb-logs run\|report\|summary\|check\|mic-test` | Manage Try boot diagnostics on the `PIPLOGS` partition; `mic-test` measures the microphone level once (numbers only). Each boot folder also gets the full codec dumps (`card0-codec0.txt` and so on, read with the processing coefficients shown), and `summary.txt` gains the lines **Codec IDs**, **HDA model**, **Cable link** and **Voice debug** |
+| `pip-diag COMMAND [options]` | Measure hearing, voice, commands and body, and say what is wrong (see [Diagnostics (pip-diag)](#diagnostics-pip-diag)). On every laptop and lab image |
+| `being-network cable-up` | Bring up the cable development link. Run by `being-cable-link.service`; refused unless the image carries the cable key, the boot is a Try boot and `being.cable=0` is absent. `being-network status` then names the cable port and both addresses |
 | `being-bodycare [--once] [--mode act] [--charge-limit N] [--restore]` | The power and thermal keeper (see `being-bodycare --help`). The unit runs it in observe mode: it decides and reports, and writes nothing |
 | `python3 /usr/lib/being/mind/model_pack.py verify [--role ROLE]` | Check a signed model pack |
 | `rauc install BUNDLE.raucb` | Install a signed OS update to the inactive slot (Setup **U** does the same) |
+
+## Diagnostics (pip-diag)
+
+Sources: `mind/diag.py`, `mind/diag_report.py`, `mind/diag_sound.py`,
+`mind/diag_speech.py`, `mind/diag_codec.py`, `mind/diag_system.py`,
+`os/package/being/pip-diag`, `mind/local_menu.py`
+
+`pip-diag` measures Pip's hearing, voice, spoken commands and body, and
+says in plain English what is wrong. It is `/usr/sbin/pip-diag` on every
+laptop and lab image, a shell wrapper that runs `python3 -m mind.diag`.
+Run it as root over the [cable link](#cable-development-build), or from
+the Try menu's item **8** (Quick, Full or Voice).
+
+| Command | Needs root | What it does |
+|---|---|---|
+| `quick` | No | About a minute, automatic. The build, clock, units, a module import check, the bus and boot timing; the codec dump; every command phrase through the mind's own routing, and the workshop state; two model prompts; heat (5 s), battery, network, firewall and storage; the mixer settings. As root with a sound card, it also records the room floor and plays one test tone. Last, each voice's speed and the words decoded from it |
+| `full` | Yes | 10 to 15 minutes, automatic. All of `quick` with every model prompt and 60 s of heat under load, plus the microphone sweep, the speaker battery, its timing, the acoustic loopback and speaker isolation, every voice scored before and after the speaker, the recognizer's self-test, the engines' speed check and, when memory allows a second model server, `bench --quick`. On a voice-debug boot it also says three phrases to the running voice (as `commands --e2e`) |
+| `voice` | Yes | Interactive, with you there, about 10 minutes. It asks whether to keep recordings, then: your speech at a few microphone gain settings; command phrases for you to say, decoded by each engine (`--phrases N`, default 10, is held between 5 and 40, but no more than the 16 phrases in the command table are said, so a run says 5 to 16: the five core phrases first, then the others in table order); each voice played for a 1 to 5 rating, and a channel test; wake trials at 1 m (`--trials`, default 10; `--two-metres` adds 2 m); and 60 s of talk without the name, to count false wakes. Refused with `--json` |
+| `commands` | No (`--e2e` needs root) | The command phrases through the mind's routing, in this process, and the workshop state. `--e2e` also renders three phrases with Flite ("Hey Pip, open a terminal.", "Hey Pip, what time is it?", "Hey Pip, close the terminal.") and says each to the running voice through the diagnostic microphone. On a voice-debug boot, as root, `--e2e` is the default |
+| `mic` | Yes | The mixer, the room floor per channel (a dead channel is named) and the Mic Boost × Capture sweep |
+| `speaker` | Yes | The test-signal battery through `plughw:0,0` and `hw:0,0` (rate, underruns, the `aplay -v` chain), small, default and large periods, the acoustic loopback (level, latency, distortion, octave bands, dropouts) and speaker isolation |
+| `tts` | Yes | Every voice: its speed, and the words PocketSphinx decodes from it before and after the speaker |
+| `codec` | Yes | The codec dump, its subsystem id, the fixup the driver picked and the codec settings. `--model NAME` (`apple`, `mbp81`, `mbp101`, `mbp53`, `mbp55`, `imac27`, `imac27_122`, `mba42`, `mba6`) switches the fixup live, then sets the mixer again with `being-audio-init --defaults`; `--coef HEX` (16 bits, such as `0x102a` or `0x000a`) writes coefficient 0x02 of node 0x11. Either one then re-reads the ADC setting and records the room floor. Live changes need the cable build's kernel (hwdep and reconfiguration); elsewhere they report skip |
+| `hear FILE` or `hear --phrase TEXT` | Yes | Plays a WAV (any rate; the louder channel is used), or renders TEXT on Pip (`--voice slt\|kal16\|piper`, default `slt`), to the running voice through the diagnostic microphone, then reads from the journal the wake, the `heard:` line and its delay, the mind's route and whether the terminal opened. `--asr pocketsphinx\|moonshine\|auto` forces the recognizer for the run; `--expect-route ROUTE` (such as `workshop.open`) names the route to expect, which is otherwise predicted from the phrase; `--patience N` (1 to 20) multiplies every wait, for an emulated CPU. The terminal counts as opened only if it is still up a few seconds later and hands did not log that it failed to start |
+| `engines` | No | Whether Moonshine and the natural voice are installed and verified, the CPU's AVX and AVX2 flags, and `mind.voice_bench` |
+| `restore` | Yes | Put the voice and the mixer back after an interrupted run (below) |
+| `report [FOLDER]` | No | Print `diag.txt` of the latest run, or of FOLDER; with `--json`, its checks one per line |
+
+Options every command takes:
+
+| Option | Effect |
+|---|---|
+| `--json` | One JSON line per check on stdout, and nothing else |
+| `--now UNIX` | The Mac's time (`date -u +%s`), to measure clock drift |
+| `--out DIR` | Write the report to DIR |
+| `--yes-keep-recordings` | Keep recordings of the room and of you, and their transcripts (default: RAM only, removed) |
+| `--stimulus-level DBFS` | Test signal level, −40 to −3 dBFS (default −20) |
+| `--no-unit` | Run audio work in this process, not under `systemd-run` |
+
+`restore` also takes `--quiet` (say nothing on stdout; what it did goes to
+stderr, and nothing at all when there was nothing to put back) and
+`--force` (restore even while another run holds the sound card).
+
+**Exit codes.** 0 when no check failed, 1 when any check failed, 2 when
+the run could not happen: a bad option, a command that needs root, another
+run already using the sound card, an interrupted run, or a fault in
+`pip-diag` itself. `report` exits 0 or 1 from the saved checks, and 2 when
+there is no report. `restore` exits 0 when it puts things back and
+also when another live run holds the lock (it then does nothing). It exits
+2 when not run as root, or when the lock file cannot be opened and
+`--force` is not given.
+
+**Output.** Each run writes to `<PIPLOGS boot folder>/diag-<UTC>/` when
+this boot's logs are on a stick, else to `/run/being-diag/<UTC>/` (RAM), or
+to `--out`. The UTC stamp looks like `20261124-104500Z`. The folder holds:
+
+- `diag.json`: `kind: "pipos-diag-v1"`, the command, start and end times,
+  boot and build ids, the boot entry's options, the clock, and every check
+  as `{id, section, status, value, evidence, hint}` with a status of
+  `pass`, `warn`, `fail` or `skip`;
+- `diag.txt`: the top problems first (at most ten), a verdict in plain
+  English for six areas (the microphone, the speakers, Pip's spoken voice,
+  the wake word, spoken commands, opening the terminal by voice), then
+  every check;
+- the evidence: WAVs, dumps and measurements.
+
+A run keeps at most 400 evidence files and 200 MB, and leaves 48 MB free on
+the stick; what does not fit is made in RAM, removed at the end, and noted
+in `diag.json` as `files_not_kept`. `/run/being-diag/last-run.json` names the
+latest finished run, and `/run/being-diag/active.json` exists while one is
+going.
+
+**Privacy.** Kept without asking: the generated test signals, Pip's
+rendered voice, and the microphone's recordings made while a test sound or
+Pip's voice plays (`loop-*.wav`, the gain sweep's `*-tone.wav` and
+`tts-*-room.wav`). Those recordings also pick up whatever else is in the
+room. The silent room-floor recordings, the recordings of your speech in
+`voice`, and transcripts of what you said are made in RAM
+(`/run/being-diag/tmp`) and removed, unless you pass
+`--yes-keep-recordings` or answer yes when `voice` asks.
+
+**The voice and the mixer.** The card's `hw:0,0` is exclusive, so a
+section that opens it sets the voice aside first: it writes the marker
+`/run/being-diag/voice-stopped`, saves the mixer (`alsactl store` to
+`/run/being-diag/mixer.state`) and stops `being-voice`. `hear` and
+`--e2e` instead restart the voice with the runtime drop-in
+`/run/systemd/system/being-voice.service.d/50-diag-mic.conf`, which sets
+`BEING_DIAG_MIC=/run/being-diag/mic.sock` and `BEING_VOICE_DEBUG=1` (and
+`BEING_ASR` for `--asr`). On the way out, normally, on an error, or on
+SIGINT, SIGTERM or SIGHUP (a dropped SSH session), it removes the drop-in
+and reloads systemd, puts the mixer back, restarts the voice (or stops it,
+if the run started a voice that was not running) and removes the marker,
+the mixer state and the socket. Each section removes its own RAM
+recordings (the `pip-diag-owner-*` and `pip-diag-*` folders under
+`/run/being-diag/tmp`) as it finishes. `restore` removes only room-floor
+files named after a process that is no longer alive, so after a run killed
+outright (SIGKILL) those folders stay in RAM until power-off.
+
+As root, an audio run (and `quick` or `commands`) goes under a transient
+unit, `pip-diag-audio`, run by `systemd-run` with
+`ExecStopPost=/usr/sbin/pip-diag restore --quiet`, so the voice comes back
+even if the run is killed outright. Only one run at a time uses the sound
+card (`/run/being-diag/lock`). `pip-diag restore` takes that lock first:
+while another run holds it, it says so and does nothing, because that run
+puts everything back itself; `--force` restores anyway.
+
+## Voice debug and route lines
+
+Sources: `mind/voice.py`, `mind/turn.py`, `mind/try_mode.py`,
+`mind/mic_port.py`, `mind/usb_logs.py`
+
+Voice debugging writes what Pip heard into the journal (and so into a Try
+stick's `journal.txt`). It is on when the kernel command line of a **Try**
+boot has `being.voice_debug=1` (as with any repeated argument, the last
+`being.voice_debug=` counts, so `being.voice_debug=0` typed at the GRUB
+prompt turns it off), or when the voice's environment has
+`BEING_VOICE_DEBUG=1`. An installed system's command line alone never turns
+it on. Every entry of a cable development stick turns it on.
+
+| Line | Organ | When |
+|---|---|---|
+| `wake phrase …, transcript text in the log on (from the kernel command line)` | voice | At start, with voice debugging on (`off` otherwise) |
+| `heard: "<text>" (engine E, confidence C, log-posterior L)` | voice | Each final transcript, with voice debugging on. E is `pocketsphinx`, `pocketsphinx grammar` (the command grammar's second pass gave it) or `moonshine` |
+| `dictation ended after S s: final transcript of N characters, confidence C, log-posterior L, …; voiced V s, …` | voice | Each final transcript, always; never the words |
+| `command grammar second pass: matched a command of N words (margin M per frame), …` or `… no match (why); keeping the open-vocabulary transcript` | voice | When a short dictation was not a workshop command and was read again with the command grammar |
+| `playback {"wav_s": …, "rate": …, "wall_s": …}` | voice | Each spoken clause, always; a warning when it played far shorter or longer than its length |
+| `route {"route": "workshop.open", "chars": 15}` | mind | Each turn, always. With voice debugging on, a `"text"` field holds the words |
+| `route {"route": "private"}` | mind | Each turn while a guest is here, or while memory is `session-only` or `explicit-only` (any mode but `persistent`), whatever the debug setting |
+
+In guest mode (`app.privacy` with `guest: true`, from the mind) the voice
+keeps transcript text out of the log even with voice debugging on.
+
+The route names: `workshop.KIND`, `command.KIND`, `everyday.SKILL` (the
+module that answered), `greeting`, `model`, `model.unavailable`,
+`model.waiting` (the conversation cache could not be cleared), `pending`,
+`overheard`, `discarded`, and `private`.
+
+`summary.txt` on the stick says whether each is on in its **Cable link**
+and **Voice debug** lines, and where voice debugging came from (the kernel
+command line, `/etc/being/env`, a unit drop-in, or transcripts seen in the
+journal). On a cable boot its first line also ends "(CABLE DEVELOPMENT
+BOOT)".
+
+**The diagnostic microphone.** When the voice starts with
+`BEING_DIAG_MIC=PATH`, it does not open ALSA capture. It connects to the
+Unix stream socket PATH, trying every 0.2 s for up to 10 s (then it logs
+that and uses the normal microphone), and reads raw S16_LE 16 kHz mono
+audio, never faster than real time, through the same gain, wake, endpoint
+and recognition path as the microphone, mixed to one channel. After the
+sender closes the socket it hears digital silence until it is restarted.
+It logs `diagnostic microphone connected on PATH`. If the diagnostic
+microphone does not answer, a `BEING_VOICE_DEBUG=1` set beside it is
+dropped, so your own words never reach the log that way.
 
 ## Files in /mind
 
@@ -332,7 +528,9 @@ Sources: `mind/*.py`, `crates/brainstem/src/life.rs`
 | `reminders.db` | mind | Pending reminders, alarms, repeats and timers, greeting days | No |
 | `context.json` | mind | The conversation to resume within 24 h | No |
 | `cortex/being.slot`, `cortex/identity.slot` | llama-server | Saved model cache, and the snapshot after a clean identity warm-up | No |
-| `voice-volume.json`, `audio/voice.json`, `audio/engines.json`, `audio/asound.state` | mind, voice, Care | Volume, chirps and voice choice, voice-engine speed measurements, mixer levels | No |
+| `voice-volume.json`, `audio/voice.json`, `audio/engines.json`, `audio/asound.state` | mind, voice, Care | Volume, chirps and voice choice, voice-engine speed measurements, mixer levels. A key mute is never saved here | No |
+| `audio/sherpa-avx-smoke.json` | by hand (nothing in the image writes it yet) | A passed Ivy Bridge speech test in `lab/sherpa_avx_smoke.py`'s format, pinned to the sherpa-onnx and ONNX Runtime bytes it tested. "Auto" loads Moonshine only with such a report, here or in `/usr/share/being/voice/` (which no image installs yet) | No |
+| `speaker-muted` | mind (`mind/keys.py`) | Present while the mute key (or the volume keys stepped to nothing) holds the speaker at 0, so the next start of the mind puts the sound back | No |
 | `play.json` | mind | Which jokes and facts were told | No |
 | `night-shift.json` | mind | How far the night's chores got | No |
 | `last-backup.json`, `backup-recipient.txt` | backup, Care | When the last backup was made and how; the public half of the backup key | No |
@@ -398,6 +596,8 @@ Source: `os/package/being/*.service`, `os/package/cortex/*.service`
 | `being-network-{lockdown,policy,reconcile}`, `being-wifi` | `being-network`, `being-wifi` | Firewall and links |
 | `being-usb-logs` | `python3 -m mind.usb_logs run` | Try boots only |
 | `being-lab-observe`, `being-lab-dev` | `being-lab-access listen …` | Paired-Mac access in lab and maintenance builds, never on Try; `being-lab-dev` is disabled until opened |
+| `pip-diag-audio` | `pip-diag …` under `systemd-run` | A transient unit for a diagnostics run as root, with `ExecStopPost=/usr/sbin/pip-diag restore --quiet`. `systemctl stop pip-diag-audio` ends a run |
+| `being-cable-workbench`, `being-cable-link`, `being-cable-ssh` | a copy-and-bind-mount script, `being-network cable-up`, `sshd -D -e -f /usr/share/being/cable/sshd_config` | [Cable development builds](#cable-development-build) only, and only on a Try boot without `being.cable=0`: a writable copy of the code, the link-local addresses, and SSH from link-local addresses only (`IPAddressAllow=localhost link-local`) |
 
 The organ units read `/etc/being/env`: brainstem, face, mind, voice,
 eyes, hands, bodycare, boot health and local screen. The cortex, network,
@@ -429,15 +629,19 @@ BEING_REQUIRE=face,mind,voice
 | `BEING_BODYCARE_MODE`, `BEING_CHARGE_LIMIT`, `BEING_DREAM_TARGET_C` | observe, unset, 70 | bodycare |
 | `BEING_ALSA_CAPTURE`, `BEING_ALSA_PLAYBACK` | `plughw:0,0` | voice |
 | `BEING_ALSA_CARD`, `BEING_ALSA_MIXER` | the playback card, `Master` | voice, Care |
-| `BEING_MIC_GAIN`, `BEING_MIC_AUTO_GAIN`, `BEING_MIC_CHANNEL` | measured, on, `mix` | voice (software gain and channel choice; `being.mic_channel=` also sets the channel) |
-| `BEING_TTS_ENGINE`, `BEING_ASR_ENGINE`, `BEING_PIPER_VOICE` | the owner's choice, `auto`, the bundled voice | voice |
+| `BEING_MIC_GAIN`, `BEING_MIC_AUTO_GAIN`, `BEING_MIC_CHANNEL` | measured, on, `auto` on the laptop image (`/usr/share/being/variant` says `laptop`) and `mix` elsewhere | voice (software gain and channel choice; `being.mic_channel=` wins over `BEING_MIC_CHANNEL`). The lab's loopback body, the QEMU microphone port and the diagnostic microphone always mix |
+| `BEING_ASR`, `BEING_TTS` | unset | voice: force the recognizer (`moonshine`, `pocketsphinx` or `auto`) or the voice (`piper`, `flite` or `auto`). They win over `being.asr=` and `being.tts=`. A forced engine skips the speed rule and, for Moonshine, the speech smoke test, but is loaded only if its signed model pack verifies. For the voice, the owner's spoken choice ends the forced one until the voice restarts |
+| `BEING_TTS_ENGINE`, `BEING_ASR_ENGINE`, `BEING_PIPER_VOICE` | the owner's choice, `auto`, the bundled voice (Alba) | voice: the older names. `BEING_ASR_ENGINE` is used only when neither `BEING_ASR` nor `being.asr=` gives a valid value (`auto` counts as one). `BEING_TTS_ENGINE` is ignored only when `BEING_TTS` or `being.tts=` forces `piper` or `flite`; with `auto` it still applies |
+| `BEING_COMMAND_GRAMMAR`, `BEING_COMMAND_GRAMMAR_MARGIN` | on (`0` turns it off), 6.0 | voice: the command grammar's second pass, and how far (per 10 ms frame) a command must beat a free phone loop |
 | `BEING_CHIRPS`, `BEING_CHIRP_DIR`, `BEING_HEAR_SOUND` | on (off in the lab), `/run/being/chirps` | voice |
 | `BEING_SHERPA_LIBRARY`, `BEING_EMBED_DIR` | the packaged library and model | voice, memory |
-| `BEING_VOICE_SHORTEN_FIRST_PAUSE`, `BEING_VOICE_DEBUG` | off | voice |
+| `BEING_VOICE_SHORTEN_FIRST_PAUSE` | off | voice |
+| `BEING_VOICE_DEBUG` | off (`1` turns it on) | voice and mind: [voice debug](#voice-debug-and-route-lines), on any boot |
+| `BEING_DIAG_MIC` | unset | voice: read the [diagnostic microphone](#voice-debug-and-route-lines) socket instead of ALSA. Set by `pip-diag` in a runtime drop-in |
 | `BEING_CAMERA_DEVICE` | `/dev/video0` | eyes |
 | `BEING_CONSOLE_UI` | off (`1` gives styled screens) | setup and menus |
 | `BEING_SLOT_DEADLINE` | 180 | boot health |
-| `BEING_LOCAL_SETUP` | set by the face unit | face (enables F2) |
+| `BEING_LOCAL_SETUP` | set by the face unit | face (enables F2 and Mission Control) |
 | `BEING_FACE_DPMS` | on (`0` disables) | face: switch the panel off while dark |
 | `BEING_PANEL_DIR`, `BEING_HANDS_KEYS` | the hands organ's paths | face |
 
@@ -451,10 +655,13 @@ BEING_REQUIRE=face,mind,voice
 | `being.installed=1 being.esp=… being.slot_a=… being.slot_b=… being.models=… being.mind=…` | Installed-disk partition binding |
 | `being.verbose=1`, `being.verbose_hold=SECS` | Keep boot messages visible (default 20 s; 0 waits for a key) |
 | `being.lid=open` | Treat a missing lid switch as open, after a 15 s grace |
-| `being.mic_channel=auto\|left\|right\|mix` | Which microphone channel the voice uses |
+| `being.mic_channel=auto\|left\|right\|mix` | Which microphone channel the voice uses. Unset, it is `auto` on the laptop image and `mix` on the lab image |
+| `being.asr=moonshine\|pocketsphinx\|auto`, `being.tts=piper\|flite\|auto` | Force the voice's recognizer or speaking voice for this boot, as `BEING_ASR` and `BEING_TTS` do (which win over them). The last one on the line counts |
+| `being.voice_debug=1` | On a Try boot only: [voice debug](#voice-debug-and-route-lines). The last `being.voice_debug=` counts, so `=0` after it turns it off |
+| `being.cable=0`, `being.cable=1` | On a cable development stick, every entry carries `being.cable=1`; `being.cable=0` is the kill switch: no link, no SSH, and the code stays read-only. Other images ignore both |
 | `being.audio=keep` | `being-audio-init` leaves the mixer as it is |
 | `being.bench=1`, `being.bench.soak=MINUTES`, `being.bench.quick=1` | Bench mode: measure models and voices, with an optional soak or a quick run |
-| `hid_apple.fnmode=2` | Set on laptop images: the top row sends F1 to F12 without fn |
+| `hid_apple.fnmode=1` | Set on laptop images: the top row does what is printed on it (brightness, volume and the rest); fn+key sends F1 to F12 |
 
 ## Lab and simulator commands
 
@@ -465,7 +672,9 @@ Sources: `lab/vm.py`, `lab/build.sh`, `scripts/run-sim.sh`, `sim/body.py`
 | `lab/build.sh` (`build`) | Build `out/images/beingos.img` |
 | `lab/build.sh model FILE.gguf` | Stage a model |
 | `lab/build.sh try-image` / `try-screen` | USB Try images |
-| `lab/build.sh laptop` / `laptop-try` | Laptop images: no serial, no root login. `BEING_TRY_BENCH=1` makes a bench stick |
+| `lab/build.sh laptop` / `laptop-try` | Laptop images: no serial, no console or password root login. `BEING_TRY_BENCH=1` makes a bench stick. `BEING_LAPTOP_CABLE=1` builds the [cable development stick](#cable-development-build) instead |
+| `lab/build.sh cable-key PUBKEY HOSTKEY` | Import the cable link's login public key and its SSH host key into the builder |
+| `lab/cable.sh ssh-config\|ping\|ssh [CMD…]\|push [--no-restart]\|pull-logs` | The Mac's side of the cable link (below) |
 | `lab/build.sh bundle` / `installed-bundle` / `test-media` / `installed-test-media` | Signed updates and fixtures |
 | `lab/build.sh release-key DIR` / `release-cert FILE` / `laptop-bundle KEY` | The owner's release key, its certificate, and signed laptop updates |
 | `lab/build.sh candidate NAME [--laptop] [--cache-overlay]` | Frozen, sealed release candidate under `out/candidates/NAME/` |
@@ -481,3 +690,40 @@ Sources: `lab/vm.py`, `lab/build.sh`, `scripts/run-sim.sh`, `sim/body.py`
 In the serial lab and the simulator, you can type these slash commands:
 `/lid open|close`, `/battery N`, `/plug`, `/lux N`, `/temp N`, `/hour N`,
 `/mute`, `/interrupt` and `/quit`.
+
+## Cable development build
+
+Sources: `lab/build.sh`, `lab/cable.sh`, `os/board/beingos/try-image.sh`,
+`os/package/being/being-cable-*.service`, `mind/network_enforce.py`
+
+A development-only Try stick that the Mac reaches over a plain Ethernet
+cable. It is for the owner's own bench: it never installs, never becomes
+an ISO and is never signed as an update. The procedure is in
+[LAB.md](../LAB.md#cable-development-build).
+
+| What | Value |
+|---|---|
+| Build | `BEING_LAPTOP_CABLE=1 lab/build.sh laptop-try`, in its own tree `/work/output/laptop-cable`, giving `out/images/beingos-laptop-cable-try.img` and its `.source-id` |
+| Refused together with | `BEING_LAPTOP_MAINTENANCE=1`, `BEINGOS_REQUIRE_RELEASE_KEY=1`, `lab/build.sh candidate` and `laptop-bundle`. `lab/make-iso.sh` and the installer (`mind/install_apply.py`) refuse a cable rootfs, and post-build refuses the cable files in every other image |
+| Added to the release laptop image | OpenSSH's server (LAN maintenance stays out), `BR2_PACKAGE_BEING_CABLE_DEV` (the three units and `/usr/share/being/cable/`: `authorized_keys`, `ssh_host_ed25519_key`, its `.pub` and `sshd_config`), and the kernel fragment `os/board/beingos/linux-cable.config` (`CONFIG_SND_HDA_HWDEP`, `CONFIG_SND_HDA_RECONFIG`, `CONFIG_SND_HDA_PATCH_LOADER`, `CONFIG_SND_DEBUG`, `CONFIG_SND_DEBUG_VERBOSE`) |
+| Boot entries | The same six; each adds `being.cable=1 being.voice_debug=1` |
+| Keys | `lab/build.sh cable-key PUBKEY HOSTKEY`, both kept outside the repository. PUBKEY is the login key's Ed25519 public half; HOSTKEY is an unencrypted OpenSSH Ed25519 private key, which every cable stick presents. It refuses a path inside the repository, a private key as PUBKEY, an encrypted or non-Ed25519 host key, and the same key twice. They are stored in the builder volume under `/work/beingos-cable` (mode 0600) |
+| Addresses | On the first wired port, chosen by type, never by name: `169.254.77.1/16` and `fe80::77:1/64`. If another device on the cable already has 169.254.77.1, Pip does not take it. The Mac keeps its own self-assigned 169.254.x address |
+| SSH | Port 22, root only, the one Ed25519 key only, from `169.254.0.0/16` and `fe80::/10` only (the firewall, `AllowUsers` and the key's `from=` option each check), no forwarding, SFTP allowed |
+| Writable code | `being-cable-workbench` copies `/usr/lib/being` and `/etc/being` to `/run/being-dev` and bind-mounts them back, with timestamp-checked `.pyc` files, so an edited module takes effect when its organ restarts. All of it is gone at power-off |
+| Kill switch | `being.cable=0` on the GRUB command line (press `e`, edit, Ctrl-X): no link, no SSH, code read-only |
+
+On the Mac (`PIPOS_CABLE_IF` names the cable port, default `en0`;
+`PIPOS_CABLE_HOST` is `pip`, over IPv6, the default, or `pip4`;
+`PIPOS_CABLE_IDENTITY` and `PIPOS_CABLE_HOST_KEY` override the login key
+and the host key's `.pub`):
+
+| Command | Does |
+|---|---|
+| `lab/cable.sh ssh-config` | Print the `Host pip` and `Host pip4` blocks for the SSH configuration, and write the host key pin file |
+| `lab/cable.sh ping` | Ping Pip over IPv6 and IPv4 on the cable port |
+| `lab/cable.sh ssh [CMD…]` | A root shell on Pip, or run CMD there |
+| `lab/cable.sh push [--no-restart]` | Copy this tree's `mind/*.py` onto Pip's writable copy, then `systemctl try-restart` the organs that run it: being-mind, being-voice, being-hands, being-eyes, being-local-screen and being-wifi (not being-usb-logs, which holds the `PIPLOGS` mount). It fails if the workbench is not mounted, or if none of those six organs is active afterwards. A down mind or voice is not caught while another of them runs, so check `systemctl status being-mind being-voice` after a push |
+| `lab/cable.sh pull-logs` | Copy `/run/being-diag` and this boot's `PIPLOGS` folder to `out/hardware-logs/cable-DATE/` |
+
+The stick holds the SSH host key, so treat the image file as a secret.

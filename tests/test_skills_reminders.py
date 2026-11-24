@@ -263,6 +263,12 @@ class Replies(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(parse("What can you do with cheese?", "Pip"))
         self.assertIn("not sure I can do that", skills.help_reply("skills_group", "cheese"))
 
+    def test_the_voice_help_names_the_laptops_menu_keys(self):
+        # The laptop's printed F2 is brightness up, so a bare "F2" would mislead.
+        line = skills.help_reply("skills_group", "your voice")
+        self.assertIn("Or type: Mission Control, or fn and F2, then 6, or Y once installed.", line)
+        self.assertLessEqual(len(line.split()), 25, line)
+
     def test_help_says_only_what_is_installed(self):
         with patch("mind.skills.has_feature", return_value=False):
             self.assertNotIn("lists", skills.help_reply("skills"))

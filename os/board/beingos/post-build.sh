@@ -3,8 +3,10 @@
 set -eu
 
 BOARD_DIR="$(dirname "$0")"
-# Buildroot passes BR2_ROOTFS_POST_SCRIPT_ARGS after the target directory.
+# Buildroot passes BR2_ROOTFS_POST_SCRIPT_ARGS after the target directory:
+# the variant, then "cable" for the cable development build (BEING_LAPTOP_CABLE=1).
 BEINGOS_VARIANT="${2:-lab}"
+BEINGOS_CABLE="${3:-}"
 . "$BOARD_DIR/slots.sh"
 
 fail() {
@@ -15,6 +17,11 @@ fail() {
 case "$BEINGOS_VARIANT" in
     lab|laptop) ;;
     *) fail "unknown PipOS variant '$BEINGOS_VARIANT' (lab or laptop)" ;;
+esac
+case "$BEINGOS_CABLE" in
+    "") ;;
+    cable) [ "$BEINGOS_VARIANT" = laptop ] || fail "the cable development build is a laptop build" ;;
+    *) fail "unknown build option '$BEINGOS_CABLE' (only cable)" ;;
 esac
 
 if ! find "$TARGET_DIR/usr/lib" -path '*/lib-dynload/_ssl.*.so' -print -quit | grep -q .; then
@@ -132,5 +139,106 @@ if [ "$BEINGOS_VARIANT" = laptop ]; then
     mkdir -p "$TARGET_DIR/usr/lib/modules-load.d"
     printf '%s\n' '# Read access to CPU registers for bodycare (plan section 4, Mode B).' msr \
         > "$TARGET_DIR/usr/lib/modules-load.d/being-msr.conf"
+fi
+# The cable development link (docs/LAB.md). Its login key and host key come
+# from the builder volume (lab/build.sh cable-key), never from the source
+# tree, and only the cable build may carry them: every other image is refused
+# if it holds any cable file or unit.
+cable="$TARGET_DIR/usr/share/being/cable"
+if [ "$BEINGOS_CABLE" = cable ]; then
+    keys=${BEINGOS_CABLE_KEYS:-/work/beingos-cable}
+    [ -s "$keys/authorized_key" ] && [ -s "$keys/ssh_host_ed25519_key" ] ||
+        fail "no cable keys in $keys: run lab/build.sh cable-key PUBKEY HOSTKEY first"
+    [ -x "$TARGET_DIR/usr/sbin/sshd" ] || fail "the cable build needs OpenSSH's server (BR2_PACKAGE_OPENSSH_SERVER)"
+    [ -s "$cable/sshd_config" ] || fail "the cable build needs BR2_PACKAGE_BEING_CABLE_DEV (no $cable/sshd_config)"
+    for unit in being-cable-link being-cable-ssh being-cable-workbench; do
+        [ -f "$TARGET_DIR/usr/lib/systemd/system/$unit.service" ] || fail "the cable build is missing $unit.service"
+    done
+    # Exactly one Ed25519 public key (its comment dropped) and one unencrypted
+    # OpenSSH Ed25519 host key, whose public half is read from the key itself.
+    python3 - "$keys/authorized_key" "$keys/ssh_host_ed25519_key" "$cable" <<'CABLE_KEYS' || exit 1
+import base64, binascii, os, struct, sys
+
+client_path, host_path, folder = sys.argv[1:]
+HEADER = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20"
+# fe80:* is a pattern, as in sshd_config: a CIDR never matches a scoped
+# link-local peer (fe80::x%enp1s0f0).
+PEERS = "169.254.0.0/16,fe80:*"
+
+
+def fail(message):
+    sys.exit(f"post-build: {message}")
+
+
+def public(blob, what):
+    if not blob.startswith(HEADER) or len(blob) != len(HEADER) + 32:
+        fail(f"{what} is not an Ed25519 key")
+    return "ssh-ed25519 " + base64.b64encode(blob).decode("ascii")
+
+
+def strings(data, at, count):
+    found = []
+    for _ in range(count):
+        (length,) = struct.unpack_from(">I", data, at)
+        if at + 4 + length > len(data):
+            raise ValueError("truncated")
+        found.append(data[at + 4:at + 4 + length])
+        at += 4 + length
+    return found, at
+
+
+try:
+    lines = open(client_path, encoding="ascii").read().splitlines()
+    host_text = open(host_path, encoding="ascii").read().strip().splitlines()
+except (OSError, UnicodeDecodeError) as error:
+    fail(f"cannot read the cable keys: {error}")
+words = lines[0].split() if len(lines) == 1 else []
+if len(words) < 2 or words[0] != "ssh-ed25519":
+    fail(f"{client_path} must hold exactly one ssh-ed25519 public key")
+try:
+    client = public(base64.b64decode(words[1], validate=True), client_path)
+except (ValueError, binascii.Error):
+    fail(f"{client_path} is not an Ed25519 public key")
+
+if (len(host_text) < 3 or host_text[0] != "-----BEGIN OPENSSH PRIVATE KEY-----"
+        or host_text[-1] != "-----END OPENSSH PRIVATE KEY-----"):
+    fail(f"{host_path} is not an OpenSSH private key")
+magic = b"openssh-key-v1\x00"
+try:
+    raw = base64.b64decode("".join(host_text[1:-1]), validate=True)
+    if not raw.startswith(magic):
+        raise ValueError("no magic")
+    (cipher, kdf, _), at = strings(raw, len(magic), 3)
+    (count,) = struct.unpack_from(">I", raw, at)
+    (host_blob,), _ = strings(raw, at + 4, 1)
+except (ValueError, binascii.Error, struct.error):
+    fail(f"{host_path} is not an OpenSSH private key")
+if cipher != b"none" or kdf != b"none" or count != 1:
+    fail(f"{host_path} must be one unencrypted host key (ssh-keygen -N '')")
+host = public(host_blob, host_path)
+if host == client:
+    fail("the cable login key and the host key must be different keys")
+
+
+def write(name, contents, mode):
+    path = os.path.join(folder, name)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w", encoding="ascii") as out:
+        os.fchmod(out.fileno(), mode)
+        out.write(contents)
+
+
+write("authorized_keys", f'from="{PEERS}",restrict,pty {client}\n', 0o644)
+write("ssh_host_ed25519_key", "\n".join(host_text) + "\n", 0o600)
+write("ssh_host_ed25519_key.pub", host + "\n", 0o644)
+CABLE_KEYS
+    chmod 0755 "$cable"
+    echo "post-build: cable development build: this image holds an SSH host key, keep it private" >&2
+else
+    [ ! -e "$cable" ] ||
+        fail "this image holds cable development files (/usr/share/being/cable); only BEING_LAPTOP_CABLE=1 builds may"
+    for unit in "$TARGET_DIR"/usr/lib/systemd/system/being-cable-*.service; do
+        [ ! -e "$unit" ] || fail "this image holds the cable development unit /${unit#"$TARGET_DIR"/}"
+    done
 fi
 python3 "$BOARD_DIR/build-id.py" "$TARGET_DIR"

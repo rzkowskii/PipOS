@@ -19,8 +19,11 @@ ExecStart=/usr/bin/python3 -m mind.hands --bus ${BEING_BUS}
 # Renderer frames, owned by being-panel; hands' own key socket, root only.
 RuntimeDirectory=being-hands being-panel
 RuntimeDirectoryMode=0700
-ExecStartPre=/bin/chown being-panel:being-panel /run/being-panel
-ExecStartPre=/bin/chmod 0750 /run/being-panel
+# systemd gives the runtime directories back to the unit's user (root) and
+# RuntimeDirectoryMode before every command it starts, ExecStart included, so
+# an ExecStartPre chown is undone at once and the renderer (being-panel)
+# could never write its frame. The hand-over runs last, as one command.
+ExecStartPost=/bin/sh -c 'chown being-panel:being-panel /run/being-panel && chmod 0750 /run/being-panel'
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=5

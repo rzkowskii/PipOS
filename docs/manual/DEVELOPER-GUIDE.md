@@ -1,7 +1,7 @@
 <!--
 doc: developer-guide
-verified: 2026-11-24T04:50
-sources: lab/build.sh lab/vm.py lab/cortex-dev.sh lab/make-iso.sh scripts/run-sim.sh scripts/check lab/candidate-build.sh lab/candidate_tests.py lab/soak.py lab/builder/Dockerfile os/configs/beingos_x86_64_defconfig os/configs/beingos_laptop_defconfig Cargo.toml sim/fake_cortex.py sim/body.py mind/mic_port.py lab/mic_bridge.py mind/lab_access.py lab/model_audition.py lab/decision_eval.py lab/dream_recall_eval.py lab/recall_second_opinion.py mind/bus.py mind/everyday.py
+verified: 2026-11-24T22:17
+sources: lab/build.sh lab/vm.py lab/cortex-dev.sh lab/make-iso.sh lab/cable.sh scripts/run-sim.sh scripts/check lab/candidate-build.sh lab/candidate_tests.py lab/soak.py lab/builder/Dockerfile os/configs/beingos_x86_64_defconfig os/configs/beingos_laptop_defconfig os/board/beingos/try-image.sh os/board/beingos/post-build.sh os/board/beingos/linux-cable.config os/package/being/Config.in Cargo.toml sim/fake_cortex.py sim/body.py mind/mic_port.py lab/mic_bridge.py mind/lab_access.py lab/model_audition.py lab/decision_eval.py lab/dream_recall_eval.py lab/recall_second_opinion.py lab/try_timings.py lab/tests/test_cable_dev.py lab/tests/test_voice_terminal.py mind/bus.py mind/everyday.py mind/diag.py mind/diag_report.py mind/keys.py crates/face/src/keys.rs crates/brainstem/src/main.rs mind/voice.py os/package/being/being-cable-link.service os/package/being/being-cable-ssh.service os/package/being/being-cable-workbench.service
 -->
 
 # PipOS developer guide
@@ -91,7 +91,8 @@ lab/build.sh                            # build out/images/beingos.img (first bu
 | `lab/build.sh laptop` | `beingos-laptop.img`: no getty, no root login, no SSH, no lab body |
 | `BEING_LAPTOP_MAINTENANCE=1 lab/build.sh laptop` | `beingos-laptop-maintenance.img`: adds paired-Mac SSH |
 | `lab/build.sh laptop-try` | `beingos-laptop-try.img`: the stick for the real MacBook, with an on-panel GRUB and a `PIPLOGS` partition. With `BEING_TRY_BENCH=1`, a `-bench` stick where every entry runs bench mode |
-| `lab/make-iso.sh [DIR]` | `out/iso/pipos-macbook.iso`: the same stick as one hybrid ISO ([ISO.md](../ISO.md)) |
+| `BEING_LAPTOP_CABLE=1 lab/build.sh laptop-try` | `beingos-laptop-cable-try.img`, in its own tree `/work/output/laptop-cable`: the development-only cable stick (below). Run `lab/build.sh cable-key PUBKEY HOSTKEY` once first |
+| `lab/make-iso.sh [DIR]` | `out/iso/pipos-macbook.iso`: the same stick as one hybrid ISO ([ISO.md](../ISO.md)). Refuses the cable build |
 | `lab/build.sh bundle` / `installed-bundle` | Signed RAUC updates for the factory or installed channel |
 | `lab/build.sh release-key DIR` / `release-cert FILE` / `laptop-bundle KEY` | The owner's passphrase-protected release key (made on the Mac, outside the repository), its certificate in the builder, and laptop updates signed with it |
 | `lab/build.sh candidate NAME [--laptop]` | Frozen, sealed release candidate in `out/candidates/NAME/`; `--laptop` adds the laptop disk and Try stick from the same snapshot, with a rootfs parity report |
@@ -148,6 +149,8 @@ python3 -m unittest discover -s lab/tests -t . -v       # QEMU guest suites (slo
 | `test_laptop_smoke` | Laptop Try stick through its screen and keyboard: GRUB entries, `PIPLOGS`, install |
 | `test_iso` | The ISO as the MacBook would use it |
 | `test_apps` | The workshop apps over the real bus |
+| `test_voice_terminal` | "Hey Pip, open a terminal." said in one breath, at full level, 30 dB and 45 dB down, and by a second voice, through the lab's ALSA loopback: the wake, the transcript and which pass gave it, the mind's `workshop.open` route with no model turn, and the terminal on screen |
+| `test_cable_dev` | The cable stick over QEMU's user network standing in for the cable (`BEING_LAPTOP_CABLE_TRY_IMAGE=out/images/beingos-laptop-cable-try.img`, `BEING_CABLE_IDENTITY` for the login key). Not part of a sealed candidate |
 | Others | Model pack tamper, face on USB, hardware audit and SSH maintenance, network modes, Wi-Fi (hwsim), Broadcom firmware |
 
 `scripts/check boot-gate` runs the must-pass suites (laptop smoke, L0, L1,
@@ -193,7 +196,64 @@ laptop, the maintenance build (`BEING_LAPTOP_MAINTENANCE=1`) is needed:
    explicitly, and it closes after at most 30 minutes.
 
 [HARDWARE.md](../HARDWARE.md#enroll-the-laptop-once) has the enrollment
-steps. Without a maintenance build, the Try stick's `PIPLOGS` partition
+steps. The maintenance listeners never start on a Try boot, so for a Try
+stick on the bench use the cable development build instead.
+
+#### The cable development build
+
+A development-only Try stick that the Mac reaches over a plain Ethernet
+cable, with no router, DHCP or pairing. It is the release laptop image
+plus OpenSSH's server, the cable link (`BR2_PACKAGE_BEING_CABLE_DEV`) and
+an audio-debugging kernel fragment (`os/board/beingos/linux-cable.config`).
+[LAB.md](../LAB.md#cable-development-build) has the full procedure; in
+short:
+
+1. Make two Ed25519 keys on the Mac, outside the repository: a login key
+   (a passphrase is fine) and a host key without a passphrase, because
+   every stick presents it. Import them once with
+   `lab/build.sh cable-key LOGIN.pub HOSTKEY`.
+2. Build: `BEING_LAPTOP_CABLE=1 lab/build.sh laptop-try` (with
+   `BEING_LAPTOP_PACKAGE_JOBS=3` for a cold build, which takes about an
+   hour). It is refused together with `BEING_LAPTOP_MAINTENANCE=1` or
+   `BEINGOS_REQUIRE_RELEASE_KEY=1`.
+3. Boot the stick and connect the cable. `lab/cable.sh ssh-config`
+   writes the host key pin and prints the `Host pip` (IPv6) and `pip4`
+   (IPv4) blocks to add to your SSH configuration. Then
+   `lab/cable.sh ping`, and `ssh pip` (or `lab/cable.sh ssh`, which needs
+   no configuration).
+4. Edit `mind/*.py` on the Mac and run `lab/cable.sh push`: it copies
+   them onto Pip's writable copy of the code and try-restarts the organs
+   that run it. It fails if the workbench is not mounted or if none of
+   those organs is active afterwards; it does not catch a down mind or
+   voice while another organ runs, so check
+   `ssh pip systemctl status being-mind being-voice`. `lab/cable.sh pull-logs` brings `/run/being-diag` and the
+   boot's `PIPLOGS` folder back to `out/hardware-logs/cable-DATE/`.
+
+Every boot entry adds `being.cable=1 being.voice_debug=1`, so the
+journal holds what the voice heard and the mind's route words. Pip takes
+`169.254.77.1` and `fe80::77:1` on its first wired port and accepts root
+SSH with that one key from link-local addresses only. `being.cable=0` on
+the GRUB command line turns off the link, SSH and the writable copy of the
+code for a boot. Voice debugging stays on unless `being.voice_debug=0` is
+also added after it. The stick never
+installs, never becomes an ISO and is never signed as an update, and its
+image holds the SSH host key: never commit, attach or share it.
+
+#### Diagnostics
+
+`pip-diag` runs on every laptop and lab image, as root over the cable or
+from the Try menu's item 8. For example:
+
+```bash
+ssh pip 'pip-diag quick --json --now '"$(date -u +%s)"
+ssh -t pip pip-diag voice        # interactive: you speak and listen
+ssh pip 'pip-diag hear --phrase "Hey Pip, open a terminal." --expect-route workshop.open'
+ssh pip pip-diag restore         # after a run was cut off
+```
+
+The [reference](REFERENCE.md#diagnostics-pip-diag) lists every
+subcommand, flag, exit code and output file. Without the cable, the Try
+stick's `PIPLOGS` partition (where each run's `diag-<UTC>/` folder goes)
 and the F1 captions overlay are the ways to see what the laptop did.
 
 ## 5. Where to change things
@@ -207,6 +267,8 @@ and the F1 captions overlay are the ways to see what the laptop did.
 | Change a state or timer | `crates/brainstem/src/machine.rs`. Update [ARCHITECTURE.md §4](ARCHITECTURE.md#4-states) |
 | Change battery care | `crates/brainstem/src/battery.rs` (the brainstem's judgement and power-off) and the plea lines in `mind/turn.py` |
 | Change the face | `crates/face/src/{anim,eye,render}.rs`, `eye.frag` |
+| Change what a key does | `crates/face/src/keys.rs` (the top row, by SDL scancode, and the evdev-only Mission Control and Launchpad), `crates/face/src/main.rs` (Esc, M, F-keys), and `mind/keys.py` for the keys the mind answers (a new one goes in its `TOPICS`, which the mind subscribes to). `allowed_from` in `crates/brainstem/src/main.rs` already admits every `key.*` topic from the face alone on the laptop, so a new key topic needs no entry there; add it to the brainstem test `the_top_row_keys_come_from_the_face_and_reach_the_mind`. Only a new topic that is not a key, such as `being.kbd_light`, needs its own arm in `allowed_from`. Update [REFERENCE.md](REFERENCE.md#keys-and-touch) |
+| Add a diagnostics check | A function in `mind/diag_*.py` that returns `check(id, section, status, value, evidence, hint)` items, run through `guarded()` in a section of `mind/diag.py`. Anything that opens the sound card goes inside `diag_sound.AudioSession`. For it to count in a verdict area, start its id with one of the prefixes that `diag_report.AREAS` lists for that area (such as `mic.`, `speaker.`, `loopback.`, `tts.`, `voice.wake`, `commands.`, `hear.terminal` or `workshop.`); the area names themselves are not matched. Add a test with fakes in `tests/test_diag*.py` |
 | Add a service or package | `os/package/being/` (`being.mk`, the unit file, `50-being.preset`) |
 | Change the kernel | `os/board/beingos/linux.config`; laptop-only changes go in `linux-laptop.config` |
 | Change the disk layout | `os/board/beingos/genimage.cfg` (factory) and `mind/installer.py` (installed) |

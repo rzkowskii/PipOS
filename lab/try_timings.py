@@ -11,7 +11,9 @@ tokens, and prompt and decode speed. The voice's and the mind's own timing
 lines ("voice timing {...}", "turn timing {...}") give medians and the
 laptop gates of docs/PIP-FUNCTIONS.md 4.2: end of speech to first audio
 <= 3.0 s for a warm model turn and <= 1.2 s for a code answer. Bench results
-(bench-*.json written by `being.bench=1`) are summarised too.
+(bench-*.json written by `being.bench=1`) are summarised too, and the
+mind's route lines ("route {...}") are counted by route: which step answered
+each turn (the workshop, a command, an everyday skill, a greeting, the model).
 
 Python standard library only. It never writes to the stick. The journal can
 hold what was said to the being: this script prints no transcript text.
@@ -39,6 +41,10 @@ RESTART = re.compile(r"(\S+\.service): Scheduled restart job, restart counter is
 # One line of numbers per reply (mind/voice.py) and per model turn (mind/turn.py).
 TIMING = re.compile(r"\b(voice|turn) timing (\{.*\})\s*$")
 VOICE_KEYS = ("eos_to_final_s", "final_to_audio_s", "eos_to_audio_s")
+# One line per turn (mind/turn.py _route): the step that answered it. A
+# voice-debug boot adds the words; they are never read here.
+ROUTE = re.compile(r"\broute (\{.*\})\s*$")
+ROUTE_NAME = re.compile(r"[a-z0-9_.-]{1,96}")
 TURN_KEYS = ("prompt_n", "cache_n", "prompt_per_second", "predicted_n", "predicted_per_second", "first_clause_s")
 MODEL_GATE_S = 3.0
 CODE_GATE_S = 1.2
@@ -50,7 +56,7 @@ PAIR_S = 60.0
 PAIR_AFTER_S = 5.0
 SUMMARY_FIELDS = ("Machine", "Firmware", "CPU", "GPU", "GL renderer", "Displays", "Audio", "Audio codecs",
                   "Lid switch", "Battery", "Charger", "applesmc", "Camera", "Wi-Fi chip", "Memory",
-                  "Failed units")
+                  "Failed units", "Codec IDs", "HDA model", "Cable link", "Voice debug")
 
 
 def read_text(path):
@@ -91,8 +97,31 @@ def timing_fields(text):
             if isinstance(key, str) and (type(value) in (int, float, bool) or value is None)}
 
 
+def route_fields(text):
+    """A route line's route name and length; the words never pass."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("route"), str):
+        return None
+    if not ROUTE_NAME.fullmatch(data["route"]):
+        return None
+    chars = data.get("chars")
+    return {"route": data["route"], "chars": chars if type(chars) is int and chars >= 0 else None}
+
+
+def route_counts(routes):
+    """{route: count}, most common first."""
+    counts = {}
+    for entry in routes:
+        counts[entry["route"]] = counts.get(entry["route"], 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
 def parse_journal(text):
     states, requests, failed, restarts, renderer = [], [], [], {}, None
+    routes = []
     timings = {"voice": [], "turn": []}
     open_tasks = {}
     checkpoints_restored = None
@@ -109,6 +138,10 @@ def parse_journal(text):
             fields = timing_fields(match[2])
             if fields is not None:
                 timings[match[1]].append({"t": stamp, **fields})
+        elif (match := ROUTE.search(message)):
+            fields = route_fields(match[1])
+            if fields is not None:
+                routes.append({"t": stamp, **fields})
         if (match := RESTORED.search(message)):
             checkpoints_restored = int(match[1])
         if "print_timing" in message or "stop processing" in message:
@@ -136,7 +169,8 @@ def parse_journal(text):
             requests.append(entry)
     requests.sort(key=lambda entry: entry["t"])
     return {"states": states, "requests": requests, "failed": failed, "restarts": restarts,
-            "renderer": renderer, "checkpoints_restored": checkpoints_restored, "timings": timings}
+            "renderer": renderer, "checkpoints_restored": checkpoints_restored, "timings": timings,
+            "routes": routes}
 
 
 def classify(timings):
@@ -234,6 +268,7 @@ def read_boot(folder):
     return {
         "folder": folder.name,
         "entry": entry,
+        "cable": bool(cmdline) and "being.cable=1" in cmdline.split() and "being.cable=0" not in cmdline.split(),
         "summary": summary,
         "renderer": journal["renderer"],
         "failed_units": journal["failed"],
@@ -245,6 +280,8 @@ def read_boot(folder):
         "checkpoints_restored": journal["checkpoints_restored"],
         "timing_lines": journal["timings"],
         "timing": timing_summary(journal["timings"]),
+        "routes": journal["routes"],
+        "route_counts": route_counts(journal["routes"]),
         "bench": bench_summaries(folder),
         "missing": [name for name in ("summary.txt", "journal.txt") if not (folder / name).is_file()],
     }
@@ -292,7 +329,8 @@ def render(data):
         out.append("No boot-NNNN folders found. Is this the PIPLOGS volume?")
     for boot in data["boots"]:
         s = boot["summary"]
-        out += ["", f"== {boot['folder']} ({boot['entry']} entry) =="]
+        cable = ", CABLE development boot" if boot.get("cable") else ""
+        out += ["", f"== {boot['folder']} ({boot['entry']} entry{cable}) =="]
         if boot["missing"]:
             out.append(f"  missing: {', '.join(boot['missing'])} (a hard power-off or a crash?)")
         out.append(f"  CPU:          {s.get('CPU', 'unknown')}")
@@ -340,6 +378,9 @@ def render(data):
                 verdict = "no data" if gate["passes"] is None else ("PASS" if gate["passes"] else "FAIL")
                 out.append(f"    {label}: {gate['count']}, median end of speech to audio "
                            f"{fmt(gate['median_eos_to_audio_s'], ' s', 2)} (gate <= {gate['gate_s']} s: {verdict})")
+        if boot.get("route_counts"):
+            out.append(f"  Routes ({len(boot['routes'])} turns): "
+                       + ", ".join(f"{route} x{count}" for route, count in boot["route_counts"].items()))
         if boot["checkpoints_restored"] is not None:
             out.append(f"  Slot restore: {boot['checkpoints_restored']} context checkpoints restored")
         if boot["requests"]:

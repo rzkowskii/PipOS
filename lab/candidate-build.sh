@@ -68,7 +68,8 @@ candidate_laptop() {
     local -a buildroot=(make -C "$tree" "O=$output" BR2_EXTERNAL=/src/os BR2_JLEVEL=4)
     "${buildroot[@]}" beingos_laptop_defconfig
     local key
-    for key in BR2_PACKAGE_BEING_LAB_BODY BR2_TARGET_ENABLE_ROOT_LOGIN BR2_TARGET_GENERIC_GETTY BR2_PACKAGE_OPENSSH; do
+    for key in BR2_PACKAGE_BEING_LAB_BODY BR2_TARGET_ENABLE_ROOT_LOGIN BR2_TARGET_GENERIC_GETTY BR2_PACKAGE_OPENSSH \
+               BR2_PACKAGE_BEING_CABLE_DEV; do
         if grep -qx "$key=y" "$output/.config"; then
             echo "Laptop candidate config has lab-only $key=y" >&2
             return 1
@@ -107,7 +108,9 @@ candidate_laptop_verify() {
     local t="$out/target" grub="$out/images/efi-part/EFI/BOOT/grub.cfg"
     for f in usr/lib/systemd/system/being-lab-body.service usr/lib/being/sim/body.py usr/sbin/sshd \
              usr/sbin/being-lab-access usr/lib/systemd/system/being-lab-observe.service \
-             usr/lib/systemd/system/being-lab-dev.service; do
+             usr/lib/systemd/system/being-lab-dev.service usr/share/being/cable \
+             usr/lib/systemd/system/being-cable-link.service usr/lib/systemd/system/being-cable-ssh.service \
+             usr/lib/systemd/system/being-cable-workbench.service; do
         if [ -e "$t/$f" ]; then echo "Laptop candidate contains lab-only /$f" >&2; bad=1; fi
     done
     if grep -q "ttyS0\|^serial " "$grub" "$t/usr/share/being/installed-grub.cfg"; then

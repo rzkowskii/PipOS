@@ -9,7 +9,9 @@ Rewriting (compaction) waits until it is idle.
 import asyncio
 import hashlib
 import importlib
+import inspect
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -23,7 +25,7 @@ from functools import cached_property
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import app_commands, commands, consolidation, dream_journal
+from . import app_commands, commands, consolidation, dream_journal, keys
 from .cortex import SLOT_FILE, CortexError
 from .dream_policy import DreamPolicy
 from .dream_store import DreamStore
@@ -91,6 +93,9 @@ SUBS = [
     *app_commands.AppBridge.SUBS,
     "organ.up",
     "organ.down",
+    # The keyboard's top row (mind/keys.py): brightness, volume, speaker
+    # mute, keyboard light and Launchpad, pressed on the face.
+    *keys.TOPICS,
 ]
 APP_TOPICS = frozenset((*app_commands.AppBridge.SUBS, "organ.up", "organ.down"))
 
@@ -411,6 +416,32 @@ def log(*parts):
     print("mind:", *parts, file=sys.stderr, flush=True)
 
 
+def voice_debug_on(cmdline=Path("/proc/cmdline"), environ=None):
+    """True when the journal may hold what was heard: `being.voice_debug=1`
+    on a Try boot's kernel command line, or BEING_VOICE_DEBUG=1 (the same
+    rule as the voice's "heard:" lines). Never on an installed system's
+    command line alone."""
+    environ = os.environ if environ is None else environ
+    if environ.get("BEING_VOICE_DEBUG") == "1":
+        return True
+    try:
+        words = Path(cmdline).read_text(encoding="utf-8", errors="replace").split()
+    except OSError:
+        return False
+    from .try_mode import voice_debug_words
+
+    return voice_debug_words(words)
+
+
+_ROUTE_NAME = re.compile(r"[^a-z0-9_.-]+")
+
+
+def route_name(*parts):
+    """'command.remember', 'workshop.open', 'everyday.calc': lowercase words
+    and dots only, so a route can never carry what was said."""
+    return ".".join(_ROUTE_NAME.sub("_", str(part).lower())[:32] for part in parts if part)
+
+
 @dataclass(frozen=True)
 class AppLine:
     """A line the workshop asked to have said (a finished script, a failure)."""
@@ -550,6 +581,11 @@ class Mind:
         self.minutes_left = None
         self.temp = None
         self._volume = self._load_volume()
+        # The top row's keys answer in code and never speak (mind/keys.py).
+        self._keys = keys.Keys(lambda topic, **fields: self.bus.send(topic, **fields),
+                               volume=lambda: self._volume, set_volume=self._save_volume,
+                               apps=self.apps, guest=lambda: self._guest_memory is not None,
+                               state_dir=self.state_dir)
         self.battery_level = None  # the brainstem's judgement, when it sends one
         self._plea_stage = 0  # the highest battery plea due since it was unplugged
         # The stage the last body.state called for: a plea needs two in a row,
@@ -573,6 +609,7 @@ class Mind:
         self._clock_warned = False
         self._clock_sent = None
         self._greeting_replies = personality_greetings(cfg.personality)
+        self._everyday_name = ""  # the everyday skill that answered the last turn, for its route line
         self._greeting_counts = {}
         # Born on this wake and not yet greeted anyone: its first words are owed.
         self._newborn = False
@@ -1088,6 +1125,8 @@ class Mind:
             if decided and self.bus.connected.is_set() and self._announced != self.bus.generation:
                 self._announced = self.bus.generation
                 await self.bus.send("mind.ready", cortex=self._model_available)
+                # A speaker a key mute left silent comes back (mind/keys.py).
+                await self._keys.start()
             self._maybe_self_care()
             # While the model is loading it is asked often, so the warm-up can
             # start the moment it answers; once it answers, every 5 s.
@@ -1374,7 +1413,8 @@ class Mind:
         if topic == "body.brightness":
             # The answer a brightness command is waiting on, before it speaks.
             waiting = self._brightness_answer
-            if waiting is not None and not waiting.done():
+            # A key's answer (req "key", mind/keys.py) is never a spoken one's.
+            if waiting is not None and not waiting.done() and event.get("req") != keys.REQ:
                 waiting.set_result({key: value for key, value in event.items() if key != "t"})
         if topic in DREAM_POLICY_EVENTS:
             self._dream_policy.observe(event)
@@ -1500,8 +1540,12 @@ class Mind:
             self._on_shutdown_notice(event)
         elif topic == "voice.volume_state":
             level = event.get("level")
-            if type(level) is int and 0 <= level <= 100 and level != self._volume:
+            # A key mute's silence is for now only, never the owner's level.
+            held = self._keys.volume_report(level)
+            if type(level) is int and 0 <= level <= 100 and level != self._volume and not held:
                 self._save_volume(level)
+        elif topic in keys.TOPICS:
+            await self._keys.handle(event)
         elif topic == "state.changed":
             self.state = event.get("state") or self.state
             if "muted" in event:
@@ -1804,6 +1848,8 @@ class Mind:
                 line = PLEA_GOODBYE
             else:
                 line = PLEA_LINES[due] if due is not None else PLEA_THANKS
+            if due is not None:
+                await self._keys.unmute("a battery plea")
             pending.speaking = True
             pending.plea = due
             self._cancelled = False
@@ -1850,6 +1896,8 @@ class Mind:
         if isinstance(entry, Reminder):
             # A bell first, then the words: it rings like a person would.
             line, chirp = _tagged(reply), "bell"
+            # A speaker the mute key silenced comes back for a ring.
+            await self._keys.unmute(f"a {entry.kind} is ringing")
         else:
             line = self._greeting_line()
         pending.speaking = True
@@ -2029,6 +2077,23 @@ class Mind:
 
     # -- a turn ----------------------------------------------------------
 
+    @cached_property
+    def _voice_debug(self):
+        return voice_debug_on()
+
+    def _route(self, route, text):
+        """One line per turn saying which step answered it, for the diagnostics
+        and lab/try_timings.py: `route {"route": "workshop.open", "chars": 15}`.
+        The words are added only in voice-debug mode, and in guest or private
+        mode the line says nothing about the turn at all."""
+        if not self._durable_context:
+            log('route {"route": "private"}')
+            return
+        fields = {"route": route, "chars": len(text or "")}
+        if self._voice_debug:
+            fields["text"] = text or ""
+        log("route " + json.dumps(fields, ensure_ascii=False))
+
     async def _run_turn(self, text, speaker, greeting=None, *, command=None, followup=False):
         """Route one addressed utterance (docs/PIP-FUNCTIONS.md 5.2).
 
@@ -2055,6 +2120,7 @@ class Mind:
         try:
             await self._check_expiry()
             if self._discard_reply:
+                self._route("discarded", text)
                 return
             if command is None:
                 command = commands.parse(text, self.cfg.name, now=self.skills.now())
@@ -2068,6 +2134,7 @@ class Mind:
             #    follow-up that answered one was taken as addressed; any
             #    other leaves the question open and answers nothing.
             if not privacy and not followup and await self._answer_pending(text, speaker, command):
+                self._route("pending", text)
                 return
             if command is not None and command.kind == "ack":
                 command = None  # "stop the alarm" with nothing ringing is conversation
@@ -2092,6 +2159,7 @@ class Mind:
                 # Not for it after all: nothing is said, kept or sent to the model.
                 overheard = True
                 self._last_addressed = addressed_before
+                self._route("overheard", text)
                 self._overhear(text)
                 await self._send_reply("mind.reply_done", spoke=False)
                 return
@@ -2102,6 +2170,13 @@ class Mind:
             if brief is not None and (app is not None or command is not None or everyday is not None):
                 # A command first: its answer, then at most one clause about today.
                 self._suffix = self._brief_clause(brief)
+            waiting = False
+            if (not privacy and app is None and command is None and everyday is None and not greeting
+                    and self._model_available and self._erase_required):
+                # Step 7's cache clear is tried before the route is logged, so
+                # the line says whether the model answered or the turn waited.
+                waiting = not await self._clear_live_slot()
+            self._route(self._route_of(privacy, app, command, everyday, greeting, waiting), text)
             if privacy:
                 # 2. Guest mode on and off.
                 await self._command(command, text, speaker)
@@ -2123,7 +2198,7 @@ class Mind:
                 reply = ("Private conversations need my local language model." if self.cortex_ok
                          else "I can't think right now. My language model isn't answering.")
                 await self._say(f"[concern] {reply}", canned=True)
-            elif self._erase_required and not await self._clear_live_slot():
+            elif waiting:
                 await self._say("[concern] I'm waiting for my conversation cache to clear.", keep=False)
             else:
                 # 7. The model. A warm-up kept for what looked like a code
@@ -2142,6 +2217,24 @@ class Mind:
                 # RAM only, for "what did you hear?" on a later turn.
                 self.last_heard = text
             self.save_context()
+
+    def _route_of(self, privacy, app, command, everyday, greeting, waiting=False):
+        """The route name for a turn routed by _run_turn's steps 2-7.
+        `waiting`: the model's turn found the conversation cache still to be
+        cleared and the clear failed (a clear that worked is plain 'model')."""
+        if privacy:
+            return route_name("command", command.kind)
+        if app is not None:
+            return route_name("workshop", app.kind)
+        if command is not None:
+            return route_name("command", command.kind)
+        if everyday is not None:
+            return route_name("everyday", self._everyday_name or "skill")
+        if greeting:
+            return "greeting"
+        if not self._model_available:
+            return "model.unavailable"
+        return "model.waiting" if waiting else "model"
 
     def _bare_answer(self, text):
         """ "Pip, yes please." -> "yes please", for matching a yes or a no."""
@@ -2284,15 +2377,36 @@ class Mind:
                 self._brightness_answer = None
 
     async def _everyday(self, text, speaker, heard_before):
-        """Step 5: the first everyday skill that answers, or None."""
+        """Step 5: the first everyday skill that answers, or None. The
+        answering skill's name is kept in _everyday_name for the route line."""
+        self._everyday_name = ""
         everyday = optional_module("everyday")
         if everyday is None:
             return None
         try:
-            return await everyday.handle(text, self._context(speaker, heard_before))
+            ctx = self._context(speaker, heard_before)
+            registry = getattr(everyday, "_DEFAULT", None)
+            if registry is None or not callable(getattr(registry, "modules", None)):
+                return await everyday.handle(text, ctx)
+            return await self._everyday_named(registry, text, ctx)
         except Exception as exc:
             log(f"everyday skills failed: {exc!r}")
             return None
+
+    async def _everyday_named(self, registry, text, ctx):
+        """everyday.Registry.handle, step for step, noting which skill answered."""
+        for module in registry.modules():
+            try:
+                reply = module.handle(text, ctx)
+                if inspect.isawaitable(reply):
+                    reply = await reply
+            except Exception as error:
+                logging.getLogger("being.everyday").warning("everyday skill %s failed: %s", module.__name__, error)
+                continue
+            if reply is not None:
+                self._everyday_name = module.__name__.rsplit(".", 1)[-1]
+                return reply
+        return None
 
     async def _speak_reply(self, reply, text, speaker, *, confirmed=False):
         """Say a code skill's Reply, then do what it asks: wait for a yes,

@@ -1,0 +1,7 @@
+# Upstream release digest, as published by GitHub for the v1.5.9 release asset.
+sha256  609569420d356f561e13ee6d52ed0edf7dcae225ea498f4cc68587c11d6d295c  piper-phonemize-v1.5.9-linux-x64-shared-lib.tar.bz2
+# Licence texts shipped in this package folder (computed locally)
+sha256  8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903  COPYING-GPL-3.0
+sha256  c55648b02873556d6ab2de14938998101fda3a0f293337542af9196435def318  LICENSE-uni-algo
+sha256  be029c50df83105a810e391778b6edcb522d6cb4b4e142332aca54437a499bf7  COPYING-espeak-ng-UCD
+sha256  af798cb885a4136f210e5007a4cf8ccae2a2ec19af6fcab35d1e49cff06382d4  LICENSES.md

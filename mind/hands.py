@@ -69,6 +69,16 @@ SUBS = (
 )
 
 APPS = ("terminal", "monitor", "clock")
+# The face composites the panels; being-local-screen (the Try menu) conflicts
+# with it, so while the menu has the screen no panel can be seen.
+FACE_UNIT = "being-face.service"
+LOCAL_SCREEN_UNIT = "being-local-screen.service"
+SCREEN_UNITS = (FACE_UNIT, LOCAL_SCREEN_UNIT)
+FACE_UP = ("active", "activating", "reloading")
+# The screen probe sits in front of every open, inside the mind's OPEN_WAIT
+# (4 s), and hands runs at a low CPU weight: it must answer well before the
+# mind gives up, and a probe that times out lets the open go ahead.
+SCREEN_PROBE_SECONDS = 1.0
 SMALL_APPS = ("monitor", "clock")   # never minimised: they close, and at most one is open
 SMALL_TITLES = {"monitor": "How I'm feeling", "clock": "Pip's clock"}
 APP_FRAME = 1.0             # seconds between monitor and clock frames
@@ -1016,6 +1026,15 @@ class SystemdCage:
     def stop_leftovers(self):
         self.run(["systemctl", "stop", "being-shell-*", "being-panel-*"])
 
+    def screen_states(self):
+        """{unit: ActiveState} of the face and the local screen (the Try
+        menu), which conflict: only one of them has the display. {} if
+        systemctl did not answer for both (a timeout raises, and the caller
+        then lets the open go ahead)."""
+        code, out = self.run(["systemctl", "is-active", *SCREEN_UNITS], timeout=SCREEN_PROBE_SECONDS)
+        states = out.split()
+        return dict(zip(SCREEN_UNITS, states)) if len(states) == len(SCREEN_UNITS) else {}
+
     def start(self, unit, tty, slave_fd):
         code, out = self.run(cage_command(unit, tty))
         if code != 0:
@@ -1765,17 +1784,41 @@ class Hands:
             return "lid_closed"
         return None
 
+    async def _menu_has_the_screen(self):
+        """True while being-face.service is not running because the Try menu
+        (being-local-screen) holds the display: a panel opened now would be
+        drawn where nobody can see it. Only the real cage can ask systemd;
+        if it cannot tell, the open goes ahead as before. The menu is never
+        closed from here: it may be in the middle of an install."""
+        probe = getattr(self.cage, "screen_states", None)
+        if probe is None:
+            return False
+        try:
+            states = await asyncio.to_thread(probe)
+        except Exception as exc:
+            log(f"could not ask which unit has the screen: {type(exc).__name__}")
+            return False
+        face, menu = states.get(FACE_UNIT), states.get(LOCAL_SCREEN_UNIT)
+        return face is not None and face not in FACE_UP and menu in FACE_UP
+
     async def open(self, app, req=None):
+        """Show an app. True when it went ahead, False when it was refused
+        (the app.refused has been sent), so a task that brings the terminal
+        forward can stop instead of working where nobody can see."""
         if app not in APPS:
             await self.send("app.refused", req=req, reason="unknown", app=app)
-            return
+            return False
         reason = self._refusal()
         if reason:
             await self.send("app.refused", req=req, reason=reason, app=app)
-            return
+            return False
+        if await self._menu_has_the_screen():
+            log(f"{app} not opened: the face is not running while the Try menu has the screen")
+            await self.send("app.refused", req=req, reason="no_face", app=app)
+            return False
         if app in SMALL_APPS:
             await self._open_small(app, req)
-            return
+            return self.view[app] != "closed"
         was = self.view[app]
         if was == "closed":
             try:
@@ -1784,7 +1827,7 @@ class Hands:
                 log(f"terminal did not start: {type(exc).__name__}")
                 await self._stop_terminal()
                 await self.send("app.refused", req=req, reason="failed", app=app)
-                return
+                return False
         elif was == "minimised" and self.renderer is not None:
             await self.renderer.show()
         self.view[app] = "shown"
@@ -1798,6 +1841,7 @@ class Hands:
             if self.view[small] != "closed":
                 await self._close_small(small)
         await self.announce_state(app, req)
+        return True
 
     def _small_shown(self):
         return next((app for app in SMALL_APPS if self.view[app] != "closed"), None)
@@ -2340,8 +2384,11 @@ class Hands:
                 return
         elif self._small_shown() or (kind == "run_app" and self.view["terminal"] == "minimised"):
             # Work in the terminal is shown: a game needs its player, and the
-            # monitor or the clock would otherwise hide what Pip types.
-            await self.open("terminal", job_id)
+            # monitor or the clock would otherwise hide what Pip types. If it
+            # cannot be brought forward (no_face: the Try menu has the screen)
+            # the refusal already answered this req, so nothing starts.
+            if not await self.open("terminal", job_id):
+                return
         self.jobs_made += 1
         job = Job(id=job_id or f"j{self.jobs_made}", kind=kind, text=text, source="model",
                   recipe=str(event.get("recipe") or ""), slots=dict(event.get("slots") or {}),

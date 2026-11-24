@@ -223,6 +223,123 @@ class Reports(FakeMachine):
     def test_report_survives_an_empty_root(self):
         self.assertIn("===== kernel =====", usb_logs.hardware_report(self.root))
 
+    def codec_machine(self, dump_coef="-1"):
+        if not (self.root / "proc/cpuinfo").exists():
+            self.macbook()
+        self.write("proc/asound/card0/codec#3", "Codec: Intel PantherPoint HDMI\nAddress: 3\n")
+        if dump_coef is not None:
+            self.write("sys/module/snd_hda_codec/parameters/dump_coef", f"{dump_coef}\n")
+        base = "sys/bus/hdaudio/devices/hdaudioC0D0"
+        for name, value in (("vendor_id", "0x10134206"), ("subsystem_id", "0x106b5200"),
+                            ("revision_id", "0x100302"), ("chip_name", "CS4206")):
+            self.write(f"{base}/{name}", f"{value}\n")
+        self.write("sys/module/snd_hda_intel/parameters/model", "mbp81,(null),(null),(null)\n")
+        self.write("sys/module/snd_hda_intel/parameters/power_save", "0\n")
+
+    def test_whole_codec_dumps_with_the_coefficients_and_dump_coef_put_back(self):
+        self.codec_machine()
+        coef = self.root / "sys/module/snd_hda_codec/parameters/dump_coef"
+        seen = []
+        real_read = usb_logs.read
+
+        def read(path, limit=usb_logs.READ_LIMIT):
+            if "codec#" in str(path):
+                seen.append(coef.read_text().strip())
+            return real_read(path, limit)
+
+        with patch.object(usb_logs, "read", read):
+            dumps = usb_logs.codec_dumps(self.root)
+        self.assertEqual(set(dumps), {"card0-codec0.txt", "card0-codec3.txt"})
+        self.assertIn("Codec: Cirrus Logic CS4206\nAddress: 0", dumps["card0-codec0.txt"])
+        self.assertIn("coefficients: on while read (was -1)", dumps["card0-codec0.txt"])
+        self.assertEqual(seen, ["1", "1"], "dump_coef is on while the files are read")
+        self.assertEqual(coef.read_text().strip(), "-1", "and put back afterwards")
+
+    def test_codec_dumps_without_the_parameter_or_any_codec(self):
+        self.assertEqual(usb_logs.codec_dumps(self.root), {})
+        self.codec_machine(dump_coef=None)
+        dumps = usb_logs.codec_dumps(self.root)
+        self.assertIn("coefficients: no dump_coef parameter", dumps["card0-codec3.txt"])
+        self.write("sys/module/snd_hda_codec/parameters/dump_coef", "1\n")
+        self.assertIn("coefficients: already on", usb_logs.codec_dumps(self.root)["card0-codec0.txt"])
+
+    def test_codec_ids_and_driver_parameters_in_the_summary_and_report(self):
+        self.codec_machine()
+        text = usb_logs.summary(self.root)
+        self.assertIn("Codec IDs:      hdaudioC0D0 0x10134206 subsystem 0x106b5200 rev 0x100302", text)
+        self.assertIn("HDA model:      mbp81", text)
+        report = usb_logs.hardware_report(self.root)
+        for title in ("hda codecs (sysfs ids)", "snd_hda_intel parameters", "snd_hda_codec parameters"):
+            self.assertIn(f"===== {title} =====", report)
+        self.assertIn('"power_save": "0"', report)
+        self.write("sys/module/snd_hda_intel/parameters/model", "(null),(null)\n")
+        self.assertIn("HDA model:      none given (default fixup)", usb_logs.summary(self.root))
+
+    def test_summary_says_whether_this_was_a_cable_or_voice_debug_boot(self):
+        self.write("proc/cmdline", "BOOT_IMAGE=/bzImage being.try=1 quiet\n")
+        with patch.dict(os.environ, {"BEING_VOICE_DEBUG": ""}):
+            text = usb_logs.summary(self.root)
+            self.assertIn("Cable link:     off", text)
+            self.assertIn("Voice debug:    off", text)
+            self.write("proc/cmdline", "being.try=1 being.cable=1 being.voice_debug=1\n")
+            text = usb_logs.summary(self.root)
+            self.assertIn("(CABLE DEVELOPMENT BOOT)", text.splitlines()[0])
+            self.assertIn("Cable link:     ON: a cable development boot", text)
+            self.assertIn("Voice debug:    ON", text)
+            self.write("proc/cmdline", "being.try=1 being.cable=1 being.cable=0 being.voice_debug=1\n")
+            self.assertIn("Cable link:     off", usb_logs.summary(self.root))
+            self.write("proc/cmdline", "being.voice_debug=1\n")
+            self.assertIn("Voice debug:    off", usb_logs.summary(self.root), "Try boots only")
+            self.write("proc/cmdline", "being.try=1 being.voice_debug=1 quiet being.voice_debug=0\n")
+            self.assertFalse(usb_logs.boot_flags(self.root, {})["voice_debug"], "the last one counts")
+            self.write("proc/cmdline", "being.try=1 being.voice_debug=0 being.voice_debug=1\n")
+            self.assertEqual(usb_logs.boot_flags(self.root, {})["voice_debug_from"], ["the kernel command line"])
+        self.assertTrue(usb_logs.boot_flags(self.root, {"BEING_VOICE_DEBUG": "1"})["voice_debug"])
+
+    def test_voice_debug_is_read_where_the_voice_gets_it(self):
+        """being-usb-logs does not load /etc/being/env, the voice and the mind
+        do: the summary reads the variable from there and from their drop-ins,
+        and believes the journal if transcripts are already in it."""
+        self.write("proc/cmdline", "BOOT_IMAGE=/bzImage being.try=1 being.cable=1 quiet\n")
+        with patch.dict(os.environ, {"BEING_VOICE_DEBUG": ""}):
+            self.assertIn("Voice debug:    off", usb_logs.summary(self.root))
+            self.write("etc/being/env", "# workbench\nBEING_TTS=piper\nexport BEING_VOICE_DEBUG='1'\n")
+            text = usb_logs.summary(self.root)
+            self.assertIn("Voice debug:    ON: what the voice heard is written in journal.txt (from /etc/being/env)",
+                          text)
+            self.write("etc/being/env", "BEING_VOICE_DEBUG=1\nBEING_VOICE_DEBUG=0\n")
+            self.assertIn("Voice debug:    off", usb_logs.summary(self.root), "the last assignment wins")
+            self.write("run/systemd/system/being-voice.service.d/debug.conf",
+                       '[Service]\nEnvironment="BEING_VOICE_DEBUG=1" OTHER=2\n')
+            self.assertIn("(from being-voice.service.d/debug.conf)", usb_logs.summary(self.root))
+            self.write("run/systemd/system/being-voice.service.d/debug.conf",
+                       "[Service]\nEnvironment=BEING_VOICE_DEBUG=1\nEnvironment=\n")
+            self.assertIn("Voice debug:    off", usb_logs.summary(self.root), "an empty Environment= clears it")
+            text = usb_logs.summary(self.root, notable={"transcripts": ["seen"]})
+            self.assertIn("(from transcripts seen in the journal)", text)
+
+    def test_the_journal_notices_transcripts_without_keeping_them(self):
+        journal = usb_logs.Journal(self.root / "journal.txt", self.root / "cursor")
+        try:
+            journal.scan(b"being-voice[1]: hello\n")
+            self.assertNotIn("transcripts", journal.notable)
+            journal.scan(b'being-voice[1]: heard: "open the terminal" (engine x, confidence 0.9)\n')
+            self.assertEqual(journal.notable["transcripts"], ["seen"])
+            self.assertNotIn("open the terminal", repr(journal.notable))
+        finally:
+            journal.stream.close()
+        for line in ('wake phrase \'hey pip\', speech engine piper (x), transcript text in the log on (from x)',
+                     'mind: route {"route": "model", "chars": 5, "text": "hello"}'):
+            self.assertTrue(usb_logs.TRANSCRIPT_EVIDENCE.search(line), line)
+        self.assertFalse(usb_logs.TRANSCRIPT_EVIDENCE.search("transcript text in the log off"))
+        self.assertFalse(usb_logs.TRANSCRIPT_EVIDENCE.search('mind: route {"route": "model", "chars": 5}'))
+
+    def test_kernel_features_without_zlib(self):
+        self.write("proc/config.gz", "not really gzip")
+        with patch.dict("sys.modules", {"gzip": None}):
+            found = usb_logs.kernel_features(self.root)
+        self.assertIn("no zlib", found["kernel config"])
+
 
 class Linux618Layout(Reports):
     """applesmc on Linux 6.18: a nameless hwmon whose attributes sit on the platform device."""
@@ -421,6 +538,26 @@ class SaveCheck(FakeMachine):
             path = usb_logs.save_check({"model": "MacBookPro9,2"})
         self.assertEqual(path.parent, folder)
         self.assertIn("MacBookPro9,2", path.read_text())
+        self.assertGreater(path.stat().st_size, 1024)
+        self.assertEqual(list(folder.glob("*.new")), [], "written in place, not renamed")
+        self.assertRegex(usb_logs.saved_line(path), r"^Saved \(\d+ KB\): ")
+
+    def test_saved_is_said_only_once_the_file_has_a_size(self):
+        folder = self.root / "stick/boot-0001-x"
+        folder.mkdir(parents=True)
+        self.write("state/folder", f"{folder}\n")
+        synced = []
+        with patch.object(usb_logs, "STATE_DIR", self.root / "state"), \
+                patch.object(usb_logs, "hardware_report", lambda **_: "report\n"), \
+                patch.object(usb_logs.os, "sync", lambda: synced.append(1)):
+            path = usb_logs.save_check()
+            self.assertEqual(synced, [1], "synced before it is measured")
+            self.assertIsNotNone(path)
+            with patch.object(usb_logs, "write_new_file", lambda path, text: path.write_bytes(b"") and 0):
+                self.assertIsNone(usb_logs.save_check(), "an empty file is not a saved check")
+        self.assertEqual(len(list(folder.glob("check-hardware-*.txt"))), 1, "the empty one is removed")
+        self.assertTrue(usb_logs.saved_line(None).startswith("Not saved"))
+        self.assertTrue(usb_logs.saved_line(folder / "gone.txt").startswith("Not saved"))
 
 
 class Serve(unittest.TestCase):

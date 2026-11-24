@@ -1,5 +1,7 @@
-from contextlib import redirect_stdout
+import tempfile
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -71,7 +73,10 @@ class InstallConfirmation(unittest.TestCase):
         self.enterContext(patch.object(installer, "disk_contents", return_value={
             "macos": False, "being": False, "partitions": 0, "readable": True}))
         self.write = Mock(side_effect=lambda plan, recheck, *, progress, meter: recheck())
-        self.enterContext(patch.dict("sys.modules", {"mind.install_apply": SimpleNamespace(apply_installation=self.write)}))
+        self.cable = Path(self.enterContext(tempfile.TemporaryDirectory())) / "cable"
+        self.enterContext(patch.dict("sys.modules", {"mind.install_apply": SimpleNamespace(
+            apply_installation=self.write, CABLE_MEDIA=self.cable)}))
+        self.enterContext(patch.object(installer, "cable_media", lambda: self.cable.exists()))
         self.output = self.enterContext(redirect_stdout(StringIO()))
 
     def test_install_from_a_pipe_cannot_start_the_writer(self):
@@ -80,6 +85,32 @@ class InstallConfirmation(unittest.TestCase):
             installer.confirm_installation("/dev/sdb")
         self.scan.assert_not_called()
         self.write.assert_not_called()
+
+    def test_a_cable_stick_says_so_before_any_disk_is_listed(self):
+        self.cable.mkdir()
+        with patch("builtins.input") as keyboard:
+            with self.assertRaisesRegex(ValueError, "^This is a development stick. It can't install PipOS; "
+                                                    "use a release Try stick.$"):
+                installer.confirm_installation("/dev/sdb")
+        keyboard.assert_not_called()
+        self.scan.assert_not_called()
+        self.write.assert_not_called()
+
+    def test_the_installer_menu_refuses_on_a_cable_stick_and_returns_to_its_menu(self):
+        self.cable.mkdir()
+        with patch("builtins.input", side_effect=["3", "q"]) as keyboard:
+            installer.menu()
+        self.assertEqual(keyboard.call_count, 2)
+        self.assertIn(installer.CABLE_MESSAGE, self.output.getvalue())
+        self.scan.assert_not_called()
+        self.write.assert_not_called()
+
+    def test_install_on_the_command_line_refuses_on_a_cable_stick(self):
+        self.cable.mkdir()
+        with redirect_stderr(StringIO()) as errors:
+            self.assertEqual(installer.main(["--install", "/dev/sdb"]), 1)
+        self.assertEqual(errors.getvalue(), f"being-installer: {installer.CABLE_MESSAGE}\n")
+        self.scan.assert_not_called()
 
     def test_writer_requires_the_exact_device_challenge(self):
         with patch("builtins.input", return_value="ERASE /dev/sda"):
@@ -168,7 +199,8 @@ class TargetSafety(InstallConfirmation):
         self.contents(being=True, macos=False)
         with patch("builtins.input", side_effect=["ERASE /dev/sdb", "ERASE BEING"]) as confirm:
             installer.confirm_installation("/dev/sdb")
-        self.assertIn("Update from a USB stick", self.output.getvalue())
+        self.assertIn("use the menu (Mission Control, or fn and F2), Update from a USB stick, instead.",
+                      self.output.getvalue())
         self.assertEqual(confirm.call_args.args[0], "Type ERASE BEING to erase the being on it: ")
 
     def test_failure_after_the_erase_says_the_disk_no_longer_starts(self):
@@ -219,6 +251,17 @@ class TargetSafety(InstallConfirmation):
         self.assertIn("Restore complete.", text)
         self.assertIn("Say its wake phrase", text)
         self.assertNotIn('Say "Hey', text)
+
+
+class CableMedia(unittest.TestCase):
+    def test_the_check_is_the_install_apply_guard_path(self):
+        from mind import install_apply
+
+        folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        with patch.object(install_apply, "CABLE_MEDIA", folder / "cable"):
+            self.assertFalse(installer.cable_media())
+            (folder / "cable").mkdir()
+            self.assertTrue(installer.cable_media())
 
 
 class DiskWording(unittest.TestCase):

@@ -10,6 +10,7 @@ from pathlib import Path
 from . import console_ui as ui
 from .install_disks import disk_contents, inventory
 from .install_hardware import hardware_report
+from .keys import MENU_KEYS
 from .try_mode import is_try_boot
 
 
@@ -314,7 +315,7 @@ def contents_warning(contents, discard=True):
                      "its memories may stay readable on the disk until new data overwrites them.")
         return [ui.paint("This drive holds a PipOS being and its memories.", "text", "bold"),
                 erase + " To keep its memory, start it from this drive "
-                "and use F2, Update from a USB stick, instead."], "being"
+                f"and use the menu ({MENU_KEYS}), Update from a USB stick, instead."], "being"
     if contents.get("macos"):
         rows = [ui.paint("This drive holds macOS.", "text", "bold"), "Before it is erased, in macOS:"]
         rows += [f"{ui.glyph('•', '-')} {item}" for item in MACOS_CHECKLIST]
@@ -389,8 +390,23 @@ def show_finish(restored, *, carried=False, wake_word="Hey Pip"):
             "Say its wake phrase, wait for the eyes to brighten, then talk.", "muted")
 
 
+# Said before any disk is listed or chosen on a cable development stick.
+CABLE_MESSAGE = "This is a development stick. It can't install PipOS; use a release Try stick."
+
+
+def cable_media():
+    """True on a cable development stick (mind.install_apply.CABLE_MEDIA), which never installs.
+
+    install_apply keeps its own guard; this one says so before any disk is chosen."""
+    from . import install_apply
+
+    return os.path.lexists(install_apply.CABLE_MEDIA)
+
+
 def confirm_installation(device, *, expected_plan=None, profile=None, initiative=None, restore=None, flow=None,
                          skills=None, carried=False):
+    if cable_media():
+        raise ValueError(CABLE_MESSAGE)
     if not is_try_boot() or os.geteuid() != 0 or not sys.stdin.isatty():
         raise ValueError("Install from an interactive root console in Try PipOS.")
     if restore is not None and (profile is not None or initiative is not None or skills is not None):
@@ -505,6 +521,9 @@ def menu():
                 except ValueError as exc:
                     print(exc, file=sys.stderr)
         elif choice == "3" and trying:
+            if cable_media():
+                print(CABLE_MESSAGE)
+                continue
             report, _ = scan()
             show_disks(report)
             if not report["layout_ready"] or not any(disk["eligible"] for disk in report["disks"]):

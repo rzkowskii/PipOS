@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 
 from . import action_log
+from .keys import MENU_KEYS
 from .body_talk import Confirm, Reply, is_guest, said
 
 BUILD_ID = Path("/etc/being/build-id")
@@ -154,9 +155,9 @@ def build_id(path=BUILD_ID):
 def version_line(path=BUILD_ID):
     found = build_id(path)
     if found is None:
-        return "[neutral] I can't find my build number. It's shown on the Update page under F2."
+        return f"[neutral] I can't find my build number. It's shown on the Update page in my menu: press {MENU_KEYS}."
     short = found[:8]
-    return f"[neutral] I'm PipOS, build {short}. The full number is on the Update page under F2."
+    return f"[neutral] I'm PipOS, build {short}. The full number is on the Update page in my menu: press {MENU_KEYS}."
 
 
 def _read(path, limit=4096):
@@ -231,7 +232,9 @@ def ago_words(stamp, now):
 
 NOT_READY = {
     "no_tool": "[concern] I can't make backups: this system has no backup tool.",
-    "no_key": "[neutral] I need a backup key first. Make my first backup from the F2 menu; it makes the key.",
+    # The laptop's printed F2 is brightness up (hid_apple.fnmode=1): name the
+    # menu key as it is pressed there (mind/keys.py MENU_KEYS).
+    "no_key": f"[neutral] I need a backup key first. Make my first backup from my menu ({MENU_KEYS}); it makes the key.",
     "no_stick": "[neutral] Plug in a USB stick labelled being-backup, then ask me again.",
     "busy": "[neutral] I'm already backing myself up.",
 }

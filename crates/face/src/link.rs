@@ -2,6 +2,7 @@
 //! the animation when the brainstem has gone quiet.
 
 use crate::anim::{Anim, Drives};
+use crate::keys::LevelBar;
 use crate::overlay::Captions;
 use bus::{Client, Event};
 use std::path::PathBuf;
@@ -28,6 +29,11 @@ const SUBS: &[&str] = &[
     "hear.missed",
     "mind.cancel",
     "mind.reply_done",
+    // What the brightness, volume and keyboard-light keys (or the owner's
+    // words) really set, for the level bar (numbers only).
+    "body.brightness",
+    "body.kbd_light",
+    "voice.volume_state",
 ];
 const RETRY: Duration = Duration::from_millis(700);
 /// With no heartbeat for this long, the face looks unwell.
@@ -52,6 +58,8 @@ pub struct Side {
     /// The brainstem authorizes camera capture now.
     pub camera: bool,
     pub captions: Captions,
+    /// The brightness, volume or keyboard light just set, for a moment.
+    pub level: LevelBar,
     birth: BirthGate,
 }
 
@@ -352,6 +360,7 @@ fn drive(ev: &Event, name: &str) -> Option<f32> {
 
 fn apply(ev: &Event, anim: &mut Anim, side: &mut Side) {
     side.captions.event(ev);
+    side.level.event(ev, Instant::now());
     match ev.topic.as_str() {
         "body.drives" => anim.set_drives(Drives {
             energy: drive(ev, "energy"),
@@ -410,6 +419,19 @@ mod tests {
         apply(&Event::new("face.express").with("name", "concern"), &mut anim, &mut Side::default());
         apply(&Event::new("state.changed").with("state", "attending"), &mut anim, &mut Side::default());
         assert_eq!(anim.target_name(), "concern");
+    }
+
+    #[test]
+    fn a_level_just_set_shows_on_the_face() {
+        for topic in ["body.brightness", "body.kbd_light", "voice.volume_state"] {
+            assert!(SUBS.contains(&topic), "{topic}");
+        }
+        let mut anim = Anim::new(7);
+        let mut side = Side::default();
+        apply(&Event::new("voice.volume_state").with("level", 56).with("mixer", "hardware"), &mut anim, &mut side);
+        let now = Instant::now();
+        assert!(side.level.visible(now));
+        assert!(side.level.line(now).is_some_and(|line| line.starts_with("volume") && line.ends_with("56%")));
     }
 
     #[test]

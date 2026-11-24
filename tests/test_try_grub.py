@@ -90,7 +90,7 @@ class TryGrubSource(unittest.TestCase):
         found = {title: body for title, _, body in entries(laptop(self.config))}
         default = kernel_args(found["Try PipOS"])
         self.assertIsNotNone(default)
-        self.assertIn("hid_apple.fnmode=2", default)
+        self.assertIn("hid_apple.fnmode=1", default)
         for title, extra in EXTRA_ARGS.items():
             with self.subTest(title=title):
                 self.assertEqual(kernel_args(found[title]), default + extra)

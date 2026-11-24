@@ -12,6 +12,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from . import clock_epoch
+from .keys import MENU_KEYS
 from .network_policy import INTERNET, load_policy
 from .reminder_language import spoken_rule
 from .reminders import Reminders
@@ -191,8 +192,10 @@ HELP_GROUPS = {
                                      "then run it. Or say, show me the clock."),
     "fun": ((), "Ask a sum, like 17 times 23, a conversion, or how to spell a word. "
                 "Ask for a joke, or say let's play a game."),
-    "voice": ((), "Say speak up, be quieter, or set your volume to 5. Ask what did you hear. "
-                  "Or type: F2, then 6, or Y once installed."),
+    # The menu key's name is six words, so the volume example gives way to
+    # keep the line within twenty-five.
+    "voice": ((), "Say speak up or be quieter. Ask what did you hear. "
+                  f"Or type: {MENU_KEYS}, then 6, or Y once installed."),
     "dreams": ((), "With my lid closed and on power, I go over the day. Ask me what I dreamed about."),
     "privacy": ((), "Say, start guest mode, for visitors, or don't remember this. "
                     "Closing my lid stops my eyes, ears and camera."),

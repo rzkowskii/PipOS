@@ -1,0 +1,28 @@
+# Cable development builds only (BR2_PACKAGE_BEING_CABLE_DEV, docs/LAB.md).
+# Root, one Ed25519 key, from the link-local networks only: the sshd_config,
+# the key's from= option and the firewall each refuse everyone else, and the
+# server itself can reach only loopback and link-local addresses.
+[Unit]
+Description=PipOS cable development SSH (Try only)
+Requires=being-cable-link.service
+After=being-cable-link.service being-network-policy.service
+ConditionKernelCommandLine=being.try=1
+ConditionKernelCommandLine=!being.cable=0
+ConditionPathExists=/usr/share/being/cable/authorized_keys
+
+[Service]
+# sshd's privilege separation directory. /var is a RAM file system on every
+# PipOS boot, so the one OpenSSH's package made in the image is hidden.
+ExecStartPre=/bin/mkdir -p -m 0755 /var/empty
+ExecStartPre=/usr/sbin/sshd -t -f /usr/share/being/cable/sshd_config
+ExecStart=/usr/sbin/sshd -D -e -f /usr/share/being/cable/sshd_config
+ExecReload=/bin/kill -HUP $MAINPID
+# A restart of the server leaves open sessions running.
+KillMode=process
+Restart=on-failure
+RestartSec=2
+IPAddressAllow=localhost link-local
+IPAddressDeny=any
+
+[Install]
+WantedBy=multi-user.target

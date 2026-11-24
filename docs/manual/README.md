@@ -1,6 +1,6 @@
 <!--
 doc: index
-verified: 2026-11-24T04:50
+verified: 2026-11-24T22:17
 sources:
 -->
 
@@ -96,3 +96,12 @@ plus the wave 4 changes in progress that night. Where wave 4 work was
 still uncommitted when the pages were stamped, the pages describe the
 working tree as it then stood; `scripts/check-docs.py` flags any later
 change.
+
+On the evening of 24 November 2026 all five pages were re-checked against
+the `cable-diag` working tree, which was still uncommitted: the cable
+development build and its SSH link, `pip-diag` and the Try menu's
+diagnostics item, the voice changes (the command grammar's second pass,
+the diagnostic microphone, voice debugging, engine overrides, Alba as the
+default voice, the laptop's microphone channel), the mind fixes, and the
+Mac-style top-row keys. They were checked again after the last of that
+evening's changes and stamped `2026-11-24T22:17`.

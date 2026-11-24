@@ -6,6 +6,7 @@
 mod anim;
 mod dpms;
 mod eye;
+mod keys;
 mod link;
 mod overlay;
 mod pace;
@@ -58,17 +59,21 @@ For reviewing motion off-screen:
                                gestures), for reproducible frame dumps
 
 Keys: Esc interrupts it, M mutes it, F1 shows captions and health (off by default and
-never logged), F2 opens appliance setup, F9 recovers a face with no lid reading, and Q
-closes the window. Space, Return or a click while the eyes rest asks for its attention,
-as \"Hey Pip\" does. With the panel dark and the brainstem silent, any key shows the face.
-While an app panel has focus, keys go to it (M is a letter then; F10 still mutes).
+never logged), F2 opens appliance setup, F9 recovers a face with no lid reading, F10
+mutes it, and Q closes the window. On the laptop the top row does what is printed on it
+(hold fn for F1 to F12): brightness, Mission Control (as F2), Launchpad (the terminal),
+keyboard light, play/pause (listen, or stop a reply), volume and speaker mute; a bar
+shows the new level. Space, Return or a click while the eyes rest asks for its
+attention, as \"Hey Pip\" does. With the panel dark and the brainstem silent, any key
+shows the face. While an app panel has focus, keys go to it (M is a letter then; F10
+still mutes, and the top row's keys are never typed).
 
 Full screen, the face shows itself after a few seconds with no lid reading
 (waiting calmly for the first minute, then dazed if the brainstem is gone), turns
 the panel's connector off while dark (BEING_FACE_DPMS=0 leaves it on), and draws
 at 60, 30, 15 or 5 frames a second as what it shows needs. With being.verbose=1 on the kernel command
 line it first leaves the boot messages up for 20 s (being.verbose_hold=SECS,
-0 to wait for a key); Esc, F2, Enter or Space ends the wait.";
+0 to wait for a key); Esc, Enter, Space, F2 or Mission Control ends the wait.";
 
 struct Args {
     bus: PathBuf,
@@ -344,6 +349,22 @@ fn run() -> Result<(), String> {
     let mut panel_focus = false;
     let mut overlay_tex: Option<render::Texture> = None;
     let mut overlay_drawn: Option<Instant> = None;
+    // The level bar shown after a brightness, volume or keyboard-light change.
+    let mut level_tex: Option<render::Texture> = None;
+    // The text in level_tex, and how strongly it is drawn.
+    let mut level_shown: Option<String> = None;
+    let mut level_alpha = 1.0f32;
+    // Top-row keys: held ones step at a steady pace; Mission Control and
+    // Launchpad, which SDL drops, are read from the keyboards themselves.
+    let mut repeats = keys::Repeats::default();
+    let mut media: Vec<(keys::Media, bool)> = Vec::new();
+    let (media_tx, media_rx) = std::sync::mpsc::channel::<keys::Media>();
+    #[cfg(target_os = "linux")]
+    if appliance && !solo {
+        keys::watch(media_tx);
+    }
+    #[cfg(not(target_os = "linux"))]
+    drop(media_tx);
     let mut note_tex: Option<render::Texture> = None;
     let mut stats = pace::Stats::new(Instant::now());
     let mut frame_ms = 0f64;
@@ -374,7 +395,14 @@ fn run() -> Result<(), String> {
                 SdlEvent::Window { win_event: WindowEvent::DisplayChanged(display), .. } => {
                     fast_display = fast_refresh(display);
                 }
-                SdlEvent::KeyDown { keycode: Some(key), keymod, repeat, .. } => {
+                SdlEvent::KeyDown { keycode, scancode, keymod, repeat, .. } => {
+                    // The top row's keys mean what is printed on them, even
+                    // while an app panel has the keyboard: never typed.
+                    if let Some(key) = scancode.and_then(keys::Media::from_scancode) {
+                        media.push((key, repeat));
+                        continue;
+                    }
+                    let Some(key) = keycode else { continue };
                     // Typing into an open, focused app panel goes to hands.
                     // Esc, F1, F2, F9 and F10 keep their meaning; M is a letter.
                     let reserved = [Keycode::Escape, Keycode::F1, Keycode::F2, Keycode::F9, Keycode::F10].contains(&key);
@@ -439,6 +467,30 @@ fn run() -> Result<(), String> {
                     }
                 }
                 _ => {}
+            }
+        }
+        media.extend(media_rx.try_iter().map(|key| (key, false)));
+        for (key, repeat) in media.drain(..) {
+            if !repeats.admit(key, repeat, Instant::now()) {
+                continue;
+            }
+            let dark_and_alone = anim.panel_blank() && link.as_ref().is_some_and(|l| l.quiet());
+            match keys::action(key, asks_attention(&anim, panel_focus)) {
+                keys::Action::Send(ev) => {
+                    if let Some(link) = &mut link {
+                        link.send(ev);
+                    }
+                }
+                keys::Action::Menu if local_setup => {
+                    setup_start.start("systemctl", &["--no-block", "start", "being-local-screen.service"]);
+                }
+                keys::Action::Menu => eprintln!("face: the {} key opens setup only on the appliance", key.name()),
+                keys::Action::Nothing(why) => eprintln!("face: the {} key does nothing: {why}", key.name()),
+            }
+            if dark_and_alone && !repeat {
+                if let Some(link) = &mut link {
+                    link.unblank_locally(&mut anim);
+                }
             }
         }
 
@@ -621,6 +673,33 @@ fn run() -> Result<(), String> {
             } else if let Some(old) = overlay_tex.take() {
                 unsafe { renderer.delete(&gl, old) };
             }
+            // The level bar, for a second and a half after a change; then,
+            // while the speaker is muted, a fainter lasting note.
+            let level_line = link.as_ref().and_then(|l| l.side.level.line(now));
+            let level_changed = link.as_mut().is_some_and(|l| l.side.level.take_changed());
+            level_alpha = if link.as_ref().is_some_and(|l| l.side.level.only_muted_note(now)) { 0.6 } else { 1.0 };
+            match (level_line, text::font()) {
+                (Some(line), Some(font))
+                    if level_changed || level_tex.is_none() || level_shown.as_deref() != Some(line.as_str()) =>
+                {
+                    let columns = line.chars().count();
+                    let pic = font.render(std::slice::from_ref(&line), columns, text::Ink { rgb: CAPTION_INK, backing: 200 });
+                    unsafe {
+                        if let Some(old) = level_tex.take() {
+                            renderer.delete(&gl, old);
+                        }
+                        level_tex = Some(renderer.texture(&gl, pic.w as i32, pic.h as i32, &pic.rgba)?);
+                    }
+                    level_shown = Some(line);
+                }
+                (Some(_), Some(_)) => {}
+                _ => {
+                    if let Some(old) = level_tex.take() {
+                        unsafe { renderer.delete(&gl, old) };
+                    }
+                    level_shown = None;
+                }
+            }
             // A software renderer says so on screen for its first half
             // minute, too dim for anyone's eye detector to count.
             if software && scene_time < SOFTWARE_NOTE.as_secs_f64() {
@@ -645,6 +724,8 @@ fn run() -> Result<(), String> {
             look: &look,
             panel: panel_tex.as_ref(),
             overlays: &overlays,
+            level: level_tex.as_ref(),
+            level_alpha,
         };
 
         if let Some(dir) = &args.frames {
@@ -714,6 +795,8 @@ fn run() -> Result<(), String> {
             look: &look,
             panel: panel_tex.as_ref(),
             overlays: &overlays,
+            level: level_tex.as_ref(),
+            level_alpha,
         };
         let px = unsafe { render::capture(&gl, w, h, || scene.draw(&gl, &mut renderer, w as i32, h as i32, 1))? };
         write_png(path, w, h, &px)?;
@@ -732,6 +815,9 @@ struct Scene<'a> {
     panel: Option<&'a render::Texture>,
     /// Each overlay with its margin from the bottom-left corner.
     overlays: &'a [(&'a render::Texture, i32)],
+    /// The level bar, centred low on the screen at twice the text size.
+    level: Option<&'a render::Texture>,
+    level_alpha: f32,
 }
 
 impl Scene<'_> {
@@ -759,8 +845,22 @@ impl Scene<'_> {
             let rect = panel::Rect { x: margin * zoom, y: margin * zoom, w: tex.w * zoom, h: tex.h * zoom };
             renderer.draw_texture(gl, tex, rect, w, h, 1.0);
         }
+        if let Some(tex) = self.level {
+            renderer.draw_texture(gl, tex, level_rect(tex.w, tex.h, w, h), w, h, self.level_alpha);
+        }
         Ok(())
     }
+}
+
+/// Where the level bar goes on a `w` by `h` screen: centred, a sixth of the
+/// way up, at twice the overlay text's size (never wider than the screen).
+fn level_rect(tex_w: i32, tex_h: i32, w: i32, h: i32) -> panel::Rect {
+    let mut zoom = 2 * (h / 800).max(1);
+    while zoom > 1 && tex_w * zoom > w {
+        zoom -= 1;
+    }
+    let (bw, bh) = (tex_w * zoom, tex_h * zoom);
+    panel::Rect { x: ((w - bw) / 2).max(0), y: h / 6, w: bw, h: bh }
 }
 
 /// Keys that ask for attention while the eyes rest (`key.attend`): the
@@ -840,8 +940,8 @@ const NOTE_INK: [u8; 3] = [10, 42, 58];
 
 /// A verbose boot (`being.verbose=1` on the kernel command line) keeps the
 /// kernel's and systemd's messages readable: the face (and the Try menu, in
-/// being-console.c) waits before it takes the screen. Esc, F2, Enter or Space
-/// brings it up at once. `being.verbose_hold=SECONDS` changes the wait, and
+/// being-console.c) waits before it takes the screen. Esc, Enter, Space, F2
+/// or Mission Control brings it up at once. `being.verbose_hold=SECONDS` changes the wait, and
 /// `being.verbose_hold=0` waits for a key however long that takes. The wait
 /// happens once per boot: whoever ends it leaves RELEASED behind.
 #[cfg(any(target_os = "linux", test))]
@@ -889,10 +989,10 @@ mod verbose {
         }
         let note = match hold {
             Some(d) => format!(
-                "being-{who}: verbose boot: the screen stays on these messages for {} s; press Esc or F2 to go on now",
+                "being-{who}: verbose boot: the screen stays on these messages for {} s; press Esc or Enter to go on now",
                 d.as_secs()
             ),
-            None => format!("being-{who}: verbose boot: the screen stays on these messages; press Esc or F2 to go on"),
+            None => format!("being-{who}: verbose boot: the screen stays on these messages; press Esc or Enter to go on"),
         };
         eprintln!("{note}");
         if let Ok(mut tty) = OpenOptions::new().write(true).open("/dev/tty0") {
@@ -905,7 +1005,9 @@ mod verbose {
         let size = 2 * long + 8;
         const O_NONBLOCK: i32 = 0o4000;
         const EV_KEY: u16 = 1;
-        const KEYS: [u16; 5] = [1, 28, 57, 60, 96]; // Esc, Enter, Space, F2, keypad Enter
+        // Esc, Enter, Space, F2, keypad Enter, and Mission Control (the
+        // laptop's printed F2 is brightness up: hid_apple.fnmode=1).
+        const KEYS: [u16; 6] = [1, 28, 57, 60, 96, crate::keys::KEY_SCALE];
         let mut devices: Vec<(PathBuf, File)> = Vec::new();
         let mut scanned: Option<Instant> = None;
         let started = Instant::now();
@@ -1124,9 +1226,20 @@ fn write_png(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::verbose::{hold_from_cmdline, DEFAULT_HOLD};
-    use super::{anim, asks_attention, Launcher, ATTEND_KEYS};
+    use super::{anim, asks_attention, level_rect, Launcher, ATTEND_KEYS};
     use sdl2::keyboard::Keycode;
     use std::time::Duration;
+
+    #[test]
+    fn the_level_bar_sits_centred_low_and_fits_the_screen() {
+        let r = level_rect(308, 28, 1280, 800);
+        assert_eq!((r.w, r.h), (616, 56), "twice the text size on the laptop panel");
+        assert_eq!((r.x, r.y), ((1280 - 616) / 2, 800 / 6));
+        let big = level_rect(308, 28, 2560, 1600);
+        assert_eq!(big.w, 308 * 4);
+        let narrow = level_rect(308, 28, 400, 800);
+        assert!(narrow.w <= 400 && narrow.x >= 0, "{}", narrow.w);
+    }
 
     #[test]
     fn the_setup_key_starts_its_command_without_waiting_for_it() {

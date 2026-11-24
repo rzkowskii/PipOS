@@ -137,6 +137,11 @@ class SherpaRecognizer(RecognizerEngine):
         self.history = deque(maxlen=HISTORY_FRAMES)
         self.was_attending = False
 
+    @property
+    def wake_score(self):
+        """The wake spotter's score for the last wake, so the voice's wake line keeps its number."""
+        return getattr(self.wake, "wake_score", None)
+
     @classmethod
     def load(cls, wake, *, root=ROOT, size="tiny", library=None, threads=1, wake_word="Hey Pip"):
         """Build the engine from installed files. Raises sherpa.Unavailable."""
@@ -216,6 +221,15 @@ class SherpaRecognizer(RecognizerEngine):
     @in_speech.setter
     def in_speech(self, value):
         self._vad_speech = bool(value)
+
+    @property
+    def run_on_wake(self):
+        """Whether a wake phrase that runs on wakes plainly (asleep); PocketSphinx spots it."""
+        return getattr(self.wake, "run_on_wake", False) is True
+
+    @run_on_wake.setter
+    def run_on_wake(self, value):
+        self.wake.run_on_wake = bool(value)
 
     # Resting: PocketSphinx listens for the name -------------------------------------
 

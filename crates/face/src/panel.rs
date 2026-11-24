@@ -591,7 +591,10 @@ pub fn gaze_at(x: u32, y: u32, width: u32, height: u32) -> [f32; 2] {
 
 /// The bytes a key sends to the shell, as being-console's `key_character()`
 /// does (US layout), plus Ctrl+letter and the usual xterm sequences. Esc is
-/// never here: it is `key.interrupt` and never reaches the shell.
+/// never here: it is `key.interrupt` and never reaches the shell. The
+/// panel's own keys (F3 hides it, PgUp and PgDn scroll its history, as its
+/// footer says) go as hands' control words: a NUL, then `f3`, `pgup` or
+/// `pgdn` (mind/hands.py `on_key`).
 pub fn key_bytes(key: sdl2::keyboard::Keycode, keymod: sdl2::keyboard::Mod) -> Option<Vec<u8>> {
     use sdl2::keyboard::{Keycode as K, Mod};
     let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
@@ -613,9 +616,9 @@ pub fn key_bytes(key: sdl2::keyboard::Keycode, keymod: sdl2::keyboard::Mod) -> O
         K::Home => return seq("\x1b[H"),
         K::End => return seq("\x1b[F"),
         K::Delete => return seq("\x1b[3~"),
-        K::PageUp => return seq("\x1b[5~"),
-        K::PageDown => return seq("\x1b[6~"),
-        K::F3 => return seq("\x1bOR"),
+        K::PageUp => return seq("\0pgup"),
+        K::PageDown => return seq("\0pgdn"),
+        K::F3 => return seq("\0f3"),
         K::Kp0 => return seq("0"),
         _ => {}
     }
@@ -1047,9 +1050,10 @@ mod tests {
         assert_eq!(key_bytes(K::Return, none), Some(b"\r".to_vec()));
         assert_eq!(key_bytes(K::Backspace, none), Some(vec![0x7f]));
         assert_eq!(key_bytes(K::Up, none), Some(b"\x1b[A".to_vec()));
-        assert_eq!(key_bytes(K::PageDown, none), Some(b"\x1b[6~".to_vec()));
+        assert_eq!(key_bytes(K::PageDown, none), Some(b"\0pgdn".to_vec()), "the panel scrolls its history");
+        assert_eq!(key_bytes(K::PageUp, none), Some(b"\0pgup".to_vec()));
         assert_eq!(key_bytes(K::Kp7, none), Some(b"7".to_vec()));
-        assert_eq!(key_bytes(K::F3, none), Some(b"\x1bOR".to_vec()));
+        assert_eq!(key_bytes(K::F3, none), Some(b"\0f3".to_vec()), "F3 hides the panel (hands' control word)");
         assert_eq!(key_bytes(K::Escape, none), None, "Esc stays an interrupt");
         assert_eq!(key_bytes(K::F10, none), None, "F10 still mutes");
         assert_eq!(key_bytes(K::Q, Mod::LGUIMOD), None);

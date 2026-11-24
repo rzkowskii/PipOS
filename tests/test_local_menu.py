@@ -57,6 +57,17 @@ class LocalMenuTests(unittest.TestCase):
         self.scan.assert_not_called()
         self.confirm.assert_not_called()
 
+    def test_a_cable_stick_refuses_install_and_restore_before_any_disk_or_media(self):
+        self.enterContext(patch.object(local_menu.installer, "cable_media", return_value=True))
+        self.which.return_value = "/usr/bin/tool"     # restore would otherwise ask for media
+        code, text, _, keyboard = self.run_keys(["2", "3", "q"])
+        self.assertEqual(code, 0)
+        self.assertEqual(text.count("This is a development stick. It can't install PipOS; use a release Try stick."),
+                         2)
+        self.assertEqual(keyboard.call_count, 3, "each refusal returns straight to the menu")
+        self.scan.assert_not_called()
+        self.confirm.assert_not_called()
+
     def test_try_menu_offers_talking_by_typing_and_how_to_talk(self):
         factory = Path(__file__).resolve().parent.parent / "config"
         with patch.object(local_menu.type_chat, "main", return_value=0) as typing, \
@@ -310,6 +321,7 @@ class ConsoleScreens(LocalMenuTests):
     test_restore_reads_a_backup_stick_and_never_offers_it_for_erasing = None
     test_unreadable_media_is_reported_and_nothing_is_installed = None
     test_unreadable_restore_file_cannot_reach_confirmation = None
+    test_a_cable_stick_refuses_install_and_restore_before_any_disk_or_media = None
 
     def test_welcome_menu_keeps_its_keys_and_prompt(self):
         code, text, _, keyboard = self.run_keys(["q"])
@@ -337,6 +349,15 @@ class ConsoleScreens(LocalMenuTests):
         plan = local_menu.installer.installation_plan(self.report, self.used, "/dev/sdb")
         self.confirm.assert_called_once_with("/dev/sdb", expected_plan=plan, profile=replace(Profile(), name="Clover"),
                                              restore=None, flow=("Install", 3, 3))
+
+    def test_a_cable_stick_says_so_on_the_redrawn_menu(self):
+        self.enterContext(patch.object(local_menu.installer, "cable_media", return_value=True))
+        code, text, errors, _ = self.run_keys(["2", "q"])
+        self.assertEqual((code, errors), (0, ""))
+        self.assertIn("This is a development stick. It can't install PipOS; use a release Try stick.",
+                      " ".join(local_menu.ui.plain(self.last_screen(text)).split()))
+        self.scan.assert_not_called()
+        self.confirm.assert_not_called()
 
     def test_errors_stay_on_the_redrawn_menu(self):
         self.confirm.side_effect = ValueError("Confirmation did not match. The disk was left untouched.")

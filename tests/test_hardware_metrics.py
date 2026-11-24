@@ -9,6 +9,8 @@ from unittest.mock import Mock, patch
 
 from mind import hardware_metrics as metrics
 
+REPO = Path(__file__).resolve().parents[1]
+
 
 class HardwareMetricsTests(unittest.TestCase):
     def setUp(self):
@@ -310,6 +312,19 @@ class HardwareMetricsTests(unittest.TestCase):
 
         with patch.object(metrics.subprocess, "run", side_effect=subprocess.TimeoutExpired("systemctl", 4)):
             self.assertEqual(metrics.read_services(self.root / "proc"), {})
+
+    def test_every_organ_and_the_audio_setup_are_watched(self):
+        for unit in ("being-hands.service", "being-eyes.service", "being-bodycare.service",
+                     "being-audio-init.service", "being-voice.service", "being-face.service"):
+            self.assertIn(unit, metrics.SERVICES)
+            self.assertTrue((REPO / "os/package/being" / unit).is_file(), unit)
+        report = ("Id=being-audio-init.service\nActiveState=active\nSubState=exited\nNRestarts=0\n\n"
+                  "Id=being-hands.service\nActiveState=failed\nSubState=failed\nNRestarts=3\n")
+        with patch.object(metrics.subprocess, "run", return_value=Mock(stdout=report)) as run:
+            observed = metrics.read_services(self.root / "proc")
+        self.assertIn("being-bodycare.service", run.call_args.args[0])
+        self.assertEqual(observed["being-audio-init.service"]["sub_state"], "exited")
+        self.assertEqual(observed["being-hands.service"]["restarts"], 3)
 
     def test_sampling_bounds_and_cli_require_linux(self):
         for duration, interval in ((-1, 1), (301, 1), (1, 0), (1, 61)):

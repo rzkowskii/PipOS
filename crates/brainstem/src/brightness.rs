@@ -1,5 +1,6 @@
-//! The panel's brightness, for "brighter", "dimmer" and "set your brightness
-//! to 50 percent" (topic `being.brightness`, from the mind only).
+//! The panel's brightness, for "brighter", "dimmer", "set your brightness
+//! to 50 percent" and the brightness keys (topic `being.brightness`, from the
+//! mind only).
 //!
 //! Only the brightness file is written, never `bl_power` (that is the lid's
 //! blanking, in linux_body). The native GPU control (`intel_backlight` on the
@@ -18,6 +19,27 @@ use std::path::{Path, PathBuf};
 pub const MIN_PCT: i64 = 5;
 /// One "brighter" or "dimmer", in percentage points.
 pub const STEP_PCT: i64 = 15;
+/// The largest step a request may name with `by` (a key steps by 6, about a
+/// sixteenth of full, as a Mac does).
+pub const MAX_BY_PCT: i64 = 50;
+
+/// The reply to a `being.*` request, carrying the request's `req` back when
+/// it has a short tag (letters, digits, `_`, `-` or `.`, up to 32): the
+/// mind's keys tag theirs, so a spoken "brighter" waiting on its own answer
+/// is never answered by a key pressed at the same moment.
+pub fn reply_to(topic: &str, ev: &Event) -> Event {
+    let reply = Event::new(topic);
+    match ev.str("req") {
+        Some(tag)
+            if !tag.is_empty()
+                && tag.len() <= 32
+                && tag.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')) =>
+        {
+            reply.with("req", tag)
+        }
+        _ => reply,
+    }
+}
 
 pub struct Brightness {
     /// The device directory and its maximum raw value.
@@ -67,14 +89,21 @@ impl Brightness {
 
     /// Apply a `being.brightness` request and say what happened, as a
     /// `body.brightness` event: the level it now has, whether it hit an end,
-    /// or why nothing changed. A malformed request changes nothing.
+    /// or why nothing changed. A `step` of 1 or -1 moves by STEP_PCT, or by
+    /// `by` points (1 to MAX_BY_PCT) when the request names it. A malformed
+    /// request changes nothing.
     pub fn request(&mut self, ev: &Event) -> Event {
-        let reply = Event::new("body.brightness");
+        let reply = reply_to("body.brightness", ev);
         let step = ev.data.get("step").and_then(Value::as_i64).filter(|s| *s == 1 || *s == -1);
         let level = ev.data.get("level").and_then(Value::as_f64).filter(|l| l.is_finite() && (0.0..=100.0).contains(l));
-        if step.is_none() && level.is_none() {
+        let by = match ev.data.get("by") {
+            None => Some(STEP_PCT),
+            Some(by) => by.as_i64().filter(|by| (1..=MAX_BY_PCT).contains(by)),
+        };
+        if (step.is_none() && level.is_none()) || by.is_none() {
             return reply.with("ok", false).with("reason", "bad_request");
         }
+        let by = by.unwrap_or(STEP_PCT);
         let Some((name, dir, max)) = self.control.clone() else {
             return reply.with("ok", false).with("reason", "no_control");
         };
@@ -85,7 +114,7 @@ impl Brightness {
         let now = Self::raw_to_pct(raw, max);
         let wanted = match (step, level) {
             (_, Some(level)) => level.round() as i64,
-            (Some(step), None) => now + step * STEP_PCT,
+            (Some(step), None) => now + step * by,
             (None, None) => now,
         };
         let target = wanted.clamp(MIN_PCT, 100);
@@ -194,6 +223,40 @@ mod tests {
         assert_eq!(t.get(&format!("{INTEL}/brightness")), 1707);
         b.restore().unwrap();
         assert_eq!(t.get(&format!("{INTEL}/brightness")), 1707, "once");
+    }
+
+    #[test]
+    fn a_key_steps_by_the_points_it_names() {
+        let t = laptop("by");
+        let mut b = Brightness::discover(&t.0);
+        let key = |n: i64| step(n).with("by", 6);
+        assert_eq!(b.request(&key(-1)).data["level"].as_i64(), Some(88));
+        assert_eq!(b.request(&key(1)).data["level"].as_i64(), Some(94));
+        assert_eq!(b.request(&key(1)).data["level"].as_i64(), Some(100));
+        b.request(&Event::new("being.brightness").with("level", 8));
+        let out = b.request(&key(-1));
+        assert_eq!((out.data["level"].as_i64(), out.bool("at_min")), (Some(MIN_PCT), Some(true)), "never dark");
+        for by in [Value::from(0), Value::from(51), Value::from(-6), Value::from("six")] {
+            let out = b.request(&step(1).with("by", by.clone()));
+            assert_eq!(out.str("reason"), Some("bad_request"), "{by:?}");
+        }
+    }
+
+    #[test]
+    fn a_tagged_request_gets_its_tag_back() {
+        let t = laptop("req");
+        let mut b = Brightness::discover(&t.0);
+        let out = b.request(&step(1).with("by", 6).with("req", "key"));
+        assert_eq!((out.str("req"), out.bool("ok")), (Some("key"), Some(true)));
+        assert_eq!(b.request(&step(1)).str("req"), None, "untagged stays untagged");
+        let bad = b.request(&Event::new("being.brightness").with("req", "key"));
+        assert_eq!((bad.str("req"), bad.str("reason")), (Some("key"), Some("bad_request")), "a refusal too");
+        let long = "k".repeat(33);
+        for tag in [Value::from(""), Value::from(long.as_str()), Value::from("a b"), Value::from(7)] {
+            assert_eq!(b.request(&step(-1).with("req", tag.clone())).str("req"), None, "{tag:?}");
+        }
+        let none = Brightness::discover(&t.0.join("nowhere")).request(&step(1).with("req", "key"));
+        assert_eq!((none.str("req"), none.str("reason")), (Some("key"), Some("no_control")));
     }
 
     #[test]

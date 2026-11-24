@@ -5,15 +5,18 @@
 # a read-only root there is no saved /var/lib/alsa/asound.state for alsactl to
 # restore, so "alsactl init" only guesses. On the MacBookPro9,2 (Cirrus Logic
 # CS4206, codec SSID 106b:5200) the generic HDA parser creates these simple
-# controls (public alsa-info dumps of that model):
+# controls (amixer scontents read on that laptop in a Try boot):
 #
 #   Master, Speaker, Bass Speaker, Headphone   playback volume and switch
-#   PCM                                        playback volume (0 dB at 100%)
 #   Capture                                    capture volume and switch
-#   Digital                                    ADC digital capture gain
 #   Mic Boost                                  0-3, 10 dB a step (pin 0x0d, the
 #                                              fixed internal microphone)
-#   Auto-Mute Mode, IEC958 ...                 left as they are
+#   Auto-Mute Mode, IEC958, IEC958 Default PCM left as they are
+#
+# That machine has no "PCM" and no "Digital" control. Other codecs do (a PCM
+# playback volume, 0 dB at 100%; a Digital ADC capture gain), so both are set
+# when they exist and skipped when they do not; the "done:" line names the
+# levels asked for, not proof that every control was there.
 #
 # There is one input, so no "Input Source" enum appears on that machine; other
 # codecs get one, and the internal mic is chosen there when it exists.
@@ -176,7 +179,8 @@ if [ "$restored" = 0 ]; then
                 fi
                 continue ;;
             digital)
-                # The CS4206 ADC's digital gain: unity, not the +29 dB it can reach.
+                # An ADC digital gain, on codecs that have one (the MacBookPro9,2's
+                # CS4206 shows none): unity, not the extra gain it may reach.
                 if has_cap cvolume || has_cap volume; then
                     apply "$id" capture "$DIGITAL"
                 fi

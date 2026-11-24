@@ -150,7 +150,8 @@ class Hearing(unittest.TestCase):
         self.assertIn("noisy", ask("check your hearing", voice={"floor_dbfs": -38}).line)
         self.assertIn("haven't measured your voice", ask("check your hearing", voice={"floor_dbfs": -70}).line)
         silent = ask("how well can you hear me", voice={"floor_dbfs": -120, "speech_peak_dbfs": -120}).line
-        self.assertTrue(silent.startswith("[concern]") and "F2, then 6" in silent, silent)
+        self.assertTrue(silent.startswith("[concern]"), silent)
+        self.assertIn("type to me: press Mission Control, or fn and F2, then 6.", silent)
         self.assertIn("haven't measured my hearing", ask("how well can you hear me").line)
         self.assertIn("not perfectly", ask("how well can you hear me",
                                            voice={"floor_dbfs": -60, "speech_peak_dbfs": -38}).line)

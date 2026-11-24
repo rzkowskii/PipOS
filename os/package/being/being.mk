@@ -37,6 +37,7 @@ BEING_HAS_SHELLRC = $(wildcard $(BR2_EXTERNAL_BEINGOS_PATH)/package/being/being-
 BEING_HAS_AUDIO_INIT = $(and $(wildcard $(BR2_EXTERNAL_BEINGOS_PATH)/package/being/being-audio-init),\
 	$(wildcard $(BR2_EXTERNAL_BEINGOS_PATH)/package/being/being-audio-init.service))
 BEING_HAS_BENCH = $(wildcard $(BR2_EXTERNAL_BEINGOS_PATH)/package/being/being-bench.service)
+BEING_HAS_DIAG_DATA = $(wildcard $(BR2_EXTERNAL_BEINGOS_PATH)/package/being/diag)
 
 # The source is the whole repository; leave behind what the build does not need.
 BEING_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = \
@@ -74,6 +75,33 @@ define BEING_INSTALL_LAN_MAINTENANCE_UNITS
 		$(TARGET_DIR)/usr/lib/systemd/system/being-lab-observe.service
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-lab-dev.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/being-lab-dev.service
+endef
+endif
+
+# The cable development link (development Try sticks only, docs/LAB.md):
+# its SSH server configuration and units. The keys are added by post-build.sh
+# from the builder volume, and post-build.sh refuses these files in any other
+# image.
+ifeq ($(BR2_PACKAGE_BEING_CABLE_DEV),y)
+define BEING_INSTALL_CABLE_DEV
+	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/cable/sshd_config $(TARGET_DIR)/usr/share/being/cable/sshd_config
+endef
+define BEING_INSTALL_CABLE_DEV_UNITS
+	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-cable-link.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/being-cable-link.service
+	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-cable-ssh.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/being-cable-ssh.service
+	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-cable-workbench.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/being-cable-workbench.service
+endef
+endif
+
+# Diagnostics (pip-diag, mind/diag.py), on every image: the wrapper, and the
+# known test stimuli it plays when the package ships any.
+ifneq ($(BEING_HAS_DIAG_DATA),)
+define BEING_INSTALL_DIAG_DATA
+	mkdir -p $(TARGET_DIR)/usr/share/being/diag
+	rsync -a --chmod=D0755,F0644 --exclude __pycache__ $(BEING_PKGDIR)/diag/ $(TARGET_DIR)/usr/share/being/diag/
 endef
 endif
 
@@ -162,7 +190,8 @@ endef
 define BEING_INSTALL_TARGET_CMDS
 	# Start from an empty tree, so a module or file removed from the source
 	# is removed from the image too.
-	rm -rf $(TARGET_DIR)/usr/lib/being $(TARGET_DIR)/usr/share/being/workshop
+	rm -rf $(TARGET_DIR)/usr/lib/being $(TARGET_DIR)/usr/share/being/workshop \
+		$(TARGET_DIR)/usr/share/being/diag $(TARGET_DIR)/usr/share/being/cable
 	$(INSTALL) -D -m 0755 $(BEING_BIN)/face $(TARGET_DIR)/usr/bin/being-face
 	$(INSTALL) -D -m 0755 $(BEING_BIN)/brainstem $(TARGET_DIR)/usr/bin/being-brainstem
 	$(INSTALL) -D -m 0755 $(@D)/being-console $(TARGET_DIR)/usr/bin/being-console
@@ -178,11 +207,14 @@ define BEING_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-usb-logs $(TARGET_DIR)/usr/sbin/being-usb-logs
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-hardware-report $(TARGET_DIR)/usr/sbin/being-hardware-report
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-boot-record $(TARGET_DIR)/usr/libexec/being-boot-record
+	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/pip-diag $(TARGET_DIR)/usr/sbin/pip-diag
+	$(BEING_INSTALL_DIAG_DATA)
 	$(INSTALL) -D -m 0755 $(@D)/eyes-capture $(TARGET_DIR)/usr/libexec/being/eyes-capture
 	$(BEING_INSTALL_AUDIO_INIT)
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/facefinder $(TARGET_DIR)/usr/share/being/facefinder
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/PICO-LICENSE $(TARGET_DIR)/usr/share/being/PICO-LICENSE
 	$(BEING_INSTALL_LAN_MAINTENANCE)
+	$(BEING_INSTALL_CABLE_DEV)
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being.env $(TARGET_DIR)/etc/being/env
 	mkdir -p $(TARGET_DIR)/usr/lib/being/mind
 	$(INSTALL) -m 0644 $(@D)/mind/*.py $(TARGET_DIR)/usr/lib/being/mind/
@@ -251,6 +283,7 @@ define BEING_INSTALL_INIT_SYSTEMD
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/50-being-resolve.conf \
 		$(TARGET_DIR)/etc/systemd/resolved.conf.d/50-being-network.conf
 	$(BEING_INSTALL_LAN_MAINTENANCE_UNITS)
+	$(BEING_INSTALL_CABLE_DEV_UNITS)
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-boot-health.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/being-boot-health.service
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-trial-reboot.service \

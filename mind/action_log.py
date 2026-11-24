@@ -251,16 +251,26 @@ def may_match(text):
     return bool(_HINT.search(text or "")) and bool(_PATTERN.match(said(text)))
 
 
+def local_now():
+    """The device's local time, for a handler given no `now` (the mind does
+    not know the owner's time zone yet). Tests replace this."""
+    return datetime.now().astimezone()
+
+
 def period(when, now):
-    """(since, until, words) in unix seconds for a spoken period."""
+    """(since, until, words) in unix seconds for a spoken period.
+
+    "Last night" is always the night before this day: 18:00 yesterday to
+    09:00 today (or now, if that is earlier), even asked in the evening.
+    "Tonight" is this evening from 18:00; asked before 18:00 it can only
+    mean the night just gone."""
     when = re.sub(r"\s+", " ", (when or "").lower())
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if when == "tonight" and now.hour >= 18:
+        return (midnight + timedelta(hours=18)).timestamp(), now.timestamp(), "tonight"
     if when in ("last night", "overnight", "tonight") or when.startswith("while i was asleep"):
         start = midnight - timedelta(hours=6)  # 18:00 yesterday
         end = min(now, midnight + timedelta(hours=9))
-        if now.hour >= 18:
-            start, end = midnight + timedelta(hours=18), now
-            return start.timestamp(), end.timestamp(), "tonight"
         return start.timestamp(), end.timestamp(), "last night"
     if when == "yesterday":
         return (midnight - timedelta(days=1)).timestamp(), midnight.timestamp(), "yesterday"
@@ -280,7 +290,7 @@ async def handle(text, ctx):
         return None
     if is_guest(ctx):
         return Reply("[neutral] I keep that for my owner.")
-    now = getattr(ctx, "now", None) or datetime.now().astimezone()
+    now = getattr(ctx, "now", None) or local_now()
     when = match.group("when") or match.group("when2") or match.group("when3")
     since, until, words = period(when, now)
     return Reply(summary(entries(ctx.state_dir, since=int(since), until=int(until) + 1), words))

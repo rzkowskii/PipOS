@@ -7,11 +7,15 @@ through plughw averages both channels, which halves the speech and adds the
 static. BEING_MIC_CHANNEL, or being.mic_channel= on the kernel command line,
 chooses instead:
 
-  mix    one channel from ALSA, both averaged (the default; as before)
+  mix    one channel from ALSA, both averaged (the lab image's default)
   left   two channels, keep the left
   right  two channels, keep the right
   auto   two channels, averaged until one of them sounds like speech and the
-         other does not, then keep that one
+         other does not, then keep that one (the laptop image's default: its
+         MacBook microphones may carry speech on one channel only)
+
+The laptop image is the one whose /usr/share/being/variant says "laptop". The
+lab's loopback body and QEMU microphone port always mix (mind/voice.py).
 
 The automatic choice measures each channel's level in the speech band
 (roughly 0.5 to 5 kHz) every 30 ms frame and smooths it into 150 ms blocks
@@ -37,7 +41,10 @@ from .recognition import FRAME_SAMPLES, RATE, _sumprod, dbfs
 
 CHOICES = ("mix", "left", "right", "auto")
 DEFAULT = "mix"
+LAPTOP_DEFAULT = "auto"
 CMDLINE = Path("/proc/cmdline")
+# Written by the image build: "lab" or "laptop".
+VARIANT = Path("/usr/share/being/variant")
 CMDLINE_KEY = "being.mic_channel="
 NAMES = ("left", "right")
 
@@ -60,18 +67,34 @@ MODULATION_MARGIN_DB = 8.0
 LOG = logging.getLogger("being.voice.channel")
 
 
-def kernel_choice(path=CMDLINE):
-    """The being.mic_channel= value on the kernel command line, or None."""
+def kernel_arg(key, path=CMDLINE):
+    """The value of `key` (such as "being.mic_channel=") on the kernel command line, or None."""
     try:
         words = Path(path).read_text(encoding="utf-8", errors="replace").split()
     except OSError:
         return None
     # As with any repeated kernel argument, the last one counts.
-    values = [word[len(CMDLINE_KEY):] for word in words if word.startswith(CMDLINE_KEY)]
+    values = [word[len(key):] for word in words if word.startswith(key)]
     return values[-1] if values else None
 
 
-def setting(environ=os.environ, cmdline=CMDLINE):
+def kernel_choice(path=CMDLINE):
+    """The being.mic_channel= value on the kernel command line, or None."""
+    return kernel_arg(CMDLINE_KEY, path)
+
+
+def image_default(variant=VARIANT):
+    """(choice, where it came from) when nothing is set: auto on the laptop image, else mix."""
+    try:
+        name = Path(variant).read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        name = ""
+    if name == "laptop":
+        return LAPTOP_DEFAULT, "the laptop default"
+    return DEFAULT, "the default"
+
+
+def setting(environ=os.environ, cmdline=CMDLINE, variant=VARIANT):
     """(choice, where it came from). The boot entry wins over /etc/being/env."""
     for raw, source in ((kernel_choice(cmdline), "the kernel command line"),
                         (environ.get("BEING_MIC_CHANNEL"), "BEING_MIC_CHANNEL")):
@@ -82,7 +105,7 @@ def setting(environ=os.environ, cmdline=CMDLINE):
             return value, source
         LOG.warning("microphone channel %r from %s is not one of %s; ignoring it",
                     raw, source, ", ".join(CHOICES))
-    return DEFAULT, "the default"
+    return image_default(variant)
 
 
 def capture_channels(choice):
