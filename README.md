@@ -47,11 +47,16 @@ record of its own life.
 > 23 November 2026 PipOS booted for the first time on the real 2012
 > MacBook Pro, from a USB stick. Pip woke up, drew its face on the
 > laptop's GPU and heard its name, but could not make out the words after
-> it, so it never answered. The fixes, and a day's worth of new skills,
-> are built and tested on the development Mac and are on their way to a
-> second stick. It does not live on the laptop's own disk yet, and proper
-> measurements of speed, heat and battery are still to come.
-> [What works today](#what-works-today) says exactly where the line is.
+> it, so it never answered. Three test images have been published on the
+> [Releases page](https://github.com/rzkowskii/PipOS/releases) since then.
+> Boots on 24 November found two separate faults: the microphone still
+> comes up too quiet, and Pip's spoken voice is garbled on the laptop's
+> own speakers, though the same sound is clear on another Mac. The newest
+> work, on the `Dev` branch, adds the tools to find and fix both. So far
+> it has been tested only on the development Mac. Pip does not live on
+> the laptop's own disk yet, and speed, heat and battery are still mostly
+> unmeasured. [What works today](#what-works-today) says exactly where the
+> line is, and the [changelog](CHANGELOG.md) says what changed.
 
 **See Pip move:** the website at **<https://pipos.pages.dev/>** runs the
 face's own shader in your browser, replays Pip's first eight minutes of
@@ -100,33 +105,40 @@ Things you can say today:
 The first rows are built and tested in a virtual laptop that emulates
 the target machine's Ivy Bridge CPU, and an earlier build of them booted
 on the real 2012 MacBook Pro on 23 November 2026. The work of 24 November
-(marked *new*) has so far been tested only on the development Mac.
+(marked *new*) has so far been tested only on the development Mac. The
+newest of it, on the `Dev` branch, has not yet been built into an image.
 
 | | State |
 |---|---|
 | **A real, bootable OS** | A custom Buildroot Linux image (kernel 6.18) that boots straight to the face. Read-only A/B system slots, signed updates with automatic rollback, and watchdog recovery. |
-| **Conversation** | The "Hey Pip" wake phrase (PocketSphinx), speech recognition, a local language model through llama.cpp built for the laptop's CPU, and spoken replies (Flite). Esc interrupts. One key mutes. *New:* a natural voice (Piper) and better hearing (Moonshine), each used only if it measures fast enough on the laptop; an honest "Sorry, I didn't catch that."; typing to Pip; chirps. |
+| **Conversation** | The "Hey Pip" wake phrase (PocketSphinx), speech recognition, a local language model through llama.cpp built for the laptop's CPU, and spoken replies (Flite). Esc interrupts. One key mutes. *New:* a natural voice (Piper's Alba, chosen by ear from 27 voices) and better hearing (Moonshine), each used only if it measures fast enough on the laptop; a second check of what it heard against the list of commands, when the first transcript is not one; an honest "Sorry, I didn't catch that."; typing to Pip; chirps. |
 | **Memory with guarantees** | Conversations and facts in SQLite on Pip's own partition. Recall, correction, confirmed forgetting, retention modes, a guest mode and encrypted backups. Forgetting is checked on the raw virtual disk. |
 | **Everyday skills** | Clock, calendar, time zones, reminders, timers, quiet hours, and weather behind explicit consent. *New:* alarms, repeats and snooze, sums, unit conversions, lists and notes, jokes and games, the time elsewhere, a morning brief, all in code. |
-| **A body** | Lid, battery and charger, temperature, room light, and a life record that knows about power loss and about waking up in a new body. *New:* it asks to be plugged in, saves itself and switches off before the battery dies, checks its own health, and sets its brightness. |
+| **A body** | Lid, battery and charger, temperature, room light, and a life record that knows about power loss and about waking up in a new body. *New:* it asks to be plugged in, saves itself and switches off before the battery dies, checks its own health, and sets its brightness. The top-row keys work as they do on a Mac: brightness, keyboard light and volume. |
+| **Diagnostics** *(new)* | `pip-diag`, on every image and as item 8 of the Try menu, checks the microphone, the speakers, the voices, the wake phrase and the routing of commands, and says in plain English what is wrong. Its report is saved on the stick, readable on any Mac. For development only, a separate *cable* stick lets a Mac reach a running Pip over an Ethernet cable; it never installs. |
 | **Nights** *(new)* | After midnight, while the lid is closed on power: memory upkeep, a day record, a backup to a labelled stick and, if you opt in, dreaming with a second model whose every suggestion code checks against your own words. |
 | **A workshop** *(new)* | "Open the terminal": a small, caged terminal beside the eyes where Pip writes and runs little programs when you say so. |
 | **Eyes that see** | Opt-in camera presence: Pip's gaze follows your face. Capture stops when the lid closes or you opt out. |
 | **Install from USB** | A *Try* mode that runs in RAM and leaves the laptop's disks byte-for-byte untouched, and an installer with a typed confirmation before anything is erased. |
-| **Tests** | About 2,000 Python and 245 Rust tests on the host, plus 23 suites that boot the image in QEMU: power cuts, rollbacks, reinstall, raw-disk forgetting. |
+| **Tests** | About 2,500 Python and 261 Rust tests on the host, plus 23 suites that boot the image in QEMU: power cuts, rollbacks, reinstall, raw-disk forgetting. |
 
 Not there yet, and said plainly:
 
-- **It cannot hear you on the MacBook yet.** On the first boot Pip heard
-  "Hey Pip", then could not make out the words after it: the microphone
-  came up too quiet, and it never said so. The next stick sets the
-  microphone up at start, offers two other microphone set-ups at boot,
-  says "Sorry, I didn't catch that.", lets you type to it (F2, then 6)
-  and listens when you press Space. That has not been tried on the
-  laptop yet.
-- **Not measured yet.** Pip runs on the real MacBook, but speed, speech
-  delay, heat and battery life have not been measured there properly.
-  Treat the speed figures in the design as estimates until they are.
+- **On the MacBook it cannot hear you well, and its voice is garbled.**
+  On the first boot Pip heard "Hey Pip", then could not make out the
+  words after it. Boots on 24 November found two separate faults. The
+  microphone still comes up too quiet, most likely with one of its two
+  channels dead, and the two other microphone set-ups in the boot menu
+  (**M** and **N**) have not been tried yet. Separately, Pip's spoken
+  voice is garbled on the laptop's own speakers, though the same sound is
+  clear on another Mac. You can type to Pip instead (Mission Control or
+  fn+F2, then 6). `pip-diag` is built to pin down both faults, but it has not run on
+  the laptop yet.
+- **Barely measured.** On the first boot the laptop read the prompt at
+  about 22.5 tokens a second. How fast Pip replies, how long it takes to
+  start speaking, heat and battery life have not been measured there
+  yet. Treat the other speed figures in the design as estimates until
+  they are.
 - **No Wi-Fi on the MacBook yet.** Linux finds the Broadcom radio, but
   its firmware is not packaged. Ethernet works.
 - **A small mind.** The current model is the smallest candidate
@@ -283,8 +295,16 @@ cargo build && scripts/run-sim.sh --fake
 target/debug/face --demo
 ```
 
-**Boot the real OS in the virtual laptop.** No image is published yet,
-so build one first with `lab/build.sh`, as the
+**Try it on the MacBook.** Test images for the 13-inch mid-2012 MacBook
+Pro (MacBookPro9,2) are on the
+[Releases page](https://github.com/rzkowskii/PipOS/releases). They run
+from a USB stick and leave the Mac's own disk untouched unless you choose
+Install. Each release says what has and has not been checked, and
+[FIRST-BOOT.md](docs/FIRST-BOOT.md) walks through a boot. They are built
+from `main`, so the work on the `Dev` branch is not in them yet.
+
+**Boot the real OS in the virtual laptop.** Build an image first with
+`lab/build.sh`, as the
 [developer guide](docs/manual/DEVELOPER-GUIDE.md) describes. It is slow,
 because the CPU is emulated. Add `--sound` to use your microphone and
 speakers:
@@ -333,6 +353,11 @@ research/   notes on small models, memory and dreaming
 reference/  the original face mockups
 ```
 
+Two branches matter. `main` is the published state, and the test
+images are built from it. `Dev` carries newer work that has passed the
+tests on the development Mac but has not yet been built into an image or
+tried on the laptop. The [changelog](CHANGELOG.md) lists what each adds.
+
 "BeingOS" is the code name. You will see it in paths, packages and
 `being-*` services. PipOS is the product, and Pip is the being.
 
@@ -346,9 +371,10 @@ Good places to start:
 - **Read** the [design](DESIGN-AND-PLAN.md) and the
   [message protocol](docs/PROTOCOL.md).
 - **Run** the simulator or the virtual laptop and talk to Pip.
-- **Report a body.** Once hardware images are published, booting one on
-  an old laptop you own and reporting what happened is a real
-  contribution. Failures count.
+- **Report a body.** Booting a
+  [test image](https://github.com/rzkowskii/PipOS/releases) on a 2012
+  MacBook Pro, or on another old laptop you own, and reporting what
+  happened is a real contribution. Failures count.
 - **Open an issue** for a bug, an idea, or a machine you would like Pip
   to live in.
 

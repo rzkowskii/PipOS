@@ -19,12 +19,15 @@ does today. Features still in progress are marked *not yet*. The
 [reference](REFERENCE.md) lists every phrase, key and setting.
 
 > **Where PipOS is today (24 November 2026).** PipOS has passed its
-> automated tests in a virtual laptop, and it has **booted once on a real
-> MacBook Pro** from a USB stick in *Try* mode, which changes nothing on
-> the laptop. On that boot Pip heard "Hey Pip" but could not make out the
-> words after it, so it never answered. A second stick with the fixes and
-> the new skills marked *new* below is being built and has not yet been
-> tried on the laptop. Pip is not installed on the laptop's own disk yet.
+> automated tests in a virtual laptop, and it has **booted on a real
+> MacBook Pro** from USB sticks in *Try* mode, which changes nothing on
+> the laptop. On the first boot Pip heard "Hey Pip" but could not make out
+> the words after it, so it never answered. Boots on 24 November found
+> that the microphone still comes up too quiet and that Pip's voice is
+> garbled on the laptop's own speakers. Until those are fixed, you can
+> type to Pip instead, and it answers on screen as well.
+> Much of what is marked *new* below has not yet been tried on the
+> laptop. Pip is not installed on the laptop's own disk yet.
 > Treat details about real hardware as the intended behaviour until they
 > have been checked there. [STATUS.md](../../STATUS.md) has the current
 > state.

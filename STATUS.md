@@ -54,11 +54,20 @@ source-id `f8021f13…2fb0eaa9`, which matches commit `f414c51` (waves 1 to
 lab tests and so has the same source-id (re-checked at about 04:25). The
 image has not yet been through the boot gate or onto the laptop.
 
+**On GitHub (24 November, late).** `main` is `cd20559` (wave 4 merged).
+Three test releases are published as pre-releases, each with an `.img`,
+an `.iso` and `SHA256SUMS`: Try 1 (`v0.1.0-try.1`, `6ccf7f9`), Try 2
+(`v0.2.0-try.2`, `f414c51`) and Try 3 (`v0.2.1-try.3`, `cd20559`). The
+cable and diagnostics work below is on the `Dev` branch, a snapshot of
+the working tree taken at 23:40. No image has been built from `Dev` yet.
+
 ## Evidence per milestone
 
 Evidence levels: **host** (Mac-side tests), **QEMU** (a guest run on an image
-built from the named source), **Mac** (the real MacBookPro9,2). Only the
-first Try boot has reached **Mac** (23 November 2026, the frozen stick).
+built from the named source), **Mac** (the real MacBookPro9,2). Only Try
+boots have reached **Mac**: the first on 23 November 2026 (the frozen
+stick), and later sticks on 24 November, whose findings are under
+[Cable and diagnostics](#cable-and-diagnostics).
 
 | Milestone | Level | Evidence and limits |
 |---|---|---|
@@ -77,7 +86,7 @@ first Try boot has reached **Mac** (23 November 2026, the frozen stick).
 ## Blockers
 
 - **First Try boot:** done 23 November (Phase 0 below).
-- **Second Try image:** waves 1 to 3 are committed (`f414c51`) and a laptop Try image was built from them at 03:52 on 24 November. Next: the lab gates of [PIP-FUNCTIONS.md](docs/PIP-FUNCTIONS.md) section 4.1 on that image, then round 2 on the laptop. Hearing is the first thing it must fix.
+- **Hearing and voice on the laptop:** the sticks booted on 24 November still could not be understood: the microphone comes up too quiet (left channel about -84 dBFS, right about -63 dBFS), and the spoken voice is garbled on the laptop's playback path. The alternative microphone entries **M** and **N** were not tried. Next: a stick built from `Dev`, `pip-diag` on the laptop, and each microphone entry compared.
 - **SSD install:** all of Phase 1 (release key and laptop identity 1.2, update and backup from F2 1.3-1.4, memory bug fixes 1.11), a sealed laptop candidate through the boot gate, and the owner's answers in [DECISIONS-OWNER.md](docs/DECISIONS-OWNER.md).
 
 ## Next gate
@@ -120,7 +129,9 @@ asks for.
 
 - **2026-11-24 (night)** Waves 1 to 3 done and committed: wave 1 (first-boot fixes, installer ISO, `6ccf7f9`), wave 2 (the Pip functions, `04d00f0`, with image-build fixes after it) and wave 3 (an adversarial review's 49 findings fixed in `9fed87c`; forget-everything reaching reminders, a plain yes for switching off and clearing, battery pleas needing two readings, images recording their source, in `f414c51`). Wave 4 is in progress in the `wave4` worktree: model packs checked before the voice, recogniser and embedding models load; the night's upkeep without dream consent; brightness answers at the ends; real-model runs. The four manual pages were re-checked against the worktree and restamped. Host suites pass (above). Nothing of waves 2 to 4 has run in QEMU or on the laptop yet.
 
-- **2026-11-24 (evening)** Cable and diagnostics, uncommitted on the `cable-diag` branch. A cable development Try stick (`BEING_LAPTOP_CABLE=1`, `lab/cable.sh`): root SSH over an Ethernet cable from link-local addresses only, a writable copy of the code for that boot, and the kill switch `being.cable=0`; it never installs. `pip-diag` on every image and as Try menu item 8. Voice: a second pass over a command grammar when the ordinary transcript is not a command, a diagnostic microphone (`BEING_DIAG_MIC`), voice debugging (`being.voice_debug=1` on a Try boot), engine overrides (`being.asr=`, `being.tts=`), the laptop microphone channel picked automatically, and the natural voice (Alba) by default with a speed limit of 0.7 of real time. Keys work as on a Mac (`hid_apple.fnmode=1`): brightness, keyboard light, volume with a click, speaker mute for now only (`persist: false`), Mission Control for the menu and Launchpad for the terminal; Pip's own keys need fn. Mind fixes: a `route` line per turn, "last night" asked after 18:00, no mind module needing zlib (the laptop's Python has none), `no_face` when the Try menu has the screen, codec dumps in the USB logs, the doctor watching the hands, the hardware metrics listing the hands, eyes, bodycare and audio-init units, and guest mode reaching a restarted voice. The owner chose Alba after a 27-voice audition, Mac-style keys, and a development-only cable stick ([DECISIONS.md](docs/DECISIONS.md) rows 18 to 20). Host suites in the integration pass (about 21:40): Python 2,402 tests passed, 29 skipped; lab host checks 42 passed. `mind/voice.py` and `tests/test_voice_keys.py` changed at 21:40 and may not be covered by that run. Not yet built, run in QEMU or tried on the laptop.
+- **2026-11-24 (evening)** Cable and diagnostics, on the `Dev` branch. A cable development Try stick (`BEING_LAPTOP_CABLE=1`, `lab/cable.sh`): root SSH over an Ethernet cable from link-local addresses only, a writable copy of the code for that boot, and the kill switch `being.cable=0`; it never installs. `pip-diag` on every image and as Try menu item 8. Voice: a second pass over a command grammar when the ordinary transcript is not a command, a diagnostic microphone (`BEING_DIAG_MIC`), voice debugging (`being.voice_debug=1` on a Try boot), engine overrides (`being.asr=`, `being.tts=`), the laptop microphone channel picked automatically, and the natural voice (Alba) by default with a speed limit of 0.7 of real time. Keys work as on a Mac (`hid_apple.fnmode=1`): brightness, keyboard light, volume with a click, speaker mute for now only (`persist: false`), Mission Control for the menu and Launchpad for the terminal; Pip's own keys need fn. Mind fixes: a `route` line per turn, "last night" asked after 18:00, no mind module needing zlib (the laptop's Python has none), `no_face` when the Try menu has the screen, codec dumps in the USB logs, the doctor watching the hands, the hardware metrics listing the hands, eyes, bodycare and audio-init units, and guest mode reaching a restarted voice. The owner chose Alba after a 27-voice audition, Mac-style keys, and a development-only cable stick ([DECISIONS.md](docs/DECISIONS.md) rows 18 to 20). Host suites in the integration pass (about 21:40): Python 2,402 tests passed, 29 skipped; lab host checks 42 passed. `mind/voice.py` and `tests/test_voice_keys.py` changed at 21:40 and may not be covered by that run. Not yet built, run in QEMU or tried on the laptop.
+
+- **2026-11-24 (late evening)** The working tree as of 23:40 was committed and pushed as the `Dev` branch, with README, this file, the user guide and a new [CHANGELOG.md](CHANGELOG.md) brought up to date. `scripts/check fast` on that branch at 23:42 passed: Rust 261 passed; Python 2,468 run, all passing, 62 skipped (models, downloads and the face build that a fresh worktree lacks); lab host checks 42 passed. Advisory: `check-docs.py` flags six manual pages (26 sources changed after the 22:17 stamp), and the media gallery is out of date. `main` and the test releases are unchanged.
 
 ## Cable and diagnostics
 
