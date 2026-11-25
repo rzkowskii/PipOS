@@ -3,7 +3,8 @@
 What changed in PipOS, newest first. Times are Australian Eastern
 (AEDT). Test images are on the
 [Releases page](https://github.com/rzkowskii/PipOS/releases), and each
-release's notes say what was and was not checked.
+release's notes say what was and was not checked. Try 2 and Try 3 were
+withdrawn on 25 November because they carry a natural voice whose licence does not allow public distribution (see below).
 
 ## Unreleased: the `Dev` branch (24 November 2026, evening)
 
@@ -19,8 +20,8 @@ Everything here has passed the tests on the development Mac (23:42, on
 this branch: Rust 261 passed; Python 2,468 run, all passing, 62 skipped
 for models, downloads and builds a fresh checkout does not have; lab host
 checks 42 passed). None of it has been built into an image, run in the
-virtual laptop or tried on the MacBook yet. The test images on the
-Releases page do not include it.
+virtual laptop or tried on the MacBook yet. The test images do not
+include it.
 
 ### Diagnostics
 
@@ -111,7 +112,17 @@ Releases page do not include it.
   be replaced by Piper's retrained Alba, which is built on a base trained
   from scratch.
 
-## Try 3: `v0.2.1-try.3` (24 November 2026, 05:29)
+## Withdrawn: Try 2 and Try 3 (25 November 2026)
+
+Both images carried the natural voice Alba in the version packaged by
+sherpa-onnx, which was fine-tuned from Piper's lessac voice. The lessac
+recordings are licensed for research only and may not be distributed,
+so these images should not have been public. Both releases are drafts
+again and their downloads are gone. They return, rebuilt, once the voice
+is replaced by Piper's retrained Alba or another voice whose licence
+allows it. Try 1 has no Piper voice and stays up.
+
+## Try 3: `v0.2.1-try.3` (24 November 2026, 05:29, withdrawn)
 
 Tuned on the real models.
 
@@ -126,7 +137,7 @@ Tuned on the real models.
 - The Try menu fits the screen again, and the ISO has all six boot
   entries.
 
-## Try 2: `v0.2.0-try.2` (24 November 2026, 04:37)
+## Try 2: `v0.2.0-try.2` (24 November 2026, 04:37, withdrawn)
 
 The first boot's findings, answered.
 

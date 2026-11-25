@@ -55,9 +55,14 @@ lab tests and so has the same source-id (re-checked at about 04:25). The
 image has not yet been through the boot gate or onto the laptop.
 
 **On GitHub (24 November, late).** `main` is `cd20559` (wave 4 merged).
-Three test releases are published as pre-releases, each with an `.img`,
+Three test releases were published as pre-releases, each with an `.img`,
 an `.iso` and `SHA256SUMS`: Try 1 (`v0.1.0-try.1`, `6ccf7f9`), Try 2
-(`v0.2.0-try.2`, `f414c51`) and Try 3 (`v0.2.1-try.3`, `cd20559`). The
+(`v0.2.0-try.2`, `f414c51`) and Try 3 (`v0.2.1-try.3`, `cd20559`). On
+25 November Try 2 and Try 3 were turned back into drafts: their model
+partitions carry the sherpa-onnx Alba voice, fine-tuned from lessac,
+whose recordings are licensed for research only and may not be
+distributed ([DECISIONS-OWNER.md](docs/DECISIONS-OWNER.md) item 22). Only
+Try 1, which has no Piper voice, is public. The
 cable and diagnostics work below is on the `Dev` branch, a snapshot of
 the working tree taken at 23:40. No image has been built from `Dev` yet.
 

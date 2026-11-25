@@ -47,8 +47,9 @@ record of its own life.
 > 23 November 2026 PipOS booted for the first time on the real 2012
 > MacBook Pro, from a USB stick. Pip woke up, drew its face on the
 > laptop's GPU and heard its name, but could not make out the words after
-> it, so it never answered. Three test images have been published on the
-> [Releases page](https://github.com/rzkowskii/PipOS/releases) since then.
+> it, so it never answered. One test image, Try 1, is on the
+> [Releases page](https://github.com/rzkowskii/PipOS/releases); Try 2 and
+> Try 3 were withdrawn over a voice licence.
 > Boots on 24 November found two separate faults: the microphone still
 > comes up too quiet, and Pip's spoken voice is garbled on the laptop's
 > own speakers, though the same sound is clear on another Mac. The newest
@@ -295,10 +296,11 @@ cargo build && scripts/run-sim.sh --fake
 target/debug/face --demo
 ```
 
-**Try it on the MacBook.** Test images for the 13-inch mid-2012 MacBook
-Pro (MacBookPro9,2) are on the
-[Releases page](https://github.com/rzkowskii/PipOS/releases). They run
-from a USB stick and leave the Mac's own disk untouched unless you choose
+**Try it on the MacBook.** A test image for the 13-inch mid-2012 MacBook
+Pro (MacBookPro9,2), Try 1, is on the
+[Releases page](https://github.com/rzkowskii/PipOS/releases). Try 2 and
+Try 3 were withdrawn on 25 November because they carry a natural voice whose licence does not allow public distribution; they come back once that voice is
+replaced. Test images run from a USB stick and leave the Mac's own disk untouched unless you choose
 Install. Each release says what has and has not been checked, and
 [FIRST-BOOT.md](docs/FIRST-BOOT.md) walks through a boot. They are built
 from `main`, so the work on the `Dev` branch is not in them yet.
