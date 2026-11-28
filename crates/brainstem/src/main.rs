@@ -9,6 +9,8 @@ mod camera;
 mod camera_look;
 #[cfg(target_os = "linux")]
 mod camera_usb;
+#[allow(dead_code)]
+mod director;
 mod ears;
 #[cfg(target_os = "linux")]
 mod device_plug;
