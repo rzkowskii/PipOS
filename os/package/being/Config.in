@@ -10,6 +10,7 @@ config BR2_PACKAGE_BEING
 	depends on BR2_TOOLCHAIN_GCC_AT_LEAST_7
 	select BR2_PACKAGE_HOST_RUSTC
 	select BR2_PACKAGE_JPEG
+	select BR2_PACKAGE_ALSA_LIB
 	# The confined Keep PDF worker uses only /usr/bin/pdftotext. Buildroot's
 	# upstream Poppler package owns the source/hash pin and installs the tools.
 	select BR2_PACKAGE_POPPLER
