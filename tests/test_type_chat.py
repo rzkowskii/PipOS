@@ -372,9 +372,10 @@ class OverTheBus(unittest.TestCase):
             nonlocal output
             deadline = time.monotonic() + timeout
             while not wanted or wanted not in type_chat.ui.plain(output.decode(errors="replace")):
-                if not wanted and time.monotonic() > deadline:
+                late = time.monotonic() > deadline  # one reading: two could straddle the deadline
+                if not wanted and late:
                     return
-                if time.monotonic() > deadline:
+                if late:
                     child.kill()
                     self.fail(f"never saw {wanted!r} in {output!r}")
                 import select

@@ -1,0 +1,6 @@
+#!/bin/sh
+# RAUC has written and activated the target. Record it only for installed PipOS.
+set -eu
+[ "${RAUC_SYSTEM_CONFIG:-}" = /run/systemd/generator.early/being-installed/rauc.conf ] || exit 0
+export PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1
+exec /usr/bin/python3 -m mind.update_slots

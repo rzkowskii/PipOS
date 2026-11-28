@@ -402,7 +402,7 @@ class PlaybackRecovery(unittest.IsolatedAsyncioTestCase):
 
         with patch("mind.voice.asyncio.sleep", pause), self.assertLogs("being.voice", "WARNING"):
             await voice.play(Path("clause.wav"), first=True)
-        self.assertEqual([item.args[1] for item in voice.play_once.await_args_list], [True, False])
+        self.assertEqual([item.args[1] for item in voice.play_once.await_args_list], [True, True])
         self.assertEqual(pauses, [0.2])
 
         voice.play_once = AsyncMock(side_effect=RuntimeError("aplay exit status 1"))

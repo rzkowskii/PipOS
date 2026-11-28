@@ -4,11 +4,14 @@
 (so tests use a temporary folder), commands, the clock. Tests replace it.
 
 Sections here: system (build, kernel command line, units, restarts, every
-mind module importing without zlib, the bus), boot timing from the journal,
-the cortex (health, properties, fixed prompts, speed), the body (thermal,
-battery, clock drift, storage, Ethernet, firewall) and the workshop's state.
+mind module importing without zlib, the bus, the watchdog), boot timing from
+the journal, the cortex (health, properties, fixed prompts, speed, whether it
+is generating), the body (thermal, battery, clock drift, storage, Ethernet,
+firewall, the hardware this build leaves out) and the workshop's state.
 """
 
+import errno
+import http.client
 import json
 import os
 import re
@@ -22,9 +25,9 @@ from pathlib import Path
 
 from .diag_report import check
 
-ORGANS = ("being-brainstem.service", "being-mind.service", "being-voice.service", "being-face.service",
-          "being-hands.service", "being-cortex.service", "being-eyes.service", "being-bodycare.service",
-          "being-audio-init.service", "being-local-screen.service", "being-usb-logs.service")
+REFLEX_ORGANS = ("being-brainstem.service", "being-mind.service", "being-voice.service", "being-face.service")
+ORGANS = (*REFLEX_ORGANS, "being-hands.service", "being-cortex.service", "being-eyes.service",
+          "being-bodycare.service", "being-audio-init.service", "being-local-screen.service", "being-usb-logs.service")
 BUS_ORGANS = ("mind", "voice", "face", "hands", "bodycare")
 CORTEX_PORT = 8080
 # Measured on the laptop in the v5 Try boot: prompt and decode tokens a second.
@@ -33,7 +36,7 @@ V5_DECODE_TPS = 10.9
 SLOW_SHARE = 0.8
 DRIFT_WARN_S = 120
 CMDLINE_KEYS = ("being.try", "snd_hda_intel.model", "being.mic_channel", "being.cable", "being.voice_debug",
-                "being.asr", "being.tts", "being.screen", "being.bench")
+                "being.asr", "being.tts", "being.screen", "being.bench", "being.face_idle_hz")
 PROMPTS = (
     ("What is two plus two? Answer with one number.", ("4", "four")),
     ("What is the capital of France? Answer in one word.", ("paris",)),
@@ -41,6 +44,13 @@ PROMPTS = (
     ("What colour is a clear daytime sky? One word.", ("blue",)),
     ("How many legs does a cat have? Answer with one number.", ("4", "four")),
 )
+
+
+# /proc/sys allocates a kernel buffer the size of the read: on the laptop's
+# kernel a 4 MiB read of /proc/sys/kernel/osrelease fails with ENOMEM
+# (2 MiB works), which left the kernel and boot_id out of every report.
+READ_LIMIT = 1024 * 1024
+PROC_SYS_LIMIT = 64 * 1024
 
 
 @dataclass
@@ -60,12 +70,24 @@ class Host:
         path = str(path)
         return self.root / path.lstrip("/") if path.startswith("/") else Path(path)
 
-    def read(self, path, limit=4 * 1024 * 1024):
+    def read(self, path, limit=READ_LIMIT):
+        """The text of a file (at most `limit` bytes), or None. /proc/sys files are read
+        with a small buffer, and a read the kernel refuses for its size is retried smaller."""
+        if str(path).startswith("/proc/sys/"):
+            limit = min(limit, PROC_SYS_LIMIT)
         try:
-            with open(self.path(path), "rb") as handle:
-                return handle.read(limit).decode("utf-8", "replace")
+            return self._read(path, limit)
+        except OSError as error:
+            if error.errno != errno.ENOMEM or limit <= PROC_SYS_LIMIT:
+                return None
+        try:
+            return self._read(path, PROC_SYS_LIMIT)
         except OSError:
             return None
+
+    def _read(self, path, limit):
+        with open(self.path(path), "rb") as handle:
+            return handle.read(limit).decode("utf-8", "replace")
 
     def write(self, path, text):
         try:
@@ -96,10 +118,10 @@ class Host:
             return None
         return Result(done.returncode, done.stdout or "", done.stderr or "")
 
-    def spawn(self, argv, **kwargs):
+    def spawn(self, argv, *, stdout=subprocess.DEVNULL, **kwargs):
         """A background process (a recording), or None."""
         try:
-            return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=stdout,
                                     stderr=subprocess.PIPE, **kwargs)
         except OSError:
             return None
@@ -159,12 +181,74 @@ def failed_units(host):
     return [line.split()[0] for line in result.out.splitlines() if line.split()]
 
 
+def check_reflex_pressure(host):
+    """Sample Linux cgroup v2 CPU stalls from the units serving each turn."""
+    readings = {}
+    for unit in REFLEX_ORGANS:
+        raw = host.read(f"/sys/fs/cgroup/system.slice/{unit}/cpu.pressure", 512) or ""
+        reading = {}
+        for line in raw.splitlines():
+            fields = line.split()
+            if not fields or fields[0] not in ("some", "full"):
+                continue
+            values = dict(field.split("=", 1) for field in fields[1:] if "=" in field)
+            try:
+                sample = {key: float(values[key]) for key in ("avg10", "avg60", "avg300")}
+                total = int(values["total"])
+            except (KeyError, ValueError):
+                continue
+            if all(0 <= value <= 100 for value in sample.values()) and total >= 0:
+                reading[fields[0]] = dict(sample, total_us=total)
+        readings[unit] = reading if "some" in reading else None
+    if not any(readings.values()):
+        return check("workload.reflex_pressure", "workload", "skip", readings,
+                     "CPU pressure readings are unavailable for these services.")
+    averages = []
+    for unit, reading in readings.items():
+        name = unit.removeprefix("being-").removesuffix(".service")
+        average = f"{reading['some']['avg10']:.2f}%" if reading else "unavailable"
+        averages.append(f"{name} {average}")
+    return check("workload.reflex_pressure", "workload", "pass", readings,
+                 f"CPU stall averages over the last 10 seconds were {', '.join(averages)}.")
+
+
 def active_units(host, *patterns):
     result = host.run(["systemctl", "list-units", "--plain", "--no-legend", "--no-pager", "--state=active",
                        *patterns], timeout=15)
     if result is None or result.code:
         return []
     return [line.split()[0] for line in result.out.splitlines() if line.split()]
+
+
+def manager_property(host, name):
+    """A property of the systemd manager itself (`systemctl show -p NAME --value`), or None."""
+    result = host.run(["systemctl", "show", f"--property={name}", "--value"], timeout=10)
+    if result is None or result.code:
+        return None
+    return result.out.strip()
+
+
+def unit_property(host, unit, name):
+    result = host.run(["systemctl", "show", f"--property={name}", "--value", unit], timeout=10)
+    if result is None or result.code:
+        return None
+    return result.out.strip()
+
+
+def cpu_weight(host, unit=None):
+    """The CPU weight of this process's cgroup, or of `unit` (its setting, even while it is
+    stopped). None when unknown; a unit with none set has the default, 100."""
+    if unit is not None:
+        text = unit_property(host, unit, "CPUWeight") if host.which("systemctl") else None
+        if not text:
+            return None
+        return int(text) if text.isdigit() else 100  # "[not set]": the default
+    for line in (host.read("/proc/self/cgroup", 64 * 1024) or "").splitlines():
+        hierarchy, _, path = line.partition("::")
+        if hierarchy == "0" and path:
+            text = (host.read(f"/sys/fs/cgroup{path.strip()}/cpu.weight", 64) or "").strip()
+            return int(text) if text.isdigit() else None
+    return None
 
 
 # The journal ------------------------------------------------------------------
@@ -273,6 +357,52 @@ def build_id(host):
     return (host.read("/etc/being/build-id") or "").strip()
 
 
+def check_recall_timing(host):
+    """Aggregate a bounded sample of numeric search timings from this boot."""
+    topic = "workload.recall"
+    prefix = "memory.recall_timing "
+    limit = 512
+    result = host.run(["journalctl", "-b", "-u", "being-mind.service", "-o", "cat", "--no-pager", "-q",
+                       r"--grep=^memory\.recall_timing ", f"--lines={limit}"], timeout=15)
+    if result is None or result.code:
+        return check(topic, "workload", "skip", None, "No recall timing sample available from this boot.")
+    groups = {}
+    counters = ("returned", "shortlisted", "lexical_shortlisted", "vector_rows_scanned", "vector_shortlisted")
+    for line in result.out.splitlines()[-limit:]:
+        if not line.startswith(prefix) or len(line) > 1024:
+            continue
+        try:
+            data = json.loads(line[len(prefix):])
+        except ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        kind, path, elapsed = data.get("kind"), data.get("path"), data.get("elapsed_ms")
+        if kind not in ("facts", "history") or path not in ("hybrid", "lexical"):
+            continue
+        if type(elapsed) not in (int, float) or not 0 <= elapsed <= 600_000:
+            continue
+        group = groups.setdefault(f"{kind}.{path}", {"elapsed": [], "max_counts": {}})
+        group["elapsed"].append(elapsed)
+        for counter in counters:
+            amount = data.get(counter)
+            if type(amount) is int and 0 <= amount <= 1_000_000_000:
+                maximum = group["max_counts"]
+                maximum[counter] = max(amount, maximum.get(counter, 0))
+    if not groups:
+        return check(topic, "workload", "skip", None, "No measured recall operations in this boot's sample.")
+    count = 0
+    for group in groups.values():
+        durations = sorted(group.pop("elapsed"))
+        size = len(durations)
+        count += size
+        group["samples"] = size
+        for rank in (50, 95, 99):
+            group[f"p{rank}_ms"] = durations[(rank * size + 99) // 100 - 1]
+    return check(topic, "workload", "pass", {"sample_limit": limit, "groups": groups},
+                 f"{count} recall operations measured across {len(groups)} search paths this boot.")
+
+
 def check_build(host):
     words = cmdline(host)
     options = cmdline_options(words)
@@ -336,6 +466,36 @@ def check_units(host):
         return check("system.units", "system", "warn", value, "restarted: " + ", ".join(restarted),
                      "An organ restarted during this boot; its journal says why.")
     return check("system.units", "system", "pass", value, f"{len(summary)} organs, none failed or restarted")
+
+
+WATCHDOG_DEVICES = ("/dev/watchdog0", "/dev/watchdog")
+WATCHDOG_OFF = ("", "0", "0s")
+
+
+def check_watchdog(host):
+    """systemd set to feed a hardware watchdog only helps when there is one to feed."""
+    if host.which("systemctl") is None:
+        return check("system.watchdog", "system", "skip", None, "systemctl is not available")
+    runtime = manager_property(host, "RuntimeWatchdogUSec")
+    device = next((name for name in WATCHDOG_DEVICES if host.exists(name)), None)
+    identity = (host.read("/sys/class/watchdog/watchdog0/identity") or "").strip() or None
+    value = {"runtime_watchdog": runtime, "device": device, "identity": identity}
+    if runtime is None:
+        return check("system.watchdog", "system", "skip", value, "systemd's watchdog setting could not be read")
+    if runtime in WATCHDOG_OFF:
+        return check("system.watchdog", "system", "pass", value,
+                     "systemd uses no hardware watchdog" + (f"; {identity} is present" if identity else ""))
+    if device is None:
+        result = host.run(["dmesg"], timeout=10)
+        disabled = result is not None and "NO_REBOOT" in (result.out or "")
+        value["firmware_disabled"] = disabled
+        return check("system.watchdog", "system", "warn", value,
+                     f"systemd is set to feed a watchdog every {runtime}, but there is no /dev/watchdog0"
+                     + ("; the kernel says the firmware disabled the iTCO watchdog (NO_REBOOT)" if disabled else ""),
+                     "A hung system will not reboot by itself. The MacBookPro9,2 firmware disables the iTCO "
+                     "watchdog, so the kernel needs the software watchdog (CONFIG_SOFT_WATCHDOG, softdog).")
+    return check("system.watchdog", "system", "pass", value,
+                 f"systemd feeds {identity or device} every {runtime}")
 
 
 IMPORT_PROBE = r"""
@@ -528,6 +688,151 @@ def cortex_client(port=CORTEX_PORT, timeout=60):
     return Client(port, timeout=timeout)
 
 
+def check_continuity_archive(host):
+    """Inspect the current identity and archive without initialising either."""
+    import sqlite3
+    from contextlib import closing
+
+    from .backup import DB_FILE, LIFE_FILE, RESTORE_MARKER, life_record
+    from .doctor import System, UNFINISHED
+    from .memory import SCHEMA_VERSION, archive_schema
+
+    root = host.path("/mind")
+    if host.exists(f"/mind/{RESTORE_MARKER}"):
+        return [check("continuity.archive", "continuity", "skip", None, "A restore is in progress.")]
+    checks = []
+    try:
+        life_record(root)
+    except OSError:
+        checks.append(check("continuity.life", "continuity", "skip", None, f"{LIFE_FILE} is unavailable."))
+    except ValueError:
+        checks.append(check("continuity.life", "continuity", "fail", None, f"{LIFE_FILE} is malformed."))
+    else:
+        checks.append(check("continuity.life", "continuity", "pass", True, "The local life record is readable."))
+
+    path = root / DB_FILE
+    integrity = System().quick_check(path, budget_s=2)
+    if integrity is False:
+        return checks + [check("continuity.archive", "continuity", "fail", None, "The archive failed SQLite's quick check.")]
+    if integrity is None or integrity == UNFINISHED:
+        return checks + [check("continuity.archive", "continuity", "skip", None, "Could not check the archive within the time budget.")]
+    try:
+        with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)) as db:
+            version = archive_schema(db)
+    except sqlite3.Error:
+        return checks + [check("continuity.archive", "continuity", "skip", None, "The archive format could not be read.")]
+    except ValueError:
+        return checks + [check("continuity.archive", "continuity", "fail", None, "The archive format stamp is invalid.")]
+    info = {"schema": version, "expected_schema": SCHEMA_VERSION}
+    if version is None:
+        return checks + [check("continuity.archive", "continuity", "warn", info, "The archive has no format stamp yet.")]
+    if version != SCHEMA_VERSION:
+        return checks + [check("continuity.archive", "continuity", "fail", info,
+                               f"Archive format {version} differs from this build's format {SCHEMA_VERSION}.")]
+    return checks + [check("continuity.archive", "continuity", "pass", info,
+                           "The archive passed SQLite's quick check and its format matches this build.")]
+
+
+def check_continuity_baseline(host):
+    from . import continuity_baseline
+    import sqlite3
+
+    try:
+        value = continuity_baseline.compare(host.path("/mind"), etc=host.path("/etc/being"),
+                                            share=host.path("/usr/share/being"), models=host.path("/models"))
+    except FileNotFoundError:
+        return check("continuity.baseline", "continuity", "skip", None,
+                     "A saved continuity baseline or the local archive is unavailable.")
+    except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
+        return check("continuity.baseline", "continuity", "warn", None,
+                     "Could not compare the saved continuity baseline.")
+    failed = [label for field, label in (
+        ("life_matches", "life identity"),
+        ("schema_matches", "archive format"),
+        ("revision_retained", "archive revision"),
+        ("ledger_matches", "deletion ledger"),
+        ("counts_explained", "record counts"),
+        ("sample_matches", "sampled facts"),
+    ) if not value[field]]
+    if not failed:
+        return check("continuity.baseline", "continuity", "pass", value,
+                     "The archive matches the saved baseline and its deletion history.")
+    return check("continuity.baseline", "continuity", "fail", value,
+                 "The current archive differs from the saved baseline in " + ", ".join(failed) + ".")
+
+
+def check_continuity_recall():
+    """Exercise lexical retrieval and forgetting in a fresh RAM archive."""
+    import sqlite3
+    from contextlib import closing
+
+    from .memory import Memory
+
+    try:
+        with closing(Memory(None, embedder=None)) as archive:
+            clip = archive.log("heard", "The amber observatory opens after sunset.", "Fixture")
+            fact = archive.remember("The telescope is named Silverleaf.", "Fixture")
+            control = archive.remember("The lantern is named Evening Star.", "Fixture")
+            facts = [row.id for row in archive.recall("telescope", limit=1)]
+            history = [row.id for row in archive.recall_history("amber observatory", limit=1, meaning=False)]
+            archive.forget([fact])
+            value = {
+                "fact_recalled": fact is not None and facts == [fact],
+                "conversation_recalled": clip is not None and history == [clip],
+                "forgotten_fact_absent": not archive.recall("telescope"),
+                "control_fact_retained": control is not None and [row.id for row in archive.recall("lantern")] == [control],
+            }
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+        return check("continuity.recall", "continuity", "fail", None,
+                     f"The RAM recall fixture failed to run ({type(error).__name__}).")
+    failed = [key.replace("_", " ") for key, passed in value.items() if not passed]
+    if failed:
+        return check("continuity.recall", "continuity", "fail", value,
+                     "The RAM recall fixture failed: " + ", ".join(failed) + ".")
+    return check("continuity.recall", "continuity", "pass", value,
+                 "The RAM recall fixture retrieved the fact and conversation, then excluded the forgotten fact.")
+
+
+def check_continuity_slots(host, *, client=None):
+    """Check the conversation and workshop contexts with a local GET only."""
+    try:
+        config = json.loads(host.read("/etc/being/being.json", 64 * 1024) or "{}")
+        expected = config["ctx_tokens"]
+    except (KeyError, TypeError, ValueError):
+        expected = None
+    if type(expected) is not int or expected <= 0:
+        return check("continuity.slots", "continuity", "skip", None, "The expected cortex context is unavailable.")
+    try:
+        slots = (client or cortex_client(timeout=2)).request("GET", "/slots")
+    except (OSError, RuntimeError, ValueError, http.client.HTTPException):
+        return check("continuity.slots", "continuity", "skip", None, "The local cortex did not report its slots.")
+
+    counts = []
+    if isinstance(slots, list):
+        for slot in slots:
+            if isinstance(slot, dict) and type(slot.get("id")) is int and type(slot.get("n_ctx")) is int:
+                counts.append((slot["id"], slot["n_ctx"]))
+    value = {"reported_slots": counts, "expected_tokens_per_slot": expected}
+    if not isinstance(slots, list) or len(slots) != len(counts) or sorted(counts) != [(0, expected), (1, expected)]:
+        return check("continuity.slots", "continuity", "fail", value,
+                     f"The cortex did not report conversation and workshop slots of {expected} tokens each.")
+    return check("continuity.slots", "continuity", "pass", value,
+                 f"Conversation and workshop each have a {expected}-token cortex slot.")
+
+
+def cortex_busy(client=None):
+    """True while the cortex is generating (a slot is processing), False when idle, None when unknown.
+
+    Speech timings taken while it generates compete with it for the CPU."""
+    try:
+        slots = (client or cortex_client(timeout=3)).request("GET", "/slots")
+    except Exception:
+        return None
+    if not isinstance(slots, list):
+        return None
+    return any(isinstance(slot, dict) and bool(slot.get("is_processing")) for slot in slots)
+
+
 def check_cortex(host, *, prompts=PROMPTS, client=None):
     """Health, properties and fixed prompts at temperature 0, with their speed."""
     client = client or cortex_client()
@@ -665,19 +970,105 @@ def wired_interfaces(host):
     return found
 
 
+def _small_fields(host, path, allowed):
+    """Selected KEY=VALUE fields from a small kernel/service state file."""
+    text = host.read(path, 64 * 1024) or ""
+    values = {}
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key in allowed and key not in values and len(value) <= 256:
+            values[key] = value
+    return values
+
+
+def _network_addresses(host, name):
+    if host.root != Path("/") or host.which("ip") is None:
+        return []
+    result = host.run(["ip", "-j", "address", "show", "dev", name], timeout=5)
+    if result is None or result.code or len(result.out) > 128 * 1024:
+        return []
+    try:
+        rows = json.loads(result.out)
+    except (ValueError, TypeError):
+        return []
+    addresses = []
+    for row in rows if isinstance(rows, list) else ():
+        for item in row.get("addr_info", ()) if isinstance(row, dict) else ():
+            if not isinstance(item, dict) or item.get("family") not in ("inet", "inet6"):
+                continue
+            address = item.get("local")
+            if isinstance(address, str) and len(address) <= 64 and item.get("scope") != "host":
+                # An address exists is useful; its private/public value is not.
+                addresses.append({"family": item["family"], "prefixlen": item.get("prefixlen"),
+                                  "scope": item.get("scope")})
+    return addresses[:16]
+
+
+def _owner_wired_state(host):
+    setting = host.read("/mind/network/ethernet.json", 257)
+    try:
+        parsed = json.loads(setting) if setting is not None else None
+        enabled = (parsed["enabled"] if isinstance(parsed, dict) and set(parsed) == {"version", "enabled"}
+                   and parsed.get("version") == 1 and type(parsed.get("enabled")) is bool else None)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        enabled = None
+    if setting is None:
+        enabled = False  # the product's missing-setting default
+    runtime = host.read("/run/being-network/state.json", 4096)
+    try:
+        mode = json.loads(runtime).get("mode") if runtime is not None else None
+    except (ValueError, TypeError):
+        mode = None
+    return enabled, mode if mode in ("local-only", "paired-lan", "internet") else None
+
+
 def check_network(host):
     wired = wired_interfaces(host)
     wireless = [path.name for path in host.glob("/sys/class/net", "*") if (path / "wireless").exists()]
     links = {}
     for name in wired:
         base = f"/sys/class/net/{name}"
-        links[name] = {key: (host.read(f"{base}/{key}") or "").strip() or None
-                       for key in ("operstate", "carrier", "speed", "duplex")}
-    value = {"wired": links, "wireless": wireless or "not available on this build"}
+        link = {key: (host.read(f"{base}/{key}") or "").strip() or None
+                for key in ("operstate", "carrier", "speed", "duplex", "ifindex")}
+        link["driver"] = _driver(host.path(f"{base}/device"))
+        index = link.pop("ifindex")
+        link["networkd"] = (_small_fields(host, f"/run/systemd/netif/links/{index}",
+                                          {"OPER_STATE", "ADDRESS_STATE", "SETUP_STATE", "NETWORK_FILE"})
+                            if index and index.isdecimal() else {})
+        link["addresses"] = _network_addresses(host, name)
+        links[name] = link
+    enabled, mode = _owner_wired_state(host)
+    value = {"wired": links, "wireless": wireless or "not available on this build",
+             "owner_enabled": enabled, "network_mode": mode}
     if not wired:
         return check("body.network", "body", "skip", value, "no wired network interface")
-    evidence = "; ".join(f"{name} {info['operstate']} carrier={info['carrier']} {info['speed'] or '?'} Mb/s"
-                         for name, info in links.items())
+    evidence = "; ".join(
+        f"{name} driver={info['driver'] or '?'} {info['operstate']} carrier={info['carrier']} "
+        f"{info['speed'] or '?'} Mb/s {info['duplex'] or '?'}; "
+        f"networkd setup={info['networkd'].get('SETUP_STATE', '?')} "
+        f"address={info['networkd'].get('ADDRESS_STATE', '?')}; addresses={len(info['addresses'])}"
+        for name, info in links.items())
+    laptop = (host.read("/sys/class/dmi/id/product_name") or "").strip() == "MacBookPro9,2"
+    if any(not info["driver"] for info in links.values()):
+        return check("body.network", "body", "warn", value, evidence,
+                     "The wired port has no bound driver. On the MacBookPro9,2 it should use tg3.")
+    if laptop and not any(info["driver"] == "tg3" for info in links.values()):
+        return check("body.network", "body", "warn", value, evidence,
+                     "The MacBook's wired port is not using its expected tg3 driver.")
+    # Offline is an intentional healthy state. Only diagnose carrier/address
+    # recovery once both ordinary owner controls authorize managed Ethernet.
+    if enabled is not True or mode != "internet":
+        reason = "wired Ethernet is off in Settings" if enabled is False else f"network mode is {mode or 'unknown'}"
+        return check("body.network", "body", "pass", value, evidence + f"; {reason}")
+    if not any(info["carrier"] == "1" for info in links.values()):
+        return check("body.network", "body", "warn", value, evidence,
+                     "Wired Internet is allowed but there is no carrier. Check the cable and the router port.")
+    ready = any(info["addresses"] and info["networkd"].get("SETUP_STATE") in ("configured", "configuring")
+                for info in links.values())
+    if not ready:
+        return check("body.network", "body", "warn", value, evidence,
+                     "The cable is linked but no address is ready. In F2, C, 9 leave wired Ethernet on and "
+                     "Internet mode selected; then check the router's DHCP service.")
     return check("body.network", "body", "pass", value, evidence)
 
 
@@ -691,6 +1082,17 @@ def check_firewall(host):
     status = "pass" if any("being_network" in table for table in tables) else "warn"
     return check("body.firewall", "body", status, tables, "; ".join(tables) or "no tables",
                  "" if status == "pass" else "The PipOS network table is missing.")
+
+
+def mount_type(host, point):
+    """The filesystem type mounted at `point` (the last mount there wins), or None."""
+    found = None
+    for line in (host.read("/proc/self/mountinfo") or "").splitlines():
+        before, _, after = line.partition(" - ")
+        fields, source = before.split(), after.split()
+        if len(fields) >= 5 and fields[4] == point and source:
+            found = source[0]
+    return found
 
 
 def check_storage(host, folder=None):
@@ -721,6 +1123,104 @@ def check_storage(host, folder=None):
                  "The diagnostics stick is nearly full." if low else "")
 
 
+# Hardware this build leaves out on purpose ---------------------------------------
+
+# (bus, vendor, device, what it is): on the MacBookPro9,2, present but not
+# supported, so the report names them instead of leaving them silently missing.
+NOT_SUPPORTED = (
+    ("usb", 0x05AC, 0x821D, "Bluetooth"),
+    ("pci", 0x14E4, 0x16BC, "SD card reader"),
+    ("pci", 0x11C1, 0x5901, "FireWire"),
+    ("pci", 0x8086, 0x1513, "Thunderbolt"),
+    ("usb", 0x05AC, 0x8242, "infrared receiver"),
+)
+WIFI_CHIPS = ((0x14E4, 0x4331, "Wi-Fi (Broadcom BCM4331)"),)
+B43_FIRMWARE = "/lib/firmware/b43"
+
+
+def _hex_file(host, path):
+    try:
+        return int((host.read(path, 64) or "").strip(), 16)
+    except ValueError:
+        return None
+
+
+def _driver(path):
+    link = Path(path) / "driver"
+    try:
+        return link.resolve().name if link.exists() else None
+    except OSError:
+        return None
+
+
+def pci_devices(host):
+    """[(vendor, device, driver or None, address)] from /sys/bus/pci/devices."""
+    found = []
+    for path in host.glob("/sys/bus/pci/devices", "*"):
+        base = f"/sys/bus/pci/devices/{path.name}"
+        vendor, device = _hex_file(host, f"{base}/vendor"), _hex_file(host, f"{base}/device")
+        if vendor is not None and device is not None:
+            found.append((vendor, device, _driver(path), path.name))
+    return found
+
+
+def usb_devices(host):
+    """[(vendor, product, driver of an interface or None, name)] from /sys/bus/usb/devices."""
+    found = []
+    for path in host.glob("/sys/bus/usb/devices", "*"):
+        if ":" in path.name:
+            continue  # an interface; its device is listed too
+        base = f"/sys/bus/usb/devices/{path.name}"
+        vendor, product = _hex_file(host, f"{base}/idVendor"), _hex_file(host, f"{base}/idProduct")
+        if vendor is None or product is None:
+            continue
+        drivers = [_driver(interface) for interface in host.glob("/sys/bus/usb/devices", f"{path.name}:*")]
+        found.append((vendor, product, next((name for name in drivers if name), None), path.name))
+    return found
+
+
+def check_devices(host):
+    """Hardware that is present but not supported on this build, and the Wi-Fi's state."""
+    present = {"pci": pci_devices(host), "usb": usb_devices(host)}
+    rows, unsupported, supported = [], [], []
+    for bus, vendor, device, what in NOT_SUPPORTED:
+        for found_vendor, found_device, driver, address in present[bus]:
+            if (found_vendor, found_device) == (vendor, device):
+                label = f"{what} {vendor:04x}:{device:04x}"
+                rows.append({"what": what, "id": f"{vendor:04x}:{device:04x}", "bus": bus, "driver": driver})
+                (supported if driver else unsupported).append(label + (f" (driver {driver})" if driver else ""))
+                break
+    wifi = None
+    for vendor, device, what in WIFI_CHIPS:
+        for found_vendor, found_device, driver, address in present["pci"]:
+            if (found_vendor, found_device) == (vendor, device):
+                interfaces = [path.name for path in host.glob("/sys/class/net", "*")
+                              if (path / "wireless").exists() or (path / "phy80211").exists()]
+                firmware = host.exists(B43_FIRMWARE)
+                if interfaces:
+                    state = f"working as {', '.join(interfaces)}"
+                elif driver and not firmware:
+                    state = f"driver {driver} but no firmware on this build"
+                elif driver:
+                    state = f"driver {driver}, firmware present, but no wireless interface"
+                else:
+                    state = "no driver on this build"
+                wifi = {"what": what, "id": f"{vendor:04x}:{device:04x}", "driver": driver, "firmware": firmware,
+                        "interfaces": interfaces, "state": state}
+    value = {"not_supported": rows, "wifi": wifi}
+    if not rows and wifi is None:
+        return check("body.devices", "body", "skip", value, "none of the MacBookPro9,2's unsupported devices is here")
+    parts = []
+    if unsupported:
+        parts.append("not supported on this build (no driver): " + ", ".join(unsupported))
+    if supported:
+        parts.append("bound: " + ", ".join(supported))
+    if wifi is not None:
+        parts.append(f"{wifi['what']}: {wifi['state']}")
+    return check("body.devices", "body", "pass", value, "; ".join(parts),
+                 "Left out on purpose: Pip uses the wired network and the internal keyboard and trackpad.")
+
+
 # The workshop -----------------------------------------------------------------
 
 PANEL_DIR = "/run/being-panel"
@@ -745,17 +1245,24 @@ def panel_state(host, name="terminal"):
     return {"visible": bool(flags & PANEL_VISIBLE), "beat": beat, "title": title}
 
 
+# hands.renderer_command names a panel's transient unit after its app
+# (hands.APPS), with systemd-run --unit=being-panel-<app>: no unit file ships.
+TERMINAL_APP = "terminal"
+TERMINAL_PANEL = f"being-panel-{TERMINAL_APP}.service"
+
+
 def terminal_open(host):
     """(open?, evidence): open only with a visible terminal frame or an active
-    being-panel-* unit (the panel that draws it). A being-shell-* unit alone is
-    a shell with nothing on the screen, so it is evidence but not an open terminal."""
+    TERMINAL_PANEL (the panel that draws it). A being-shell-* unit alone is a
+    shell with nothing on the screen, and the clock's or body monitor's panel
+    is not the terminal: both are evidence, never an open terminal."""
     units = active_units(host, "being-panel-*", "being-shell-*")
-    panels = [unit for unit in units if unit.startswith("being-panel-")]
+    panels = [unit for unit in units if unit == TERMINAL_PANEL]
     frame = panel_state(host)
     evidence = []
     if units:
         evidence.append("units " + ", ".join(units))
-        if not panels:
+        if not panels and any(unit.startswith("being-shell-") for unit in units):
             evidence.append("a shell without a panel")
     if frame is not None:
         evidence.append(f"terminal frame {'visible' if frame['visible'] else 'hidden'}, beat {frame['beat']}")

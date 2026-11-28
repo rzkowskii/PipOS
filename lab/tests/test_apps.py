@@ -215,15 +215,26 @@ class Apps(unittest.TestCase):
         return (width, height, rgb) if left and right and cyan > 0.5 else None
 
     def test_3_guest_mode_refuses_every_app(self):
-        payload = shlex.quote(json.dumps({"t": "app.privacy", "guest": True}))
-        self.sh(f"python3 /run/apps-bus.py {payload}")
+        state = self.ask("app.open", app="lists")
+        self.assertEqual((state["t"], state.get("view")), ("app.state", "shown"))
+        self.wait(lambda: self.visible("lists"), what="the owner's Lists panel")
+
+        self.assertIn("guest", self.vm.converse("start guest mode", 60).lower())
         try:
-            for app in ("terminal", "monitor", "clock"):
+            self.wait(lambda: self.frame("lists") is None, what="the owner's frame removed on guest entry")
+            self.wait(lambda: not self.unit_active("being-panel-lists.service"), what="the Lists renderer stopped")
+            for app in ("terminal", "monitor", "clock", "calc", "lists", "memory", "journal", "mind", "lookup"):
                 reply = self.ask("app.open", app=app)
                 self.assertEqual((reply["t"], reply.get("reason")), ("app.refused", "guest"), app)
+            self.assertIsNone(self.frame("lists"))
         finally:
-            payload = shlex.quote(json.dumps({"t": "app.privacy", "guest": False}))
-            self.sh(f"python3 /run/apps-bus.py {payload}")
+            self.vm.converse("end guest mode", 60)
+        self.assertIsNone(self.frame("lists"), "the owner's panel stays closed until requested again")
+        state = self.ask("app.open", app="lists")
+        self.assertEqual((state["t"], state.get("view")), ("app.state", "shown"))
+        self.wait(lambda: self.visible("lists"), what="Lists reopened on the owner's request")
+        self.ask("app.close", app="lists")
+        self.wait(lambda: self.frame("lists") is None, what="the owner's reopened frame removed")
 
 
 @unittest.skipUnless(os.environ.get("BEING_APPS_LOCAL_SCREEN") == "1",

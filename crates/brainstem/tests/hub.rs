@@ -109,6 +109,27 @@ fn a_newcomer_is_told_the_current_state() {
 }
 
 #[test]
+fn only_the_mind_sets_look_and_a_restarted_face_gets_it_before_live_events() {
+    let stem = Stem::start("look", "mind");
+    let mut mind = stem.join("mind", &["screen.prefs_state"]);
+    let mut rogue = stem.join("rogue", &[]);
+    let mut face = stem.join("face", &["screen.prefs"]);
+    let blue = Event::new("screen.prefs").with("glow", "blue").with("revision", 3u64);
+    mind.send(&blue).unwrap();
+    assert_eq!(wait_for(&face, "look request", |e| e.topic == "screen.prefs"), blue);
+    rogue.send(&Event::new("screen.prefs").with("glow", "red")).unwrap();
+    assert!(quiet(&face, |e| e.topic == "screen.prefs"));
+    let applied = Event::new("screen.prefs_state").with("glow", "blue").with("revision", 3u64);
+    rogue.send(&applied).unwrap();
+    assert!(quiet(&mind, |e| e.topic == "screen.prefs_state"));
+    face.send(&applied).unwrap();
+    assert_eq!(wait_for(&mind, "applied look", |e| e.topic == "screen.prefs_state"), applied);
+    drop(face);
+    let restarted = stem.join("face", &["screen.prefs"]);
+    assert_eq!(wait_for(&restarted, "retained look", |e| e.topic == "screen.prefs"), blue);
+}
+
+#[test]
 fn boots_then_runs_a_whole_turn() {
     let stem = Stem::start("turn", "mind,voice");
     let watcher = stem.join("watcher", &["state.changed", "face.*", "stem.beat"]);
@@ -173,6 +194,42 @@ fn only_current_mind_requests_and_voice_receipts_can_announce() {
     let finished = wait_for(&mind, "the voice receipt", |e| e.topic == "say.done");
     assert_eq!(finished.str("announcement"), Some("due-1"));
     wait_for(&mind, "attending again", state_is("attending"));
+}
+
+#[test]
+fn only_the_current_voice_reports_which_clauses_played() {
+    let stem = Stem::start("played", "mind,voice");
+    let mind = stem.join("mind", &["say.played"]);
+    let mut old = stem.join("voice", &[]);
+    let mut voice = stem.join("voice", &[]);
+    let mut rogue = stem.join("rogue", &[]);
+    let receipt = |seq: u64| Event::new("say.played").with("reply", "0123456789abcdef").with("seq", seq);
+
+    rogue.send(&receipt(1)).unwrap();
+    // The hub closes a replaced connection, so this may not even be written.
+    let _ = old.send(&receipt(2));
+    voice.send(&receipt(3).with("lid_seq", 7)).unwrap();
+    assert!(quiet(&mind, |e| e.topic == "say.played"), "a rogue, a replaced voice or a stale lid");
+
+    voice.send(&receipt(4)).unwrap();
+    let played = wait_for(&mind, "the voice's receipt", |e| e.topic == "say.played");
+    assert_eq!(played.data.get("seq").and_then(|v| v.as_u64()), Some(4));
+}
+
+#[test]
+fn calculator_results_come_from_the_mind_in_the_current_lid_epoch() {
+    let stem = Stem::start("calc", "mind");
+    let mut mind = stem.join("mind", &[]);
+    let mut rogue = stem.join("rogue", &[]);
+    let hands = stem.join("hands", &["app.calc_display", "body.lid"]);
+    let lid = wait_for(&hands, "lid snapshot", |e| e.topic == "body.lid");
+    let sequence = lid.data["seq"].as_u64().expect("a numbered lid reading");
+    let result = Event::new("app.calc_display").with("result", "42").with("lid_seq", sequence);
+    rogue.send(&result).unwrap();
+    mind.send(&result.clone().with("lid_seq", sequence + 1)).unwrap();
+    assert!(quiet(&hands, |e| e.topic == "app.calc_display"));
+    mind.send(&result).unwrap();
+    assert_eq!(wait_for(&hands, "calculator result", |e| e.topic == "app.calc_display"), result);
 }
 
 #[test]
@@ -305,7 +362,8 @@ fn camera_gaze_requires_opt_in_and_current_open_lid() {
         let event = wait_for(&watcher, "presence from the brainstem", |e| e.topic == "body.presence");
         assert_eq!(event.bool("present"), Some(present));
         assert_eq!(event.data["lid_seq"].as_u64(), Some(lid_seq));
-        assert_eq!(event.data.len(), 2, "presence carries only the reading and lid epoch");
+        assert!(event.data["camera_seq"].as_u64().is_some(), "presence is tied to the camera grant");
+        assert_eq!(event.data.len(), 3, "presence carries only the reading, lid epoch and camera epoch");
     };
     let seq = |ev: &Event| ev.data["seq"].as_u64().unwrap();
     let ask = |enabled| Event::new("camera.request").with("enabled", enabled);
@@ -683,4 +741,84 @@ fn one_bad_battery_reading_does_not_power_off_a_healthy_laptop() {
     }
     assert!(!mark.exists(), "powered off at 60%");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_voice_that_joins_after_the_mind_is_ready_is_told_so() {
+    let stem = Stem::start("ready", "mind");
+    let mut mind = stem.join("mind", &["state.changed"]);
+    let early = stem.join("early", &["mind.ready"]);
+    assert!(quiet(&early, |e| e.topic == "mind.ready"), "nothing to replay before the mind says it");
+    mind.send(&Event::new("mind.ready").with("cortex", true)).unwrap();
+    let live = wait_for(&early, "the live mind.ready", |e| e.topic == "mind.ready");
+    assert_eq!(live.bool("snapshot"), None);
+    wait_for(&mind, "idle", state_is("idle"));
+
+    // Every cold boot: the voice joins after the one mind.ready went out.
+    let voice = stem.join("voice", &["mind.ready", "state.changed"]);
+    let replay = wait_for(&voice, "the kept mind.ready", |e| e.topic == "mind.ready");
+    assert_eq!((replay.bool("cortex"), replay.bool("snapshot")), (Some(true), Some(true)));
+
+    // A new mind connection has said nothing yet: nothing is replayed for it.
+    let _new_mind = stem.join("mind", &["state.changed"]);
+    let later = stem.join("later", &["mind.ready"]);
+    assert!(quiet(&later, |e| e.topic == "mind.ready"));
+}
+
+#[test]
+fn a_voice_restart_mid_reply_opens_the_ears_at_once() {
+    let stem = Stem::start("voicerestart", "mind,voice");
+    let watcher = stem.join("watcher", &["state.changed"]);
+    let mut mind = stem.join("mind", &["mind.cancel", "say.*"]);
+    let mut voice = stem.join("voice", &["say.*", "state.changed"]);
+    mind.send(&Event::new("mind.ready")).unwrap();
+    wait_for(&watcher, "idle", state_is("idle"));
+    voice.send(&Event::new("hear.wake")).unwrap();
+    voice.send(&Event::new("hear.final").with("text", "tell me a long story about the sea")).unwrap();
+    wait_for(&watcher, "thinking", state_is("thinking"));
+    mind.send(&Event::new("say.request").with("text", "Once upon a time.").with("seq", 1).with("last", false)).unwrap();
+    wait_for(&voice, "the first clause", |e| e.topic == "say.request");
+    voice.send(&Event::new("say.started")).unwrap();
+    wait_for(&watcher, "speaking", state_is("speaking"));
+
+    // systemctl restart being-voice: the new process says hello.
+    let started = Instant::now();
+    let mut new_voice = stem.join("voice", &["say.*", "state.changed"]);
+    let cancel = wait_for(&mind, "the cancel", |e| e.topic == "mind.cancel");
+    assert_eq!(cancel.str("reason"), Some("voice_restarted"));
+    wait_for(&watcher, "attending", state_is("attending"));
+    assert!(started.elapsed() < Duration::from_secs(2), "not the 60 s speak timeout");
+    new_voice.send(&Event::new("hear.wake")).unwrap();
+    new_voice.send(&Event::new("hear.speech_start")).unwrap();
+    wait_for(&watcher, "listening to the owner again", state_is("listening"));
+    drop(voice);
+}
+
+#[test]
+fn a_mind_restart_while_thinking_opens_the_ears_at_once() {
+    let stem = Stem::start("mindrestart", "mind,voice");
+    let watcher = stem.join("watcher", &["state.changed", "mind.cancel"]);
+    let mut mind = stem.join("mind", &["hear.*"]);
+    let mut voice = stem.join("voice", &["say.*"]);
+    mind.send(&Event::new("mind.ready").with("progress", true)).unwrap();
+    wait_for(&watcher, "idle", state_is("idle"));
+    voice.send(&Event::new("hear.wake")).unwrap();
+    voice.send(&Event::new("hear.final").with("text", "tell me a long story about the sea")).unwrap();
+    wait_for(&watcher, "thinking", state_is("thinking"));
+
+    // The old mind is killed first; the new one connects half a second later.
+    let started = Instant::now();
+    drop(mind);
+    let cancel = wait_for(&watcher, "the cancel", |e| e.topic == "mind.cancel");
+    assert_eq!(cancel.str("reason"), Some("mind_lost"));
+    wait_for(&watcher, "attending", state_is("attending"));
+    assert!(started.elapsed() < Duration::from_secs(2), "not the 300 s think budget");
+    let mut mind = stem.join("mind", &["hear.*"]);
+    mind.send(&Event::new("mind.ready")).unwrap();
+    voice.send(&Event::new("hear.wake")).unwrap();
+    voice.send(&Event::new("hear.speech_start")).unwrap();
+    wait_for(&watcher, "listening to the owner again", state_is("listening"));
+    voice.send(&Event::new("hear.final").with("text", "what time is it")).unwrap();
+    let heard = wait_for(&mind, "the new mind hears it", |e| e.topic == "hear.final");
+    assert_eq!(heard.str("text"), Some("what time is it"));
 }

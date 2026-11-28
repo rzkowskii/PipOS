@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "source": "qemu-ivybridge",
+  "qemu_cpu": "IvyBridge",
+  "passed": true,
+  "sigill": false,
+  "stages": [
+    {
+      "stage": "vad",
+      "passed": true,
+      "sigill": false
+    },
+    {
+      "stage": "moonshine",
+      "passed": true,
+      "sigill": false
+    },
+    {
+      "stage": "piper",
+      "passed": true,
+      "sigill": false
+    }
+  ],
+  "runtime_sha256": {
+    "libonnxruntime.so": "b70986dfda7b5c9a50284db18cbad84890156abe9ae52518c31934cfb36200ff",
+    "libsherpa-onnx-c-api.so": "58d0fd85878d0ba42b868234ea93c03906e87245aec7515f1590be9b42d4faa8"
+  },
+  "versions": {
+    "onnxruntime": "1.28.2",
+    "sherpa_onnx": "2.0.3"
+  }
+}

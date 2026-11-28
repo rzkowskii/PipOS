@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import sqlite3
 import subprocess
 import sys
@@ -12,7 +13,7 @@ import tempfile
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from . import care
+from . import actions, care, look
 from . import console_ui as ui
 from . import voice_engines
 from .bus import Bus
@@ -296,27 +297,158 @@ async def restart_try_organs():
         await bus.stop()
 
 
-def choose(title, options, *, intro=None, current=None):
+def choose(title, options, *, intro=None, current=None, draw=None):
     numbered = {str(number): key for number, key in enumerate(options, 1)}
     entries = [(number, options[key], "current" if key == current else None) for number, key in numbered.items()]
     entries.append(("0", "Back"))
     if not ui.enabled():
         print(f"\n{title}")
+        for row in intro or ():
+            print(row)
         ui.options(entries)
     while True:
         if ui.enabled():
-            ui.screen(title, context="Setup")
-            for row in intro or ():
-                ui.line(row)
-            if intro:
-                ui.line()
-            ui.options(entries)
+            if draw is not None:
+                draw(entries)
+            else:
+                ui.screen(title, context="Setup")
+                for row in intro or ():
+                    ui.line(row)
+                if intro:
+                    ui.line()
+                ui.options(entries)
         choice = input(ui.prompt("Choice: ")).strip()
         if choice in ("", "0", "q", "Q"):
             return None
         if choice in numbered:
             return numbered[choice]
         ui.note("Choose a number from the menu.", "warning")
+
+
+def _look_choices(setting):
+    if setting in look.FLAGS:
+        return {False: "Off", True: "On"}
+    return {value: value.replace("-", " ").capitalize() for value in look.CHOICES[setting]}
+
+
+def _look_chip(label, selected, *, swatch=False):
+    marker = "●" if selected else "○"
+    tone = "accent" if selected else "muted"
+    if swatch:
+        hue = {"Cyan": "96", "Blue": "94", "Teal": "36", "Mint": "92", "Violet": "95", "Green": "32",
+               "Amber": "33", "Red": "91", "Rose": "35", "Yellow": "93", "White": "97"}[label]
+        return f" {ui.paint(marker, hue)} {ui.paint(label, 'bright' if selected else 'text')} "
+    return ui.paint(f" {marker} {label} ", tone, "46" if selected else "40")
+
+
+def _look_meter(strength):
+    fraction = (strength - look.MIN_STRENGTH) / (look.MAX_STRENGTH - look.MIN_STRENGTH)
+    return f"{ui.bar(fraction, length=10)} {ui.paint(f'{round(strength * 100)}%', 'text')}"
+
+
+def _draw_look(entries, current):
+    ui.screen("Look", context="Options")
+    keyed = dict(zip(actions.LOOK_FIELDS, entries[:-1]))
+    sections = (("Face", ("glow", "shape", "strength", "size")),
+                ("Expression", ("brows", "mouth", *look.FACE_LAYERS)), ("Widgets", look.WIDGETS),
+                ("Layout", ("menu_position", "menu_labels", *look.WIDGET_POSITIONS)),
+                ("Voice and text", ("captions", "caption_cost", "caption_heard")),
+                ("Behaviour", ("idle_glances",)))
+    space = ui.room() - len(entries)
+    for section, fields in sections:
+        if space >= len(sections):
+            ui.line(ui.paint(section, "accent_soft", "bold"))
+        for field in fields:
+            key, label, _ = keyed[field]
+            prefix = ui.pad(ui.option(key, label), 27)
+            value = getattr(current, field)
+            if field == "strength":
+                controls = _look_meter(value)
+                compact = ui.paint(f"{round(value * 100)}%", "text")
+            else:
+                options = _look_choices(field)
+                swatch = field == "glow"
+                controls = " ".join(_look_chip(text, item == value, swatch=swatch) for item, text in options.items())
+                compact = _look_chip(options[value], True, swatch=swatch)
+            ui.line(prefix + (controls if ui.visible_len(prefix + controls) <= ui.width() else compact))
+        if space >= 2 * len(sections):
+            ui.line()
+    ui.line(ui.option(*entries[-1]))
+
+
+def _draw_look_choices(entries, title, setting, intro):
+    ui.screen(title, context="Options  /  Look")
+    for row in intro:
+        ui.para(row, "muted")
+    ui.line()
+    swatch = setting == "glow"
+    options = [f" {ui.pad(ui.paint(key, 'accent', 'bold'), 2)}  {_look_chip(label, selected is not None, swatch=swatch)}"
+               for key, label, selected in entries[:-1]]
+    if swatch:
+        for index in range(0, len(options), 2):
+            ui.line("  ".join(ui.pad(option, 15) for option in options[index:index + 2]).rstrip())
+    else:
+        for option in options:
+            ui.line(option)
+    ui.line()
+    ui.line(ui.option(*entries[-1]))
+
+
+def look_page(mind_dir, *, dry_run=False):
+    store = look.Store(mind_dir)
+    current = store.read()
+    titles = {field: action.label for field, action in actions.LOOK_FIELDS.items()}
+    while True:
+        setting = choose("Look", titles, intro=[f"Current look: {current.describe()}.", current.features()],
+                         draw=lambda entries: _draw_look(entries, current))
+        if setting is None:
+            return
+        hint = actions.phrase_hint(actions.LOOK_FIELDS[setting])
+        if setting == "strength":
+            ui.screen(titles[setting], context="Options  /  Look" if ui.enabled() else "Look")
+            if ui.enabled():
+                ui.line(_look_meter(current.strength))
+                ui.line()
+            ui.line("Enter 40 to 160 percent, or press Enter to go back.")
+            ui.para(hint, "muted")
+            answer = input(ui.prompt(f"Glow [{round(current.strength * 100)}%]: ")).strip()
+            if not answer:
+                continue
+            value = int(answer) / 100 if re.fullmatch(r"[0-9]{1,3}", answer) else None
+        else:
+            intro = [hint]
+            if setting == "size":
+                intro.append("Face size applies when no app is open.")
+            elif setting == "weather_widget":
+                intro.append("The weather widget appears in Internet mode.")
+            value = choose(titles[setting], _look_choices(setting), intro=intro, current=getattr(current, setting),
+                           draw=lambda entries: _draw_look_choices(entries, titles[setting], setting, intro))
+            if value is None:
+                continue
+        try:
+            if dry_run:
+                if not look.valid(setting, value):
+                    raise ValueError("Choose 40 to 160 percent." if setting == "strength" else "Choose a listed value.")
+                current = replace(current, **{setting: value})
+            else:
+                current = store.set(setting, value)
+        except (OSError, ValueError) as error:
+            ui.note(str(error), "warning")
+
+
+def voice_help_page():
+    while (group := choose("Voice commands", actions.GROUPS)) is not None:
+        ui.screen(actions.GROUPS[group], context="Voice commands",
+                  subtitle="Use these phrases after your wake phrase.")
+        if group in ("surfaces", "calculator"):
+            ui.para("Return to the face before opening an app.", "muted")
+        for action in actions.for_group(group):
+            label = ui.paint(action.label, "bold")
+            hints = [actions.phrase_hint(action)] if action.phrases else []
+            if action.keys:
+                hints.append(action.keys)
+            ui.para(f"{label}   {'  /  '.join(hints)}", "text")
+        input(ui.prompt("Enter to go back: "))
 
 
 def check_wake_phrase(phrase):
@@ -494,7 +626,11 @@ def system_entries(appliance, installed_being, name=None):
     entries = [("C", "Senses and memory", "Camera, dreams, memory, clock"),
                ("A", "Volume and microphone"), ("T", "Time zone")]
     if installed_being:
-        entries += [("B", "Back up to a USB stick"), ("U", "Update from a USB stick"),
+        from .update_download import LOCAL_SOURCE, SOURCE
+
+        online = SOURCE.is_file() or (APPLIANCE_MIND / LOCAL_SOURCE).is_file()
+        update = "System update" if online else "Update from a USB stick"
+        entries += [("B", "Back up to a USB stick"), ("U", update),
                     (TYPE_CHAT_KEY, f"Talk to {name} by typing", f"When {name} can't hear you.")]
     return entries
 
@@ -526,7 +662,8 @@ def personalize(profile, mind_dir, *, dry_run=False, network_dir=None, temporary
                    ("5", "Speaking speed"), ("6", "Personality"), ("7", "Surprise me", "A random new character")]
         if network_dir is not None:
             entries.append(("8", "Network"))
-        entries += [("9", "Quiet hours and announcements"), ("N", "Natural or original voice")]
+        entries += [("9", "Quiet hours and announcements"), ("L", "Look", "Eyes, glow and face size"),
+                    ("V", "Voice commands", "Phrases for Look and apps"), ("N", "Natural or original voice")]
         extra = system_entries(appliance and not dry_run, network_dir is not None, name=profile.name)
         entries += extra
         entries += [("P", "Play sample"), ("K", "Keep these choices", "Finish setup"), ("Q", "Cancel")]
@@ -572,6 +709,10 @@ def personalize(profile, mind_dir, *, dry_run=False, network_dir=None, temporary
                 configure_initiative(mind_dir, dry_run=dry_run, temporary=temporary)
         elif choice == "n":
             voice_page(mind_dir, profile, dry_run=dry_run, appliance=appliance)
+        elif choice == "l":
+            look_page(mind_dir, dry_run=dry_run)
+        elif choice == "v":
+            voice_help_page()
         elif choice in {key.lower() for key, *_ in extra}:
             try:
                 run_system_entry(choice, mind_dir, temporary=temporary)
@@ -604,6 +745,7 @@ def main(argv=None):
     mode.add_argument("--backup", action="store_true", help="back up to a USB stick")
     mode.add_argument("--update", action="store_true", help="update the system from a USB stick")
     mode.add_argument("--voice", action="store_true", help="choose the natural or original voice")
+    mode.add_argument("--look", action="store_true", help="edit eye colour, shape, glow and face size")
     args = parser.parse_args(argv)
     if not args.show and not sys.stdin.isatty():
         parser.error("personalization requires an interactive terminal")
@@ -613,6 +755,9 @@ def main(argv=None):
         on_appliance = mind_dir.resolve() == APPLIANCE_MIND
         live_preview = on_appliance and is_try_boot()
         network_dir = mind_dir if on_appliance and not live_preview and not args.dry_run else None
+        if args.look:
+            look_page(mind_dir, dry_run=args.dry_run)
+            return 0
         if args.initiative:
             return configure_initiative(mind_dir, temporary=live_preview)
         if args.care or args.audio or args.time_zone or args.backup or args.update:

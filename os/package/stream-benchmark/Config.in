@@ -1,0 +1,12 @@
+config BR2_PACKAGE_STREAM_BENCHMARK
+	bool "STREAM 5.10 memory bandwidth benchmark"
+	depends on BR2_USE_MMU
+	depends on BR2_TOOLCHAIN_HAS_OPENMP
+	help
+	  The author's unmodified STREAM 5.10 C benchmark with OpenMP
+	  workers. Set OMP_NUM_THREADS to control the worker count.
+
+	  Results may be called STREAM results only when the author's run rules
+	  are followed. PipOS does not automatically publish or compare them.
+
+	  https://www.cs.virginia.edu/stream/

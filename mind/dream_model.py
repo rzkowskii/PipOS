@@ -234,7 +234,15 @@ class DreamClient:
 
     def extract(self, chunk):
         """The model's proposed items for `chunk` (unchecked), and its token counts."""
-        status, data = self._request("POST", "/v1/chat/completions", request_body(chunk))
+        result, usage = self.json_reply(request_body(chunk))
+        try:
+            return result["items"], usage
+        except (TypeError, KeyError):
+            raise DreamAnswerInvalid("the dream answer was not the agreed JSON") from None
+
+    def json_reply(self, body):
+        """Request a schema-constrained local reply. Callers validate its fields."""
+        status, data = self._request("POST", "/v1/chat/completions", body)
         if status == 400:
             # llama-server's answer to a prompt longer than its context.
             raise DreamAnswerInvalid("the dream server refused the request (400)")
@@ -248,12 +256,12 @@ class DreamClient:
             choice = reply["choices"][0]
             if choice.get("finish_reason") == "length":
                 raise DreamAnswerInvalid("the dream answer was cut off at its token limit")
-            items = json.loads(choice["message"]["content"])["items"]
+            result = json.loads(choice["message"]["content"])
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             raise DreamAnswerInvalid("the dream answer was not the agreed JSON") from None
         usage = reply.get("usage") if isinstance(reply, dict) else None
         usage = usage if isinstance(usage, dict) else {}
-        return items, {key: usage.get(key) for key in ("prompt_tokens", "completion_tokens")}
+        return result, {key: usage.get(key) for key in ("prompt_tokens", "completion_tokens")}
 
 
 class DreamService:
@@ -290,6 +298,46 @@ class DreamService:
         event loop never waits while the conversation model needs the CPU."""
         return self._ctl("stop", wait=wait)
 
+    async def _async_ctl(self, verb, *, wait, timeout):
+        if not self.systemctl:
+            return False
+        command = [self.systemctl, verb, SERVICE] if wait else [self.systemctl, "--no-block", verb, SERVICE]
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL)
+        except OSError:
+            return False
+        try:
+            return await asyncio.wait_for(process.wait(), timeout) == 0
+        except TimeoutError:
+            return False
+        finally:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+
+    async def start_async(self):
+        """Start the shared service without leaving an uninterruptible worker."""
+        if await asyncio.to_thread(self.client.healthy):
+            return True
+        if not await self._async_ctl("start", wait=False, timeout=3):
+            return False
+        deadline = time.monotonic() + READY_SECONDS
+        while time.monotonic() < deadline:
+            if await asyncio.to_thread(self.client.healthy):
+                return True
+            await asyncio.sleep(1.0)
+        return False
+
+    async def stop_async(self):
+        # A synchronous systemd job receipt lets the next night job use the
+        # service once the old request has lost its model and connection.
+        return await self._async_ctl("stop", wait=True, timeout=5)
+
 
 @dataclass
 class NightTally:
@@ -321,13 +369,14 @@ class DreamJob:
     never stop every later night's dreaming.
     """
 
-    def __init__(self, memory, owner, being, night, *, service=None, zone=None, store=None):
+    def __init__(self, memory, owner, being, night, *, service=None, zone=None, store=None, eligible=None):
         from . import dream_store
 
         self.memory, self.owner, self.being, self.night = memory, owner, being, night
         self.service = service or DreamService()
         self.zone = zone
         self.store = store or dream_store
+        self.eligible = eligible
         self.cursor = None
         self.tally = NightTally()
         self._started = False
@@ -346,6 +395,8 @@ class DreamJob:
         return self.store.dream_cursor(self.memory, self.owner)
 
     async def run_chunk(self, budget_s):
+        if self.eligible is not None and not self.eligible():
+            return False
         night = self.night() if callable(self.night) else self.night
         rows = owner_lines(self.memory.db, self.owner, self.being, after=self._after())
         chunk = build_chunk(rows, zone=self.zone, max_tokens=self._limit)
@@ -400,6 +451,8 @@ class DreamJob:
         # minutes of the model's reading are not thrown away for a moment's
         # contention with the vector indexer either.
         for attempt in range(20):
+            if self.eligible is not None and not self.eligible():
+                return
             try:
                 self.store.save_candidates(self.memory, self.owner, accepted, night=night, through=through,
                                            zone=self.zone)

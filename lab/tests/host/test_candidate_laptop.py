@@ -72,6 +72,7 @@ class Parity(unittest.TestCase):
 
     def tree(self, name, files):
         root = self.dir / name
+        root.mkdir(parents=True, exist_ok=True)
         for path, text in files.items():
             (root / path).parent.mkdir(parents=True, exist_ok=True)
             (root / path).write_text(text)
@@ -101,6 +102,31 @@ class Parity(unittest.TestCase):
         laptop = self.tree("laptop", {"usr/bin/x": "x", "usr/sbin/sshd": "ssh"})
         self.assertFalse(parity.compare(lab, laptop)["ok"])
 
+    def test_laptop_rejects_identical_lab_access_and_sshd_at_executable_aliases(self):
+        for prefix in ("usr/bin", "usr/sbin", "bin", "sbin"):
+            with self.subTest(prefix=prefix):
+                access = f"{prefix}/being-lab-access"
+                sshd = f"{prefix}/sshd"
+                lab = self.tree(f"lab-{prefix}", {access: "access", sshd: "openssh"})
+                clean = self.tree(f"clean-{prefix}", {})
+                self.assertTrue(parity.compare(lab, clean)["ok"])
+                stale = self.tree(f"stale-{prefix}", {access: "access", sshd: "openssh"})
+                result = parity.compare(lab, stale)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["unexplained"], [
+                    {"path": access, "forbidden": "lab-only"}, {"path": sshd, "forbidden": "lab-only"},
+                ])
+
+    def test_only_dev_flavours_admit_their_own_endpoints(self):
+        paths = [
+            "usr/bin/sshd", "usr/bin/being-lab-access", "usr/lib/being/sim/body.py",
+            "lib/systemd/system/being-cable-link.service", "etc/systemd/system/sshd.service",
+            "usr/lib/systemd/system/serial-getty@.service", "etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf",
+        ]
+        self.assertEqual(set(parity.laptop_violations(paths)), set(paths[:4]))
+        self.assertEqual(set(parity.laptop_violations(paths, maintenance=True)), set(paths[2:4]))
+        self.assertEqual(set(parity.laptop_violations(paths, cable=True)), set(paths[1:3]))
+
     def test_cli(self):
         for name, files in (("lab", {"a": "1"}), ("laptop", {"a": "2"})):
             (self.dir / f"{name}.json").write_text(json.dumps(self.tree(name, files)))
@@ -117,6 +143,8 @@ class LaptopTargetChecks(unittest.TestCase):
         self.out = Path(self.enterContext(tempfile.TemporaryDirectory()))
         files = {
             "images/efi-part/EFI/BOOT/grub.cfg": "menuentry \"Try PipOS\" { linux /boot/bzImage quiet }\n",
+            "images/rootfs.squashfs": "a" * 64 + "\n",
+            "host/bin/unsquashfs": "#!/bin/sh\n[ \"$1\" = -cat ] && [ \"$3\" = etc/being/source-id ] && cat \"$2\"\n",
             "target/usr/share/being/installed-grub.cfg": "linux /boot/bzImage quiet\n",
             "target/etc/rauc/system.conf": "[system]\ncompatible=beingos-laptop-v1\n",
             "target/usr/share/being/installed-rauc.conf": "compatible=beingos-laptop-installed-v1\n",
@@ -126,12 +154,16 @@ class LaptopTargetChecks(unittest.TestCase):
         for name, text in files.items():
             (self.out / name).parent.mkdir(parents=True, exist_ok=True)
             (self.out / name).write_text(text)
+        (self.out / "host/bin/unsquashfs").chmod(0o755)
 
-    def verify(self):
+    def run_shell(self, command):
         script = Path(__file__).resolve().parents[2] / "candidate-build.sh"
-        return subprocess.run(["bash", "-c", f'. "{script}"; candidate_laptop_verify "$1"', "verify", str(self.out)],
+        return subprocess.run(["bash", "-c", f'. "$1"; {command}', "verify", str(script), str(self.out)],
                               env={"PATH": "/usr/bin:/bin", "BEING_SOURCE_ID": "a" * 64},
                               capture_output=True, text=True, timeout=30)
+
+    def verify(self):
+        return self.run_shell('candidate_laptop_verify "$2"')
 
     def test_a_clean_laptop_target_passes(self):
         result = self.verify()
@@ -147,6 +179,38 @@ class LaptopTargetChecks(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         for phrase in ("lab-only /usr/sbin/sshd", "serial console", "panics on an oops", "laptop update identity"):
             self.assertIn(phrase, result.stderr)
+
+    def test_merged_usr_and_dangling_lab_programs_are_detected(self):
+        root = self.out / "target"
+        (root / "usr/bin").mkdir(parents=True)
+        (root / "usr/sbin").symlink_to("bin")
+        (root / "sbin").symlink_to("usr/sbin")
+        (root / "usr/bin/being-lab-access").symlink_to("/missing/lab-access")
+        (root / "usr/bin/sshd").write_text("cached lab package")
+        result = self.verify()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("lab-only /usr/bin/being-lab-access", result.stderr)
+        self.assertIn("lab-only /usr/bin/sshd", result.stderr)
+
+    def test_the_embedded_id_must_match_even_if_the_target_tree_does(self):
+        rootfs = self.out / "images/rootfs.squashfs"
+        rootfs.write_text("b" * 64 + "\n")
+        for variant, command in (("laptop", 'candidate_laptop_verify "$2"'),
+                                 ("lab", 'candidate_source_verify "$2" lab')):
+            with self.subTest(variant=variant):
+                result = self.run_shell(command)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"{variant} candidate rootfs has a missing or different embedded source ID", result.stderr)
+
+    def test_cache_refresh_reinstalls_speech_and_cleans_being_before_rebuilding(self):
+        result = self.run_shell("make_fixture() { printf '%s\\n' \"$*\"; }; candidate_refresh make_fixture")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        refresh, clean, rebuild = result.stdout.splitlines()
+        refresh = refresh.split()
+        self.assertIn("sherpa-onnx-reinstall", refresh)
+        self.assertLess(refresh.index("sqlite-reconfigure"), refresh.index("python3-reconfigure"))
+        self.assertLess(refresh.index("python3-reconfigure"), refresh.index("util-linux-reconfigure"))
+        self.assertEqual([clean, rebuild], ["being-dirclean", "being-rebuild"])
 
 
 class ControllerBinding(unittest.TestCase):

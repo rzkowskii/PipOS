@@ -1,10 +1,13 @@
 import asyncio
 import tempfile
 import threading
+import time
 import unittest
+from collections import deque
 from pathlib import Path
 from unittest.mock import patch
 
+from mind import install_status
 from mind.local_screen import GATE_REQUESTS, serve_panel
 
 
@@ -34,7 +37,7 @@ class PanelHandoff(unittest.IsolatedAsyncioTestCase):
             stop = threading.Event()
             bus = PanelBus()
             with patch("mind.local_screen.Bus", return_value=bus):
-                panel = asyncio.create_task(serve_panel(directory, stop))
+                panel = asyncio.create_task(serve_panel(directory, stop, deque(maxlen=1)))
                 try:
                     await bus.events.put({"t": "body.lid", "closed": False, "seq": 0})
                     await self.until(lambda: (directory / "show").is_file())
@@ -82,7 +85,7 @@ class PanelHandoff(unittest.IsolatedAsyncioTestCase):
             stop = threading.Event()
             bus = PanelBus()
             with patch("mind.local_screen.Bus", return_value=bus):
-                panel = asyncio.create_task(serve_panel(directory, stop))
+                panel = asyncio.create_task(serve_panel(directory, stop, deque(maxlen=1)))
                 try:
                     await self.until(bus.connected.is_set)
                     for name, event in expected:
@@ -99,6 +102,47 @@ class PanelHandoff(unittest.IsolatedAsyncioTestCase):
                     bus.connected.set()
                     await self.until(lambda: not (directory / "volume-up").exists())
                     self.assertEqual(bus.sent[-1], ("key.volume", {"dir": "up"}))
+                finally:
+                    stop.set()
+                    await panel
+
+    async def test_only_latest_fresh_status_is_bound_to_the_current_open_lid(self):
+        with tempfile.TemporaryDirectory() as work:
+            directory = Path(work)
+            stop = threading.Event()
+            bus = PanelBus()
+            statuses = deque(maxlen=1)
+            with patch("mind.local_screen.Bus", return_value=bus):
+                panel = asyncio.create_task(serve_panel(directory, stop, statuses))
+                try:
+                    await bus.events.put({"t": "body.lid", "closed": False, "seq": 0})
+                    await self.until(lambda: (directory / "show").exists())
+                    statuses.append(("prepare", time.monotonic()))
+                    issued = time.monotonic()
+                    statuses.append(("write", issued))
+                    await self.until(lambda: len(bus.sent) == 1)
+                    self.assertEqual(bus.sent, [
+                        (install_status.TOPIC, {"stage": "write", "issued": issued, "lid_seq": 0}),
+                    ])
+
+                    await bus.events.put({"t": "body.lid", "closed": None, "show_face": True, "seq": 1})
+                    await self.until(lambda: (directory / "show").read_text() == "1\n")
+                    statuses.append(("verify", time.monotonic()))
+                    await bus.events.put({"t": "body.lid", "closed": False, "seq": 2})
+                    await self.until(lambda: (directory / "show").read_text() == "2\n" and not statuses)
+                    self.assertEqual(len(bus.sent), 1)
+
+                    statuses.append(("commit", time.monotonic() - install_status.FRESH_FOR - 1))
+                    await self.until(lambda: not statuses)
+                    self.assertEqual(len(bus.sent), 1)
+
+                    bus.connected.clear()
+                    bus.on_disconnect()
+                    statuses.append(("complete", time.monotonic()))
+                    bus.connected.set()
+                    await bus.events.put({"t": "body.lid", "closed": False, "seq": 2})
+                    await self.until(lambda: (directory / "show").exists() and not statuses)
+                    self.assertEqual(len(bus.sent), 1)
                 finally:
                     stop.set()
                     await panel

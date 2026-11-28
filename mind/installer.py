@@ -5,9 +5,12 @@ import json
 import os
 import subprocess
 import sys
+import textwrap
+import time
 from pathlib import Path
 
 from . import console_ui as ui
+from . import install_status
 from .install_disks import disk_contents, inventory
 from .install_hardware import hardware_report
 from .keys import MENU_KEYS
@@ -61,6 +64,60 @@ INSTALL_STAGES = (
     ("Verifying installation data.", "Checking every byte", 35),
     ("Committing the installation boot records.", "Making the disk startable", 3),
 )
+SPOKEN_STAGES = {
+    INSTALL_STAGES[0][0]: "prepare",
+    INSTALL_STAGES[1][0]: "write",
+    INSTALL_STAGES[2][0]: "verify",
+    INSTALL_STAGES[3][0]: "commit",
+}
+POWER_CUT_HELP = "If power cuts out, boot this USB again and start from disk selection."
+PARTITION_MARKS = {
+    "esp": ("Startup", "█", "warning"),
+    "system-a": ("System A", "█", "accent"),
+    "system-b": ("System B", "▓", "accent"),
+    "models": ("Models", "█", "94"),
+    "mind": ("Memory", "░", "muted"),
+}
+INSTALL_STEPS = ("Welcome", "Choose disk", "Make it yours", "Confirm", "Installing", "Wake")
+
+
+def wizard_steps(current):
+    """The active screen is named alongside its position in the install flow."""
+    done = ui.paint("● " * current, "accent_soft", "dim")
+    active = ui.paint("●", "accent", "bold") + " " + ui.paint(INSTALL_STEPS[current], "text", "bold")
+    remaining = ui.paint(" ○" * (len(INSTALL_STEPS) - current - 1), "muted", "dim")
+    return done + active + remaining
+
+
+def card_width():
+    return (min(ui.columns() - 2 * len(ui.MARGIN), 106) - 4) // 2
+
+
+def card_rows(rows, width, tone):
+    """A filled card that can sit beside another card in the native console."""
+    inner = width - 4
+    def edge(text):
+        return ui.paint(text, tone, "dim", "40")
+
+    top = edge("╭" + "─" * (width - 2) + "╮")
+    body = []
+    for row, *tones in rows:
+        parts = textwrap.wrap(row, inner, break_on_hyphens=False) or [""]
+        body.extend(edge("│ ") + ui.paint(ui.pad(part, inner), *tones, "40") + edge(" │")
+                    for part in parts)
+    return [top, *body, edge("╰" + "─" * (width - 2) + "╯")]
+
+
+def paired_cards(left, right):
+    """Keep both borders aligned when a local label wraps onto another row."""
+    height = max(len(left), len(right))
+
+    def padded(card):
+        blank = ui.paint("│" + " " * (ui.visible_len(card[0]) - 2) + "│", "muted", "dim", "40")
+        return [*card[:-1], *([blank] * (height - len(card))), card[-1]]
+
+    for a, b in zip(padded(left), padded(right)):
+        ui.line(a + "    " + b)
 
 
 def model_allocation(used_bytes):
@@ -171,14 +228,24 @@ def friendly_reason(disk, layout_ready=True):
     return ""
 
 
-def layout_summary(plan):
-    names = {"esp": "startup", "models": "model", "mind": "memory"}
-    parts = {part["name"]: part["size_bytes"] for part in plan["partitions"]}
-    pieces = [f"{names['esp']} {ui.size(parts['esp'])}",
-              f"system 2 x {ui.size(parts['system-a'])}",
-              f"{names['models']} {ui.size(parts['models'])}",
-              f"{names['mind']} {ui.size(parts['mind'])}"]
-    return ui.dot().join(pieces)
+def partition_rows(plan, width):
+    """The planned partition sizes, rounded to console cells in disk order."""
+    parts = plan["partitions"]
+    total = sum(part["size_bytes"] for part in parts)
+    previous = cumulative = 0
+    bar, legend = [], []
+    for partition in parts:
+        label, mark, tone = PARTITION_MARKS[partition["name"]]
+        size = partition["size_bytes"]
+        cumulative += size
+        boundary = (cumulative * width + total // 2) // total
+        bar.append(ui.paint(mark * (boundary - previous), tone))
+        legend.append(f"{ui.paint(mark, tone)} {label} {size_label(size)}")
+        previous = boundary
+    # Tiny partitions can round to zero cells on large disks. Their sizes
+    # remain visible in the legend, without exaggerating their bar lengths.
+    return ["".join(bar), *ui.wrap(ui.dot().join(legend[:3]), width),
+            *ui.wrap(ui.dot().join(legend[3:]), width)]
 
 
 def show_disks(report):
@@ -230,13 +297,35 @@ def hardware_rows(report):
     return rows
 
 
+def hardware_flags(rows):
+    """Observation bits for the console's laptop diagram."""
+    detected = {name: found for name, _, found in rows}
+    fields = ("Lid", "Memory", "Battery", "Microphone", "Speakers", "Keyboard", "Trackpad")
+    return sum(1 << bit for bit, field in enumerate(fields) if detected.get(field))
+
+
 def show_hardware(report):
     if ui.enabled():
+        diagram = ui.columns() >= 80 and ui.rows() >= 22 and not ui.pending_notes()
         ui.screen("Check hardware", subtitle="What PipOS can see on this Mac.")
-        ui.card([ui.mark("success" if found else "warning", f"{label:<12}{ui.paint(value, 'text' if found else 'muted')}")
-                 for label, value, found in hardware_rows(report)])
+        rows = hardware_rows(report)
+        if diagram:
+            ui.write(f"\x1b]7772;hardware={hardware_flags(rows)}\a")
+            facts = []
+            for label, value, found in rows:
+                tone = "success" if found else "warning"
+                first, *rest = textwrap.wrap(value, 33, break_on_hyphens=False) or [""]
+                facts.append(ui.mark(tone, f"{label:<12}{ui.paint(first, 'text' if found else 'muted')}"))
+                facts.extend(" " * 14 + ui.paint(part, "muted") for part in rest)
+            for fact in facts:
+                ui.line(fact)
+        else:
+            ui.card([ui.mark("success" if found else "warning", f"{label:<12}"
+                             f"{ui.paint(value, 'text' if found else 'muted')}") for label, value, found in rows])
         ui.line()
-        ui.para("Try a conversation, and open and close the lid, to check them in use.", "muted")
+        hint = "Try a conversation, and open and close the lid, to check them in use."
+        for line in ui.wrap(hint, 48 if diagram else ui.width()):
+            ui.line(ui.paint(line, "muted"))
         return
     print("Hardware detected by PipOS")
     system = " ".join(display_text(report[key]) for key in ("manufacturer", "model") if report[key])
@@ -267,33 +356,29 @@ def show_hardware(report):
     print("Try a conversation and the lid and input controls to check them in use.")
 
 
-def install_summary(plan, *, profile=None, initiative=None, restore=None, skills=None, carried=False):
+def install_summary(*, profile=None, initiative=None, restore=None, skills=None, carried=False, appearance=None):
     """What installing does, in plain words."""
-    disk = plan["target"]
-    model = " ".join(display_text(disk.get("model") or "").split()) or display_text(disk["device"])
-    rows = [ui.mark("accent", f"Makes {model} ({ui.size(disk['size_bytes'])}) the being's home.")]
-    rows.append(ui.mark("accent", "Two copies of the system, so an update can always roll back."))
-    rows.append(ui.mark("accent", "The language model, so the being thinks on this Mac."))
     if carried:
-        rows.append(ui.mark("accent", "The being you met in Try, with what you talked about and its settings."))
-    elif restore is not None:
-        rows.append(ui.mark("accent", "The being from your backup, checked before anything is written."))
-    else:
-        rows.append(ui.mark("accent", "A new being with fresh, empty memory."))
-        if profile is not None:
-            rows.append(ui.mark("accent", f"Keeps the name, voice and personality of {display_text(profile.name)}."))
-        if initiative is not None:
-            rows.append(ui.mark("accent", "Keeps your quiet hours and announcement settings."))
-        if skills and skills.get("time_zone"):
-            rows.append(ui.mark("accent", f"Uses the time zone {display_text(skills['time_zone'])}."))
+        return ["Keeps the being you met in Try, its conversations and settings."]
+    if restore is not None:
+        return ["Checks the being's backup before any disk write."]
+    keeps = []
+    if profile is not None:
+        keeps.append(f"{display_text(profile.name)} (name, voice, personality)")
+    if initiative is not None:
+        keeps.append("quiet hours and announcements")
+    if skills and skills.get("time_zone"):
+        keeps.append(f"time zone {display_text(skills['time_zone'])}")
+    if appearance is not None:
+        keeps.append("Try appearance")
+    rows = ["A new being starts with fresh memory."]
+    if keeps:
+        rows.append("Keeps " + ui.dot().join(keeps))
     return rows
 
 
 def discard_supported(device, sys_root="/sys/class/block"):
-    """True when the kernel says the drive can discard (forget) old blocks,
-    False when it says it cannot, None when that can't be read. The new mind
-    image is sparse: without discard, an old being's data stays in the blocks
-    it never writes (the original hard disk, many USB bridges)."""
+    """Read the kernel's advertised discard support."""
     name = os.path.basename(os.path.realpath(str(device)))
     try:
         with open(os.path.join(sys_root, name, "queue", "discard_max_bytes")) as limit:
@@ -303,27 +388,25 @@ def discard_supported(device, sys_root="/sys/class/block"):
 
 
 def contents_warning(contents, discard=True):
-    """Card rows for a target that already holds something, or None.
-
-    `discard` is discard_supported() for the drive: only a drive that can
-    discard old blocks really erases the old being's memories."""
+    """Card rows for a target that already holds something, or None."""
+    if not contents.get("readable", True):
+        return [ui.paint("I couldn't read what this drive holds.", "text", "bold"),
+                "It may hold macOS or a being. Installing erases whatever is on it."], "unknown"
+    if contents.get("macos"):
+        rows = [ui.paint("This drive holds macOS. Check these in macOS first.", "text", "bold")]
+        if contents.get("being"):
+            rows.append("It also holds a PipOS being and its memories.")
+        rows += [f"{ui.glyph('•', '-')} {item}" for item in MACOS_CHECKLIST]
+        return rows, "macos"
     if contents.get("being"):
-        if discard:
-            erase = "Installing erases that being for good."
-        else:
+        if discard is False:
             erase = ("Installing replaces that being, but this drive can't erase old blocks, so parts of "
                      "its memories may stay readable on the disk until new data overwrites them.")
+        else:
+            erase = "Installing replaces that being. Old memory data may still be recoverable after discard."
         return [ui.paint("This drive holds a PipOS being and its memories.", "text", "bold"),
                 erase + " To keep its memory, start it from this drive "
                 f"and use the menu ({MENU_KEYS}), Update from a USB stick, instead."], "being"
-    if contents.get("macos"):
-        rows = [ui.paint("This drive holds macOS.", "text", "bold"), "Before it is erased, in macOS:"]
-        rows += [f"{ui.glyph('•', '-')} {item}" for item in MACOS_CHECKLIST]
-        return rows, "macos"
-    if not contents.get("readable", True):
-        # Never treat a drive that could not be read as empty.
-        return [ui.paint("I couldn't read what this drive holds.", "text", "bold"),
-                "It may hold macOS or a being. Installing erases whatever is on it."], "unknown"
     return None, None
 
 
@@ -335,23 +418,60 @@ def second_confirmation(kind):
         raise ValueError("Confirmation did not match. The disk was left untouched.")
 
 
-def show_confirmation(plan, device, flow, **choices):
+def show_confirmation(plan, device, flow, *, warning=None, **choices):
     restoring = choices.get("restore") is not None and not choices.get("carried")
     name, number, total = flow or ("Restore" if restoring else "Install", None, None)
-    context = ui.step(number, total, name) if number else name
-    ui.screen("Ready to restore" if restoring else "Ready to install", context=context,
-              subtitle="Here is what happens next. Nothing is written until you confirm.")
-    ui.card(install_summary(plan, **choices), title="Restoring" if restoring else "Installing")
-    ui.para(layout_summary(plan), "muted", indent="  ")
-    ui.line()
+    context = ui.step(number, total, name) if number and (restoring or ui.columns() < 80) else name
     disk = plan["target"]
+    ui.screen("Ready to restore" if restoring else "Ready to install", context=context)
+    title = f"Disk layout{ui.dot()}{ui.size(disk['size_bytes'])}"
+    summary = install_summary(**choices)
     model = " ".join(display_text(disk.get("model") or "").split())
-    ui.card([ui.paint(f"Everything on {model} ({device}) will be erased." if model else
-                      f"Everything on {device} will be erased.", "text", "bold"),
-             "This cannot be undone. Back up anything you want to keep first."],
-            title=ui.paint("Erase", "danger", "bold"), tone="danger")
-    ui.line()
-    ui.para("Type the words below exactly, or press Enter to keep the disk safe.", "muted")
+    target = f"{model} ({device})" if model else device
+    erase = f"Installing replaces all data on {target}."
+    cancel = "Press Enter to leave the disk untouched."
+    if ui.columns() >= 80:
+        combined = 2 * card_width()
+        review_width = combined // 3
+        warning_width = combined - review_width
+        partition_facts = []
+        for part in plan["partitions"]:
+            label, mark, tone = PARTITION_MARKS[part["name"]]
+            partition_facts.append((f"{mark} {label}  {size_label(part['size_bytes'])}", tone))
+        left = card_rows([(title, "accent", "bold"), ("",), *partition_facts, ("",),
+                          *((row, "text") for row in summary)], review_width, "accent_soft")
+        right_rows = [("This cannot be undone", "danger", "bold"), (erase, "danger", "bold")]
+        if warning:
+            right_rows.extend([("",), *((ui.plain(row), "warning") for row in warning)])
+        else:
+            right_rows.append(("Back up what you need.", "text"))
+        right_rows.extend([("",), (cancel, "muted")])
+        right = card_rows(right_rows, warning_width, "danger")
+        if max(len(left), len(right)) + 5 <= ui.room():
+            bar, *_ = partition_rows(plan, combined + 4)
+            ui.line(bar)
+            paired_cards(left, right)
+            ui.para(POWER_CUT_HELP, "muted")
+            if not restoring:
+                ui.line(wizard_steps(3))
+            return
+    compact = ui.rows() < 26 or warning is not None
+    bar, *legend = partition_rows(plan, ui.width() - (0 if compact else 4))
+    if compact:
+        ui.line(ui.paint(title, "accent", "bold"))
+        for part in (bar, *legend, *summary):
+            ui.para(part, "text")
+        ui.para(erase, "danger", "bold")
+        for row in warning or ("Back up what you need.",):
+            ui.para(row, "warning")
+        ui.para(cancel, "muted")
+    else:
+        ui.card([bar, *legend, "", *summary], title=title, tone="accent_soft")
+        ui.card([ui.paint(erase, "danger", "bold"), f"Back up what you need. {cancel}"],
+                title=ui.paint("This cannot be undone", "danger", "bold"), tone="danger")
+    ui.para(POWER_CUT_HELP, "muted")
+    if not restoring and ui.room() >= 4:
+        ui.line(wizard_steps(3))
 
 
 def wake_phrase(profile=None):
@@ -365,12 +485,27 @@ def wake_phrase(profile=None):
         return "Hey Pip"
 
 
+def install_content_width():
+    # being-console reserves the space to the right for the native illustration.
+    return 48 if ui.columns() >= 80 and ui.rows() >= 16 else ui.width()
+
+
+def install_meter(fraction, width):
+    filled = round(min(1.0, max(0.0, fraction)) * width)
+    return ui.paint("━" * filled, "accent") + ui.paint("━" * (width - filled), "muted", "dim")
+
+
 def show_finish(restored, *, carried=False, wake_word="Hey Pip"):
     ui.screen(ui.mark("success", ui.paint("Restore complete." if restored and not carried else "Installation complete.",
                                           "success", "bold")),
               context="Restored" if restored and not carried else "Installed")
-    ui.para("Your being has been brought back." if restored and not carried else
-            "The being you met in Try has a home now." if carried else "Your being has a home now.", "text")
+    width = install_content_width()
+    if ui.enabled():
+        ui.write("\x1b]7772;install=100\a")
+    home = ("Your being has been brought back." if restored and not carried else
+            "The being you met in Try has a home now." if carried else "Your being has a home now.")
+    for part in ui.wrap(home, width):
+        ui.line(ui.paint(part, "text"))
     ui.line()
     for number, text in enumerate((
         "Press Enter, then press the power button to shut down.",
@@ -380,14 +515,19 @@ def show_finish(restored, *, carried=False, wake_word="Hey Pip"):
         "If the Mac shows a folder with a question mark, hold Option at power-on, highlight EFI Boot, "
         "then press Control-Enter to start from it every time.",
     ), 1):
-        first, *rest = ui.wrap(text, ui.width() - 4)
+        first, *rest = ui.wrap(text, width - 4)
         ui.line(f" {ui.paint(str(number), 'accent', 'bold')}  {first}")
         for part in rest:
             ui.line(f"    {part}")
     ui.line()
     # A restored being keeps its own wake phrase, which this Try session cannot read.
-    ui.para(f'Say "{display_text(wake_word)}", wait for the eyes to brighten, then talk.' if wake_word else
-            "Say its wake phrase, wait for the eyes to brighten, then talk.", "muted")
+    wake = (f'Say "{display_text(wake_word)}", wait for the eyes to brighten, then talk.' if wake_word else
+            "Say its wake phrase, wait for the eyes to brighten, then talk.")
+    for part in ui.wrap(wake, width):
+        ui.line(ui.paint(part, "muted"))
+    if (not restored or carried) and ui.room() >= 2:
+        ui.line()
+        ui.line(wizard_steps(5))
 
 
 # Said before any disk is listed or chosen on a cable development stick.
@@ -403,15 +543,90 @@ def cable_media():
     return os.path.lexists(install_apply.CABLE_MEDIA)
 
 
+class InstallProgress(ui.StageProgress):
+    """Keep stage estimates apart from bytes actually copied or checked."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.measured = None
+
+    def stage(self, message):
+        if message in {stage for stage, _, _ in self.stages}:
+            self.measured = None
+        super().stage(message)
+
+    def advance(self, done, total):
+        if total > 0:
+            self.measured = self.current, max(0, min(done, total)), total
+        super().advance(done, total)
+
+    def progress_lines(self):
+        width = install_content_width()
+        fraction = self.fraction()
+        rows = [ui.paint(f"{int(fraction * 100)}%", "bright", "bold") + ui.paint("  Overall estimate", "muted"),
+                install_meter(fraction, width)]
+        measured = self.measured
+        if measured is not None and self.current == measured[0] and self.current in {1, 2}:
+            _, done, total = measured
+            verb = "Copied" if self.current == 1 else "Checked"
+            rows.append(ui.paint(f"{verb} {done:,} / {total:,} bytes", "text"))
+        else:
+            rows.append("")
+        return rows
+
+    def lines(self):
+        width = install_content_width()
+        rows = [ui.header(self.title, self.context), ui.rule()]
+        if self.subtitle:
+            rows.extend(ui.paint(part, "muted") for part in ui.wrap(self.subtitle, width))
+        rows.extend(["", *self.progress_lines(), ""])
+        label_width = max(len(label) for _, label, _ in self.stages)
+        side_by_side = width >= label_width + 12
+        bar_width = width - label_width - 4 if side_by_side else width - 2
+        for index, (_, label, _) in enumerate(self.stages):
+            complete = index < self.current
+            active = index == self.current
+            fraction = 1 if complete else self.within if active else 0
+            tone = "success" if complete else "accent" if active else "muted"
+            marker = "✓" if complete else "●" if active else "○"
+            label_text = ui.paint(ui.pad(label, label_width), "text" if active else "muted")
+            stage = f"{ui.paint(marker, tone)} {label_text}"
+            bar = install_meter(fraction, bar_width)
+            if side_by_side:
+                rows.append(f"{stage}  {bar}")
+            else:
+                rows.extend([stage.rstrip(), f"  {bar}"])
+        elapsed = int(time.monotonic() - self.started)
+        rows.append(ui.paint(f"{elapsed // 60}:{elapsed % 60:02d} elapsed", "muted"))
+        rows.append("")
+        if self.extra:
+            rows.extend(ui.paint(part, "text") for part in ui.wrap(self.extra[-1], width))
+        if self.footer:
+            rows.extend(ui.paint(part, "muted") for part in ui.wrap(self.footer, width))
+        if self.context == "Install":
+            rows.extend(["", wizard_steps(4)])
+        return rows
+
+    def header_control(self):
+        return f"\x1b]7772;install={int(self.fraction() * 100)}\a"
+
+    def __exit__(self, *exc):
+        try:
+            return super().__exit__(*exc)
+        finally:
+            if ui.enabled():
+                ui.write("\x1b]7772;install=off\a")
+
+
 def confirm_installation(device, *, expected_plan=None, profile=None, initiative=None, restore=None, flow=None,
-                         skills=None, carried=False):
+                         skills=None, carried=False, appearance=None):
     if cable_media():
         raise ValueError(CABLE_MESSAGE)
     if not is_try_boot() or os.geteuid() != 0 or not sys.stdin.isatty():
         raise ValueError("Install from an interactive root console in Try PipOS.")
-    if restore is not None and (profile is not None or initiative is not None or skills is not None):
+    if restore is not None and any(value is not None for value in (profile, initiative, skills, appearance)):
         raise ValueError("Choose trial settings or a backup for the new installation.")
-    from .install_apply import apply_installation
+    from .mind_encryption import CRYPTSETUP, new_pin, wipe
 
     report, used = scan()
     plan = installation_plan(report, used, device)
@@ -419,27 +634,51 @@ def confirm_installation(device, *, expected_plan=None, profile=None, initiative
         raise ValueError("The disk or layout changed. Review it again.")
     if not any(disk["device"] == plan["boot_disk"] and disk["transport"] == "usb" for disk in report["disks"]):
         raise ValueError("The running Try media must be an identifiable USB disk.")
-    if ui.enabled():
-        show_confirmation(plan, device, flow, profile=profile, initiative=initiative, restore=restore,
-                          skills=skills, carried=carried)
-    else:
-        show_plan(plan)
-        if restore is None:
-            print("Installing creates a new being with fresh memory. Back up anything you want to keep.", flush=True)
-        else:
-            print("The backup will be restored and checked before writing to the selected disk.", flush=True)
-    warning, kind = contents_warning(disk_contents(device, plan["target"].get("logical_sector_bytes") or 512),
-                                     discard=bool(discard_supported(device)))
-    if warning:
-        if ui.enabled():
-            ui.card(warning, title=ui.paint("Look first", "warning", "bold"), tone="warning")
-        else:
-            print("\n".join(ui.plain(row) for row in warning), flush=True)
+    contents = disk_contents(device, plan["target"]["logical_sector_bytes"])
+    warning, kind = contents_warning(contents, discard=discard_supported(device))
+    support_protection = os.access(CRYPTSETUP, os.X_OK)
     challenge = f"ERASE {device}"
-    if input(ui.prompt(f"Type {challenge} to install: ")) != challenge:
-        raise ValueError("Confirmation did not match. The disk was left untouched.")
-    if kind:
-        second_confirmation(kind)
+
+    def review(protected=False):
+        if ui.enabled():
+            show_confirmation(plan, device, flow, warning=warning, profile=profile, initiative=initiative,
+                              restore=restore, skills=skills, carried=carried, appearance=appearance)
+        else:
+            show_plan(plan)
+            if restore is None:
+                print("Installing creates a new being with fresh memory. Back up anything you want to keep.", flush=True)
+            else:
+                print("The backup will be restored and checked before writing to the selected disk.", flush=True)
+            print(POWER_CUT_HELP, flush=True)
+            if warning:
+                print("\n".join(ui.plain(row) for row in warning), flush=True)
+        if protected:
+            ui.para("PIN protection selected. The installed memory requires the PIN after each full boot.", "success")
+        elif support_protection:
+            ui.para("Unattended startup uses unencrypted memory. Type E to choose PIN protection.", "muted")
+        return input(ui.prompt(f"Type {challenge} to install: "))
+
+    pin = None
+    try:
+        answer = review()
+        if support_protection and answer.strip().lower() == "e":
+            ui.screen("Protect your memory", context="Restore" if restore is not None else "Install")
+            ui.para("Choose a 12–32 digit PIN. Pip will ask for it on this screen after every full boot.")
+            ui.para("Keep a separate encrypted backup. Pip cannot recover a lost PIN.", "warning")
+            pin = new_pin()
+            answer = review(protected=True)
+        if answer != challenge:
+            raise ValueError("Confirmation did not match. The disk was left untouched.")
+        if kind:
+            second_confirmation(kind)
+        return _write_installation(plan, device, contents, profile=profile, initiative=initiative, restore=restore,
+                                   skills=skills, appearance=appearance, carried=carried, mind_pin=pin)
+    finally:
+        wipe(pin)
+
+
+def _write_installation(plan, device, contents, *, profile, initiative, restore, skills, appearance, carried, mind_pin):
+    from .install_apply import apply_installation
 
     def recheck():
         latest, model_bytes = scan()
@@ -448,7 +687,7 @@ def confirm_installation(device, *, expected_plan=None, profile=None, initiative
             raise ValueError("The disk or layout changed after confirmation. Review it again.")
         return current
 
-    seed = {}
+    seed = {"expected_contents": contents}
     if profile is not None:
         seed["profile"] = profile
     if initiative is not None:
@@ -457,31 +696,45 @@ def confirm_installation(device, *, expected_plan=None, profile=None, initiative
         seed["restore"] = restore
     if skills is not None:
         seed["skills"] = skills
+    if appearance is not None:
+        seed["appearance"] = appearance
+    # Preserve the legacy plain-install call shape; only the explicit
+    # encrypted choice hands this in-memory value to install_apply.
+    if mind_pin is not None:
+        seed["mind_pin"] = mind_pin
     stages = INSTALL_STAGES
     if restore is not None and not carried:
         stages = (("Preparing the installation files in RAM.", "Unlocking and checking your backup", 18), *stages[1:])
     model = " ".join(display_text(plan["target"].get("model") or "").split()) or device
     restoring = restore is not None and not carried
-    view = ui.StageProgress(
-        f"{'Restoring your being' if restoring else 'Installing PipOS'} on {model}", stages,
+    view = InstallProgress(
+        "Restoring your being" if restoring else "Installing PipOS", stages,
         context="Restore" if restoring else "Install",
+        subtitle=f"Target {model} ({device})" if model != device else f"Target {device}",
         footer="Keep the Mac plugged in and the USB stick in place. This takes a few minutes.")
-    erased = []
+    writing = False
 
     def stage(message):
-        # From this stage on the old boot records are gone.
+        nonlocal writing
+        # This stage begins with invalidating the old boot records.
         if message == INSTALL_STAGES[1][0]:
-            erased.append(True)
+            writing = True
         view.stage(message)
+        if message in SPOKEN_STAGES:
+            install_status.report(SPOKEN_STAGES[message])
 
     try:
         with view:
             apply_installation(plan, recheck, progress=stage, meter=view.advance, **seed)
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
-        if erased:
-            raise ValueError(f"The installation stopped after {device} was erased ({error}). "
-                             "It no longer starts and holds no being. Run the installation again.") from error
+    except (OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt) as error:
+        install_status.report("stopped")
+        if writing:
+            detail = str(error) or "interrupted"
+            raise ValueError(f"The installation stopped during disk writing to {device} ({detail}). "
+                             "The selected disk may no longer start. "
+                             "Start again from this USB and check the target disk before confirming.") from error
         raise
+    install_status.report("complete")
     if ui.enabled():
         show_finish(restore is not None, carried=carried,
                     wake_word=None if restore is not None and not carried else wake_phrase(profile))

@@ -7,6 +7,8 @@ ConditionPathExists=/models/dream/dream.gguf
 # A measuring boot (bench mode) must not share its cores with the night model.
 ConditionKernelCommandLine=!being.bench=1
 RequiresMountsFor=/models
+BindsTo=being-mind.service
+After=being-mind.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -25,6 +27,9 @@ ExecStart=/usr/bin/llama-server \
     --reasoning-budget 0 \
     --cache-ram 0 \
     --no-webui
+# Same-origin browser requests only, as for the cortex: the night shift's own
+# requests carry no Origin header.
+Environment=LLAMA_ARG_CORS_ORIGINS=localhost
 # The night shift stops it; a crash is not retried behind its back.
 Restart=no
 # It keeps nothing, so a wake need not wait for it to finish a batch: a
@@ -34,10 +39,18 @@ TimeoutStopSec=2
 # Dreaming takes only what the face, the voice and the mind leave.
 Nice=10
 CPUWeight=20
+# Prefer dropping the optional dream worker over interrupting conversation
+# when both models are eligible for the kernel's OOM killer.
+OOMScoreAdjust=500
+# The laptop kernel has no io cgroup controller (CONFIG_BLK_CGROUP is off), so
+# IOWeight does nothing there; the idle I/O class (which mq-deadline honours)
+# keeps its model reads behind everyone else's.
 IOWeight=20
+IOSchedulingClass=idle
 # The night model reads /models and nothing else, writes nothing, and is
 # reachable only on loopback: it has no authentication.
 NoNewPrivileges=yes
+LimitCORE=0
 CapabilityBoundingSet=
 ProtectSystem=strict
 ProtectHome=yes

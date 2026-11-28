@@ -1,4 +1,4 @@
-//! The captions and health overlay (task 7.4), behind F1 and off by default.
+//! Owner captions and the separate health overlay, both off by default.
 //!
 //! It shows the last thing heard, the reply being spoken, and how the organs
 //! are, for bringing up the hardware with no shell. Nothing here is ever
@@ -6,11 +6,18 @@
 //! is open, only the latest of each, and are dropped when it closes, when
 //! the panel goes dark, or when the brainstem goes away.
 
+use crate::{
+    chrome::{self, DIM, GLOW, INK, WARNING},
+    panel::Rect,
+    text::{Font, Picture},
+};
 use bus::Event;
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 /// Longest caption kept, in characters (the newest part is kept).
 const KEEP: usize = 360;
+const CAPTION_HOLD: Duration = Duration::from_secs(16);
 
 #[derive(Default)]
 pub struct Captions {
@@ -18,6 +25,8 @@ pub struct Captions {
     heard: String,
     hearing: String,
     said: String,
+    via: Option<&'static str>,
+    guest: bool,
     /// The reply being spoken has ended; the next clause starts a new one.
     said_done: bool,
     state: String,
@@ -25,6 +34,8 @@ pub struct Captions {
     unwell: bool,
     organs: BTreeMap<String, bool>,
     changed: bool,
+    captions_changed: bool,
+    last_caption: Option<Instant>,
 }
 
 fn keep_tail(text: &str) -> String {
@@ -40,9 +51,15 @@ fn keep_tail(text: &str) -> String {
 
 impl Captions {
     pub fn toggle(&mut self) -> bool {
-        self.on = !self.on;
-        self.forget();
+        self.set_enabled(!self.on);
         self.on
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        if enabled != self.on {
+            self.on = enabled;
+            self.forget();
+        }
     }
 
     /// Drop every word heard or said.
@@ -50,13 +67,31 @@ impl Captions {
         self.heard.clear();
         self.hearing.clear();
         self.said.clear();
+        self.via = None;
+        self.last_caption = None;
         self.said_done = true;
         self.changed = true;
+        self.captions_changed = true;
     }
 
     /// Whether the picture needs drawing again, clearing the mark.
     pub fn take_changed(&mut self) -> bool {
         std::mem::take(&mut self.changed)
+    }
+
+    pub fn take_captions_changed(&mut self) -> bool {
+        std::mem::take(&mut self.captions_changed)
+    }
+
+    pub fn displaying(&self, now: Instant) -> bool {
+        self.on && !self.guest
+            && self.last_caption.is_some_and(|at| now.saturating_duration_since(at) < CAPTION_HOLD)
+    }
+
+    fn changed_caption(&mut self) {
+        self.last_caption = Some(Instant::now());
+        self.changed = true;
+        self.captions_changed = true;
     }
 
     pub fn event(&mut self, ev: &Event) {
@@ -73,20 +108,37 @@ impl Captions {
                     self.changed = true;
                 }
             }
-            // Words: only while the overlay is open, and never anywhere else.
-            _ if !self.on => {}
+            "app.privacy" => {
+                if let Some(guest) = ev.bool("guest") {
+                    self.guest = guest;
+                    self.forget();
+                }
+            }
+            // Words and routing indicators stay inside the opt-in owner overlay.
+            _ if !self.on || self.guest => {}
+            "mind.route" => {
+                self.via = match ev.str("via") {
+                    Some("code") => Some("Code"),
+                    Some("model") => Some("Model"),
+                    Some("waiting") => Some("Model waiting"),
+                    Some("unavailable") => Some("Model unavailable"),
+                    _ => None,
+                };
+                self.changed_caption();
+            }
             "hear.partial" => {
                 self.hearing = keep_tail(ev.str("text").unwrap_or(""));
-                self.changed = true;
+                self.changed_caption();
             }
             "hear.final" => {
+                self.via = None;
                 self.heard = keep_tail(ev.str("text").unwrap_or(""));
                 self.hearing.clear();
-                self.changed = true;
+                self.changed_caption();
             }
             "hear.cancel" => {
                 self.hearing.clear();
-                self.changed = true;
+                self.changed_caption();
             }
             "say.request" => {
                 let text = ev.str("text").unwrap_or("").trim();
@@ -101,10 +153,67 @@ impl Captions {
                 if ev.bool("last") == Some(true) {
                     self.said_done = true;
                 }
-                self.changed = true;
+                self.changed_caption();
             }
             _ => {}
         }
+    }
+
+    pub fn picture(&self, font: &Font, columns: usize, show_heard: bool, show_cost: bool) -> Option<Picture> {
+        if !self.on || self.guest {
+            return None;
+        }
+        let heard = if !show_heard { "" } else if self.hearing.is_empty() { self.heard.as_str() } else { self.hearing.as_str() };
+        let route = self.via.filter(|_| show_cost).map(|via| if via == "Code" { "Code · 0 tokens" } else { via });
+        if heard.is_empty() && self.said.is_empty() && route.is_none() {
+            return None;
+        }
+        let heard = (!heard.is_empty()).then(|| {
+            let label = if self.hearing.is_empty() { "Heard" } else { "Hearing" };
+            let limit = columns.saturating_sub(label.len() + 3);
+            if heard.chars().count() > limit {
+                let start = heard.chars().count() - limit + 1;
+                format!("{label} · …{}", heard.chars().skip(start).collect::<String>())
+            } else {
+                format!("{label} · {heard}")
+            }
+        });
+        let said = if self.said.is_empty() { Vec::new() } else { Font::wrap(&self.said, columns, 0) };
+        let inline = said.last().zip(route).and_then(|(line, badge)| {
+            let length = line.chars().count() + badge.chars().count() + 4;
+            (length <= columns).then_some(length)
+        });
+        let content = heard.iter().map(|line| line.chars().count())
+            .chain(said.iter().map(|line| line.chars().count()))
+            .chain(route.iter().map(|badge| badge.chars().count() + 2))
+            .chain(inline)
+            .max().unwrap_or(0);
+        let w = (content * font.w + 36).max(172);
+        let own_row = route.is_some() && inline.is_none();
+        let h = 20 + 21 * (usize::from(heard.is_some()) + said.len()) + 25 * usize::from(own_row);
+        let mut picture = chrome::picture(w, h);
+        let rect = Rect { x: 0, y: 0, w: w as i32, h: h as i32 };
+        picture.glass(rect, 14);
+        let center = |line: &str| ((w - line.chars().count() * font.w) / 2) as i32;
+        let mut y = 9;
+        if let Some(line) = heard {
+            font.draw(&mut picture, center(&line), y, &line, DIM, 1);
+            y += 21;
+        }
+        for (index, line) in said.iter().enumerate() {
+            if let Some((length, badge)) = inline.zip(route).filter(|_| index + 1 == said.len()) {
+                let x = ((w - length * font.w) / 2) as i32;
+                font.draw(&mut picture, x, y, line, INK, 1);
+                draw_route(&mut picture, font, x + ((line.chars().count() + 3) * font.w) as i32, y, badge);
+            } else {
+                font.draw(&mut picture, center(line), y, line, INK, 1);
+            }
+            y += 21;
+        }
+        if let Some(badge) = route.filter(|_| own_row) {
+            draw_route(&mut picture, font, center(badge), y + 3, badge);
+        }
+        Some(picture)
     }
 
     /// The brainstem is gone: whatever it said about organs no longer holds,
@@ -115,12 +224,21 @@ impl Captions {
             self.state.clear();
             self.changed = true;
         }
-        if !self.heard.is_empty() || !self.hearing.is_empty() || !self.said.is_empty() {
+        if !self.heard.is_empty() || !self.hearing.is_empty() || !self.said.is_empty() || self.via.is_some() {
             self.forget();
         }
     }
 
-    pub fn lines(&self, health: &Health, columns: usize) -> Vec<String> {
+    pub fn health_lines(&self, health: &Health, columns: usize) -> Vec<String> {
+        self.format_lines(health, columns, false)
+    }
+
+    #[cfg(test)]
+    fn lines(&self, health: &Health, columns: usize) -> Vec<String> {
+        self.format_lines(health, columns, true)
+    }
+
+    fn format_lines(&self, health: &Health, columns: usize, speech: bool) -> Vec<String> {
         let wrap = |label: &str, text: &str| -> Vec<String> {
             let body = crate::text::Font::wrap(text, columns.saturating_sub(8), 0);
             body.into_iter()
@@ -128,12 +246,18 @@ impl Captions {
                 .map(|(i, line)| format!("{:<8}{line}", if i == 0 { label } else { "" }))
                 .collect()
         };
-        let mut lines = vec!["Captions and health · F1 hides · nothing here is kept".to_string()];
-        lines.extend(wrap("heard", if self.heard.is_empty() { "(nothing yet)" } else { &self.heard }));
-        if !self.hearing.is_empty() {
-            lines.extend(wrap("hearing", &self.hearing));
+        let header = self.via.filter(|_| speech).map_or_else(
+            || "Health · Shift+F1 hides".to_string(),
+            |via| format!("[{via}] · Health · Shift+F1 hides"),
+        );
+        let mut lines = vec![header];
+        if speech {
+            lines.extend(wrap("heard", if self.heard.is_empty() { "(nothing yet)" } else { &self.heard }));
+            if !self.hearing.is_empty() {
+                lines.extend(wrap("hearing", &self.hearing));
+            }
+            lines.extend(wrap("said", if self.said.is_empty() { "(nothing yet)" } else { &self.said }));
         }
-        lines.extend(wrap("said", if self.said.is_empty() { "(nothing yet)" } else { &self.said }));
         let state = if self.state.is_empty() { "unknown" } else { &self.state };
         let mut body = format!("{state} · mic {}", if self.muted { "muted" } else { "open" });
         if self.unwell {
@@ -151,7 +275,7 @@ impl Captions {
         lines.extend(wrap("organs", &organs.join(" · ")));
         let p = health.privacy;
         let mut privacy = vec![
-            format!("camera {}", if health.camera { "may capture" } else { "off" }),
+            if health.camera { "camera capture permitted" } else { "camera capture denied" }.to_string(),
             match &health.network_mode {
                 Some(mode) => format!("network {} ({mode})", if p.network { "up" } else { "down" }),
                 None => format!("network {}", if p.network { "up" } else { "down" }),
@@ -161,6 +285,20 @@ impl Captions {
         if p.ssh {
             privacy.push("ssh session open".to_string());
         }
+        use crate::status::Reading;
+        privacy.push(match p.mic {
+            Reading::Open => "mic capture open",
+            Reading::Closed => "mic capture closed",
+            Reading::Unknown => "mic capture unknown",
+        }.to_string());
+        if p.mic_latched {
+            privacy.push("mic safety latch active".to_string());
+        }
+        privacy.push(match p.camera_usb {
+            Reading::Open => "camera USB authorised",
+            Reading::Closed => "camera USB blocked",
+            Reading::Unknown => "camera USB unknown",
+        }.to_string());
         lines.extend(wrap("privacy", &privacy.join(" · ")));
         let mut face = vec![format!("{}{}", health.renderer, if health.software { " (software)" } else { "" })];
         if health.scale > 1 {
@@ -174,6 +312,17 @@ impl Captions {
         lines.extend(wrap("face", &face.join(" · ")));
         lines
     }
+}
+
+fn draw_route(picture: &mut Picture, font: &Font, x: i32, y: i32, badge: &str) {
+    let (ink, fill) = match badge {
+        "Model" => ([208, 184, 255], [41, 33, 59]),
+        "Model unavailable" | "Model waiting" => (WARNING, [56, 40, 21]),
+        _ => (GLOW, [17, 46, 57]),
+    };
+    let width = (badge.chars().count() * font.w) as i32 + 14;
+    picture.fill(Rect { x: x - 7, y: y - 3, w: width, h: 22 }, 10, fill);
+    font.draw(picture, x, y, badge, ink, 1);
 }
 
 /// Everything else the overlay reports, gathered by the main loop.
@@ -246,7 +395,8 @@ mod tests {
         let text = c.lines(&health(), 120).join("\n");
         assert!(text.contains("state   idle · mic muted"), "{text}");
         assert!(text.contains("brainstem ok (beat 0.4 s ago) · mind up · voice down"), "{text}");
-        assert!(text.contains("camera off · network up (local-only) · guest off"), "{text}");
+        assert!(text.contains("camera capture denied · network up (local-only) · guest off"), "{text}");
+        assert!(text.contains("camera USB unknown"), "{text}");
         assert!(text.contains("llvmpipe (LLVM 19.1, 256 bits) (software) · 1/4 size · 20 Hz · 2.2 ms a frame"), "{text}");
         c.toggle();
         c.event(&Event::new("hear.final").with("text", "are you there"));
@@ -270,5 +420,30 @@ mod tests {
         assert!(!c.heard.contains('\u{1b}'));
         let lines = c.lines(&health(), 60);
         assert!(lines.iter().all(|l| l.chars().count() <= 60), "{lines:?}");
+    }
+
+    #[test]
+    fn route_chip_only_appears_in_open_owner_captions() {
+        let font = crate::text::font().unwrap();
+        let route = Event::new("mind.route").with("via", "code");
+        let mut captions = Captions::default();
+        captions.event(&route);
+        assert!(!captions.lines(&health(), 100)[0].contains("[Code]"));
+        assert!(captions.picture(font, 100, true, true).is_none());
+        captions.toggle();
+        captions.event(&route);
+        assert!(captions.lines(&health(), 100)[0].contains("[Code]"));
+        assert!(captions.picture(font, 100, true, true).is_some());
+        assert!(captions.picture(font, 100, true, false).is_none());
+        captions.event(&Event::new("app.privacy").with("guest", true));
+        captions.event(&Event::new("hear.final").with("text", "guest words"));
+        captions.event(&route);
+        let lines = captions.lines(&health(), 100).join("\n");
+        assert!(!lines.contains("[Code]"));
+        assert!(!lines.contains("guest words"));
+        assert!(captions.picture(font, 100, true, true).is_none());
+        captions.event(&Event::new("app.privacy").with("guest", false));
+        captions.event(&Event::new("mind.route").with("via", "model"));
+        assert!(captions.lines(&health(), 100)[0].contains("[Model]"));
     }
 }

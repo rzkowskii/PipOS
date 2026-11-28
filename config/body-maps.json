@@ -1,0 +1,7 @@
+{
+  "MacBookPro9,2": {
+    "internal_camera": {"vendor": "05ac", "product": "8509"},
+    "internal_mic": {"card_id": "PCH", "device": 0},
+    "usb_storage_place": "left"
+  }
+}

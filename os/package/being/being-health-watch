@@ -1,0 +1,164 @@
+#!/bin/sh
+# being-health-watch: the watch behind the organs' own watchdogs.
+#
+# systemd already restarts a brainstem or face whose loop stops (WatchdogSec)
+# and feeds the system watchdog (softdog on the MacBookPro9,2, whose chipset
+# watchdog the firmware disables) while PID 1 itself runs. What none of that
+# covers is an organ that cannot come back: a process stuck in the kernel
+# (state D, for example in a graphics wait) survives SIGABRT and SIGKILL, so
+# the unit hangs in "deactivating" or every restart fails behind the old
+# process. The design says the machine reboots if the brainstem does not
+# return; the face is the being's only sign of life.
+#
+# Every BEING_HEALTH_EVERY seconds this reads each watched unit's state from
+# systemd. A unit is fine when it is active and has stayed up for
+# BEING_HEALTH_STABLE seconds, when it is off on purpose (stopped, or skipped
+# by its ExecCondition), or when this image does not have it. A unit that has
+# not been fine for its limit is stuck:
+#   - on an installed boot, past BEING_HEALTH_SETTLE seconds of uptime, the
+#     machine is rebooted once (systemctl reboot; a shutdown that hangs is
+#     caught by RebootWatchdogSec and the system watchdog);
+#   - on a Try or verbose boot (being.try=1, being.verbose=1) it never
+#     reboots, as for the brainstem's crash-loop rule: a reboot would hide
+#     the failure. It logs what it found once, and writes it to
+#     $BEING_HEALTH_STATE/<unit>.stuck for pip-diag.
+# The limits sit after the brainstem's own rule (eight failures in ten
+# minutes) and well past every systemd timeout in the units, so this only
+# acts when systemd's own recovery has had its chance.
+#
+#   being-health-watch          watch until stopped
+#   being-health-watch --once   one pass (tests)
+set -u
+
+units=${BEING_HEALTH_UNITS:-being-brainstem.service:600 being-face.service:300}
+every=${BEING_HEALTH_EVERY:-10}
+stable=${BEING_HEALTH_STABLE:-15}
+settle=${BEING_HEALTH_SETTLE:-300}
+proc=${BEING_HEALTH_PROC:-/proc}
+state=${BEING_HEALTH_STATE:-/run/being-health}
+systemctl=${BEING_HEALTH_SYSTEMCTL:-systemctl}
+
+once=0
+case "${1:-}" in
+    --once) once=1 ;;
+    "") ;;
+    *) echo "usage: being-health-watch [--once]" >&2; exit 2 ;;
+esac
+
+mkdir -p "$state" || exit 1
+
+# Whole seconds since boot.
+uptime_s() {
+    read -r up rest <"$proc/uptime" 2>/dev/null || return 1
+    up=${up%%.*}
+    case "$up" in ''|*[!0-9]*) return 1 ;; esac
+    echo "$up"
+}
+
+# The boot is a Try or verbose boot: look and log, never reboot.
+no_reboot_boot() {
+    read -r cmdline <"$proc/cmdline" 2>/dev/null || cmdline=
+    case " $cmdline " in *" being.try=1 "*|*" being.verbose=1 "*) return 0 ;; esac
+    return 1
+}
+
+# What the kernel says about a process: its state letter and where it waits.
+process_line() {
+    pid=$1
+    case "$pid" in ''|0|*[!0-9]*) echo "no process"; return ;; esac
+    stat=
+    read -r stat <"$proc/$pid/stat" 2>/dev/null || { echo "pid $pid gone"; return; }
+    # The command name is in parentheses and may hold spaces: the state is
+    # the first field after the last ')'.
+    rest=${stat##*") "}
+    letter=${rest%% *}
+    # wchan has no newline at the end, so read reports EOF; keep what it got.
+    wchan=
+    read -r wchan <"$proc/$pid/wchan" 2>/dev/null || :
+    case "$wchan" in ''|0) echo "pid $pid state $letter" ;; *) echo "pid $pid state $letter in $wchan" ;; esac
+}
+
+# One unit: fine, stuck, or unknown (systemd did not answer).
+check_unit() {
+    unit=$1 limit=$2 now=$3
+    shown=$("$systemctl" show -p LoadState -p ActiveState -p SubState -p Result -p MainPID \
+        -p ActiveEnterTimestampMonotonic "$unit" 2>/dev/null) || return 0
+    load='' active='' sub='' result='' pid='' entered=
+    while IFS='=' read -r key value; do
+        case "$key" in
+            LoadState) load=$value ;;
+            ActiveState) active=$value ;;
+            SubState) sub=$value ;;
+            Result) result=$value ;;
+            MainPID) pid=$value ;;
+            ActiveEnterTimestampMonotonic) entered=$value ;;
+        esac
+    done <<EOF
+$shown
+EOF
+    [ -n "$active" ] || return 0
+    case "$entered" in ''|*[!0-9]*) entered=0 ;; esac
+    fine=0
+    if [ "$load" != loaded ]; then
+        fine=1   # not on this image, or masked
+    elif [ "$active" = active ] && [ $((now - entered / 1000000)) -ge "$stable" ]; then
+        fine=1
+    elif [ "$active" = inactive ]; then
+        case "$result" in success|exec-condition) fine=1 ;; esac
+    fi
+    good_file="$state/$unit.good"
+    stuck_file="$state/$unit.stuck"
+    if [ "$fine" = 1 ]; then
+        if [ -e "$stuck_file" ]; then
+            echo "$unit is back ($active $sub)"
+            rm -f "$stuck_file"
+        fi
+        echo "$now" >"$good_file"
+        return 0
+    fi
+    good=
+    read -r good <"$good_file" 2>/dev/null || good=
+    case "$good" in ''|*[!0-9]*) echo "$now" >"$good_file"; return 0 ;; esac
+    # A clock that went back (a new boot reusing the folder) starts again.
+    if [ "$good" -gt "$now" ]; then
+        echo "$now" >"$good_file"
+        return 0
+    fi
+    down=$((now - good))
+    [ "$down" -ge "$limit" ] || return 0
+    [ -e "$stuck_file" ] && return 0
+    what="$unit has not been up for $down s ($active $sub, result ${result:-none}, $(process_line "$pid"))"
+    if no_reboot_boot; then
+        echo "$what; this is a Try or verbose boot, so Pip is not restarted: the journal keeps the evidence"
+        echo "$what" >"$stuck_file"
+    elif [ "$now" -lt "$settle" ]; then
+        echo "$what; not restarting in the first $settle s after boot"
+    else
+        echo "$what; systemd cannot bring it back, so Pip restarts now"
+        echo "$what" >"$stuck_file"
+        "$systemctl" --no-block reboot || echo "the restart request failed; the system watchdog stays armed"
+    fi
+}
+
+pass() {
+    running=$("$systemctl" is-system-running 2>/dev/null) || true
+    case "$running" in stopping|offline) return 0 ;; esac
+    now=$(uptime_s) || return 0
+    for entry in $units; do
+        unit=${entry%%:*}
+        limit=${entry#*:}
+        case "$limit" in ''|*[!0-9]*|"$entry") limit=600 ;; esac
+        check_unit "$unit" "$limit" "$now"
+    done
+}
+
+if [ "$once" = 1 ]; then
+    pass
+    exit 0
+fi
+trap 'exit 0' TERM INT
+while :; do
+    pass
+    sleep "$every" &
+    wait $! || true
+done

@@ -196,14 +196,18 @@ class Checks(unittest.TestCase):
         host.made("/proc/asound/cards", "")
         self.assertEqual(codec.codec_checks(host)[0]["status"], "skip")
 
-    def test_this_mac_on_the_generic_fixup_warns_with_the_way_forward(self):
+    def test_this_mac_on_the_generic_fixup_passes_and_never_sends_the_owner_to_mbp81(self):
+        # Measured on the MacBookPro9,2: one microphone, on the right; mbp81 only copies it
+        # to the left at 5.8 dB less level, so the generic Apple fixup is the one to keep.
         host = self.host()
         found = self.by_id(codec.codec_checks(host))
         self.assertEqual(found["codec.ssid"]["value"], "0x106b5200")
         self.assertIn("alsactl saw 0x10134206,0x106b5200", found["codec.ssid"]["evidence"])
-        self.assertEqual(found["codec.fixup"]["status"], "warn")
-        self.assertEqual(found["codec.adc_cfg"]["status"], "warn")
-        self.assertIn("mbp81", found["codec.adc_cfg"]["hint"])
+        self.assertEqual(found["codec.fixup"]["status"], "pass")
+        self.assertIn("generic Apple fixup is the one to keep", found["codec.fixup"]["evidence"])
+        self.assertEqual(found["codec.adc_cfg"]["status"], "pass")
+        self.assertIn("one microphone is on the right", found["codec.adc_cfg"]["evidence"])
+        self.assertFalse(any("mbp81" in item["hint"] for item in found.values()))
         self.assertEqual(found["codec.mic_pin"]["value"]["vref"], "80")
         self.assertIn("selected the mic pin", found["codec.adc_connection"]["evidence"])
         self.assertEqual(found["codec.live"]["status"], "skip")
@@ -216,6 +220,7 @@ class Checks(unittest.TestCase):
                                                                           "Coeff 0x02: 0x102a"))))
         self.assertEqual(found["codec.adc_cfg"]["status"], "pass")
         self.assertIn("single ended", found["codec.adc_cfg"]["evidence"])
+        self.assertIn("5.8 dB less level", found["codec.adc_cfg"]["evidence"])
 
     def test_without_coefficients_or_sysfs_it_still_reports(self):
         dump = "\n".join(line for line in CODEC_DUMP.splitlines() if "Coeff" not in line)
@@ -284,43 +289,238 @@ class Live(unittest.TestCase):
         self.assertEqual(codec.reconfigure(host, "mbp81")["status"], "skip")
         self.assertEqual(codec.set_coefficient(host, 0x102A)["status"], "skip")
 
-    def test_reconfigure_writes_the_model_and_triggers(self):
-        host = FakeHost(self.root)
-        host.made(f"{codec.HWDEP_SYSFS}/reconfig", "")
-        host.made(f"{codec.HWDEP_SYSFS}/modelname", "\n")
+    def test_a_reconfig_that_keeps_the_fixup_is_a_skip_not_a_pass(self):
+        # Kernel 6.18 on the laptop: the reconfig runs, no new "picked fixup" line, coef stays 0x000a.
+        host = Kernel(self.root)
         result = codec.reconfigure(host, "mbp81")
-        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["status"], "skip")
         self.assertEqual(host.path(f"{codec.HWDEP_SYSFS}/modelname").read_text(), "mbp81")
         self.assertEqual(host.path(f"{codec.HWDEP_SYSFS}/reconfig").read_text(), "1")
+        self.assertTrue(result["value"]["written"])
+        self.assertEqual((result["value"]["coef_before"], result["value"]["coef_after"]), ("0x000a", "0x000a"))
+        self.assertIn("kept its fixup", result["evidence"])
+        self.assertIn("snd_hda_intel.model=mbp81", result["hint"])
+        self.assertIn("--coef 0x102a", result["hint"])
         self.assertEqual(codec.reconfigure(host, "anything; rm -rf /")["status"], "fail")
+
+    def test_a_reconfig_the_kernel_acts_on_passes(self):
+        host = Kernel(self.root, picks="mbp81", coef="0x102a")
+        result = codec.reconfigure(host, "mbp81")
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["value"]["picked"]["name"], "mbp81")
+        self.assertEqual(result["value"]["coef_after"], "0x102a")
+
+    def test_a_changed_coefficient_alone_also_shows_it_took(self):
+        result = codec.reconfigure(Kernel(self.root, coef="0x102a"), "mbp81")
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("0x000a -> 0x102a", result["evidence"])
+
+    def test_the_kernel_picking_another_fixup_fails(self):
+        result = codec.reconfigure(Kernel(self.root, picks="apple"), "mbp81")
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("picked apple", result["evidence"])
+
+    def test_unknown_coefficients_cannot_prove_anything(self):
+        dump = "\n".join(line for line in CODEC_DUMP.splitlines() if "Coeff" not in line)
+        result = codec.reconfigure(Kernel(self.root, dump=dump), "mbp81")
+        self.assertEqual(result["status"], "skip")
+        self.assertIn("unknown", result["evidence"])
 
 
 if __name__ == "__main__":
     unittest.main()
 
 
+class Kernel(FakeHost):
+    """A codec with live reconfig: writing reconfig=1 runs the kernel's reconfiguration.
+
+    `picks` is the fixup name a new "picked fixup" line gives (None: no new
+    line, as on kernel 6.18), `coef` the coefficient 0x02 after it (None: unchanged)."""
+
+    def __init__(self, root, *, picks=None, coef=None, dump=CODEC_DUMP, **kwargs):
+        programs = set(kwargs.pop("programs", ())) | {"dmesg"}
+        handlers = {"dmesg": lambda argv: Result(0, self.log), **kwargs.pop("handlers", {})}
+        super().__init__(root, programs=programs, handlers=handlers, **kwargs)
+        self.log = V5_DMESG
+        self.picks, self.coef = picks, coef
+        self.made("/proc/asound/card0/codec#0", dump)
+        self.made(codec.DUMP_COEF, "-1\n")
+        self.made(f"{codec.HWDEP_SYSFS}/reconfig", "")
+        self.made(f"{codec.HWDEP_SYSFS}/modelname", "\n")
+        self.mixer = "owner"
+
+    def write(self, path, text):
+        done = super().write(path, text)
+        if done and str(path).endswith("/reconfig") and text == "1":
+            self.log += "[  466.1] snd_hda_codec_cs420x hdaudioC0D0: hda-codec: reconfiguring\n"
+            asked = self.path(f"{codec.HWDEP_SYSFS}/modelname").read_text().strip()
+            if asked:
+                if self.picks is not None:
+                    self.log += f"[  466.2] snd_hda_codec_cs420x hdaudioC0D0: CS4206: picked fixup {self.picks} " \
+                                "(model specified)\n"
+                if self.coef is not None:
+                    self.set_dump_coef(int(self.coef, 16))
+            elif self.coef is not None:
+                self.set_dump_coef(codec.DEFAULT_ADC_CFG)  # back to the boot's own fixup
+            self.mixer = "driver defaults"  # a reconfig zeroes the mixer
+        return done
+
+    def dump_coef(self):
+        import re
+
+        text = self.path("/proc/asound/card0/codec#0").read_text()
+        node = text[text.index("Node 0x11"):]
+        return int(re.search(r"Coeff 0x02: (0x[0-9a-fA-F]+)", node)[1], 16)
+
+    def set_dump_coef(self, value):
+        import re
+
+        dump = self.path("/proc/asound/card0/codec#0")
+        text = dump.read_text()
+        start = text.index("Node 0x11")
+        dump.write_text(text[:start] + re.sub(r"Coeff 0x02: 0x[0-9a-fA-F]+", f"Coeff 0x02: 0x{value:04x}",
+                                              text[start:], count=1))
+
+    def hwdep(self):
+        """A Hwdep stand-in for this codec: coef 0x02 on node 0x11 is the dump's."""
+        host = self
+        self.made(codec.HWDEP, "")
+
+        class Device:
+            def __init__(self, _path):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read_coef(self, nid, index):
+                return host.dump_coef()
+
+            def write_coef(self, nid, index, value):
+                host.set_dump_coef(value)
+                return host.dump_coef()
+
+        return Device
+
+
 class LiveRun(unittest.TestCase):
-    def test_codec_model_switch_end_to_end(self):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def run_codec(self, argv=("codec", "--model", "mbp81"), *, store_fails=False, hwdep=False, **kernel):
         import io
         import json
         from contextlib import redirect_stdout
+        from unittest.mock import patch
 
         from mind import diag, diag_sound
 
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        host = FakeHost(root, programs={"systemctl", "dmesg"}, active={diag_sound.VOICE},
-                        handlers={"dmesg": lambda argv: Result(0, V5_DMESG),
-                                  "being-audio-init": lambda argv: Result(0, "done")})
-        host.made("/proc/asound/card0/codec#0", CODEC_DUMP)
-        host.made(f"{codec.HWDEP_SYSFS}/reconfig", "")
-        host.made(f"{codec.HWDEP_SYSFS}/modelname", "\n")
+        stored = []
+
+        def alsactl(argv):
+            if argv[1] == "store":
+                if store_fails:
+                    return Result(1, "", "alsactl: cannot open the card")
+                Path(argv[3]).write_text(host.mixer)
+                stored.append(host.mixer)
+            elif argv[1] == "restore":
+                host.mixer = Path(argv[3]).read_text()
+            return Result(0, "")
+
+        host = Kernel(root, programs={"systemctl", "alsactl"}, active={diag_sound.VOICE},
+                      handlers={"alsactl": alsactl, "being-audio-init": lambda argv: Result(0, "done")}, **kernel)
         host.made(str(diag.AUDIO_INIT), "#!/bin/sh\n")
-        with redirect_stdout(io.StringIO()):
-            diag.main(["codec", "--model", "mbp81", "--out", str(root / "out")], host=host)
+        device = host.hwdep() if hwdep else None
+        with redirect_stdout(io.StringIO()), patch.object(codec, "Hwdep", device or codec.Hwdep):
+            code = diag.main([*argv, "--out", str(root / "out")], host=host)
         data = json.loads((root / "out" / "diag.json").read_text())
-        ids = {item["id"]: item["status"] for item in data["checks"]}
-        self.assertEqual(ids["codec.reconfig"], "pass")
-        self.assertEqual(ids["codec.mixer_reset"], "pass")
-        self.assertIn("codec.adc_cfg.after", ids)
+        return code, {item["id"]: item for item in data["checks"]}, host, stored
+
+    def test_codec_model_switch_end_to_end(self):
+        from mind import diag_sound
+
+        code, items, host, stored = self.run_codec(picks="mbp81", coef="0x102a")
+        self.assertEqual(items["codec.reconfig"]["status"], "pass")
+        self.assertEqual(items["codec.mixer_reset"]["status"], "pass")
+        self.assertIn("codec.adc_cfg.after", items)
+        self.assertEqual(items["codec.adc_cfg.after"]["value"], "0x102a")
         self.assertIn(diag_sound.VOICE, host.active)
-        self.assertEqual(host.path(f"{codec.HWDEP_SYSFS}/modelname").read_text(), "mbp81")
+        # The experiment ends with the run: the boot's model and coefficient are back, and the
+        # owner's mixer after the second reconfiguration.
+        self.assertEqual(host.path(f"{codec.HWDEP_SYSFS}/modelname").read_text().strip(), "")
+        self.assertEqual(host.dump_coef(), codec.DEFAULT_ADC_CFG)
+        self.assertEqual(host.mixer, "owner")
+        self.assertEqual(items["codec.restored"]["status"], "pass")
+        self.assertIn("put the codec model back", items["codec.restored"]["evidence"])
+
+    def test_a_kept_fixup_says_skip_and_the_owners_mixer_comes_back(self):
+        code, items, host, stored = self.run_codec()
+        # An experiment the kernel cannot do is not a fault in Pip: no codec check fails.
+        self.assertEqual(items["codec.reconfig"]["status"], "skip")
+        self.assertFalse([name for name, item in items.items() if name.startswith("codec.")
+                          and item["status"] == "fail"])
+        # Saved before the reconfig (the owner's levels), put back at once for the
+        # measurements and again when the session ends: never the --defaults levels.
+        self.assertEqual(stored, ["owner"])
+        self.assertEqual(items["codec.mixer_reset"]["status"], "pass")
+        self.assertIn("from before the run", items["codec.mixer_reset"]["evidence"])
+        self.assertEqual(host.mixer, "owner")
+        self.assertFalse([call for call in host.calls if call and call[0].endswith("being-audio-init")])
+
+    def test_a_coefficient_written_live_is_put_back_when_the_run_ends(self):
+        # The live stand-in for mbp81: left becomes a copy of right, 5.8 dB down, until it is undone.
+        code, items, host, stored = self.run_codec(("codec", "--coef", "0x102a"), hwdep=True)
+        self.assertEqual(items["codec.coef"]["status"], "pass")
+        self.assertEqual(items["codec.adc_cfg.after"]["value"], "0x102a")
+        self.assertIn("put back when the run ends", items["codec.coef"]["evidence"])
+        self.assertEqual(host.dump_coef(), codec.DEFAULT_ADC_CFG)
+        self.assertEqual(items["codec.restored"]["status"], "pass")
+        self.assertIn("coef 0x02 back to 0x000a", items["codec.restored"]["evidence"])
+        self.assertEqual(stored, [])  # a coefficient leaves the mixer alone
+
+    def test_a_killed_coefficient_run_is_put_back_by_restore(self):
+        from mind import diag_sound
+
+        host = Kernel(self.root, programs={"systemctl"}, active={diag_sound.VOICE})
+        with patch_hwdep(host.hwdep()):
+            session = diag_sound.AudioSession(host, signals=False).__enter__()
+            session.save_codec(codec.experiment_state(host))
+            self.assertEqual(codec.set_coefficient(host, 0x102A)["status"], "pass")
+            # Killed here, before its own restore: the marker still knows the coefficient from before,
+            # and ExecStopPost's `pip-diag restore` puts it back.
+            self.assertEqual(diag_sound.read_marker(host)["codec"], {"modelname": "", "coef": codec.DEFAULT_ADC_CFG})
+            done = diag_sound.restore(host)
+        self.assertIn("put the codec coef 0x02 back to 0x000a", done)
+        self.assertEqual(host.dump_coef(), codec.DEFAULT_ADC_CFG)
+        self.assertIn(diag_sound.VOICE, host.active)
+
+    def test_a_coefficient_that_cannot_be_written_back_is_said(self):
+        host = Kernel(self.root)
+        host.set_dump_coef(0x102A)
+        done, reconfigured = codec.put_back(host, {"modelname": "", "coef": codec.DEFAULT_ADC_CFG})
+        self.assertFalse(reconfigured)
+        self.assertEqual(done, ["could not put the codec coef 0x02 back to 0x000a (it stays 0x102a until the reboot)"])
+        from mind import diag
+
+        self.assertEqual(diag.codec_restored(done)["status"], "warn")
+        self.assertEqual(codec.put_back(host, None), ([], False))
+
+    def test_no_reconfig_without_a_saved_mixer(self):
+        # alsactl store failed: a reconfig would leave the boot defaults (Master 108) for good.
+        code, items, host, stored = self.run_codec(store_fails=True)
+        self.assertEqual(items["codec.reconfig"]["status"], "skip")
+        self.assertIn("mixer could not be saved", items["codec.reconfig"]["evidence"])
+        self.assertEqual(host.path(f"{codec.HWDEP_SYSFS}/modelname").read_text(), "\n")
+        self.assertEqual(host.path(f"{codec.HWDEP_SYSFS}/reconfig").read_text(), "")
+        self.assertEqual(host.mixer, "owner")
+        self.assertNotIn("codec.mixer_reset", items)
+
+
+def patch_hwdep(device):
+    from unittest.mock import patch
+
+    return patch.object(codec, "Hwdep", device)

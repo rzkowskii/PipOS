@@ -4,9 +4,9 @@ set -eu
 
 BOARD_DIR="$(dirname "$0")"
 # Buildroot passes BR2_ROOTFS_POST_SCRIPT_ARGS after the target directory:
-# the variant, then "cable" for the cable development build (BEING_LAPTOP_CABLE=1).
+# the variant, then the mutually exclusive "cable" or "diagnostic" build kind.
 BEINGOS_VARIANT="${2:-lab}"
-BEINGOS_CABLE="${3:-}"
+BEINGOS_BUILD_KIND="${3:-}"
 . "$BOARD_DIR/slots.sh"
 
 fail() {
@@ -18,10 +18,11 @@ case "$BEINGOS_VARIANT" in
     lab|laptop) ;;
     *) fail "unknown PipOS variant '$BEINGOS_VARIANT' (lab or laptop)" ;;
 esac
-case "$BEINGOS_CABLE" in
+case "$BEINGOS_BUILD_KIND" in
     "") ;;
     cable) [ "$BEINGOS_VARIANT" = laptop ] || fail "the cable development build is a laptop build" ;;
-    *) fail "unknown build option '$BEINGOS_CABLE' (only cable)" ;;
+    diagnostic) [ "$BEINGOS_VARIANT" = laptop ] || fail "the diagnostic build is a laptop build" ;;
+    *) fail "unknown build option '$BEINGOS_BUILD_KIND' (cable or diagnostic)" ;;
 esac
 
 if ! find "$TARGET_DIR/usr/lib" -path '*/lib-dynload/_ssl.*.so' -print -quit | grep -q .; then
@@ -50,7 +51,10 @@ mv "$fstab.new" "$fstab"
 # Update identity. The laptop has its own RAUC compatible strings, so a lab
 # bundle (or a lab rootfs signed for "installed" systems) is refused by RAUC
 # before any of its code runs, and being-update-ready checks the variant too.
-if [ "$BEINGOS_VARIANT" = laptop ]; then
+if [ "$BEINGOS_BUILD_KIND" = diagnostic ]; then
+    compatible=beingos-diagnostic-never-install
+    installed_compatible=beingos-diagnostic-never-install
+elif [ "$BEINGOS_VARIANT" = laptop ]; then
     compatible=beingos-laptop-v1
     installed_compatible=beingos-laptop-installed-v1
 else
@@ -67,7 +71,7 @@ fi
 release_cn="PipOS Laptop Release"
 keyring="$BEINGOS_LAB_KEYS/cert.pem"
 trust=lab
-if [ "$BEINGOS_VARIANT" = laptop ]; then
+if [ "$BEINGOS_VARIANT" = laptop ] && [ "$BEINGOS_BUILD_KIND" != diagnostic ]; then
     if [ -n "${BEINGOS_RELEASE_CERT:-}" ] && [ -s "$BEINGOS_RELEASE_CERT" ]; then
         keyring="$BEINGOS_RELEASE_CERT"
         trust=release
@@ -102,6 +106,21 @@ render_rauc() {
 }
 
 mkdir -p "$TARGET_DIR/usr/share/being"
+
+# Only the explicit build option can carry a generated voice asset into a
+# system slot. Re-run the copy when packaging a cached target tree.
+stock_target="$TARGET_DIR/usr/share/being/stock-speech"
+if [ -n "${BR2_CONFIG:-}" ] && grep -qx 'BR2_PACKAGE_BEING_STOCK_SPEECH=y' "$BR2_CONFIG"; then
+    source_root="$(cd "$BOARD_DIR/../../.." && pwd)"
+    rm -rf "$stock_target.new"
+    PYTHONPATH="$source_root" PYTHONDONTWRITEBYTECODE=1 python3 -m mind.stock_speech_bank \
+        "$source_root/out/stock-speech" "$stock_target.new"
+    rm -rf "$stock_target"
+    mv "$stock_target.new" "$stock_target"
+else
+    rm -rf "$stock_target" "$stock_target.new"
+fi
+
 render_rauc "$compatible" > "$TARGET_DIR/etc/rauc/system.conf.tmpl"
 slot_ids "$TARGET_DIR/etc/rauc/system.conf.tmpl" > "$TARGET_DIR/etc/rauc/system.conf"
 rm -f "$TARGET_DIR/etc/rauc/system.conf.tmpl"
@@ -111,6 +130,9 @@ grep -qx "compatible=$installed_compatible" "$TARGET_DIR/usr/share/being/install
     fail "installed-rauc.conf has the wrong compatible string"
 boot_console < "$BOARD_DIR/grub.cfg" > "$TARGET_DIR/usr/share/being/installed-grub.cfg"
 chmod 0644 "$TARGET_DIR/usr/share/being/installed-grub.cfg"
+if [ -n "${BR2_CONFIG:-}" ] && grep -qx 'BR2_PACKAGE_CRYPTSETUP=y' "$BR2_CONFIG"; then
+    test -x "$TARGET_DIR/usr/sbin/cryptsetup" || fail "missing cryptsetup for PIN-protected installs"
+fi
 install -D -m 0644 "$BINARIES_DIR/efi-part/EFI/BOOT/bootx64.efi" "$TARGET_DIR/usr/share/being/install/bootx64.efi"
 install -D -m 0644 "$keyring" "$TARGET_DIR/etc/rauc/keyring.pem"
 # The signed model pack is staged by the builder (post-image.sh) with the lab
@@ -126,6 +148,7 @@ trust=$trust
 certificate_sha256=$fingerprint
 EOF
 install -D -m 0755 "$BOARD_DIR/being-update-ready" "$TARGET_DIR/usr/libexec/being-update-ready"
+install -D -m 0755 "$BOARD_DIR/being-update-recorded" "$TARGET_DIR/usr/libexec/being-update-recorded"
 install -D -m 0644 "$BOARD_DIR/watchdog.conf" "$TARGET_DIR/etc/systemd/system.conf.d/50-being-watchdog.conf"
 
 # Only the owner-provisioned PipOS listeners are allowed to start.
@@ -140,12 +163,35 @@ if [ "$BEINGOS_VARIANT" = laptop ]; then
     printf '%s\n' '# Read access to CPU registers for bodycare (plan section 4, Mode B).' msr \
         > "$TARGET_DIR/usr/lib/modules-load.d/being-msr.conf"
 fi
+# WP-C8 is deliberately a Try-only root maintenance environment. It has no
+# installer entry point or installed-system templates, and its empty-password
+# root login is confined to tty2 on this separately named image.
+if [ "$BEINGOS_BUILD_KIND" = diagnostic ]; then
+    for tool in usr/bin/perf usr/bin/llama-bench usr/bin/stream usr/sbin/dmidecode usr/sbin/rdmsr; do
+        [ -x "$TARGET_DIR/$tool" ] || fail "the diagnostic image is missing /$tool"
+    done
+    [ -f "$TARGET_DIR/usr/share/being/stream-5.10.c" ] || fail "the diagnostic image lacks the pinned STREAM source"
+    for module in memory_bandwidth model_verity prefill_floor thread_sweep; do
+        install -D -m 0644 "$BOARD_DIR/../../../lab/$module.py" "$TARGET_DIR/usr/lib/being/lab/$module.py"
+    done
+    rm -f "$TARGET_DIR/usr/sbin/being-installer" \
+        "$TARGET_DIR/usr/share/being/installed-grub.cfg" \
+        "$TARGET_DIR/usr/share/being/installed-rauc.conf"
+    rm -rf "$TARGET_DIR/usr/share/being/install"
+    : > "$TARGET_DIR/usr/share/being/diagnostic"
+    mkdir -p "$TARGET_DIR/etc/systemd/system/getty.target.wants"
+    rm -f "$TARGET_DIR/etc/systemd/system/getty@.service"
+    ln -sfn /usr/lib/systemd/system/getty@.service \
+        "$TARGET_DIR/etc/systemd/system/getty.target.wants/getty@tty2.service"
+elif [ -e "$TARGET_DIR/usr/lib/being/lab/thread_sweep.py" ] || [ -e "$TARGET_DIR/usr/bin/stream" ]; then
+    fail "diagnostic benchmark files found outside the diagnostic build tree"
+fi
 # The cable development link (docs/LAB.md). Its login key and host key come
 # from the builder volume (lab/build.sh cable-key), never from the source
 # tree, and only the cable build may carry them: every other image is refused
 # if it holds any cable file or unit.
 cable="$TARGET_DIR/usr/share/being/cable"
-if [ "$BEINGOS_CABLE" = cable ]; then
+if [ "$BEINGOS_BUILD_KIND" = cable ]; then
     keys=${BEINGOS_CABLE_KEYS:-/work/beingos-cable}
     [ -s "$keys/authorized_key" ] && [ -s "$keys/ssh_host_ed25519_key" ] ||
         fail "no cable keys in $keys: run lab/build.sh cable-key PUBKEY HOSTKEY first"
@@ -241,4 +287,4 @@ else
         [ ! -e "$unit" ] || fail "this image holds the cable development unit /${unit#"$TARGET_DIR"/}"
     done
 fi
-python3 "$BOARD_DIR/build-id.py" "$TARGET_DIR"
+PYTHONDONTWRITEBYTECODE=1 python3 "$BOARD_DIR/build-id.py" "$TARGET_DIR"

@@ -1,7 +1,7 @@
 <!--
 doc: architecture
 verified: 2026-11-24T22:17
-sources: crates/bus/src/lib.rs crates/brainstem/src/main.rs crates/brainstem/src/machine.rs crates/brainstem/src/body.rs crates/brainstem/src/battery.rs crates/brainstem/src/brightness.rs crates/brainstem/src/kbd_light.rs crates/face/src/keys.rs mind/keys.py mind/app_commands.py mind/mic_port.py mind/mic_channel.py mind/try_mode.py mind/diag.py mind/diag_sound.py mind/install_apply.py os/package/being/being-cable-link.service os/package/being/being-cable-ssh.service os/package/being/being-cable-workbench.service os/board/beingos/linux-cable.config crates/brainstem/src/peer.rs crates/brainstem/src/life.rs crates/brainstem/src/camera.rs crates/brainstem/src/linux_body.rs crates/bodycare/src/main.rs crates/bodycare/src/policy.rs crates/face/src/main.rs crates/face/src/anim.rs crates/face/src/link.rs crates/face/src/render.rs crates/face/src/eye.rs crates/face/src/pace.rs crates/face/src/dpms.rs crates/face/src/overlay.rs mind/turn.py mind/everyday.py mind/memory.py mind/embed.py mind/cortex.py mind/speech.py mind/voice.py mind/voice_engines.py mind/hands.py mind/night_shift.py mind/dream_model.py mind/dream_verify.py mind/eyes.py mind/retention.py mind/dream_policy.py mind/dream_store.py mind/boot_health.py mind/installer.py mind/network_policy.py mind/network_enforce.py os/package/being/being.mk os/package/cortex/being-cortex.service os/package/cortex/being-dream-cortex.service os/board/beingos/grub.cfg os/board/beingos/genimage.cfg os/board/beingos/post-build.sh os/board/beingos/rauc.conf mind/storage.py mind/backup.py mind/backup_crypto.py mind/wifi.py mind/initiative.py mind/consolidation.py mind/install_binding.py mind/usb_logs.py mind/model_pack.py mind/bus.py mind/local_screen.py mind/local_menu.py os/package/being/being-try-generator os/package/being/being-installed-generator os/package/being/being-screen-mode os/package/being/50-being.preset os/package/being/30-model-pack.conf os/board/beingos/being-update-ready os/board/beingos/slots.sh mind/diag_speech.py os/package/being/cable/sshd_config lab/build.sh
+sources: crates/bus/src/lib.rs crates/brainstem/src/main.rs crates/brainstem/src/machine.rs crates/brainstem/src/body.rs crates/brainstem/src/battery.rs crates/brainstem/src/brightness.rs crates/brainstem/src/kbd_light.rs crates/face/src/keys.rs mind/keys.py mind/app_commands.py mind/mic_port.py mind/mic_channel.py mind/try_mode.py mind/diag.py mind/diag_sound.py mind/install_apply.py os/package/being/being-cable-link.service os/package/being/being-cable-ssh.service os/package/being/being-cable-workbench.service os/board/beingos/linux-cable.config crates/brainstem/src/peer.rs crates/brainstem/src/life.rs crates/brainstem/src/camera.rs crates/brainstem/src/linux_body.rs crates/bodycare/src/main.rs crates/bodycare/src/policy.rs crates/face/src/main.rs crates/face/src/anim.rs crates/face/src/link.rs crates/face/src/render.rs crates/face/src/eye.rs crates/face/src/pace.rs crates/face/src/dpms.rs crates/face/src/overlay.rs mind/turn.py mind/played.py mind/everyday.py mind/memory.py mind/embed.py mind/cortex.py mind/speech.py mind/voice.py mind/voice_engines.py mind/hands.py mind/night_shift.py mind/dream_model.py mind/dream_verify.py mind/eyes.py mind/retention.py mind/dream_policy.py mind/dream_store.py mind/boot_health.py mind/installer.py mind/network_policy.py mind/network_enforce.py os/package/being/being.mk os/package/cortex/being-cortex.service os/package/cortex/being-dream-cortex.service os/board/beingos/grub.cfg os/board/beingos/genimage.cfg os/board/beingos/post-build.sh os/board/beingos/rauc.conf mind/storage.py mind/backup.py mind/backup_crypto.py mind/wifi.py mind/initiative.py mind/consolidation.py mind/install_binding.py mind/usb_logs.py mind/model_pack.py mind/bus.py mind/local_screen.py mind/local_menu.py os/package/being/being-try-generator os/package/being/being-installed-generator os/package/being/being-screen-mode os/package/being/50-being.preset os/package/being/30-model-pack.conf os/board/beingos/being-update-ready os/board/beingos/slots.sh mind/diag_speech.py os/package/being/cable/sshd_config lab/build.sh os/package/being/being-health-watch os/package/being/being-health-watch.service
 -->
 
 # PipOS architecture
@@ -11,7 +11,7 @@ today. For the original intent and the reasoning behind it, see
 [DESIGN-AND-PLAN.md](../../DESIGN-AND-PLAN.md) (historical) and
 [DESIGN.md](../DESIGN.md); the function spec is
 [PIP-FUNCTIONS.md](../PIP-FUNCTIONS.md). The documents differ in places,
-and [What is designed but not built](#what-is-designed-but-not-built)
+and [remaining hardware and design work](#remaining-hardware-and-design-work)
 lists where.
 
 > **Naming.** The product is called **PipOS**. That name appears in the
@@ -149,6 +149,8 @@ that matters for understanding the system:
     here; the mind sends it again to a voice that restarts in guest
     mode).
   - An announcement's `say.done` is accepted only from `voice`.
+  - `say.played`, which says what of a reply really played, is accepted
+    only from the current `voice` connection in the current lid state.
 - **Back-pressure.** Lines over 64 KiB are dropped. An organ whose
   512-line queue fills up, or whose write takes over a second, is
   disconnected.
@@ -209,7 +211,8 @@ reading decides; privacy does not wait, because an unknown lid is treated
 as closed from the start.
 
 **Esc** (`key.interrupt`) cancels thinking or speaking at any time. It
-sends `say.stop` and `mind.cancel`.
+sends `say.stop` and `mind.cancel`. Pip then remembers only the clauses
+that started playing (step 8 of the reply, below).
 
 ### The lid is the privacy switch
 
@@ -267,7 +270,7 @@ Only a hardware body (or a test naming `--poweroff-cmd`) powers off.
   quarter scale. While dark, it also turns the panel connector off through
   DRM DPMS (`BEING_FACE_DPMS=0` stops that), because `bl_power` does not
   switch off the MacBook's LVDS backlight.
-- **Expressions.** The face has 17 poses: `neutral`, `attentive`,
+- **Expressions.** The default expression table has 17 legacy poses: `neutral`, `attentive`,
   `listening`, `thinking`, `speaking`, `joy`, `curiosity`, `surprise`,
   `skepticism`, `concern`, `sleepy`, `asleep`, `dreaming`, `tired`,
   `muted`, `loading` (before the brainstem first answers) and `dazed`.
@@ -299,7 +302,8 @@ Only a hardware body (or a test naming `--poweroff-cmd`) powers off.
   | Esc | `key.interrupt` |
   | M, F10 (fn+F10 on the MacBook) | `key.mute` (the microphone) |
   | F9 | `key.panel_recover` |
-  | F1 | Toggles the captions and health overlay (local only; nothing logged) |
+  | F1 | Toggles local captions and their route badge. Nothing is logged |
+  | Shift+F1 | Toggles the hardware and service health overlay |
   | F2, or Mission Control | Starts the local setup screen |
   | Brightness down, up | `key.brightness` |
   | Keyboard light down, up, toggle | `key.kbd_light` |
@@ -385,11 +389,19 @@ Only a hardware body (or a test naming `--poweroff-cmd`) powers off.
    `session-only` or `explicit-only`, the line is
    `route {"route": "private"}`
    ([reference](REFERENCE.md#voice-debug-and-route-lines)).
+
+   An addressed owner can bookmark the latest ordinary conversation
+   in persistent mode. The bookmark is an archive record linked to
+   the original episode. Resuming it adds that live episode to the
+   normal highlight list. Source correction, expiry and forgetting
+   revoke it through the same deletion proof as the rest of the archive.
 4. A code answer replies at once. It never invents anything.
 5. A model turn works like this:
    1. The mind builds the prompt from these parts:
       - the identity;
-      - `core.md`, if present (persistent mode only);
+      - the core profile, in persistent owner mode. A consented night
+        can select up to four recent confirmed owner facts. A manual
+        `core.md` takes precedence;
       - up to three dated highlights;
       - the recent conversation turns;
       - the senses line;
@@ -420,6 +432,16 @@ Only a hardware body (or a test naming `--poweroff-cmd`) powers off.
 7. The voice organ speaks each clause with Piper or Flite and reports
    `say.started`, `say.level` and `say.done`. The microphone is closed
    while it speaks (half-duplex).
+8. Each clause of a model reply carries the reply's token. The voice
+   reports each clause when its first audio plays (`say.played`), and
+   ends the reply with one final `say.played` that says whether it
+   stopped short. When a reply is interrupted, the history and the
+   archive keep only the clauses that started, marked cut off. A clause
+   cut off partway counts. One the voice never reached does not, and a
+   reply of which nothing played is not kept at all. Most replies are
+   written down before the voice finishes them, so a reply stopped later
+   is corrected in place (`mind/played.py`, `Memory.cut_said`). The rules
+   are in [PROTOCOL.md](../PROTOCOL.md#interrupted-replies).
 
 ### Choosing the speech engines
 
@@ -480,16 +502,36 @@ The voice organ picks its engines at start (`mind/voice_engines.py`):
 | Setting | Value |
 |---|---|
 | Default model | Qwen3.5-0.8B, Q4_K_M GGUF (`/models/reflex.gguf`), Apache-2.0 |
-| Server | `llama-server` on `127.0.0.1:8080` with `--ctx-size 8192 --parallel 2` (slot 0 the conversation, slot 1 the workshop), 2 threads for both decode and prompt, `--reasoning-budget 0`, `--cache-ram 0`, 512-token batches, slot files in `/mind/cortex`, `Nice=5`, `CPUWeight=100`, sandboxed to loopback |
+| Server | `llama-server` on `127.0.0.1:8080` with `--ctx-size 8192 --parallel 2` (slot 0 the conversation, slot 1 the workshop), 2 threads for both decode and prompt, `--reasoning-budget 0`, `--cache-ram 0`, 64-token logical batches and 7-token physical batches, flash attention off, mapped weights, boot-local slot storage, `Nice=5`, `CPUWeight=100`, sandboxed to loopback |
 | Build | Static, `GGML_NATIVE=OFF`, AVX, F16C and SSE4.2 on; AVX2, FMA, BMI2 and AVX-512 off |
 | Mind settings | `ctx_tokens 4096`, `max_tokens 64`, `temperature 0.7`, `top_k 20`, `top_p 0.8`, `presence_penalty 1.0`, `reply_shape strict`, `prefill false` (`config/being.json`) |
 | Warm-up | On lid-open or waking, the mind restores a saved slot if the context was accepted, or else primes a verified prompt prefix. After a clean identity warm-up it saves `identity.slot`, restored after a forget, a guest change or an erase |
-| Context | `context.json` restores the conversation for 24 h, but only if the identity and memory revision are unchanged. Compaction runs above 60 % of the context. An emergency trim runs at 90 % |
-| Model gate | An `ExecCondition` runs `model_pack.py verify` before the cortex (and the dream cortex) starts. It checks the signed pack descriptor with OpenSSL against `/etc/rauc/keyring.pem`, the same trust root as OS updates, and hashes the model. On failure the cortex is skipped, not restart-looped. Boot health then never sees a model server, so a trial slot with a bad pack rolls back. Every model role (conversation, dream, voice, recogniser, VAD, embeddings, speaker) has a pack descriptor: the conversation model's in `os/package/being/default-model/`, the others in `os/package/being/model-packs/`; `BEING_PACK_ROLES` chooses which are staged, and packs are built with `lab/package_model.py`. Before the voice loads Piper, Silero or Moonshine, or the mind uses the embedding model, from `/models`, `model_pack.trusted` checks that the files belong to that role's verified pack, off the event loop. A pack that fails is not loaded: the voice falls back to Flite or PocketSphinx, and recall to words only |
+| Context | `context.json` can resume the conversation after a same-boot service restart for up to 24 h if the identity and memory revision are unchanged. Compaction runs above 60 % of the context. An emergency trim runs at 90 % |
+| Model gate | An `ExecCondition` runs `model_pack.py verify` before each cortex starts. It checks the signed descriptor against `/etc/rauc/keyring.pem`, the same trust root as OS updates. Installed systems, benchmark boots and forced full checks verify model bytes before use. On eligible Try boots the startup path can accept a signed descriptor and matching file sizes provisionally. `being-model-check.service` hashes every pack at idle priority and restarts affected organs if a pack fails. A refused conversation model cannot confirm a trial boot. Other model roles also have signed descriptors and are checked before loading. Speech falls back to Flite or PocketSphinx and recall to words when their respective packs fail |
 
 The model is small on purpose. On two Ivy Bridge cores, latency matters
 more than intelligence. The character is written for short replies, and
 anything factual (time, battery, age, memory, sums) is answered by code.
+
+On confirmed installed boots with an encryption-capable ext4 mind partition,
+`being-context-storage.service` creates the current boot's encrypted text
+directory under `/mind/context-cache` and model slot directory under
+`/mind/cortex/boot-cache`. The key stays in the running kernel. Mind and
+llama-server use the same selection through a private file in `/run`.
+Rebooting discards the key. Try, unconfirmed trials and filesystems without
+fscrypt keep both directories in RAM. The conversation archive, searchable
+memory and saved unfinished thread keep their usual lifetimes. Earlier
+system builds may have left plaintext cache files on the disk.
+
+On a fresh Install or Restore, type E to choose PIN protection from the final disk
+review to put the entire `/mind` filesystem inside LUKS2. The installer
+stages the encrypted image in RAM and keeps the installed boot records
+uncommitted until after disk readback. The early local screen waits for the
+PIN before checking and mounting `/mind`. Safe graphics uses the physical
+text console. Both A/B slots use the same memory partition. The original
+unattended choice starts without a PIN and leaves the archive unencrypted.
+Keep an independent encrypted backup in case the PIN is lost. A previously
+unencrypted disk needs a backup and a new installation to gain this mode.
 
 ### Memory
 
@@ -512,7 +554,11 @@ Memory lives in `/mind/mind.db`, a SQLite database in WAL mode with
   keyword, by who spoke (a person or Pip) and by date range. What people
   said is weighted above Pip's own replies. Recall answers quote the
   original words. A history answer also gives its date ("On November 3,
-  2026, you said: …").
+  2026, you said: …"). Declarative owner sentences with one explicit
+  `today`, `yesterday` or ISO date also retain that event day separately
+  from the telling timestamp. Only clearly event-shaped date questions
+  opt into that field; “what did I say” readback and forgetting continue
+  to use the telling timestamp, and older rows keep their old behaviour.
 - **Correction** ("that's wrong, …") rewrites the fact and its source
   episode.
 - **Forgetting** deletes facts and replaces episode text with
@@ -681,25 +727,35 @@ The brainstem also computes four drives, each from 0 to 1, published as
 - `wakes`;
 - the body string (DMI vendor, product and CPU);
 - the boot ID;
-- `awake_since`.
+- `awake_since`, the five-minute heartbeat `alive_at`, and `ended` when the brainstem closes the wake cleanly.
 
 On each real boot the brainstem increments `wakes`. It also detects two
 conditions:
 
-- **lost power:** `awake_since` is still set from the previous boot;
+- **unclosed wake:** `awake_since` is still set from the previous boot, producing the compatibility flag `lost_power`;
 - **new body:** the DMI or CPU string changed.
 
-For the first 15 minutes awake, the senses line mentions these facts, so
-Pip can say truthfully that it lost power or moved to a new laptop.
+For the first 15 minutes awake, the senses line mentions an unclosed wake or a changed body.
+The new wake carries forward the previous end classification and the last heartbeat from that wake when available.
+A same-boot restart keeps the wake number and claims a fresh writer token. A clock gap alone cannot distinguish a crash from a power cut.
 Writes are atomic: a temporary file with fsync, rename, then a directory
-fsync. A damaged record is never overwritten.
+fsync. Updates use the restore directory lock and require the current wake and writer token. A damaged record is never overwritten.
 
 **Bodycare** (`crates/bodycare`) is the one owner of the battery charge
 limit (an SMC write, only if the owner sets one), the fan floor and CPU
-frequency caps, and holds the package near 70 °C while dreaming with a
+frequency caps, and holds the package near 80 °C while dreaming with a
 PI loop. It keeps a restore journal and puts every control back when it
 stops. The shipped unit runs it in observe mode, so on today's images it
 writes nothing.
+
+The fan floor (`fan1_min`; never manual mode) follows the SMC as measured
+on the MacBookPro9,2: the SMC holds 2000 rpm until about 97 °C, and the
+package idles at 71-82 °C but reaches 95 °C after a minute of sustained
+model load (TjMax 105 °C). So the floor stays at the factory minimum until
+the package passes 85 °C under sustained load (the smoothed CPU busy share
+over 40%; one reply is not enough), and rises in 250 rpm steps to 65% of
+the fan's maximum by 97 °C. Over 92 °C it follows the temperature whatever
+the load. It is held steady while the microphone is open.
 
 ## 8. The appliance
 
@@ -796,8 +852,9 @@ no release key has been made yet.
 | Mind and voice watchdogs | Each pings the systemd watchdog from its event loop (`WatchdogSec=30s`), so a stuck loop is restarted while a busy one is not |
 | Face watchdog | The face pings the systemd watchdog from its frame loop, which runs at least 5 times a second even while dark (`WatchdogSec=5s`). A frame loop stuck for 5 s is restarted |
 | Bodycare watchdog | `WatchdogSec=30s`; on any stop it restores what it changed |
-| Hardware watchdog | systemd feeds it with `RuntimeWatchdogSec=30s`, `RebootWatchdogSec=2min` |
-| Kernel | `panic=10 oops=panic` on installed and lab boots; the Try stick's entries use `panic=30` or none |
+| Health watch | `being-health-watch.service` checks every 10 s that the brainstem and face are up. An organ systemd cannot bring back (a process stuck in the kernel that outlives SIGKILL, a restart that never stays up) counts as stuck after 10 minutes for the brainstem and 5 for the face. An installed boot then reboots once, never in the first 5 minutes after boot. Try and verbose boots only log it and write `/run/being-health/<unit>.stuck`. It leaves alone an organ that was stopped on purpose or skipped by its `ExecCondition` |
+| System watchdog | systemd feeds `/dev/watchdog0` with `RuntimeWatchdogSec=30s`, `RebootWatchdogSec=2min`. The lab VM has the emulated i6300esb. On the MacBookPro9,2 the chipset's TCO watchdog (`iTCO_wdt`) is disabled by the firmware ("unable to reset NO_REBOOT flag"), so the laptop kernel builds `softdog`, a kernel timer: it restarts the Mac if systemd stops feeding it (PID 1 stuck for 30 s, or a reboot that hangs for 2 minutes), but cannot catch a kernel hung with interrupts off. There are no lockup detectors. `CONFIG_WATCHDOG_SYSFS` shows which device is fed under `/sys/class/watchdog/watchdog0/` (`identity` reads "Software Watchdog"). The "show boot messages" and "safe graphics" entries turn the watchdog off (`systemd.watchdog_sec=off`) |
+| Kernel | `panic=10` on installed boots, with `oops=panic` on lab boots only (on the laptop an oops panic would be a reboot loop with nothing to read); the Try stick's entries use `panic=30` or none |
 
 ### Network modes
 
@@ -957,11 +1014,13 @@ Installation works like this:
    and any disk in use.
 2. It shows the exact layout, then requires the device-specific
    confirmation `ERASE /dev/sdX`, and a second `ERASE MACOS` or `ERASE
-   BEING` when the disk holds one. It warns when the drive cannot discard
-   old blocks, since the new mind image is sparse and an old being's data
-   could then stay in blocks it never writes.
-3. It stages files in RAM, verifies every write, and publishes the GPT
-   last.
+   BEING` when the disk holds one. An unreadable partition table requires
+   `ERASE DRIVE`.
+3. It stages files in RAM, claims the selected disk exclusively, and
+   checks its identity and contents again. It requests discard for the
+   old archive range when the GPT identifies it, and for the sparse new
+   archive range. Data may still be recoverable after discard.
+4. It verifies the data it wrote and publishes the new GPT last.
 
 Restore is an installation. It goes through the same disk choice and
 `ERASE` confirmation, then writes an `age`-encrypted snapshot from
@@ -1010,18 +1069,17 @@ cannot be edited. A being therefore never wakes on a half-restored mind.
 | Laptop image | No getty and no console or password root login in any build. No SSH unless built with `BEING_LAPTOP_MAINTENANCE=1`, which adds key-only paired-Mac access, or with `BEING_LAPTOP_CABLE=1`, a development-only Try stick that allows key-only root SSH from link-local addresses, never installs, and whose image holds its SSH host key |
 | Storage discipline | Small Python state files in `/mind` are written with the helpers in `mind/storage.py`. Directories are 0700, and are rejected unless they are real directories owned by the service user with no group or other bits. Files go to a temp file, are fsynced and renamed, then the directory is fsynced. The SQLite databases, the brainstem's `life.json` (its own atomic write) and the cortex slot saves are written by their own code. Readers of trust-bearing files `lstat` them and accept only regular files. New Python code should use these helpers |
 
-## What is designed but not built
+## Remaining hardware and design work
 
-As of 24 November 2026:
+As of 26 November 2026:
 
-- **Speech on the real laptop.** Silero VAD, Moonshine and Piper (through
-  sherpa-onnx) are built in. Piper's Alba speaks by default and is set
-  aside only if it measures too slow; Moonshine waits for a recorded
-  Ivy Bridge smoke test that no image carries yet. PocketSphinx and Flite
-  are the fallback. Whether they are fast enough on Ivy Bridge has not
-  been measured; `pip-diag full` and `engines` are built to measure it. Zipformer recognition and
-  CAM++ speaker recognition from the design are not used: Pip cannot tell
-  voices apart.
+- **Speech on the real laptop.** Native v6 tests passed Silero VAD,
+  Moonshine and Piper on the MacBookPro9,2 after a temporary Python update.
+  Moonshine measured about 0.15 of real time. The build can carry an Ivy
+  Bridge compatibility verdict for matching runtime libraries, and auto
+  still checks whether Moonshine is fast enough. The current image needs
+  repeat physical tests with the owner's voice and speakers. PocketSphinx
+  and Flite remain available. Pip cannot distinguish speakers by voice.
 - **Deliberate vision.** "What do you see?" says the camera is off, or
   that Pip can tell someone is there but cannot make out things. Eye
   contact does not open attention.
@@ -1031,14 +1089,15 @@ As of 24 November 2026:
 - **Drowsiness.** Long idle alone does not cause drowsiness; it needs
   dark or night. The panel stays lit during natural sleep with the lid
   open.
-- **Owner memory.** Care lists and forgets facts, but there is no browser
-  for conversations, and nothing writes `core.md`. Generated summaries
-  are not produced.
+- **Owner memory.** Care lists and forgets facts. The night shift saves
+  an owner core profile before prompt warm-up. Its index contains archive
+  references. The prompt resolves them against the current owner and
+  archive revision, and replies carry those fact IDs into deletion
+  lineage. A hand-written `core.md` remains available as a manual override.
 - **Model choice.** The model is not yet chosen on hardware. Qwen3.5-0.8B
   is a lab placeholder.
 - **Release signing.** No owner-held release key exists yet.
-- **Physical hardware.** One Try boot on the real MacBookPro9,2 (23
-  November 2026): it booted, drew the face on the GPU and heard "Hey Pip",
-  but did not make out the words after it. Everything else comes from
-  QEMU or the development Mac. [STATUS.md](../../STATUS.md) keeps the
-  evidence per milestone.
+- **Physical hardware.** The first Try boot drew the face on the GPU and
+  heard "Hey Pip". Later v5 and v6 boots measured speech, graphics, power
+  and inference over a development cable. [STATUS.md](../../STATUS.md)
+  records which image each run used and the remaining SSD gates.

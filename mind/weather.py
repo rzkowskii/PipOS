@@ -14,12 +14,14 @@ from datetime import date, datetime
 from urllib.parse import urlencode
 
 GEOCODER = "geocoding-api.open-meteo.com"
+REFERENCE = "en.wikipedia.org"
 FORECAST = "api.open-meteo.com"
 REQUEST_TIMEOUT = 2.5
 LOOKUP_TIMEOUT = 5
 MAX_RESPONSE = 65536
 NO_LOCATION = "What city should I check? Try asking for the weather in Sydney."
 UNAVAILABLE = "I couldn't get the weather from Open-Meteo just now."
+SAMPLE_SECONDS = 15 * 60
 
 CONDITIONS = {
     0: "clear skies", 1: "mostly clear skies", 2: "partly cloudy skies", 3: "overcast skies",
@@ -83,17 +85,19 @@ def _is_public(family, address):
 
 
 class _PublicHTTPSConnection(http.client.HTTPSConnection):
-    def __init__(self, host, *, deadline, permitted):
+    def __init__(self, host, *, deadline, permitted, resolver=None):
         self.tls = ssl.create_default_context()
         super().__init__(host, timeout=_remaining(deadline), context=self.tls)
         self.deadline = deadline
         self.permitted = permitted
+        self.resolver = resolver
 
     def connect(self):
         _require_permission(self.permitted)
         # The system resolver has its own timeout. A late result cannot dial.
         _remaining(self.deadline)
-        addresses = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
+        resolve = self.resolver or socket.getaddrinfo
+        addresses = resolve(self.host, self.port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
         _require_permission(self.permitted)
         last_error = None
         for family, kind, proto, _, address in addresses:
@@ -127,8 +131,8 @@ def _end_socket_io(sock):
 
 
 def _fetch_json(host, path, params, timeout, *, permitted=None):
-    if (host, path) not in ((GEOCODER, "/v1/search"), (FORECAST, "/v1/forecast")):
-        raise ValueError("Unknown weather service endpoint")
+    if (host, path) not in ((GEOCODER, "/v1/search"), (FORECAST, "/v1/forecast"), (REFERENCE, "/w/api.php")):
+        raise ValueError("Unknown public lookup endpoint")
     _require_permission(permitted)
     deadline = time.monotonic() + timeout
     connection = _PublicHTTPSConnection(host, deadline=deadline, permitted=permitted)
@@ -141,7 +145,10 @@ def _fetch_json(host, path, params, timeout, *, permitted=None):
         watchdog.daemon = True
         watchdog.start()
         _require_permission(permitted)
-        connection.request("GET", f"{path}?{urlencode(params)}", headers={"Accept": "application/json"})
+        headers = {"Accept": "application/json"}
+        if host == REFERENCE:
+            headers["User-Agent"] = "PipOS text lookup/1.0 (https://github.com/rzkowskii/PipOS)"
+        connection.request("GET", f"{path}?{urlencode(params)}", headers=headers)
         with connection.getresponse() as response:
             if response.status != 200:
                 raise ValueError("Weather service failed")
@@ -156,6 +163,10 @@ def _fetch_json(host, path, params, timeout, *, permitted=None):
             if watchdog.is_alive():
                 watchdog.join()
         connection.close()
+
+
+def fetch_reference(params, *, permitted):
+    return _fetch_json(REFERENCE, "/w/api.php", params, REQUEST_TIMEOUT, permitted=permitted)
 
 
 def _name_key(value):
@@ -208,6 +219,7 @@ class Weather:
         self._fetch_json = fetch_json
         self._permitted = permitted
         self._places = {}
+        self.sample = None
 
     def _fetch(self, host, path, params):
         _require_permission(self._permitted)
@@ -264,6 +276,10 @@ class Weather:
             temperature = _temperature(current["temperature_2m"])
             condition = CONDITIONS.get(current["weather_code"])
             conditions = f" with {condition}" if condition else ""
+            _require_permission(self._permitted)
+            city = " ".join("".join(ch if ch.isprintable() else " " for ch in place.label).split())[:32]
+            sample = f"Weather  {city}  {temperature} {self.units[0].upper()}"
+            self.sample = (time.monotonic(), sample + (f"  {condition}" if condition else ""))
             return (
                 f"Open-Meteo reports {temperature} {unit}{conditions} in {place.label} "
                 f"at {local_time} local time."
@@ -282,6 +298,8 @@ class Weather:
         return f"{forecast} in {place.label} {period}, {weekday}.{chance}"
 
     async def reply(self, period="current", location=""):
+        if period == "current":
+            self.sample = None
         _require_permission(self._permitted)
         if period not in ("current", "today", "tomorrow"):
             return "I can check the weather now, today, or tomorrow."

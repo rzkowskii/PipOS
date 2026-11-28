@@ -25,6 +25,8 @@ them on here:
   volume keys stepped down to nothing are the same kind of mute.
 - `key.apps` (Launchpad): the workshop terminal, as "open the terminal"
   opens it; pressed again it puts the terminal away.
+- `ui.action`: a Quick Menu selection made with the keyboard, through the
+  same workshop open route as its spoken command.
 
 Mission Control (the menu, as F2) and play/pause (listen, or stop a reply)
 are the face's own and never reach the mind; previous, next and eject do
@@ -37,7 +39,9 @@ import asyncio
 import sys
 from pathlib import Path
 
-TOPICS = ("key.brightness", "key.volume", "key.mute_speaker", "key.kbd_light", "key.apps")
+from . import actions
+
+TOPICS = ("key.brightness", "key.volume", "key.mute_speaker", "key.kbd_light", "key.apps", "ui.action")
 # The tag on the brainstem requests a key makes; its answer carries it back.
 REQ = "key"
 # How Pip names its menu key on the laptop, whose printed F2 is brightness up
@@ -115,6 +119,9 @@ class Keys:
                 await self._mute()
             elif topic == "key.apps":
                 self._launchpad()
+            elif topic == "ui.action" and event.get("via") == "key":
+                if phrase := actions.quick_menu_app_phrase(event.get("id")):
+                    self._open_app(phrase, "Quick Menu")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # a key must never stop the mind
@@ -260,20 +267,23 @@ class Keys:
             self.log(f"could not clear the speaker mute note: {exc}")
 
     def _launchpad(self):
+        view = (getattr(self.apps, "view", None) or {}).get("terminal")
+        self._open_app(APP_PHRASES.get(view, APP_OPEN), "Launchpad")
+
+    def _open_app(self, phrase, source):
         if self.apps is None:
-            self.log("Launchpad: no workshop here")
+            self.log(f"{source}: no workshop here")
             return
         if self._app_task is not None and not self._app_task.done():
-            self.log("Launchpad: the last press is still being answered")
+            self.log(f"{source}: the last press is still being answered")
             return
-        view = (getattr(self.apps, "view", None) or {}).get("terminal")
-        command = self.apps.parse(APP_PHRASES.get(view, APP_OPEN), self.guest())
+        command = self.apps.parse(phrase, self.guest())
         if command is None:
-            self.log("Launchpad: nothing to do")
+            self.log(f"{source}: nothing to do")
             return
-        self._app_task = asyncio.get_running_loop().create_task(self._run_app(command))
+        self._app_task = asyncio.get_running_loop().create_task(self._run_app(command, source))
 
-    async def _run_app(self, command):
+    async def _run_app(self, command, source):
         said = []
 
         async def say(line):
@@ -286,13 +296,13 @@ class Keys:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self.log(f"Launchpad: the workshop did not answer: {exc!r}")
+            self.log(f"{source}: the workshop did not answer: {exc!r}")
             return
         if command.kind == "say" and said:
-            self.log(f"Launchpad: {said[-1]}")
+            self.log(f"{source}: {said[-1]}")
 
     async def close(self):
-        """Stop a Launchpad press still being answered."""
+        """Stop a workshop key request still being answered."""
         task, self._app_task = self._app_task, None
         if task is not None and not task.done():
             task.cancel()

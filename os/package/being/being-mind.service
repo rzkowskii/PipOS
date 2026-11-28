@@ -3,15 +3,17 @@ Description=Being: mind
 ConditionPathExists=!/mind/.being-restore-in-progress
 StartLimitIntervalSec=0
 RequiresMountsFor=/mind
+Requires=being-context-storage.service
 # Not after the cortex: its model check takes seconds (18 s from the Try
 # stick), and the mind answers the time, timers and typing without a model.
 # It finds the cortex by itself once it is up. On the way down the two stop
 # together, so the mind saves the model's cache when a power-off is
 # announced (the brainstem's notice), not in its last moment.
-After=being-brainstem.service
+After=being-brainstem.service being-context-storage.service
 
 [Service]
 EnvironmentFile=/etc/being/env
+EnvironmentFile=/run/being-context/paths.env
 # The image ships compiled modules (being.mk), so nothing is compiled here.
 Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 -m mind --bus ${BEING_BUS} --config /etc/being --mind-dir ${BEING_MIND} \
@@ -31,6 +33,11 @@ NotifyAccess=main
 # in Internet mode, the weather service (plan task 3.14 moves that fetch to
 # its own sandboxed helper).
 NoNewPrivileges=yes
+LimitCORE=0
+DevicePolicy=closed
+# The encrypted backup flow still mounts owner-selected media. The local
+# setup screen owns battery-clock writes.
+DeviceAllow=block-* rw
 ProtectHome=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes

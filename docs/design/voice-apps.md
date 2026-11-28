@@ -95,7 +95,7 @@ Optional beats for the same demo:
 | Typing pace | 16 characters a second (screen); model speed (voice, codegen) | The model's own rate through a jitter buffer; recipes at about 30 characters a second | The model already writes at about typing speed. Slowing it down only adds waiting |
 | Where files live | Loop image on /mind (screen); /mind/workshop (codegen); RAM (safety) | A 64 MB RAM-only tmpfs at /workshop, mounted noexec | Real forgetting. It can never fill /mind, and /mind is noexec anyway |
 | "Install an application" | A script in ~/bin (screen); a shelf (safety); mini-app recipes (codegen); a refusal (voice) | A built-in shelf plus an honest "I can't download" | It is the only option that is both offline and impressive. A script in ~/bin cannot be executed from a noexec workspace |
-| When code runs | Confirm first (screen); "run it" (voice); 4-second countdown (safety) | A script runs only on "run it". A one-line command from the allow-list runs after a 4-second countdown you can stop | Asking for a one-liner is consent. A script is a separate thing to try. The countdown catches mishearing |
+| When code runs | Confirm first (screen); "run it" (voice); 4-second countdown (safety) | Scripts and generated one-line commands wait for "run it". Built-in one-line recipes have a 4-second countdown you can stop | Confirm code Pip wrote. The recipe countdown gives the owner time to catch a mishearing |
 | Cage limits | 512M/64 tasks (screen); 256M/48 (safety); 128M/16 (codegen) | Safety's numbers: 256 MB, 48 tasks, half of one logical CPU, idle scheduling | Safety checked the kernel. Section 5 says honestly which limits are inert until the next image |
 | Lid closed | Jobs keep running (screen); freeze (safety) | Freeze the cage, thaw on open | A closed lid means nobody is watching. A 13-inch chassis in a bag must not heat up |
 | A bare "stop" | Pause (voice); stop the run (codegen) | Pause, in every phase. Esc interrupts a running program | A misheard "stop" must never destroy work. "Cancel" is the word that ends it |
@@ -298,8 +298,8 @@ the job alone. That is what makes Esc "innermost first".
 | held | The display has stopped (you said "Hey Pip"), but generation continues into the buffer | writing on a release, after 6 s with no speech, or when the state returns to idle; paused on a pause command or a conversation turn |
 | paused | Typing has stopped and the generation is parked: the stream is cut and its token IDs kept | reading or writing on resume, cancelled |
 | checking | The file is complete. The syntax, policy and free import fix run | waiting, failed |
-| waiting | The script is written. "It's ready. Say run it." | countdown (a one-liner), running ("run it"), cancelled |
-| countdown | A one-liner Pip wrote, 4 s, Enter not yet pressed | running, or cancelled (Esc, "stop": Ctrl-U clears the line) |
+| waiting | A script or generated command is ready. "It's ready. Say run it." | running ("run it"), cancelled |
+| countdown | A built-in one-line recipe is ready, 4 s before execution | running, or cancelled (Esc, "stop": Ctrl-U clears the line) |
 | running | The program is in the foreground (tcgetpgrp shows it) | done, failed, frozen ("stop for a second"), stopped (Esc, "cancel", 60 s limit) |
 | frozen | The session cgroup is frozen | running on "carry on", stopped on "cancel" |
 | done / failed / cancelled | The end | A cancel can be undone for 30 s with "carry on" or "undo that" |
@@ -775,7 +775,7 @@ Fixed costs:
 | Countdown from ten on screen | about 4 s, then a 10 s run | 3.5-8.5 s, then a 10 s run |
 | "List my notes" | 2-3 s | 6-11 s |
 | ASCII spiral | 8-12 s | 8-25 s, and probably not a spiral |
-| One-line command ("disk space") | 1-2 s plus the 4 s countdown | 1.5-3.5 s plus the 4 s countdown |
+| One-line command ("disk space") | 1-2 s plus the 4 s countdown | 1.5-3.5 s before the "run it" prompt |
 | "Hey Pip" to typing stopped | about 0.5 s after "Pip" | same |
 | "Carry on" | instant | under 0.5 s if the cache extends; 15-45 s in the worst case (M4) |
 | "Run it" to first output | under 1 s | same |
@@ -976,7 +976,7 @@ The critical path is 1 → 14 → 15 → 16 → 18 → 25 → 26.
 The open questions in section 11 were settled as follows:
 
 1. **Opt-in or on:** on by default on Try images and installed beings; Setup has a switch to turn it off. The original "no shell on the screen" rule now means "no login shell"; the caged workshop shell is allowed.
-2. **Running code:** scripts run only on "run it"; one-line commands Pip wrote run after a 4-second countdown that "stop", Esc or any key cancels. Destructive patterns are refused by the screen regardless.
+2. **Running code:** scripts and one-line commands Pip writes wait for "run it". A built-in one-line recipe runs after a 4-second countdown that "stop", Esc or any key cancels. Shell commands must pass the workshop policy. This follows Shell Lab decision S7 from 25 November.
 3. **Install:** the offline shelf of five to eight tiny console programs plus the honest refusal line. Network installs wait until after the proof of concept.
 4. **Workshop:** RAM-only, cleared at reboot, never backed up; "forget that script" deletes the file and its transcript.
 5. **Recipes:** labelled recipes for the rehearsed demo sentences, and the model for everything else; Pip says which it used if asked.

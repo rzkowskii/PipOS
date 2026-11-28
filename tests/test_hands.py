@@ -324,7 +324,7 @@ class TypistTest(unittest.TestCase):
         self.assertEqual(typist.take(0.5), "")
         self.assertEqual(typist.take(1.0), "")
         resumed = typist.take(0.32 + hands.HUMAN_QUIET + 0.01)
-        self.assertTrue(resumed.startswith("\x15" + typed))
+        self.assertTrue(resumed.startswith("\x05\x15" + typed))
 
     def test_minimised_types_at_once(self):
         typist = Typist(now=0.0)
@@ -709,6 +709,14 @@ class RendererSignalTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await failing.hide())
         self.assertTrue(failing.visible, "a refused signal changes nothing")
 
+        def stalled(argv, timeout):
+            self.assertEqual(timeout, hands.PANEL_SIGNAL_SECONDS)
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+        failing.run = stalled
+        self.assertFalse(await failing.hide())
+        self.assertTrue(failing.visible, "a timed out signal leaves visibility unconfirmed")
+
     async def test_ready_waits_for_the_first_frame_file(self):
         import tempfile
         from unittest import mock
@@ -730,12 +738,39 @@ class RendererSignalTest(unittest.IsolatedAsyncioTestCase):
 
     def test_every_app_has_a_renderer_line(self):
         for app in hands.APPS:
-            self.assertEqual(renderer_command(app)[-5], app)
-        self.assertEqual(set(hands.SMALL_APPS), {"monitor", "clock"})
-        from mind import app_clock, app_monitor
-        self.assertEqual(hands.SMALL_TITLES, {"monitor": app_monitor.TITLE, "clock": app_clock.TITLE})
+            command = renderer_command(app)
+            self.assertEqual(command[command.index("--panel") + 1], app)
+            self.assertEqual("--hidden" in command, app in hands.TEXT_PANELS, app)
+        self.assertEqual(set(hands.SMALL_APPS), {"monitor", "clock", "calc", "lists", "memory", "journal", "mind", "lookup"})
+        from mind import app_clock, app_lookup, app_monitor
+        self.assertEqual(hands.SMALL_TITLES, {"monitor": app_monitor.TITLE, "clock": app_clock.TITLE,
+                                             "calc": "Calculator", "lists": "Lists", "memory": "Memory",
+                                             "journal": "Journal", "mind": "Mind", "lookup": app_lookup.TITLE})
         self.assertEqual((app_monitor.COLUMNS, app_monitor.ROWS), (hands.GRID_COLUMNS, hands.GRID_ROWS))
         self.assertEqual((app_clock.COLUMNS, app_clock.ROWS), (hands.GRID_COLUMNS, hands.GRID_ROWS))
+
+    async def test_visibility_requires_a_committed_frame(self):
+        import struct
+        import tempfile
+        from types import SimpleNamespace
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(hands, "PANEL_DIR", Path(folder)):
+            renderer = hands.PanelRenderer("lists")
+            renderer.proc = SimpleNamespace(returncode=None)
+            frame = Path(folder) / "lists.frame"
+            header = bytearray(128)
+            header[:4] = b"BPN1"
+            frame.write_bytes(header)
+            self.assertTrue(await renderer.ready(timeout=0, visible=False))
+            self.assertFalse(await renderer.ready(timeout=0, visible=True))
+            struct.pack_into("<Q", header, 16, 1)
+            struct.pack_into("<I", header, 32, 1)
+            frame.write_bytes(header)
+            self.assertFalse(await renderer.ready(timeout=0, visible=True))
+            struct.pack_into("<Q", header, 16, 2)
+            frame.write_bytes(header)
+            self.assertTrue(await renderer.ready(timeout=0, visible=True))
 
 
 if __name__ == "__main__":
@@ -834,14 +869,16 @@ class NoFaceTest(unittest.IsolatedAsyncioTestCase):
         self.dir.cleanup()
 
     async def test_refused_while_the_menu_has_the_screen(self):
-        for app in ("terminal", "monitor", "clock"):
+        # Lookup is refused "offline" before the screen check unless the owner
+        # has allowed web lookups, so allow them here to reach no_face.
+        self.enterContext(mock.patch.object(hands, "web_lookup_ready", lambda *_a, **_k: True))
+        for app in hands.APPS:
             await self.hands.on_event({"t": "app.open", "app": app, "req": f"r-{app}"})
         refused = [e for e in self.bus.sent if e["t"] == "app.refused"]
         self.assertEqual([(e["app"], e["reason"], e["req"]) for e in refused],
-                         [("terminal", "no_face", "r-terminal"), ("monitor", "no_face", "r-monitor"),
-                          ("clock", "no_face", "r-clock")])
+                         [(app, "no_face", f"r-{app}") for app in hands.APPS])
         self.assertEqual([e for e in self.bus.sent if e["t"] == "app.state"], [])
-        self.assertEqual(self.hands.view, {"terminal": "closed", "monitor": "closed", "clock": "closed"})
+        self.assertEqual(self.hands.view, dict.fromkeys(hands.APPS, "closed"))
         self.assertIn(["systemctl", "is-active", "being-face.service", "being-local-screen.service"], self.calls)
         self.assertFalse(any(argv[:2] == ["systemctl", "stop"] and "being-local-screen.service" in argv
                              for argv in self.calls), "the menu is never closed for the owner")

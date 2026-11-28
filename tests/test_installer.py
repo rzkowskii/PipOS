@@ -1,3 +1,4 @@
+import re
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
@@ -6,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from mind import installer
+from mind import install_status, installer
 from mind.installer import ALIGNMENT, GIB, MIB, installation_plan, minimum_target
 
 
@@ -49,6 +50,23 @@ class LayoutPreview(unittest.TestCase):
             installation_plan(report(capacity - MIB), used, "/dev/sdb")
         self.assertEqual(installation_plan(report(capacity), used, "/dev/sdb")["partitions"][-1]["size_bytes"], GIB)
 
+    def test_partition_bar_uses_plan_sizes_and_names_even_if_a_partition_is_too_small_to_draw(self):
+        for capacity in [8 * GIB, 512 * GIB]:
+            with self.subTest(capacity=capacity), patch.dict(installer.os.environ, {"BEING_CONSOLE_UI": "1"}):
+                plan = installation_plan(report(capacity), 531 * MIB, "/dev/sdb")
+                sizes = [part["size_bytes"] for part in plan["partitions"]]
+                width = 64
+                bar, *legend = installer.partition_rows(plan, width)
+                boundaries = [0] + [round(sum(sizes[:i + 1]) / sum(sizes) * width) for i in range(len(sizes))]
+                expected = [end - start for start, end in zip(boundaries, boundaries[1:]) if end > start]
+                runs = re.findall(r"\x1b\[[0-9;]+m([█▓░]+)\x1b\[0m", bar)
+                self.assertEqual([len(run) for run in runs], expected)
+                self.assertEqual(installer.ui.visible_len(bar), width)
+                labels = " ".join(installer.ui.plain(line) for line in legend)
+                for label, size in zip(["Startup", "System A", "System B", "Models", "Memory"], sizes):
+                    self.assertIn(f"{label} {installer.size_label(size)}", labels)
+                self.assertTrue(all(installer.ui.visible_len(line) <= width for line in legend))
+
     def test_refuses_in_use_targets_and_unknown_model_or_sector_geometry(self):
         with self.assertRaisesRegex(ValueError, "mounted filesystem"):
             installation_plan(report(reasons=("mounted",)), 0, "/dev/sdb")
@@ -72,7 +90,7 @@ class InstallConfirmation(unittest.TestCase):
         # A blank, readable target unless a test says otherwise.
         self.enterContext(patch.object(installer, "disk_contents", return_value={
             "macos": False, "being": False, "partitions": 0, "readable": True}))
-        self.write = Mock(side_effect=lambda plan, recheck, *, progress, meter: recheck())
+        self.write = Mock(side_effect=lambda plan, recheck, **_: recheck())
         self.cable = Path(self.enterContext(tempfile.TemporaryDirectory())) / "cable"
         self.enterContext(patch.dict("sys.modules", {"mind.install_apply": SimpleNamespace(
             apply_installation=self.write, CABLE_MEDIA=self.cable)}))
@@ -123,6 +141,40 @@ class InstallConfirmation(unittest.TestCase):
         confirm.assert_called_once_with("Type ERASE /dev/sdb to install: ")
         self.assertIn("Installation complete.", self.output.getvalue())
 
+    def test_encrypted_choice_forwards_only_the_in_memory_pin_after_same_challenge(self):
+        from mind import mind_encryption
+
+        pin = bytearray(b"386047195275")
+        second = bytearray(pin)
+        seen = []
+        self.write.side_effect = lambda *args, **kwargs: seen.append(bytes(kwargs["mind_pin"]))
+        with (patch.object(installer.os, "access", return_value=True),
+              patch.object(mind_encryption, "read_pin", side_effect=[pin, second]),
+              patch("builtins.input", side_effect=["e", "ERASE /dev/sdb"]) as confirm):
+            installer.confirm_installation("/dev/sdb")
+        self.assertIs(self.write.call_args.kwargs.get("mind_pin"), pin)
+        self.assertEqual(seen, [b"386047195275"])
+        self.assertEqual([call.args[0] for call in confirm.call_args_list], ["Type ERASE /dev/sdb to install: "] * 2)
+        self.assertNotIn("386047195275", self.output.getvalue())
+        self.assertFalse(pin)
+        self.assertFalse(second)
+
+    def test_protected_install_mismatch_leaves_the_target_untouched(self):
+        from mind import mind_encryption
+
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled):
+                first = bytearray(b"386047195275")
+                other = None if cancelled else bytearray(b"386047195276")
+                with (patch.object(installer.os, "access", return_value=True),
+                      patch.object(mind_encryption, "read_pin", side_effect=[first, other]),
+                      patch("builtins.input", return_value="e")):
+                    with self.assertRaisesRegex(ValueError, "did not match"):
+                        installer.confirm_installation("/dev/sdb")
+                self.write.assert_not_called()
+                self.assertFalse(first)
+                self.assertFalse(other)
+
     def test_revalidation_detects_replacement_after_confirmation(self):
         replaced = {**self.report, "disks": [{**self.report["disks"][0], "serial": "CHANGED"}, self.report["disks"][1]]}
         self.scan.side_effect = [(self.report, 0), (replaced, 0)]
@@ -133,28 +185,80 @@ class InstallConfirmation(unittest.TestCase):
 
     def test_console_confirmation_keeps_the_challenge_and_reports_progress(self):
         seen = []
+        spoken = []
 
-        def write(plan, recheck, *, progress, meter):
+        def write(plan, recheck, *, progress, meter, expected_contents):
             recheck()
-            for stage, _, _ in installer.INSTALL_STAGES:
+            for index, (stage, _, _) in enumerate(installer.INSTALL_STAGES):
                 progress(stage)
-                meter(50, 100)
+                if index in {1, 2}:
+                    meter(50, 100)
                 seen.append(stage)
+            progress("Private label and progress details")
 
         self.write.side_effect = write
         self.enterContext(patch.dict(installer.os.environ, {"BEING_CONSOLE_UI": "1", "COLUMNS": "68"}))
+        token = install_status.sink.set(spoken.append)
+        self.addCleanup(install_status.sink.reset, token)
         with patch("builtins.input", return_value="ERASE /dev/sdb") as confirm:
             installer.confirm_installation("/dev/sdb", flow=("Install", 2, 2))
         prompt = installer.ui.plain(confirm.call_args.args[0])
         self.assertTrue(prompt.endswith("Type ERASE /dev/sdb to install: "), prompt)
         self.assertEqual(seen, [stage for stage, _, _ in installer.INSTALL_STAGES])
+        self.assertEqual(spoken, ["prepare", "write", "verify", "commit", "complete"])
         text = installer.ui.plain(self.output.getvalue())
         self.assertIn("Install · Step 2 of 2", text)
-        self.assertIn("will be erased", text)
+        self.assertIn("replaces all data", text)
         self.assertIn("Target SSD", text)
+        self.assertIn("Copied 50 / 100 bytes", text)
+        self.assertIn("Checked 50 / 100 bytes", text)
+        self.assertIn("Overall estimate", text)
+        self.assertIn("\x1b]7772;install=0\a", text)
+        self.assertIn("\x1b]7772;install=100\a", text)
+        self.assertIn("\x1b]7772;install=off\a", text)
+        self.assertIn(installer.POWER_CUT_HELP, " ".join(text.split()))
         finish = text.rsplit("Installation complete.", 1)
         self.assertEqual(len(finish), 2)
         self.assertIn("Remove the USB stick.", finish[1])
+
+    def test_narration_waits_for_both_confirmations_and_reports_only_a_fixed_failure(self):
+        spoken = []
+        token = install_status.sink.set(spoken.append)
+        self.addCleanup(install_status.sink.reset, token)
+
+        def write(_plan, _recheck, *, progress, meter, expected_contents):
+            self.assertEqual(spoken, [])
+            progress(installer.INSTALL_STAGES[1][0])
+            raise OSError("a private path")
+
+        self.write.side_effect = write
+        with patch("mind.installer.contents_warning", return_value=([], "data")), \
+                patch("builtins.input", return_value="ERASE /dev/sdb"), \
+                patch("mind.installer.second_confirmation", side_effect=ValueError("second word did not match")):
+            with self.assertRaisesRegex(ValueError, "second word"):
+                installer.confirm_installation("/dev/sdb")
+        self.assertEqual(spoken, [])
+        self.write.assert_not_called()
+
+        with patch("mind.installer.contents_warning", return_value=([], "data")), \
+                patch("builtins.input", return_value="ERASE /dev/sdb"), \
+                patch("mind.installer.second_confirmation") as confirmed:
+            with self.assertRaisesRegex(ValueError, "stopped during disk writing"):
+                installer.confirm_installation("/dev/sdb")
+        confirmed.assert_called_once_with("data")
+        self.assertEqual(spoken, ["write", "stopped"])
+
+    def test_failed_install_progress_does_not_use_a_completion_frame(self):
+        with patch.dict(installer.os.environ, {"BEING_CONSOLE_UI": "1"}):
+            view = installer.InstallProgress("Installing", installer.INSTALL_STAGES)
+            with self.assertRaisesRegex(OSError, "disk stopped"):
+                with view:
+                    view.stage(installer.INSTALL_STAGES[1][0])
+                    view.advance(4096, 8192)
+                    raise OSError("disk stopped")
+        text = self.output.getvalue()
+        self.assertNotIn("\x1b]7772;install=100\a", text)
+        self.assertIn("\x1b]7772;install=off\a", text)
 
     def test_console_mismatch_writes_nothing(self):
         self.enterContext(patch.dict(installer.os.environ, {"BEING_CONSOLE_UI": "1"}))
@@ -195,6 +299,36 @@ class TargetSafety(InstallConfirmation):
         self.assertEqual(confirm.call_args.args[0], "Type ERASE MACOS to erase macOS: ")
         self.write.assert_called_once()
 
+    def test_wide_macos_review_keeps_the_layout_and_erase_warning_in_one_view(self):
+        self.contents(macos=True)
+        self.report["disks"][0]["model"] = "Apple SSD SM256E"
+        with patch.dict(installer.os.environ, {"BEING_CONSOLE_UI": "1", "COLUMNS": "104", "LINES": "26"}), \
+                patch("builtins.input", side_effect=["ERASE /dev/sdb", ""]) as keys:
+            with self.assertRaisesRegex(ValueError, "left untouched"):
+                installer.confirm_installation("/dev/sdb", flow=("Install", 2, 2))
+        self.write.assert_not_called()
+        view = installer.ui.plain(self.output.getvalue()).splitlines()
+        self.assertTrue(any("Disk layout" in row and "This cannot be undone" in row for row in view))
+        self.assertTrue(any("battery cycle count" in row for row in view))
+        self.assertTrue(any("Memory" in row and "GiB" in row for row in view))
+        self.assertTrue(all(len(row) <= 104 for row in view))
+        self.assertLessEqual(len(view), 22, "leave screen rows for the typed challenges")
+        self.assertEqual([installer.ui.plain(call.args[0]).strip(" \n›") for call in keys.call_args_list],
+                         ["Type ERASE /dev/sdb to install:", "Type ERASE MACOS to erase macOS:"])
+
+    def test_short_macos_review_keeps_the_title_and_warning_above_both_prompts(self):
+        self.contents(macos=True)
+        with patch.dict(installer.os.environ, {"BEING_CONSOLE_UI": "1", "COLUMNS": "75", "LINES": "23"}), \
+                patch("builtins.input", side_effect=["ERASE /dev/sdb", ""]):
+            with self.assertRaisesRegex(ValueError, "left untouched"):
+                installer.confirm_installation("/dev/sdb", flow=("Install", 2, 2))
+        lines = installer.ui.plain(self.output.getvalue()).splitlines()
+        self.assertIn("Ready to install", lines[0])
+        self.assertTrue(any("replaces all data" in row for row in lines))
+        self.assertTrue(any("Keep a macOS installer stick" in row for row in lines))
+        self.assertLessEqual(len(lines), 19, "reserve four rows for the two typed challenges")
+        self.write.assert_not_called()
+
     def test_being_target_points_to_an_update_and_needs_erase_being(self):
         self.contents(being=True, macos=False)
         with patch("builtins.input", side_effect=["ERASE /dev/sdb", "ERASE BEING"]) as confirm:
@@ -202,24 +336,25 @@ class TargetSafety(InstallConfirmation):
         self.assertIn("use the menu (Mission Control, or fn and F2), Update from a USB stick, instead.",
                       self.output.getvalue())
         self.assertEqual(confirm.call_args.args[0], "Type ERASE BEING to erase the being on it: ")
+        self.assertTrue(self.write.call_args.kwargs["expected_contents"]["being"])
 
-    def test_failure_after_the_erase_says_the_disk_no_longer_starts(self):
+    def test_failure_during_disk_writing_says_how_to_start_again(self):
         self.contents()
 
-        def write(plan, recheck, *, progress, meter):
+        def write(plan, recheck, *, progress, meter, expected_contents):
             progress(installer.INSTALL_STAGES[0][0])
             progress(installer.INSTALL_STAGES[1][0])
             raise OSError("Short write to the target.")
 
         self.write.side_effect = write
         with patch("builtins.input", return_value="ERASE /dev/sdb"):
-            with self.assertRaisesRegex(ValueError, "no longer starts and holds no being"):
+            with self.assertRaisesRegex(ValueError, r"stopped during disk writing to /dev/sdb.*Start again from this USB"):
                 installer.confirm_installation("/dev/sdb")
 
     def test_failure_before_the_erase_is_reported_unchanged(self):
         self.contents()
 
-        def write(plan, recheck, *, progress, meter):
+        def write(plan, recheck, *, progress, meter, expected_contents):
             progress(installer.INSTALL_STAGES[0][0])
             raise ValueError("Insufficient free RAM to stage this installation. The target is untouched.")
 
@@ -290,4 +425,4 @@ class DiscardHonesty(unittest.TestCase):
         self.assertNotIn("for good", rows[1])
         self.assertIn("may stay readable", rows[1])
         rows, _ = installer.contents_warning({"being": True}, discard=True)
-        self.assertIn("erases that being for good", rows[1])
+        self.assertIn("may still be recoverable", rows[1])

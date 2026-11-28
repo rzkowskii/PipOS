@@ -48,6 +48,9 @@ class SimBody:
         self._proc = None
         self._stop = False
         self._started = False
+        # Reply tokens accepted and not yet ended with a final say.played, as
+        # the real voice reports them (mind/played.py).
+        self._open = {}
 
     def show(self, text):
         print(text, file=self.out, flush=True)
@@ -143,6 +146,8 @@ class SimBody:
             event = await self.bus.recv()
             topic = event.get("t")
             if topic == "say.request":
+                if isinstance(event.get("reply"), str):
+                    self._open.setdefault(event["reply"], None)
                 self._queue.put_nowait(event)
             elif topic == "say.stop":
                 await self._stop_speaking()
@@ -168,6 +173,13 @@ class SimBody:
                 self._proc.terminate()
             except ProcessLookupError:
                 pass
+        await self._settle()
+
+    async def _settle(self, finished=None):
+        """End each open reply with its final say.played, after its clauses' own."""
+        tokens, self._open = list(self._open), {}
+        for token in tokens:
+            await self.bus.send("say.played", reply=token, final=True, stopped=token != finished)
 
     async def _speak_loop(self):
         while True:
@@ -178,11 +190,14 @@ class SimBody:
                 if not self._started:
                     self._started = True
                     await self.bus.send("say.started")
+                if isinstance(event.get("reply"), str) and type(event.get("seq")) is int:
+                    await self.bus.send("say.played", reply=event["reply"], seq=event["seq"])
                 self.show(f"  {text}")
                 await self._utter(text)
             if self._stop:
                 continue
             if event.get("last"):
+                await self._settle(event.get("reply"))
                 fields = {"final": True}
                 announcement = event.get("announcement")
                 if self._started and isinstance(announcement, str) and announcement:

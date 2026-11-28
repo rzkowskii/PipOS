@@ -89,6 +89,8 @@ def erase_all(state_dir):
                 db.execute("DELETE FROM items")
                 db.execute("DELETE FROM lists")
                 db.execute("DELETE FROM notes")
+                if db.execute("SELECT 1 FROM sqlite_schema WHERE name='phrase_habits' AND type='table'").fetchone():
+                    db.execute("DELETE FROM phrase_habits")
                 db.commit()
                 db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 db.execute("VACUUM")

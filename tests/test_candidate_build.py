@@ -32,7 +32,8 @@ class CandidateBuild(unittest.TestCase):
                 path.mkdir()
                 # The frozen snapshot copies files. Real input directories are populated.
                 (path / "fixture").touch()
-        for name in ("build.sh", "candidate-build.sh", "candidate_manifest.py", "__init__.py"):
+        for name in ("build.sh", "candidate-build.sh", "candidate_manifest.py", "candidate_parity.py",
+                     "hardware_image.py", "__init__.py"):
             shutil.copy2(ROOT / "lab" / name, self.root / "lab" / name)
         # Model inspection has its own ext4 extraction tests.
         (self.root / "lab/candidate_models.py").write_text('''import hashlib, json, sys
@@ -68,7 +69,7 @@ print(json.dumps({"source_sha256": source["sha256"], "model": source["model"], "
         commands = self.root / "out/commands"
         commands.mkdir()
         (commands / "colima").write_text('#!/bin/sh\nexit 0\n')
-        (commands / "7zz").write_text('#!/bin/sh\nexit 0\n')
+        (commands / "7zz").write_text('#!/bin/sh\nprintf "Path = usr/share/being/variant\\n"\n')
         (commands / "docker").write_text('''#!/usr/bin/env python3
 import os, shutil, sys
 from pathlib import Path
@@ -112,3 +113,43 @@ if "--cidfile" in args:
         result = self.build("partial", FAIL_TEST_BUILD="1")
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "out/candidates/partial/release.json").exists())
+
+    def test_freezes_named_pack_sources_and_detects_changes_without_copying_other_voice_files(self):
+        pack_dir = self.root / "os/package/being/model-packs"
+        wanted = ["out/voice/DOWNLOADS.json", "out/models/DOWNLOADS.json"]
+        for role in ("asr", "tts", "vad", "speaker", "dream", "embeddings"):
+            descriptor = pack_dir / role / "pack.json"
+            descriptor.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / descriptor.relative_to(self.root), descriptor)
+            for source in json.loads(descriptor.read_text())["sources"]:
+                wanted.append(f"out/{source['file']}")
+        for name in wanted:
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(name)
+
+        voice_input = next(name for name in wanted if name.startswith("out/voice/tts/"))
+        other = "out/voice/listen/owner.wav"
+        recording = self.root / other
+        recording.parent.mkdir()
+        image_source = candidate_manifest.image_source_id(self.root)
+        recording.write_bytes(b"local recording")
+        self.assertEqual(candidate_manifest.image_source_id(self.root), image_source)
+
+        result = self.build("with-packs")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        directory = self.root / "out/candidates/with-packs"
+        frozen = directory / "source"
+        seal = json.loads((directory / "release.json").read_text())
+        for name in wanted:
+            self.assertIn(name, seal["source"]["files"])
+            self.assertEqual((frozen / name).read_text(), name)
+        self.assertNotIn(other, seal["source"]["files"])
+        self.assertFalse((frozen / other).exists())
+        candidate_manifest.check_source(frozen, seal["source"])
+        self.assertEqual(seal["source_id"], image_source)
+
+        (frozen / voice_input).write_bytes(b"changed archive")
+        self.assertNotEqual(candidate_manifest.image_source_id(frozen), image_source)
+        with self.assertRaisesRegex(ValueError, voice_input):
+            candidate_manifest.check_source(frozen, seal["source"])

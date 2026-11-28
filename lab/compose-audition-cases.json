@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "bins",
+      "request": "Write a polite letter to Rivergum Council about the missed recycling collection on Tuesday 12 May at 14 Wattle Street. Ask for collection before Friday and confirmation by email.",
+      "points": [["missed", "recycling"], ["Tuesday", "12 May"], ["14 Wattle Street"], ["before Friday"], ["confirmation", "email"]]
+    },
+    {
+      "id": "library",
+      "request": "Write to Cedar Library asking to renew the community room booking for the Moonleaf Garden Club on 7 June from 6 pm to 8 pm. Ask whether the fee remains $40.",
+      "points": [["Cedar Library"], ["Moonleaf Garden Club"], ["7 June"], ["6 pm", "8 pm"], ["fee", "$40"]]
+    },
+    {
+      "id": "landlord",
+      "request": "Write a calm letter to Morgan Lee about the leaking kitchen tap at 22 Fern Lane. Say it began on Monday, is wasting water, and ask for a plumber this week.",
+      "points": [["Morgan Lee"], ["leaking", "kitchen tap"], ["22 Fern Lane"], ["Monday"], ["wasting water"], ["plumber", "this week"]]
+    },
+    {
+      "id": "school",
+      "request": "Write to Principal Asha Patel explaining that Sam Rivera will miss the excursion on 3 August because of a medical appointment. Ask how to receive the worksheet.",
+      "points": [["Principal Asha Patel"], ["Sam Rivera"], ["excursion"], ["3 August"], ["medical appointment"], ["worksheet"]]
+    },
+    {
+      "id": "refund",
+      "request": "Write to Northstar Repairs requesting a refund of $85 for order NR-204 because the repaired lamp stopped working after two days. Ask for a reply within 10 business days.",
+      "points": [["Northstar Repairs"], ["refund", "$85"], ["NR-204"], ["lamp", "stopped working"], ["two days"], ["10 business days"]]
+    },
+    {
+      "id": "noise",
+      "request": "Write a friendly note to neighbour Elena Cho about loud music after 11 pm on Thursday and Saturday. Mention the baby wakes early and ask to lower the volume after 10 pm.",
+      "points": [["Elena Cho"], ["loud music"], ["11 pm", "Thursday", "Saturday"], ["baby", "wakes early"], ["lower", "volume", "after 10 pm"]]
+    },
+    {
+      "id": "volunteer",
+      "request": "Write to Harbour Pantry offering to volunteer on Wednesday mornings from September. Mention food-safety training and ask whether the 9 am shift needs help.",
+      "points": [["Harbour Pantry"], ["volunteer"], ["Wednesday mornings"], ["September"], ["food-safety training"], ["9 am shift"]]
+    },
+    {
+      "id": "tree",
+      "request": "Write to Hillside Council about a damaged jacaranda outside 6 Paperbark Road after the storm on 18 January. Say one branch hangs over the footpath and request an inspection.",
+      "points": [["Hillside Council"], ["damaged jacaranda"], ["6 Paperbark Road"], ["storm", "18 January"], ["branch", "footpath"], ["inspection"]]
+    },
+    {
+      "id": "class",
+      "request": "Write to Juniper Arts Centre asking to move Casey Wong from the pottery class on 4 March to the class on 11 March. Explain that the first date clashes with work and ask if the $25 materials fee transfers.",
+      "points": [["Juniper Arts Centre"], ["Casey Wong"], ["pottery class"], ["4 March", "11 March"], ["clashes with work"], ["$25", "materials fee", "transfers"]]
+    },
+    {
+      "id": "delivery",
+      "request": "Write to Blue Finch Furniture about delivery BF-731 scheduled for 16 October. Ask for arrival after 2 pm, a call 30 minutes beforehand, and confirmation that the old table will be removed.",
+      "points": [["Blue Finch Furniture"], ["BF-731"], ["16 October"], ["after 2 pm"], ["call", "30 minutes beforehand"], ["old table", "removed"]]
+    }
+  ]
+}

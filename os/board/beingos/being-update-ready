@@ -4,6 +4,7 @@ set -eu
 IFS= read -r cmdline </proc/cmdline
 set -f
 slot=
+installed=no
 for argument in $cmdline; do
     case "$argument" in
         being.try=1)
@@ -14,7 +15,8 @@ for argument in $cmdline; do
                 echo "Use the installed disk's RAUC service to update PipOS" >&2
                 exit 1
             fi
-            PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m mind.install_binding ;;
+            PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m mind.install_binding
+            installed=yes ;;
         rauc.slot=A|rauc.slot=B)
             slot=${argument#rauc.slot=} ;;
     esac
@@ -27,6 +29,7 @@ variant=lab
 if [ -r /usr/share/being/variant ]; then
     IFS= read -r variant </usr/share/being/variant
 fi
+
 bundle=${RAUC_MF_COMPATIBLE:-}
 if [ -n "$bundle" ]; then
     if [ -n "${RAUC_SYSTEM_COMPATIBLE:-}" ] && [ "$bundle" != "$RAUC_SYSTEM_COMPATIBLE" ]; then
@@ -51,4 +54,8 @@ if [ ! -f /run/being-slot-good ]; then
         echo "PipOS must finish its health check before installing an update" >&2
         exit 1
     fi
+fi
+
+if [ "$installed" = yes ]; then
+    PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m mind.update_checkpoint
 fi

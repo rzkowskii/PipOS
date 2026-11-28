@@ -18,11 +18,17 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import actions
+from .app_lookup import query_text
+from .policy import WORKSHOP_DISABLED, workshop_allowed
+
 SHELF = Path(__file__).resolve().parent / "workshop_shelf"
 INSTALLED_SHELF = Path("/usr/share/being/workshop/shelf")
 CONFIRM_SECONDS = 15.0
 REPLY_WAIT = 2.0
-OPEN_WAIT = 4.0     # starting the shell's unit and the renderer takes 1.5-3 s (estimate)
+# Allow Hands to probe the screen, fetch the page and start, show and confirm
+# the initially hidden renderer. Keep the face's Quick Menu timeout longer.
+OPEN_WAIT = 7.0
 LEASE_WAIT = 0.5
 FORGET_WAIT = 6.0   # hands stops the cage units and removes the files first (seconds on the laptop)
 
@@ -46,9 +52,11 @@ class AppCommand:
     program: str = ""         # a shelf program's name
     say: str = ""             # a fixed line, for kind "say" (and the offline weather note)
     request: str = ""         # for task: just the thing asked for ("draws a spiral")
+    page: str = ""            # optional subpage of an app on open
 
 
-SMALL_APPS = ("monitor", "clock")
+SMALL_NAMES = {app: name for app, name in actions.SURFACE_NAMES.items() if app != "terminal"}
+SMALL_APPS = tuple(SMALL_NAMES)
 
 
 @dataclass
@@ -61,8 +69,14 @@ class AppContext:
     job_source: str = ""
     pending: str = ""         # "close" or "forget" while a yes/no question is open
     shelf: dict = field(default_factory=dict)
-    monitor: str = "closed"   # the two small apps: closed or shown (they never minimise)
+    monitor: str = "closed"   # small apps: closed or shown (they never minimise)
     clock: str = "closed"
+    calc: str = "closed"
+    lists: str = "closed"
+    memory: str = "closed"
+    journal: str = "closed"
+    mind: str = "closed"
+    lookup: str = "closed"
 
     @property
     def small_app(self):
@@ -226,10 +240,19 @@ _PATTERNS = [
              r"|(?:open|launch|start)(?: up)? (?:a |the |your |my )?(?:new )?terminal(?:s| window)?(?: for me)?"
              r"|(?:the |your |my )?(?:terminal|console)"),
     ("open_monitor", r"show me how you(?:'re| are) (?:feeling|doing)|show me your (?:temperature|body|vitals|insides)"
-                     r"|(?:open|show me|bring up|start|launch) (?:the |your )?(?:body )?monitor"),
+                     r"|(?:open|show me|bring up|start|launch) (?:the |your )?(?:body )?monitor"
+                     r"|(?:show(?: me)?|open) (?:your |the )?(?P<processes>processes|process list)"),
     ("open_clock", r"show me (?:the|your) (?:clock|time)|show (?:me )?my timers|(?:open|bring up|start|launch) (?:the |your )?clock"),
-    ("close_small", r"(?:close|hide|minimi[sz]e|shut|turn off|get rid of|put away|stop) (?:the |your |my )?(?P<a>(?:body )?monitor|clock|timers)"
-                    r"|put (?:the |your )?(?P<a2>clock|monitor) away|close (?:it|that)"),
+    ("open_calc", r"(?:open|show(?: me)?|bring up|start|launch) (?:the |your |a )?calculator"),
+    ("open_lists", r"(?:open|bring up) (?:the |my |your )?lists(?: panel)?|show(?: me)? (?:the |my |your )?lists panel"),
+    ("open_memory", r"(?:open|bring up) (?:the |your )?memory(?: panel)?|show(?: me)? (?:the |your )?memory panel"),
+    ("open_journal", r"(?:open|bring up) (?:the |my |your )?(?:dream )?journal(?: panel)?"
+                     r"|show(?: me)? (?:the |my |your )?(?:dream )?journal panel"),
+    ("open_mind", r"(?:open|bring up) (?:the |your )?mind(?: panel)?|show(?: me)? (?:the |your )?mind panel"),
+    ("open_lookup", r"(?:open|bring up|show(?: me)?) (?:the )?(?:text )?lookup(?: panel)?"),
+    ("lookup_query", r"search wikipedia for (?P<q>.+)|look up (?P<online>.+) (?:online|on wikipedia)"),
+    ("close_small", r"(?:close|hide|minimi[sz]e|shut|turn off|get rid of|put away|stop) (?:the |your |my )?(?P<a>(?:body )?monitor|clock|timers|calculator|lists|memory|(?:dream )?journal|mind|lookup)(?: panel)?"
+                    r"|put (?:the |your )?(?P<a2>clock|monitor|calculator|lists|memory|journal|mind|lookup) away|close (?:it|that)"),
     ("show_terminal", rf"(?:show(?: me)?|bring back|switch to|go back to|restore|unhide|reopen) {_T}|show (?:it|that) (?:again|to me)|bring it back"),
     ("minimise", rf"(?:minimi[sz]e|hide|put away|tuck away|shrink)(?: it| that| {_T})(?: away)?|minimi[sz]e|show me your face|(?:go|come) back to your face|put it away"),
     ("close", rf"(?:close|quit|exit|shut(?: down)?|get rid of|kill|turn off|stop) {_T}(?: completely)?|close (?:it|that) (?:completely|down)"),
@@ -264,16 +287,17 @@ _FORCE = re.compile(r"(?:[, ]+(?:and )?(?:write it yourself|from scratch|without
 # ahead for them. They are prefixes, because the gate may see a partial
 # transcript ("open the").
 _THING = (r"(?:the |your |my |a |that )?(?:body )?(?:(?:new )?terminal(?:s| window)?|console|shell|command line"
-          r"|command prompt|monitor|clock|timers)\b")
+          r"|command prompt|monitor|clock|timers|calculator|lists|memory|(?:dream )?journal|mind|(?:text )?lookup)\b")
 _VERB_THING = (r"(?:open|close|quit|exit|launch|start|bring up|pull up|fire up|load|show(?: me)?|switch to|go back to"
                rf"|restore|unhide|reopen|minimi[sz]e|hide|put away|tuck away|shrink|get rid of|kill|turn off|shut(?: down)?) {_THING}")
 _VERB_ALONE = r"(?:open|bring up|pull up|show me|show|start|launch|close|hide)(?: (?:the|your|my|a|that))?(?: new)?\s*$"
 COMMAND_START = re.compile(
     rf"^(?:{_VERB_THING}"
     rf"|{_VERB_ALONE}"
-    r"|show me how you(?:'re| are) (?:feeling|doing)|show me your (?:temperature|body|vitals|insides|clock|time)"
+    r"|show me how you(?:'re| are) (?:feeling|doing)|show me your (?:temperature|body|vitals|insides|clock|time|processes)"
     r"|show me the (?:clock|time)|show (?:me )?my timers"
     r"|give me a (?:shell|terminal|console)|(?:install|uninstall|download)\b"
+    r"|search wikipedia(?: for)?\b|look up\b"
     r"|what (?:can|could) you install|what(?:'s| is) on your shelf|show me your shelf|what (?:programs|games) do you have"
     r"|(?:clear|empty|wipe) (?:the|your) workshop"
     r"|in (?:the|your) terminal|on the terminal|using the terminal|do the following|write it yourself|from scratch"
@@ -302,7 +326,8 @@ _DEFAULT_SHELF = None
 # The second try with the filler words taken out: only these commands, which
 # open, show, hide or close an app (never a job, an install or a forget), and
 # never a bare noun ("a terminal" is not "terminal").
-_RETRY_KINDS = ("open", "open_monitor", "open_clock", "close_small", "show_terminal", "minimise", "close")
+_SMALL_OPEN_KINDS = tuple(f"open_{app}" for app in SMALL_APPS)
+_RETRY_KINDS = ("open", *_SMALL_OPEN_KINDS, "close_small", "show_terminal", "minimise", "close")
 # The gate's view of the retry: a verb and the app it names ("and open the
 # terminal"), never a verb alone ("close it" must not become "close").
 _RETRY_START = re.compile(rf"^(?:{_VERB_THING}|give me a (?:shell|terminal|console)\b)")
@@ -476,12 +501,17 @@ def _parse_said(said, ctx, kinds=None):
         program = (match.groupdict().get("p") or "").strip(" .")
         if kind == "open":
             return _gate(AppCommand("open"), ctx) or AppCommand("open")
-        if kind in ("open_monitor", "open_clock"):
-            command = AppCommand("open", app="monitor" if kind == "open_monitor" else "clock")
+        if kind in _SMALL_OPEN_KINDS:
+            page = "processes" if match.groupdict().get("processes") else ""
+            command = AppCommand("open", app=kind.removeprefix("open_"), page=page)
             return _gate(command, ctx) or command
+        if kind == "lookup_query":
+            query = query_text(match["q"] or match["online"])
+            command = AppCommand("lookup", app="lookup", request=query)
+            return _gate(command, ctx) or (command if query else AppCommand("say", say=REPLIES["bad_query"]))
         if kind == "close_small":
-            named = (match["a"] or match["a2"] or "").replace("body ", "")
-            app = {"timers": "clock"}.get(named, named)
+            named = (match["a"] or match["a2"] or "").removeprefix("body ").removeprefix("dream ")
+            app = {"timers": "clock", "calculator": "calc"}.get(named, named)
             if not app:  # "close it": whatever is on screen
                 if small:
                     return AppCommand("close", app=small)
@@ -563,26 +593,27 @@ def _parse_said(said, ctx, kinds=None):
 
 def _gate(command, ctx):
     """The context that turns a request into a fixed reply."""
-    if command.kind not in ("open", "task", "install", "uninstall", "run_app", "shelf_list"):
+    if command.kind not in ("open", "lookup", "task", "install", "uninstall", "run_app", "shelf_list"):
         return None
     if not ctx.enabled:
         return AppCommand("say", say=REPLIES["disabled"])
     if ctx.guest:
-        if command.kind == "open" and command.app in SMALL_APPS:
+        if command.kind in ("open", "lookup") and command.app in SMALL_APPS:
             return AppCommand("say", say=REPLIES[f"guest_{command.app}"])
         return AppCommand("say", say=REPLIES["guest"])
     if command.kind == "shelf_list":
         return None  # the shelf can be listed with my hands down: it is only words
     if not ctx.hands_up:
-        if command.kind == "open" and command.app in SMALL_APPS:
-            return AppCommand("say", say=REPLIES["no_hands"].replace("the terminal", f"my {command.app}"))
+        if command.kind in ("open", "lookup") and command.app in SMALL_APPS:
+            return AppCommand("say", say=REPLIES["no_hands"].replace("the terminal", f"my {SMALL_NAMES[command.app]}"))
         return AppCommand("say", say=REPLIES["no_hands"])
     if command.kind == "task" or command.kind in ("install", "uninstall", "run_app"):
         if ctx.job in ACTIVE:
             return AppCommand("say", say=REPLIES["busy"])
     if command.kind == "open" and command.app == "terminal" and ctx.terminal == "shown" and not ctx.small_app:
         return AppCommand("say", say=REPLIES["already_open"])
-    if command.kind == "open" and command.app in SMALL_APPS and getattr(ctx, command.app) == "shown":
+    if (command.kind == "open" and command.app in SMALL_APPS and getattr(ctx, command.app) == "shown"
+            and not command.page):
         return AppCommand("say", say=REPLIES["already_open"])
     return None
 
@@ -605,17 +636,19 @@ _GRAMMAR_TERMINAL = tuple(
 )
 _GRAMMAR_OTHERS = (
     "bring up the terminal", "pull up the terminal", "give me a terminal", "open the console",
-    "show me the terminal", "show me your terminal", "show the terminal", "bring back the terminal",
+    "show me the terminal", "show me your terminal", "show the terminal",
     "switch to the terminal", "go back to the terminal",
-    "minimise the terminal", "minimize the terminal", "hide the terminal", "put away the terminal",
+    "minimise the terminal", "minimize the terminal", "put away the terminal",
     "show me your face", "go back to your face",
-    "close the terminal", "close your terminal", "close the console", "quit the terminal", "exit the terminal",
-    "open the monitor", "open your monitor", "open the body monitor", "show me how you're feeling",
+    "close your terminal", "close the console", "quit the terminal", "exit the terminal",
+    "open your monitor", "open the body monitor", "show me how you're feeling",
+    "show me your processes",
     "show me how you are feeling", "show me how you're doing", "show me your vitals", "show me your body",
-    "close the monitor", "hide the monitor", "put the monitor away",
-    "open the clock", "open your clock", "show me the clock", "show me your clock", "show me the time",
-    "show me my timers", "show my timers", "close the clock", "hide the clock", "put the clock away",
+    "hide the monitor", "put the monitor away",
+    "open your clock", "show me the clock", "show me your clock", "show me the time",
+    "show me my timers", "show my timers", "hide the clock", "put the clock away",
     "close my timers",
+    "show me the calculator", "hide the calculator",
 )
 
 
@@ -623,7 +656,7 @@ def _grammar_contexts():
     """What may be on screen when a phrase is heard: nothing, the terminal
     shown or minimised, or a small app up. With no shelf and no job."""
     return (AppContext(), AppContext(terminal="shown"), AppContext(terminal="minimised"),
-            AppContext(monitor="shown"), AppContext(clock="shown"))
+            *(AppContext(**{app: "shown"}) for app in SMALL_APPS))
 
 
 _GRAMMAR = None
@@ -642,7 +675,7 @@ def grammar_phrases():
     if _GRAMMAR is None:
         contexts = _grammar_contexts()
         found = []
-        for phrase in dict.fromkeys(_GRAMMAR_TERMINAL + _GRAMMAR_OTHERS):
+        for phrase in dict.fromkeys(_GRAMMAR_TERMINAL + _GRAMMAR_OTHERS + actions.app_phrases()):
             commands = [parse(phrase, context) for context in contexts]
             if all(command is None for command in commands):
                 continue
@@ -658,8 +691,21 @@ REPLIES = {
     "open": "Here's my terminal.",
     "open_monitor": "Here's how I'm doing.",
     "open_clock": "Here's my clock.",
+    "open_calc": "Here's my calculator. Type a sum or ask me one.",
+    "open_lists": "Here are your lists.",
+    "open_memory": "Here are the things I've saved to remember.",
+    "open_journal": "Here's your journal.",
+    "open_mind": "Here's how I routed recent requests.",
+    "open_lookup": "The lookup panel is open.",
     "monitor_not_open": "My monitor isn't open.",
     "clock_not_open": "My clock isn't open.",
+    "calc_not_open": "My calculator isn't open.",
+    "lists_not_open": "The Lists panel isn't open.",
+    "memory_not_open": "The Memory panel isn't open.",
+    "journal_not_open": "The Journal panel isn't open.",
+    "mind_not_open": "The Mind panel isn't open.",
+    "lookup_not_open": "The lookup panel isn't open.",
+    "bad_query": "Give me a short topic to look up.",
     "already_hidden": "It's already tucked away.",
     "already_open": "It's already open.",
     "open_failed": "My terminal didn't open.",
@@ -687,6 +733,12 @@ REPLIES = {
     "guest": "My terminal stays closed while a guest is here.",
     "guest_clock": "My clock stays closed while a guest is here. It shows your reminders.",
     "guest_monitor": "My monitor stays closed while a guest is here.",
+    "guest_calc": "My calculator stays closed in guest mode. You can still ask me to do a sum.",
+    "guest_lists": "Your lists stay private in guest mode.",
+    "guest_memory": "Your saved memory stays private in guest mode.",
+    "guest_journal": "Your journal stays private in guest mode.",
+    "guest_mind": "The Mind panel stays closed in guest mode.",
+    "guest_lookup": "The lookup panel stays closed in guest mode.",
     "no_hands": "My hands aren't working right now, so I can't open the terminal.",
     # The Try menu holds the screen, so the face (which shows the panels) is
     # not running. The menu is never closed for the owner: it may be installing.
@@ -839,9 +891,9 @@ class AppBridge:
         self.clock = clock
         self.name = name
         self.shelf = load_shelf(shelf) if not isinstance(shelf, dict) else shelf
-        self.enabled = enabled or (lambda: not Path("/mind/apps.disabled").exists())
+        self.enabled = enabled or (lambda: workshop_allowed(Path("/mind") / WORKSHOP_DISABLED))
         self.hands_up = False
-        self.view = {"terminal": "closed", "monitor": "closed", "clock": "closed"}
+        self.view = dict.fromkeys(("terminal", *SMALL_APPS), "closed")
         self.status = None          # the last term.status
         self.text = None            # the last term.text
         self.pending = ""
@@ -924,7 +976,7 @@ class AppBridge:
         return AppContext(
             enabled=bool(self.enabled()), guest=self.guest if guest is None else guest, hands_up=self.hands_up,
             terminal=self.view["terminal"], job=status.get("phase"), job_source=status.get("source") or "",
-            pending=self.pending, shelf=self.shelf, monitor=self.view["monitor"], clock=self.view["clock"],
+            pending=self.pending, shelf=self.shelf, **{app: self.view[app] for app in SMALL_APPS},
         )
 
     def parse(self, text, guest=None):
@@ -1009,7 +1061,7 @@ class AppBridge:
             for name in wait_for:
                 self._waiters.pop((req, name), None)
 
-    async def handle(self, command, say):
+    async def handle(self, command, say, *, lid_seq=None):
         kind = command.kind
         if kind == "say":
             await say(command.say)
@@ -1018,10 +1070,21 @@ class AppBridge:
             await self._answer(command.action == "yes", say)
             return
         self.pending = ""
-        if kind == "open":
+        if kind in ("open", "lookup"):
             was = self.view.get(command.app)
-            reply = await self._ask("app.open", ("app.state", "app.refused"), OPEN_WAIT, app=command.app)
-            await say(self._open_line(reply, was))
+            fields = {"page": command.page} if command.page else {}
+            topic = "app.open"
+            if kind == "lookup":
+                topic = "app.lookup_query"
+                fields["query"] = command.request
+                if lid_seq is not None:
+                    fields["lid_seq"] = lid_seq
+            reply = await self._ask(topic, ("app.state", "app.refused"), OPEN_WAIT, app=command.app, **fields)
+            line = ("Here are my processes." if command.page == "processes" and reply
+                    and reply.get("view") == "shown" else self._open_line(reply, was))
+            if command.app in SMALL_APPS and line == REPLIES["open_failed"]:
+                line = line.replace("terminal", SMALL_NAMES[command.app])
+            await say(line)
         elif kind == "restore":
             # Hands restores through its open (the screen probe included), so
             # it gets the open's wait, and a refusal says why (no_face: close
@@ -1106,9 +1169,15 @@ class AppBridge:
             return REPLIES["bad_slot"]
         if reason == "guest" and reply.get("app") in SMALL_APPS:
             return REPLIES[f"guest_{reply['app']}"]
+        if reason == "session_only":
+            return "This panel is closed while memory is set to session only."
+        if reason == "offline":
+            return "Lookup needs Internet mode with web lookups switched on."
+        if reason == "bad_query":
+            return REPLIES["bad_query"]
         if reason == "no_face":
             app = reply.get("app")
-            return REPLIES["no_face"].replace("my terminal", f"my {app}") if app in SMALL_APPS else REPLIES["no_face"]
+            return REPLIES["no_face"].replace("my terminal", f"my {SMALL_NAMES[app]}") if app in SMALL_APPS else REPLIES["no_face"]
         return {
             "disabled": REPLIES["disabled"], "guest": REPLIES["guest"], "busy": REPLIES["busy"],
             "unavailable": REPLIES["unavailable"], "lid_closed": REPLIES["lid_closed"],
@@ -1120,7 +1189,8 @@ class AppBridge:
         if reply is not None and reply.get("reason") == "no_session" and app in SMALL_APPS:
             await say(REPLIES[f"{app}_not_open"])
         elif reply is None:
-            await say(REPLIES["open_failed"].replace("open", "close"))
+            line = REPLIES["open_failed"].replace("open", "close")
+            await say(line.replace("terminal", SMALL_NAMES[app]) if app in SMALL_APPS else line)
         elif reply.get("t") == "app.state" and reply.get("view") == "closed":
             await say(REPLIES["closed"])
         elif reply.get("reason") == "busy":

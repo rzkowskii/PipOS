@@ -16,11 +16,32 @@ from array import array
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import clock_epoch, core_profile
+from .try_mode import installed_trial_pending, is_try_boot
+
 SCHEMA_VERSION = 1
+RECALL_TIMING_PREFIX = "memory.recall_timing "
+
+
+def archive_schema(db):
+    """Read the on-disk format stamp without creating or upgrading an archive."""
+    kind = db.execute("SELECT type FROM sqlite_schema WHERE name = 'meta'").fetchone()
+    if kind is None:
+        return None
+    if kind != ("table",):
+        raise ValueError("memory schema metadata is not a table")
+    row = db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
+    if row is None:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError) as error:
+        raise ValueError("memory schema version is invalid") from error
+
 
 # The being has no network time by default, and an old laptop's clock battery
 # dies. Expiry deletes for good, so the clock has to be believable first.
-CLOCK_FLOOR = 1_767_225_600  # 2026-01-01 UTC; earlier is a dead clock battery
+CLOCK_FLOOR = clock_epoch.CLOCK_FLOOR
 CLOCK_SLACK = 600.0  # small steps backwards are ordinary corrections
 CLOCK_LEAP = 400 * 86_400.0  # further ahead than this is doubted
 CLOCK_SETTLE = 7 * 86_400.0  # a doubted clock is believed once it has held this long
@@ -246,6 +267,46 @@ END;
 CREATE TRIGGER IF NOT EXISTS diary_topic_source_deleted AFTER DELETE ON diary_topic_sources BEGIN
     DELETE FROM diary_topics WHERE id = old.topic_id;
 END;
+
+-- Additive night-job state. Older slots keep using the same archive format.
+-- Results contain only source indexes. The source text is never duplicated.
+CREATE TABLE IF NOT EXISTS ponder_jobs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner       TEXT NOT NULL,
+    request_id  INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('notes', 'list', 'conversation')),
+    source_key  TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'queued'
+                    CHECK (status IN ('queued', 'ready', 'unavailable', 'failed')),
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    last_night  TEXT,
+    heard       INTEGER NOT NULL DEFAULT 0 CHECK (heard IN (0, 1))
+);
+CREATE INDEX IF NOT EXISTS ponder_jobs_owner ON ponder_jobs (owner, status, id);
+CREATE INDEX IF NOT EXISTS ponder_jobs_request ON ponder_jobs (request_id);
+CREATE TABLE IF NOT EXISTS ponder_sources (
+    job_id      INTEGER NOT NULL REFERENCES ponder_jobs(id) ON DELETE CASCADE,
+    episode_id  INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    PRIMARY KEY (job_id, episode_id)
+);
+CREATE INDEX IF NOT EXISTS ponder_source_episode ON ponder_sources (episode_id);
+CREATE TABLE IF NOT EXISTS ponder_results (
+    job_id   INTEGER PRIMARY KEY REFERENCES ponder_jobs(id) ON DELETE CASCADE,
+    picks    TEXT NOT NULL,
+    pack     TEXT NOT NULL,
+    prompt   INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS ponder_episode_update
+AFTER UPDATE OF text, meta, speaker, kind, ts ON episodes
+WHEN new.text IS NOT old.text OR new.meta IS NOT old.meta OR new.speaker IS NOT old.speaker
+     OR new.kind IS NOT old.kind OR new.ts IS NOT old.ts BEGIN
+    DELETE FROM ponder_jobs WHERE request_id = old.id
+        OR id IN (SELECT job_id FROM ponder_sources WHERE episode_id = old.id);
+END;
+CREATE TRIGGER IF NOT EXISTS ponder_source_delete AFTER DELETE ON ponder_sources BEGIN
+    DELETE FROM ponder_jobs WHERE id = old.job_id;
+END;
 """
 
 # Hybrid recall. RRF fuses the word ranking with the meaning ranking; a
@@ -274,6 +335,12 @@ _PERSONAL = re.compile(r"\b(?:i|me|my|mine|myself|we|us|our|ours|i'm|i've|i'd|i'
 RECENCY_WEIGHT = 0.004
 RECENCY_HALF_LIFE_DAYS = 45.0
 EMBED_BATCH = 64
+# FTS5's merge argument is a target number of leaf pages for one incremental
+# merge. One small pass per night bounds write amplification; an occasional
+# full optimize keeps long-lived archives from accumulating segments forever.
+SEARCH_MERGE_PAGES = 16
+SEARCH_FULL_EVERY = 30
+SEARCH_LARGE_FORGET = 1000
 
 # Disk guard: below LOW, conversation is no longer archived and the archive is
 # compacted; below CRITICAL only what the owner asked to keep is written.
@@ -328,6 +395,8 @@ _EPISODE_SOURCE_LINKS = """
     WHERE heard.kind = 'heard' AND reply.kind = 'said'
       AND reply.text NOT IN ('', '[forgotten]')
       AND reply.ts BETWEEN heard.ts AND heard.ts + 120
+      AND NOT coalesce(json_extract(heard.meta, '$.ponder_request'), 0)
+      AND json_type(heard.meta, '$.intent_alias') IS NULL
       AND json_type(reply.meta, '$.episodes') IS NULL
       AND coalesce(json_extract(reply.meta, '$.reply_to'), heard.id) = heard.id
 """
@@ -556,22 +625,75 @@ class _Indexer:
 class Memory:
     def __init__(self, root, *, embedder=_DEFAULT):
         self.root = Path(root) if root is not None else None
+        self._recall_timing_enabled = (self.root == Path("/mind") and Path("/etc/being/env").is_file()
+                                       and not is_try_boot())
+        self.format_ready = self.root is None or not installed_trial_pending(self.root)
         if self.root is None:
             self.db = sqlite3.connect(":memory:")
             self.db.execute("PRAGMA temp_store = MEMORY")
-        else:
+        elif self.format_ready:
             self.root.mkdir(parents=True, exist_ok=True)
             self.db = sqlite3.connect(self.root / "mind.db")
-            self.db.execute("PRAGMA journal_mode = WAL")
-        self.db.execute("PRAGMA foreign_keys = ON")
-        # Deleted rows are overwritten, not just unlinked.
-        self.db.execute("PRAGMA secure_delete = ON")
+        else:
+            # The trial opens the existing archive. Creating a blank archive
+            # would hide a missing shared partition or a failed restore.
+            uri = (self.root.resolve() / "mind.db").as_uri()
+            self.db = sqlite3.connect(f"{uri}?mode=rw", uri=True)
+        try:
+            if self.root is not None:
+                found = archive_schema(self.db)
+                if found != SCHEMA_VERSION and (found is not None or not self.format_ready):
+                    raise RuntimeError(f"memory schema is version {found}, this code needs {SCHEMA_VERSION}")
+                if self.format_ready:
+                    self.db.execute("PRAGMA journal_mode = WAL")
+                    # Archive commits are owner memory. Once the installed
+                    # format is confirmed writable, sync the WAL before
+                    # reporting a transaction commit complete.
+                    self.db.execute("PRAGMA synchronous = FULL")
+            self.db.execute("PRAGMA foreign_keys = ON")
+            # Deleted rows are overwritten, not just unlinked.
+            self.db.execute("PRAGMA secure_delete = ON")
+            if self.format_ready:
+                self._initialize_format()
+            else:
+                self._open_trial_format()
+        except (sqlite3.Error, RuntimeError, ValueError):
+            self.db.close()
+            raise
+        if embedder is _DEFAULT:
+            from . import embed
+
+            embedder = embed.load()
+        self.embedder = embedder or None
+        self._indexer = None
+        self._disk = None
+        self._disk_checked = float("-inf")
+        self._clock_set_by_owner = False
+
+    def _open_trial_format(self):
+        """Use the previous format without running startup migrations."""
+        for table in ("episodes", "facts"):
+            self.db.execute(f"SELECT deletion_ref FROM {table} LIMIT 0")
+        self.db.execute("SELECT seq, nonce, episodes, facts FROM deletion_edits LIMIT 0")
+        self.db.execute("SELECT kind, ref FROM deletion_pending LIMIT 0")
+        for table in ("episodes_fts", "facts_fts"):
+            self.db.execute(f"SELECT text FROM {table} LIMIT 0")
+        required = {f"{table}_{trigger}" for table in ("episodes", "facts")
+                    for trigger in ("assign_deletion_ref", "record_deletion_delete", "record_deletion_update")}
+        present = {name for name, in self.db.execute("SELECT name FROM sqlite_schema WHERE type = 'trigger'")}
+        if not required <= present or self.db.execute(
+                "SELECT 1 FROM meta WHERE key = 'deletion_lineage'").fetchone() is None:
+            raise RuntimeError("The shared archive needs deletion-history initialization by the confirmed slot.")
+        self._fts_secure = self.db.execute(
+            "SELECT 1 FROM meta WHERE key = 'search_secure' AND value = '1'").fetchone() is not None
+
+    def _initialize_format(self):
         with self.db:
             self.db.executescript(_SCHEMA)
             self.db.execute(
                 "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema', ?)", (str(SCHEMA_VERSION),)
             )
-        found = int(self.db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()[0])
+        found = archive_schema(self.db)
         if found != SCHEMA_VERSION:
             raise RuntimeError(f"memory schema is version {found}, this code needs {SCHEMA_VERSION}")
         with self.db:
@@ -592,15 +714,6 @@ class Memory:
                 if self.db.execute("INSERT OR IGNORE INTO meta VALUES ('search_secure', '1')").rowcount:
                     self._rebuild_search(force=True)
         self._initialize_deletions()
-        if embedder is _DEFAULT:
-            from . import embed
-
-            embedder = embed.load()
-        self.embedder = embedder or None
-        self._indexer = None
-        self._disk = None
-        self._disk_checked = float("-inf")
-        self._clock_set_by_owner = False
 
     def close(self):
         if self._indexer is not None:
@@ -715,6 +828,7 @@ class Memory:
                 "DELETE FROM facts WHERE deletion_ref IN (SELECT value FROM json_each(?))",
                 (json.dumps(facts),),
             )
+            self._note_search_deletions(len(episodes) + len(facts))
             self._rebuild_search()
             # The replay triggers fire too. Record the original proof entries
             # rather than treating this restore as a new branch in the ledger.
@@ -761,15 +875,62 @@ class Memory:
         self._sweep_derived()
 
     def optimize_search(self, db=None):
-        """Nightly: merge the search index into one segment, for speed and size.
+        """Merge each search index fully, for infrequent compaction.
 
         `db`, for this and the other night work, is a connection of the night
         shift's own on a worker thread; the default is memory's own."""
         db = self.db if db is None else db
         with db:
-            db.execute("INSERT INTO episodes_fts (episodes_fts) VALUES ('optimize')")
-            db.execute("INSERT INTO facts_fts (facts_fts) VALUES ('optimize')")
+            self._merge_search(db, full=True)
         db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    @staticmethod
+    def _merge_search(db, *, full):
+        for table in ("episodes_fts", "facts_fts"):
+            if full:
+                db.execute(f"INSERT INTO {table} ({table}) VALUES ('optimize')")
+            else:
+                db.execute(f"INSERT INTO {table} ({table}, rank) VALUES ('merge', ?)",
+                           (SEARCH_MERGE_PAGES,))
+
+    def maintain_search(self, db=None, *, force=False):
+        """One bounded nightly merge; fully optimize every 30 runs or after a large forget.
+
+        The counter is deliberately a successful-pass count rather than wall
+        time: a dead clock cannot make archive maintenance run too often.
+        Returns ``"merge"`` or ``"optimize"`` for the night-shift record.
+        """
+        db = self.db if db is None else db
+        with db:
+            if not db.in_transaction:
+                db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT value FROM meta WHERE key = 'search_merge_runs'").fetchone()
+            try:
+                runs = max(0, int(row[0])) if row is not None else 0
+            except (TypeError, ValueError):
+                runs = 0
+            due = db.execute(
+                "SELECT 1 FROM meta WHERE (key = 'search_full_due' AND value = '1') "
+                "OR (key = 'search_deleted_since_full' AND CAST(value AS INTEGER) >= ?) LIMIT 1",
+                (SEARCH_LARGE_FORGET,)).fetchone()
+            full = force or due is not None or runs + 1 >= SEARCH_FULL_EVERY
+            self._merge_search(db, full=full)
+            # Compaction and acknowledgement are one write. A forget after
+            # it commits can still schedule its own subsequent full pass.
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('search_merge_runs', ?)",
+                       ("0" if full else str(runs + 1),))
+            if full:
+                db.execute("DELETE FROM meta WHERE key IN ('search_full_due', 'search_deleted_since_full')")
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return "optimize" if full else "merge"
+
+    def _note_search_deletions(self, rows):
+        """Count deletions across transactions, including batched global forgetting."""
+        if rows:
+            self.db.execute(
+                "INSERT INTO meta VALUES ('search_deleted_since_full', ?) ON CONFLICT(key) DO UPDATE "
+                "SET value = min(?, CAST(meta.value AS INTEGER) + CAST(excluded.value AS INTEGER))",
+                (min(rows, SEARCH_LARGE_FORGET), SEARCH_LARGE_FORGET))
 
     def _sweep_derived(self):
         """Delete everything derived, at any depth, from records now gone.
@@ -814,6 +975,7 @@ class Memory:
                 return
 
     def _advance_revision(self, amount=1):
+        core_profile.invalidate(self.root)
         self.db.execute(
             "INSERT INTO meta VALUES ('memory_revision', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + CAST(excluded.value AS INTEGER)",
@@ -836,6 +998,37 @@ class Memory:
         if kind in ("heard", "said"):
             self._poke_indexer()
         return cur.lastrowid
+
+    def cut_said(self, episode_id, text, *, was):
+        """Keep only the part of one of its own replies that Voice played.
+
+        A model reply is written down once it has all been handed to Voice,
+        and Voice may then be stopped before the end (mind/played.py). `was`
+        is the text written then; a row that is no longer exactly that 'said'
+        row is left alone. `text` is what played, and the row is marked
+        interrupted. With nothing played the row goes, as a reply cut off
+        before any of it played is never written down. The search index,
+        vectors and dream links follow the words (the episodes triggers).
+        True when the row changed."""
+        with self.db:
+            row = self.db.execute("SELECT meta FROM episodes WHERE id = ? AND kind = 'said' AND text = ?",
+                                  (episode_id, was)).fetchone()
+            if row is None:
+                return False
+            if not text:
+                self.db.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
+                return True
+            try:
+                meta = json.loads(row[0]) if row[0] else {}
+            except ValueError:
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            meta["interrupted"] = True
+            self.db.execute("UPDATE episodes SET text = ?, meta = ? WHERE id = ?",
+                            (text, json.dumps(meta), episode_id))
+        self._poke_indexer()
+        return True
 
     # -- the disk guard ------------------------------------------------------
 
@@ -865,7 +1058,7 @@ class Memory:
     def compact(self, db=None):
         """Give space back: merge the search index, truncate the WAL, and
         vacuum only when there is room for the copy a vacuum makes."""
-        self.optimize_search(db)
+        self.maintain_search(db, force=True)
         if self.root is None:
             return
         try:
@@ -1002,11 +1195,19 @@ class Memory:
           least a day and at most a week. If the clock drops back to where it
           was, the step is undone.
         """
-        run = self._lost_clock if self.clock_lost() else self._clock
+        reading = time.time() if reading is None else reading
+        floor = clock_epoch.floor(self.root)
+        lost = self.clock_lost()
+
+        def run():
+            if lost or not math.isfinite(reading) or reading < floor or reading > clock_epoch.MAX_CLOCK:
+                return self._lost_clock(reading, floor)
+            return self._clock(reading)
+
         if self.db.in_transaction:
-            return run(time.time() if reading is None else reading)
+            return run()
         with self.db:
-            return run(time.time() if reading is None else reading)
+            return run()
 
     def clock_lost(self):
         """True while this boot's clock came from systemd's epoch, not a
@@ -1016,24 +1217,23 @@ class Memory:
         now = time.monotonic()
         cached = getattr(self, "_lost_cache", None)
         if cached is not None and now - cached[0] < 60.0:
-            return cached[1]
+            return cached[1] and not clock_epoch.confirmed_now()
         lost = False
         try:
-            from . import clock_epoch
-
             lost = clock_epoch.epoch_advanced() is True
         except Exception:  # no way to tell is not a reason to doubt
             lost = False
         self._lost_cache = (now, lost)
         return lost
 
-    def _lost_clock(self, reading):
+    def _lost_clock(self, reading, floor):
         """A clock known to be wrong: stamps never go backwards, and nothing
         may expire, because no time from it can be believed."""
         noted, newest = self._meta_number("clock_seen"), self.newest_timestamp()
         known = max((value for value in (noted, newest) if value is not None), default=None)
-        latest = max(known or CLOCK_FLOOR, CLOCK_FLOOR)
-        if reading < latest - CLOCK_SLACK:
+        latest = max(known or floor, floor)
+        if (not math.isfinite(reading) or reading < floor or reading < latest - CLOCK_SLACK
+                or reading > clock_epoch.MAX_CLOCK):
             # Rows written now are raised to the right time once it is known.
             self._mark("behind")
             return None, latest
@@ -1149,6 +1349,27 @@ class Memory:
         ).fetchall()
         return rows[::-1]
 
+    def _recall_timing(self, kind, path, started, returned, shortlisted, *, vector_rows=None,
+                       vector_shortlisted=None):
+        """Write content-free local search timing on an installed appliance."""
+        if not self._recall_timing_enabled:
+            return
+        record = {
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            "kind": kind,
+            "path": path,
+            "returned": returned,
+        }
+        record["shortlisted" if path == "lexical" else "lexical_shortlisted"] = shortlisted
+        if vector_rows is not None:
+            record["vector_rows_scanned"] = vector_rows
+        if vector_shortlisted is not None:
+            record["vector_shortlisted"] = vector_shortlisted
+        try:
+            print(RECALL_TIMING_PREFIX + json.dumps(record, sort_keys=True, separators=(",", ":")), flush=True)
+        except OSError:
+            pass
+
     @property
     def revision(self):
         row = self.db.execute("SELECT value FROM meta WHERE key = 'memory_revision'").fetchone()
@@ -1156,7 +1377,7 @@ class Memory:
 
     def recall_history(
         self, query, *, limit=3, start=None, end=None, all_terms=False, for_edit=False, kind=None,
-        include_fact_sources=True, journal_owner=None, speaker=None, meaning=True,
+        include_fact_sources=True, journal_owner=None, speaker=None, meaning=True, time_basis="told",
     ):
         """Search retained conversations by relevance or a date range.
 
@@ -1164,8 +1385,14 @@ class Memory:
         relevance search also finds sentences by what they mean. A caller
         that keeps only rows sharing its words (an ordinary sentence looking
         for context) passes meaning=False and saves the vector search."""
+        if time_basis not in ("told", "event"):
+            raise ValueError("time_basis must be 'told' or 'event'")
+        if for_edit:
+            time_basis = "told"
+        started = time.perf_counter()
         terms = list(dict.fromkeys(search_terms(query)))
         if not terms and query.strip():
+            self._recall_timing("history", "lexical", started, 0, 0)
             return []
         conditions = [_HISTORY]
         if for_edit:
@@ -1195,21 +1422,37 @@ class Memory:
             include_fact_sources = start is not None or end is not None
         if not include_fact_sources:
             conditions.append("NOT EXISTS (SELECT 1 FROM facts WHERE facts.source = e.id)")
+        # Event time is opt-in at a classified query seam. Legacy rows, and
+        # conservative statements without one unambiguous event day, retain
+        # their telling timestamp. Edit/forget callers keep the default.
+        event_start = "json_extract(e.meta, '$.event_start')"
+        event_end = "json_extract(e.meta, '$.event_end')"
+        event_range = (f"typeof({event_start}) IN ('integer','real') AND "
+                       f"typeof({event_end}) IN ('integer','real') AND {event_start} < {event_end}")
         if start is not None:
-            conditions.append("e.ts >= ?")
-            params.append(start)
+            if time_basis == "event":
+                conditions.append(f"CASE WHEN {event_range} THEN {event_end} > ? ELSE e.ts >= ? END")
+                params.extend((start, start))
+            else:
+                conditions.append("e.ts >= ?")
+                params.append(start)
         if end is not None:
-            conditions.append("e.ts < ?")
+            conditions.append(f"CASE WHEN {event_range} THEN {event_start} ELSE e.ts END < ?"
+                              if time_basis == "event" else "e.ts < ?")
             params.append(end)
         columns = f"e.id, e.ts, e.kind, e.speaker, e.text, {excerpt}"
         where = " AND ".join(conditions)
         rows = None
+        vector_rows = vector_shortlisted = None
         if meaning and terms and not for_edit and not all_terms and type(limit) is int and limit != 0:
-            rows = self._history_hybrid(
+            hybrid = self._history_hybrid(
                 query, terms, params[0], [c for c in conditions if c != "episodes_fts MATCH ?"], params[1:],
                 where, params, limit)
+            if hybrid is not None:
+                rows, vector_rows, vector_shortlisted, lexical_shortlisted = hybrid
         if rows is not None:
-            pass
+            path = "hybrid"
+            shortlisted = lexical_shortlisted
         elif terms and type(limit) is int and 0 < limit <= 6:
             # Tied hits can all pass SQLite's top-N filter as timestamps rise.
             # Rank narrow rows and build excerpts only for the final winners.
@@ -1224,19 +1467,25 @@ class Memory:
                     WHERE episodes_fts MATCH ? ORDER BY w.score, w.ts DESC, w.id DESC""",
                 (*params, limit, params[0]),
             )]
+            path, shortlisted = "lexical", len(rows)
         else:
             rows = [Episode(*row) for row in self.db.execute(
                 f"SELECT {columns} FROM {source} WHERE {where} ORDER BY {order} LIMIT ?",
                 (*params, limit),
             )]
+            path, shortlisted = "lexical", len(rows)
         if not (journal_owner and rows and limit == 1 and len(terms) >= 2
                 and kind in (None, "heard") and not all_terms and not for_edit):
+            self._recall_timing("history", path, started, len(rows), shortlisted,
+                                vector_rows=vector_rows, vector_shortlisted=vector_shortlisted)
             return rows
         match_all = " AND ".join(f'"{term}"' for term in terms)
         if self.db.execute(
             "SELECT 1 FROM episodes_fts WHERE rowid = ? AND episodes_fts MATCH ?",
             (rows[0].id, match_all),
         ).fetchone():
+            self._recall_timing("history", path, started, len(rows), shortlisted,
+                                vector_rows=vector_rows, vector_shortlisted=vector_shortlisted)
             return rows
 
         # Rank every strict match under the ordinary filters before checking
@@ -1249,7 +1498,9 @@ class Memory:
             (journal_owner, match_all, *params[1:], journal_owner),
         ).fetchone()
         if row and row[-1]:
-            return [Episode(*row[:-1])]
+            rows = [Episode(*row[:-1])]
+        self._recall_timing("history", path, started, len(rows), shortlisted,
+                            vector_rows=vector_rows, vector_shortlisted=vector_shortlisted)
         return rows
 
     def _history_hybrid(self, query, terms, match, plain_conditions, plain_params, where, params, limit):
@@ -1267,11 +1518,13 @@ class Memory:
             complete = {row[0] for row in self.db.execute(
                 f"SELECT e.id FROM episodes_fts JOIN episodes e ON e.id = episodes_fts.rowid WHERE {where} LIMIT ?",
                 (every, *params[1:], HYBRID_POOL))}
-        cosines = self._cosines("episode_vec", "episode_id", "JOIN episodes e ON e.id = v.episode_id",
-                                " AND ".join(plain_conditions), plain_params, vector)
+        cosines, vector_rows = self._cosines(
+            "episode_vec", "episode_id", "JOIN episodes e ON e.id = v.episode_id",
+            " AND ".join(plain_conditions), plain_params, vector)
+        vector_shortlisted = len(cosines)
         pool = set(lexical) | set(cosines)
         if not pool:
-            return []
+            return [], vector_rows, vector_shortlisted, len(lexical)
         rows = {row[0]: row for row in self.db.execute(
             "SELECT e.id, e.ts, e.kind, e.speaker, e.text FROM episodes e "
             "WHERE e.id IN (SELECT value FROM json_each(?))", (json.dumps(sorted(pool)),))}
@@ -1286,7 +1539,8 @@ class Memory:
                 "SELECT rowid, snippet(episodes_fts, 0, '', '', ' … ', 24) FROM episodes_fts "
                 "WHERE episodes_fts MATCH ? AND rowid IN (SELECT value FROM json_each(?))",
                 (match, json.dumps(words))).fetchall())
-        return [Episode(*rows[row_id], excerpts.get(row_id)) for row_id in ids]
+        return ([Episode(*rows[row_id], excerpts.get(row_id)) for row_id in ids],
+                vector_rows, vector_shortlisted, len(lexical))
 
     def history_neighbor(self, episode):
         """Return the other half of a nearby exchange, when available."""
@@ -1415,13 +1669,18 @@ class Memory:
         With `all_terms`, a fact must contain every such word. Forgetting uses
         that, so "forget my sister's birthday" does not take every birthday.
         """
+        started = time.perf_counter()
         terms = search_terms(query)
         if not terms:
+            self._recall_timing("facts", "lexical", started, 0, 0)
             return []
         if not all_terms:
             hybrid = self._recall_hybrid(query, terms, limit)
             if hybrid is not None:
-                return hybrid
+                rows, vector_rows, vector_shortlisted, lexical_shortlisted = hybrid
+                self._recall_timing("facts", "hybrid", started, len(rows), lexical_shortlisted,
+                                    vector_rows=vector_rows, vector_shortlisted=vector_shortlisted)
+                return rows
         match = (" AND " if all_terms else " OR ").join(f'"{t}"' for t in terms)
         rows = self.db.execute(
             "SELECT f.id, f.ts, f.text, f.speaker, f.confidence, bm25(facts_fts), "
@@ -1439,9 +1698,12 @@ class Memory:
             rest = [r for r in rows if r[5] > best * RECALL_BAND]
             band.sort(key=lambda r: (r[6], r[0]), reverse=True)
             rows = band + rest
+        shortlisted = len(rows)
         if limit >= 0:
             rows = rows[:limit]
-        return [self._fact(r) for r in rows]
+        rows = [self._fact(r) for r in rows]
+        self._recall_timing("facts", "lexical", started, len(rows), shortlisted)
+        return rows
 
     # -- hybrid recall ------------------------------------------------------
 
@@ -1481,7 +1743,7 @@ class Memory:
         params = (*params, vector_model(self.embedder))
         count = self.db.execute(f"SELECT count(*) {base}", params).fetchone()[0]
         if not count:
-            return {}
+            return {}, 0
         if count > PREFILTER_MIN:
             query = int.from_bytes(_sign_bits(vector), "little")
             width = len(vector)
@@ -1499,7 +1761,7 @@ class Memory:
         for row_id, scale, q8 in rows:
             if scale and len(q8) == len(vector):
                 found[row_id] = dot(vector, array("b", q8)) * scale
-        return found
+        return found, count
 
     @staticmethod
     def _fuse(lexical, complete, cosines, told, limit, *, personal=True):
@@ -1557,10 +1819,11 @@ class Memory:
         complete = {row[0] for row in self.db.execute(
             "SELECT rowid FROM facts_fts WHERE facts_fts MATCH ? LIMIT ?",
             (" AND ".join(f'"{t}"' for t in terms), HYBRID_POOL))} if len(terms) > 1 else set(lexical)
-        cosines = self._cosines("fact_vec", "fact_id", "", "1", (), vector)
+        cosines, vector_rows = self._cosines("fact_vec", "fact_id", "", "1", (), vector)
+        vector_shortlisted = len(cosines)
         pool = set(lexical) | set(cosines)
         if not pool:
-            return []
+            return [], vector_rows, vector_shortlisted, len(lexical)
         rows = {row[0]: row for row in self.db.execute(
             "SELECT id, ts, text, speaker, confidence, max(ts, coalesce(confirmed, ts)) FROM facts "
             "WHERE id IN (SELECT value FROM json_each(?))", (json.dumps(sorted(pool)),))}
@@ -1568,7 +1831,8 @@ class Memory:
         cosines = {i: c for i, c in cosines.items() if i in rows}
         ids = self._fuse([i for i in lexical if i in rows], complete, cosines, told, limit,
                          personal=bool(_PERSONAL.search(query.replace("’", "'"))))
-        return [self._fact(rows[row_id]) for row_id in ids]
+        return ([self._fact(rows[row_id]) for row_id in ids],
+                vector_rows, vector_shortlisted, len(lexical))
 
     def forget(self, fact_ids):
         """Delete facts for good, and blank the log entries they came from."""
@@ -1595,6 +1859,7 @@ class Memory:
             self._begin_deletion_batch()
             self._redact_episodes(episode_ids)
             self._delete_facts(fact_ids)
+            self._note_search_deletions(len(episode_ids) + len(fact_ids))
             self._rebuild_search()
             self._finish_deletion_batch(replayed=() if snapshot else None)
             if not snapshot:
@@ -1690,7 +1955,7 @@ class Memory:
     def _delete_facts(self, fact_ids):
         self.db.execute("DELETE FROM facts WHERE id IN (SELECT value FROM json_each(?))", (json.dumps(fact_ids),))
 
-    def edit(self, *, fact_ids=(), episode_ids=(), replacement=None):
+    def edit(self, *, fact_ids=(), episode_ids=(), replacement=None, replacement_event=None, preserve_event=False):
         """Correct or forget selected memories and invalidate their derived text."""
         episode_ids = set(episode_ids)
         named_facts = set(fact_ids)
@@ -1803,14 +2068,22 @@ class Memory:
                         "UPDATE facts SET source = (SELECT max(episode_id) FROM fact_tellings WHERE fact_id = ?) "
                         "WHERE id = ? AND source IN (SELECT value FROM json_each(?))",
                         (fact, fact, json.dumps(untold)))
-                self.db.execute(
-                    # The old wording's excerpt and links go; that it was a
-                    # command ("remember that ...") stays, so the corrected
-                    # telling is still not taken for conversation.
-                    "UPDATE episodes SET text = ?, meta = CASE WHEN coalesce(json_extract(meta, '$.command'), 0) "
-                    "THEN json_object('command', json('true')) END WHERE id IN (SELECT value FROM json_each(?))",
-                    (corrected, json.dumps(episode_ids)),
-                )
+                # Drop all links to the old wording. Keep its command flag
+                # and carry time only for a correction that supplies a day
+                # or explicitly leaves the original day expression intact.
+                self.db.execute("""
+                    UPDATE episodes SET text = ?, meta = NULLIF(json_patch(
+                        CASE WHEN json_extract(meta, '$.command')
+                             THEN json_object('command', json('true')) ELSE '{}' END,
+                        CASE WHEN ? AND json_type(meta, '$.event_start') IN ('integer','real')
+                                    AND json_type(meta, '$.event_end') IN ('integer','real')
+                             THEN json_object('event_start', json_extract(meta, '$.event_start'),
+                                              'event_end', json_extract(meta, '$.event_end')) ELSE ? END
+                    ), '{}') WHERE id IN (SELECT value FROM json_each(?))
+                """, (corrected, preserve_event,
+                      json.dumps(dict(zip(("event_start", "event_end"), replacement_event or ()))),
+                      json.dumps(episode_ids)))
+            self._note_search_deletions(len(set(stale).union(episode_ids)) + len(fact_ids))
             self._rebuild_search()
             self._advance_revision()
             self._finish_deletion_batch()

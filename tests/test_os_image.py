@@ -5,9 +5,11 @@ These run on the Mac without Buildroot. Anything that needs the builder, a VM
 or the laptop is named in the plan, not faked here.
 """
 
+import hashlib
 import json
 import os
 import re
+import runpy
 import shlex
 import shutil
 import stat
@@ -82,8 +84,9 @@ class GrubTests(unittest.TestCase):
         try_config = render(BOARD / "try-grub.cfg", "laptop")
         lines = kernel_lines(try_config)
         # Normal, messages and safe graphics, then the round-2 entries
-        # (two microphone quirks and the measuring boot) once they exist.
-        self.assertIn(len(lines), (3, 6), lines)
+        # (two microphone quirks, the speed boot and the boot-and-idle
+        # measuring boot) once they exist.
+        self.assertIn(len(lines), (3, 7), lines)
         for line in lines:
             self.assertIn("hid_apple.fnmode=1", line.split())
             self.assertIn("msr.allow_writes=off", line)
@@ -121,8 +124,13 @@ class GrubTests(unittest.TestCase):
         trial = config[config.index('    elif [ "$1" != "$GOOD" ]; then'):config.index('    elif [ -n "$install_esp" ]; then')]
         self.assertNotIn("PIP_UNSEEN", trial)
         unit = (PACKAGE / "being-boot-health.service").read_text()
-        self.assertIn("ExecStopPost=-/bin/sh -c '[ -f /run/being-slot-good ] || exit 0;", unit)
-        self.assertIn("grub-editenv \"$$env\" set PIP_UNSEEN=0", unit)
+        # A healthy boot clears the count itself, in the same locked write
+        # that confirms the slot (mind/update_slots.py mark_healthy), not in
+        # a shell ExecStopPost that could run beside it.
+        self.assertNotIn("PIP_UNSEEN", unit)
+        self.assertIn("mind.boot_health", unit)
+        slots = (ROOT / "mind/update_slots.py").read_text()
+        self.assertIn('values["PIP_UNSEEN"] = "0"', slots)
 
     def test_grub_scripts_balance_their_blocks(self):
         for template in (BOARD / "grub.cfg", BOARD / "try-grub.cfg"):
@@ -185,18 +193,44 @@ class PostBuildTests(unittest.TestCase):
         (binaries / "efi-part/EFI/BOOT/bootx64.efi").write_bytes(b"efi")
         return target, binaries
 
-    def post_build(self, variant, *, release=None, require=False, model_pack_cert=True):
+    def post_build(self, variant, *, release=None, require=False, model_pack_cert=True, source_id=""):
         target, binaries = self.tree(model_pack_cert=model_pack_cert)
         env = dict(os.environ, TARGET_DIR=str(target), BINARIES_DIR=str(binaries),
                    BEINGOS_LAB_KEYS=str(self.lab), PATH=f"{self.bin}:{os.environ['PATH']}",
                    BEINGOS_RELEASE_CERT=str(release / "cert.pem") if release else "",
-                   BEINGOS_REQUIRE_RELEASE_KEY="1" if require else "0")
+                   BEINGOS_REQUIRE_RELEASE_KEY="1" if require else "0", BEING_SOURCE_ID=source_id)
         result = subprocess.run(["/bin/sh", str(BOARD / "post-build.sh"), str(target), variant],
                                 env=env, text=True, capture_output=True, timeout=60)
         return result, target
 
     def read(self, target, path):
         return (target / path).read_text()
+
+    def test_source_id_is_embedded_when_supplied(self):
+        ident = "ab" * 32
+        result, target = self.post_build("lab", source_id=ident)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.read(target, "etc/being/source-id"), ident + "\n")
+        result, target = self.post_build("lab")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((target / "etc/being/source-id").exists())
+
+    def test_speech_verdict_is_only_installed_for_matching_libraries(self):
+        install_verdict = runpy.run_path(str(BOARD / "build-id.py"))["install_speech_verdict"]
+        target, _ = self.tree()
+        verdict = self.work / "ivybridge.json"
+        template = json.loads((OS / "package/sherpa-onnx/ivybridge-smoke.json").read_text())
+        for name in template["runtime_sha256"]:
+            (target / "usr/lib" / name).write_bytes(name.encode())
+            template["runtime_sha256"][name] = hashlib.sha256(name.encode()).hexdigest()
+        verdict.write_text(json.dumps(template))
+        install_verdict(target, verdict)
+        installed = target / "usr/share/being/voice/sherpa-avx-smoke.json"
+        self.assertEqual(installed.read_bytes(), verdict.read_bytes())
+
+        (target / "usr/lib/libonnxruntime.so").write_bytes(b"new runtime")
+        install_verdict(target, verdict)
+        self.assertFalse(installed.exists())
 
     def test_lab_image_keeps_the_lab_identity(self):
         result, target = self.post_build("lab")
@@ -234,6 +268,20 @@ class PostBuildTests(unittest.TestCase):
         result, _ = self.post_build("laptop", require=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no release certificate", result.stderr)
+
+    def test_post_build_variants_match_the_candidate_parity_rules(self):
+        from lab import candidate_parity
+
+        lab_result, lab = self.post_build("lab", source_id="ab" * 32)
+        laptop_result, laptop = self.post_build("laptop", source_id="ab" * 32)
+        self.assertEqual(lab_result.returncode, 0, lab_result.stderr)
+        self.assertEqual(laptop_result.returncode, 0, laptop_result.stderr)
+        # Buildroot also gives the laptop distinct EFI bytes by omitting its
+        # serial module. The fixture above uses one stand-in for both binaries.
+        (laptop / "usr/share/being/install/bootx64.efi").write_bytes(b"efi without serial")
+        comparison = candidate_parity.compare(candidate_parity.listing(lab), candidate_parity.listing(laptop))
+        self.assertTrue(comparison["ok"], comparison["unexplained"])
+        self.assertIn("usr/share/being/installed-rauc.conf", {row["path"] for row in comparison["explained"]})
 
     def test_release_certificate_is_the_only_update_trust(self):
         release = self.certificate("PipOS Laptop Release", "release")
@@ -390,7 +438,9 @@ class BoardScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = (log / "boots.txt").read_text().splitlines()
         self.assertEqual(len(lines), 400)
-        self.assertRegex(lines[-1], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ boot=")
+        # /proc/uptime exists only on Linux; elsewhere the record says unknown.
+        uptime = r"\d+(?:\.\d+)?s" if Path("/proc/uptime").exists() else "unknown"
+        self.assertRegex(lines[-1], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ boot=.* recorded_at_uptime=" + uptime)
         self.assertTrue((log / "journal").is_dir())
 
     def test_release_key_refuses_a_folder_in_the_repository(self):
@@ -460,6 +510,15 @@ class KernelAndImageConfigTests(unittest.TestCase):
         for name in ("beingos_x86_64_defconfig", "beingos_laptop_defconfig"):
             with self.subTest(defconfig=name):
                 self.assertEqual(config_options(OS / "configs" / name).get("BR2_PACKAGE_SHERPA_ONNX"), "y")
+
+    def test_both_images_have_a_utf8_locale_for_the_natural_voice(self):
+        # Without one, espeak-ng in piper-phonemize classifies letters in the C
+        # locale and reads "Café" as "caf e acute" (seen in QEMU on the v6
+        # cable stick; with C.UTF-8 present, 14/14 parity sentences match the Mac).
+        for name in ("beingos_x86_64_defconfig", "beingos_laptop_defconfig"):
+            with self.subTest(defconfig=name):
+                locales = config_options(OS / "configs" / name).get("BR2_GENERATE_LOCALE", "").strip('"').split()
+                self.assertIn("C.UTF-8", locales)
 
     def test_every_external_package_config_exists(self):
         # Kconfig stops the whole build on a missing source file.
@@ -547,7 +606,9 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(values(service, "Service", "IPAddressDeny"), ["any"])
         self.assertEqual(values(service, "Service", "IPAddressAllow"), ["localhost"])
         self.assertEqual(values(service, "Service", "ProtectSystem"), ["strict"])
-        self.assertEqual(values(service, "Service", "ReadWritePaths"), ["-/mind/cortex"])
+        # The one bound Cortex subtree plus the slot files the context
+        # storage unit prepares for it (never the archive or working text).
+        self.assertEqual(values(service, "Service", "ReadWritePaths"), ["-/mind/cortex -/run/being-context/slots"])
         self.assertEqual(values(service, "Service", "ExecStartPre"), ["+/bin/mkdir -p /mind/cortex"])
         self.assertIn("--host 127.0.0.1", values(service, "Service", "ExecStart")[0])
 
@@ -567,8 +628,15 @@ class UnitTests(unittest.TestCase):
         service = unit(PACKAGE / "being-voice.service")
         if '"modprobe"' in voice:
             self.assertFalse(values(service, "Service", "ProtectKernelModules"))
+        else:
+            self.assertEqual(values(service, "Service", "ProtectKernelModules"), ["yes"])
         allowed = values(service, "Service", "DeviceAllow")
-        self.assertIn("char-alsa rw", allowed)
+        # Playback and mixer control only: the voice must never be allowed
+        # microphone capture (the ears organ owns it), nor the whole of ALSA.
+        self.assertNotIn("char-alsa rw", allowed)
+        self.assertIn("/dev/snd/pcmC0D0p rw", allowed)
+        self.assertIn("/dev/snd/controlC0 rw", allowed)
+        self.assertFalse([entry for entry in allowed if re.match(r"/dev/snd/pcmC\d+D\d+c\b", entry)], allowed)
         if "virtio-ports" in (ROOT / "mind/mic_port.py").read_text():
             self.assertIn("char-virtio-portsdev rw", allowed)
 
@@ -578,7 +646,8 @@ class UnitTests(unittest.TestCase):
         service = unit(PACKAGE / "being-hands.service")
         self.assertEqual(values(service, "Unit", "ConditionPathExists"), ["!/mind/.being-restore-in-progress"])
         self.assertEqual(values(service, "Unit", "ConditionKernelCommandLine"), [])
-        self.assertIn('Path("/mind/apps.disabled")', (ROOT / "mind/hands.py").read_text())
+        self.assertIn('Path("/mind") / WORKSHOP_DISABLED', (ROOT / "mind/hands.py").read_text())
+        self.assertIn('WORKSHOP_DISABLED = "apps.disabled"', (ROOT / "mind/policy.py").read_text())
         self.assertIn("/workshop", values(service, "Unit", "RequiresMountsFor"))
         self.assertEqual(values(service, "Service", "MemoryMax"), ["128M"])
         self.assertEqual(values(service, "Service", "ExecStart"), ["/usr/bin/python3 -m mind.hands --bus ${BEING_BUS}"])
@@ -848,6 +917,37 @@ class ImageRecipeTests(unittest.TestCase):
         self.assertIsNotNone(match, name)
         return match[1]
 
+    def test_sqlite_and_python_stage_their_selected_optional_libraries(self):
+        # Model the configure targets already parsed when Buildroot includes
+        # external.mk. The recipe dependencies also populate per-package dirs.
+        makefile = """\
+SQLITE_DEPENDENCIES = readline
+PYTHON3_DEPENDENCIES = host-python3 sqlite
+PYTHON3_CONF_ENV = py_cv_module__uuid=n/a
+SQLITE_TARGET_CONFIGURE = sqlite-configure
+PYTHON3_TARGET_CONFIGURE = python3-configure
+sqlite-configure:
+	@echo sqlite $(SQLITE_DEPENDENCIES) $(SQLITE_CONF_OPTS)
+python3-configure:
+	@echo python3 $(PYTHON3_DEPENDENCIES) $(PYTHON3_CONF_ENV)
+zlib util-linux-libs:
+	@echo "$@"
+include external.mk
+"""
+        for selected, expected in (
+            ("y", ["zlib", "sqlite readline zlib --fts5",
+                   "util-linux-libs", "python3 host-python3 sqlite util-linux-libs py_cv_module__uuid=n/a"]),
+            ("", ["sqlite readline --fts5", "python3 host-python3 sqlite py_cv_module__uuid=n/a"]),
+        ):
+            with self.subTest(selected=selected):
+                result = subprocess.run(
+                    ["make", "-s", "-f", "-", "sqlite-configure", "python3-configure",
+                     f"BR2_PACKAGE_ZLIB={selected}", f"BR2_PACKAGE_UTIL_LINUX_LIBUUID={selected}"],
+                    cwd=OS, input=makefile, text=True, capture_output=True, timeout=5,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), expected)
+
     def test_audio_init_is_installed_once_its_files_exist(self):
         self.assertIn("$(BEING_PKGDIR)/being-audio-init $(TARGET_DIR)/usr/libexec/being/being-audio-init",
                       self.define("BEING_INSTALL_AUDIO_INIT"))
@@ -942,6 +1042,11 @@ class BenchBootTests(unittest.TestCase):
     def test_only_a_try_boot_with_bench_on_starts_bench_mode(self):
         link = self.generate(f"being.try=1 being.models={self.GUID} being.bench=1")
         self.assertEqual(os.readlink(link), "/usr/lib/systemd/system/being-bench.service")
+        plus_service = self.generate(f"being.try=1 being.models={self.GUID} being.bench=2")
+        self.assertFalse(os.path.lexists(plus_service))
+        plus_timer = plus_service.with_name("being-bench-plus.timer")
+        self.assertEqual(os.readlink(plus_timer), "../being-bench-plus.timer")
+        self.assertIn("OnActiveSec=1s", (plus_timer.parent.parent / "being-bench-plus.timer").read_text())
         for line in (f"being.try=1 being.models={self.GUID}", f"being.try=1 being.models={self.GUID} being.bench=0",
                      f"being.bench=1 being.models={self.GUID}"):
             with self.subTest(cmdline=line):
@@ -968,7 +1073,8 @@ class PowerRuleTests(unittest.TestCase):
 # /work mapped into the scratch tree, runs only the steps that put images
 # and their source ids in place.
 BUILD_FAKE_DOCKER = r'''#!/usr/bin/env python3
-import json, os, sys
+import json, os, shutil, sys
+from pathlib import Path
 root = os.environ["FAKE_ROOT"]
 args = sys.argv[1:]
 with open(os.path.join(root, "docker-calls.jsonl"), "a") as log:
@@ -1009,13 +1115,35 @@ if command[:1] == ["make"]:
     targets = [part for part in command[1:] if not part.startswith(("-", "O=", "BR2_EXTERNAL="))]
     with open(os.path.join(root, "make-targets.jsonl"), "a") as log:
         log.write(json.dumps(targets) + "\n")
+    out = Path(mapped(next(part[2:] for part in command if part.startswith("O="))))
+    cortex = out / "per-package/cortex/target"
+    if "cortex-reinstall" in targets and cortex.exists():
+        for source in (Path(root) / "os/package/cortex").glob("*.service"):
+            shutil.copyfile(source, cortex / "usr/lib/systemd/system" / source.name)
+    if not targets[1:] or "all" in targets:
+        unpacked = out / "images/rootfs-files"
+        installed_id = unpacked / "etc/being/source-id"
+        ident = env.get("BEING_SOURCE_ID", "")
+        if ident:
+            installed_id.parent.mkdir(parents=True, exist_ok=True)
+            installed_id.write_text(ident + "\n")
+        else:
+            installed_id.unlink(missing_ok=True)
+        guide = Path(root) / "docs/manual/spoken-guide.json"
+        if guide.exists():
+            (unpacked / "usr/share/being").mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(guide, unpacked / "usr/share/being/spoken-guide.json")
+        if cortex.exists():
+            shutil.copytree(cortex, unpacked, dirs_exist_ok=True)
+        if os.environ.get("FAKE_STALE_CORTEX"):
+            (unpacked / "usr/lib/systemd/system/being-cortex.service").write_text("old cortex unit\n")
     # The tree changes while the build runs.
     touch = os.environ.get("FAKE_TOUCH_DURING_MAKE")
     if touch:
         with open(os.path.join(root, touch), "a") as changed:
             changed.write("# changed during the build\n")
     sys.exit(0)
-runs = ("try-image.sh", "cp --sparse", "record-source-id")
+runs = ("try-image.sh", "cp --sparse", "record-source-id", "refresh-stale", "verify-packaged-cortex")
 if not (any(any(word in part for word in runs) for part in command)
         or (command[:2] == ["rm", "-f"] and command[2].endswith("/being-source-id"))):
     sys.exit(0)
@@ -1049,13 +1177,20 @@ class BuildScriptSourceIdTests(unittest.TestCase):
             else:
                 path.mkdir(parents=True, exist_ok=True)
                 (path / "fixture").write_text(scope + "\n")
+        (self.root / "docs/manual").mkdir(parents=True)
+        (self.root / "docs/manual/spoken-guide.json").write_text('{"fixture": true}\n')
         board = self.root / "os/board/beingos"
         board.mkdir(parents=True)
         (board / "try-image.sh").write_text(try_image_options())
         for tree in ("x86_64", "laptop", "laptop-maintenance"):
             images = self.root / "work/output" / tree / "images"
             (images / "efi-part/EFI/BOOT").mkdir(parents=True)
-            (self.root / "work/output" / tree / "host").mkdir()
+            host = images.parent / "host/bin"
+            host.mkdir(parents=True)
+            unsquashfs = host / "unsquashfs"
+            unsquashfs.write_text('#!/bin/sh\n[ "$1" = -cat ] && cat "$(dirname "$2")/rootfs-files/$3"\n')
+            unsquashfs.chmod(0o755)
+            (images.parent / ".config").touch()
             for name in ("efi-part/EFI/BOOT/bootx64.efi", "rootfs.squashfs", "models.ext4", "beingos.img"):
                 (images / name).write_text(f"{tree} fixture\n")
         commands = scratch / "bin"
@@ -1177,15 +1312,50 @@ class BuildScriptSourceIdTests(unittest.TestCase):
         self.assertEqual(self.sidecar("beingos-laptop.img"), self.tree_id())
 
     def test_an_explicit_dirclean_before_all_counts_as_a_fresh_build(self):
-        result = self.run_script("lab/build.sh", "build", "being-dirclean", "all")
+        result = self.run_script("lab/build.sh", "laptop", "being-dirclean", "all")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.sidecar("beingos.img"), self.tree_id())
+        self.assertEqual(self.sidecar("beingos-laptop.img"), self.tree_id())
+        calls = [[target for target in call if target != "/work/buildroot"] for call in self.make_targets()]
+        self.assertEqual(calls[-2:], [["being-dirclean"], ["all"]])
 
-    def test_a_fast_rebuild_is_recorded_with_a_warning(self):
+    def test_a_fast_rebuild_is_unidentified(self):
+        self.assertEqual(self.run_script("lab/build.sh", "try-image").returncode, 0)
         result = self.run_script("lab/build.sh", "try-image", BEING_FAST_REBUILD="1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.sidecar("beingos-try.img"), self.tree_id())
-        self.assertIn("may have kept older files", result.stderr)
+        self.assertIsNone(self.sidecar("beingos-try.img"))
+        self.assertIsNone(self.record("x86_64"))
+        self.assertFalse((self.root / "work/output/x86_64/images/rootfs-files/etc/being/source-id").exists())
+        self.assertIn("may keep older files", result.stderr)
+
+    def test_stale_cortex_units_are_reinstalled_and_compared_against_the_packaged_root(self):
+        out = self.root / "work/output/laptop"
+        (out / ".config").write_text("BR2_PACKAGE_CORTEX=y\nBR2_PER_PACKAGE_DIRECTORIES=y\n")
+        stamp = out / "build/cortex-v1.0.0/.stamp_target_installed"
+        stamp.parent.mkdir(parents=True)
+        stamp.touch()
+        cortex = self.root / "os/package/cortex"
+        cortex.mkdir(parents=True)
+        packaged = out / "per-package/cortex/target"
+        installed = "usr/lib/systemd/system"
+        for unit in ("being-cortex.service", "being-dream-cortex.service", "being-model-check.service"):
+            (cortex / unit).write_text(f"new {unit}\n")
+            (out / "target" / installed).mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(cortex / unit, out / "target" / installed / unit)
+        (packaged / installed).mkdir(parents=True)
+        (packaged / installed / "being-cortex.service").write_text("old cortex unit\n")
+        (packaged / "usr/share/being").mkdir(parents=True)
+        template = self.root / "config/chat-template.jinja"
+        template.write_text("current chat template\n")
+        shutil.copyfile(template, packaged / "usr/share/being/chat-template.jinja")
+
+        result = self.run_script("lab/build.sh", "laptop-try")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("cortex-reinstall", {target for call in self.make_targets() for target in call})
+        self.assertEqual(self.record("laptop"), self.tree_id())
+        result = self.run_script("lab/build.sh", "laptop-try", FAKE_STALE_CORTEX="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Packaged /usr/lib/systemd/system/being-cortex.service differs", result.stderr)
+        self.assertIsNone(self.record("laptop"))
 
     def test_fast_rebuild_and_plain_builds_skip_the_clean(self):
         for argv, env in ((("try-image",), {"BEING_FAST_REBUILD": "1"}),

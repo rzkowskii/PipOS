@@ -169,7 +169,10 @@ class LocalMenuTests(unittest.TestCase):
 
     def restore_fixture(self):
         self.which.return_value = "/usr/sbin/being-backup"
-        files = tuple(self.mind_path.parent / name for name in ("owner snapshot.age", "identity.agekey", "latest.age"))
+        # Resolved: staging resolves each file's folder, and macOS keeps its
+        # temporary folders behind a /var -> /private/var link.
+        files = tuple(self.mind_path.parent.resolve() / name for name in
+                      ("owner snapshot.age", "identity.agekey", "latest-deletions.age"))
         for path in files:
             path.write_text("owner data")
         staged = self.mind_path.parent / "staged-mind"
@@ -191,12 +194,11 @@ class LocalMenuTests(unittest.TestCase):
             code, text, errors, _ = self.run_keys(["3", "1", "1", "q", "q"])
         self.assertEqual(code, 0)
         self.assertEqual(self.confirm.call_count, 1)
-        backend.assert_called_once_with(
-            ["/usr/sbin/being-backup", "restore", "--mind-dir", str(staged), "--input", str(snapshot),
-             "--identity", str(identity), "--deletions", str(proof), "--current-checkpoint", checkpoint],
-            stdin=local_menu.subprocess.DEVNULL, stdout=local_menu.subprocess.DEVNULL,
-            stderr=local_menu.subprocess.DEVNULL, timeout=900, check=False,
-        )
+        command = backend.call_args.args[0]
+        self.assertEqual(command[:4], ["/usr/sbin/being-backup", "restore", "--mind-dir", str(staged)])
+        self.assertEqual([Path(command[index]).name for index in (5, 7, 9)],
+                         ["snapshot.source", "identity.source", "deletions.source"])
+        self.assertEqual(command[-2:], ["--current-checkpoint", checkpoint])
         self.assertIn("Backup restore failed", errors)
         self.assertIn("separately saved record", text)
         for private in (str(snapshot), str(identity), str(proof), checkpoint):
@@ -217,12 +219,17 @@ class LocalMenuTests(unittest.TestCase):
 
     def media_fixture(self):
         """A USB backup stick beside the SSD, with mounting replaced by a folder."""
+        from mind import backup
+
         (snapshot, identity, proof), staged = self.restore_fixture()
-        media = self.mind_path.parent / "media"
+        # Resolved, as the staging code resolves the mount root: macOS keeps
+        # its temporary folders behind a /var -> /private/var link.
+        media = self.mind_path.parent.resolve() / "media"
         (media / "backups").mkdir(parents=True)
         (media / ".Spotlight-V100").mkdir()
         (media / ".Spotlight-V100" / "store.db").write_text("index")
-        picked = [media / "backups" / "being.age", media / "identity.agekey", media / "latest.age"]
+        picked = [media / "backups" / "being.age", media / "identity.agekey",
+                  media / "latest-deletions.age"]
         for path in picked:
             path.write_text("owner data")
         (media / "link.age").symlink_to("/etc/passwd")
@@ -233,6 +240,8 @@ class LocalMenuTests(unittest.TestCase):
         self.enterContext(patch.object(local_menu, "MEDIA_DIR", media))
         self.enterContext(patch.object(local_menu.install_disks, "volumes",
                                        return_value=[{"device": "/dev/sdc1", "size_bytes": 31 * 1024**3}]))
+        self.enterContext(patch.object(backup, "media_identity", return_value="1234-ABCD"))
+        self.enterContext(patch.object(backup, "mounted_from", return_value=True))
         self.unmount = self.enterContext(patch.object(local_menu, "unmount_media"))
         mounted = []
 
@@ -263,17 +272,96 @@ class LocalMenuTests(unittest.TestCase):
         self.assertNotIn("Spotlight", text)
         self.assertNotIn("link.age", text)
         restore = backend.call_args_list[-1].args[0]
-        self.assertEqual(restore[:8], ["/usr/sbin/being-backup", "restore", "--mind-dir", str(staged),
-                                       "--input", str(picked[0]), "--identity", str(picked[1])])
+        self.assertEqual(restore[:4], ["/usr/sbin/being-backup", "restore", "--mind-dir", str(staged)])
+        self.assertEqual(Path(restore[5]).name, "snapshot.source")
+        self.assertEqual(Path(restore[7]).name, "identity.source")
+        self.assertEqual(Path(restore[5]).parent, Path(restore[7]).parent)
+        self.assertNotEqual(Path(restore[5]).parent, picked[0].parent)
         self.assertEqual(self.confirm.call_args.args[0], "/dev/sdb")
         self.assertIn("     /dev/sdc | Backup Stick", text, "listed as in use, without a number")
         self.assertIn("(contains a mounted filesystem)", text)
         self.assertTrue(self.unmount.called, "the media is released afterwards")
 
     def test_ext4_backup_media_is_mounted_without_replaying_its_journal(self):
-        options = dict(local_menu.MEDIA_MOUNTS)["ext4"].split(",")
-        self.assertIn("noload", options)
-        self.assertIn("ro", options)
+        _, _, mounted, run = self.media_fixture()
+
+        def ext4_media(command, **kwargs):
+            result = run(command, **kwargs)
+            if command[0] == "mount":
+                result.returncode = 0 if command[2] == "ext4" else 32
+            return result
+
+        with patch.object(local_menu.subprocess, "run", side_effect=ext4_media):
+            code, _, errors, _ = self.run_keys(["3", "2", "1", "1", "2", "1", ""])
+        self.assertEqual((code, errors), (0, ""))
+        self.assertEqual([command[2] for command in mounted], ["vfat", "exfat", "ext4"])
+        self.assertEqual(set(mounted[-1][4].split(",")),
+                         {"ro", "noload", "nodev", "nosuid", "noexec", "noatime"})
+        self.confirm.assert_called_once()
+
+    def test_foreign_reader_refuses_ext4_and_keeps_the_dedicated_backup_writer(self):
+        self.media_fixture()
+
+        def ext4_media(command, **kwargs):
+            return SimpleNamespace(returncode=0 if command[2] == "ext4" else 32)
+
+        with patch.object(local_menu.subprocess, "run", side_effect=ext4_media) as backend:
+            with self.assertRaisesRegex(ValueError, "FAT and exFAT media"):
+                local_menu.mount_media("/dev/sdc1")
+            self.assertEqual([c.args[0][2] for c in backend.call_args_list], ["vfat", "exfat"])
+
+            backend.reset_mock()
+            self.assertEqual(local_menu.mount_media("/dev/sdc1", writable=True), local_menu.MEDIA_DIR)
+            self.assertEqual([c.args[0][2] for c in backend.call_args_list], ["vfat", "exfat", "ext4"])
+            self.assertEqual(set(backend.call_args.args[0][4].split(",")), {"rw", "nodev", "nosuid", "noexec"})
+
+    def test_update_releases_only_its_own_read_only_mount_on_failure(self):
+        private = Path(self.enterContext(tempfile.TemporaryDirectory())) / "update"
+        private.mkdir()
+        target = private / "media"
+        mounted = False
+
+        def run(command, **_):
+            nonlocal mounted
+            if command[0] == "mount":
+                mounted = True
+                self.assertEqual(command[-1], str(target))
+                self.assertTrue({"ro", "nodev", "nosuid", "noexec"} <= set(command[4].split(",")))
+            elif command == ["umount", str(target)]:
+                mounted = False
+            else:
+                self.fail(f"Unexpected media command {command!r}")
+            return SimpleNamespace(returncode=0)
+
+        with (patch.object(local_menu.tempfile, "mkdtemp", return_value=str(private)),
+              patch.object(local_menu.os.path, "ismount", side_effect=lambda path: path == target and mounted),
+              patch.object(local_menu.subprocess, "run", side_effect=run) as commands):
+            with self.assertRaisesRegex(ValueError, "cancelled"):
+                with local_menu.update_media("/dev/sdc1") as root:
+                    self.assertEqual(root, target)
+                    self.assertTrue(mounted)
+                    raise ValueError("cancelled")
+        self.assertEqual(commands.call_count, 2)
+        self.assertFalse(mounted)
+        self.assertFalse(private.exists())
+
+    def test_update_mount_survives_a_lost_wait_until_rauc_is_idle(self):
+        from mind import care
+
+        run_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        with (patch.object(local_menu, "UPDATE_MEDIA_ROOT", run_dir),
+              patch.object(local_menu, "_mount_at", return_value=True),
+              patch.object(local_menu.os.path, "ismount", return_value=False),
+              patch.object(care, "update_service_idle", side_effect=[False, True])):
+            with self.assertRaises(care.UpdateWaitInterrupted):
+                with local_menu.update_media("/dev/sdc1") as root:
+                    raise care.UpdateWaitInterrupted("timed out")
+            self.assertTrue(root.is_dir())
+            with self.assertRaisesRegex(ValueError, "could not confirm that the updater is idle"):
+                local_menu.release_previous_update_media()
+            self.assertTrue(root.is_dir())
+            local_menu.release_previous_update_media()
+            self.assertFalse(root.parent.exists())
 
     def test_unreadable_media_is_reported_and_nothing_is_installed(self):
         _, _, _, _ = self.media_fixture()
@@ -331,6 +419,8 @@ class ConsoleScreens(LocalMenuTests):
                       "5  Check hardware", "6  Talk to Pip by typing", "7  Back up to a USB stick",
                       "Q  Return to PipOS"):
             self.assertIn(entry, screen)
+        self.assertIn("Choices and conversations clear when you restart.", screen)
+        self.assertIn("Review the disk layout before confirming an erase.", screen)
         self.assertTrue(self.prompts(keyboard)[0].endswith("Choice: "))
         self.assertTrue(self.prompts(keyboard)[0].rstrip().splitlines()[-1].strip().startswith("›"))
 
@@ -391,11 +481,16 @@ class ConsoleScreens(LocalMenuTests):
                   "ram_mib": 7860, "battery": None, "lid": "open",
                   "audio": {"capture_pcm_detected": True, "playback_pcm_detected": False},
                   "input": {"keyboard_detected": True, "pointer_detected": None}}
-        with patch.object(local_menu.installer, "hardware_report", return_value=report):
-            code, text, _, keyboard = self.run_keys(["5", "", "q"])
-        self.assertEqual(code, 0)
-        self.assertTrue(self.prompts(keyboard)[1].endswith("Press Enter to go back. "))
-        self.assertIn("MacBookPro9,2", text)
+        for columns in ("68", "104"):
+            with (self.subTest(columns=columns),
+                  patch.dict(local_menu.os.environ, {"COLUMNS": columns, "LINES": "26"}),
+                  patch.object(local_menu.installer, "hardware_report", return_value=report)):
+                code, text, _, keyboard = self.run_keys(["5", "", "q"])
+                self.assertEqual(code, 0)
+                self.assertTrue(self.prompts(keyboard)[1].endswith("Press Enter to go back. "))
+                self.assertIn("MacBookPro9,2", text)
+                self.assertIn("Not found", text)
+                self.assertEqual("\x1b]7772;hardware=43\a" in text, columns == "104")
 
 
 class PlainConsole(unittest.TestCase):
@@ -572,7 +667,7 @@ class TryHomecoming(LocalMenuTests):
         restore = backend.call_args_list[-1].args[0]
         self.assertEqual(restore[-2:], ["--current-checkpoint", "c" * 64])
 
-    def test_a_wrong_record_file_is_asked_again(self):
+    def test_a_wrong_staged_record_file_stops_before_restore(self):
         from mind import backup
 
         picked, staged, _, run = self.media_fixture()
@@ -581,12 +676,14 @@ class TryHomecoming(LocalMenuTests):
         with (patch.object(local_menu.subprocess, "run", side_effect=run) as backend,
               patch.object(local_menu.getpass, "getpass") as hidden):
             files = local_menu.media_files(picked[0].parent.parent)
-            wrong, number = str(files.index(picked[0]) + 1), str(files.index(record) + 1)
-            code, text, errors, _ = self.run_keys(["3", "1", "1", "1", "2", "3", wrong, number, "y", "1", ""])
-        self.assertEqual((code, errors), (0, ""))
+            wrong = str(files.index(picked[0]) + 1)
+            code, text, errors, _ = self.run_keys(["3", "1", "1", "1", "2", "3", wrong, "q", "q"])
+        self.assertEqual(code, 0)
         hidden.assert_not_called()
-        self.assertIn("not a checkpoint record", text)
-        self.assertEqual(backend.call_args_list[-1].args[0][-2:], ["--current-checkpoint", "d" * 64])
+        # Staging only copies a checkpoint record named *.txt, so the backup
+        # file picked in its place is stopped before it is even read.
+        self.assertIn("checkpoint file has an unexpected name", errors)
+        self.assertFalse(any(call.args[0][0] == "/usr/sbin/being-backup" for call in backend.call_args_list))
 
     def test_a_passphrase_key_is_unlocked_into_ram_before_any_progress_screen(self):
         from mind.backup_crypto import BackupCryptoError

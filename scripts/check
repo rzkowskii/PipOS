@@ -19,9 +19,10 @@ boot-gate
          Try, local screen, install/apply, setup and one real-model L2 turn
          (test_l2.Thinking), in --jobs parallel QEMU lanes. Image variables
          (BEING_FACTORY_IMAGE, BEING_TRY_IMAGE, BEING_LAPTOP_TRY_IMAGE, ...)
-         pass through; with --manifest they are taken from a sealed candidate.
-full     python3 -m lab.candidate_tests --manifest ... (every guest suite in
-         series, installed recovery included), with BEING_GATE=1.
+         pass through; with --manifest the candidate source and artifacts are
+         verified before any guests start.
+full     python3 -m lab.candidate_tests --manifest ... (persona evidence and
+         every guest suite in series, installed recovery included).
 
 Exit status is 0 only when every step passed. A summary is written to
 out/logs/check-TIER-TIME/summary.json.
@@ -33,13 +34,19 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from lab import candidate_tests
+
 BOOT_GATE = (
     "lab.tests.test_laptop_smoke",
     "lab.tests.test_l0",
@@ -56,23 +63,30 @@ BOOT_GATE = (
 SKIP_LINE = re.compile(r"^(test\w*) \(([\w.]+)\)(?:\n[^\n]*?)? \.\.\. skipped '(.*)'$", re.M)
 
 
-def step(name, command, *, env=None, log_dir, timeout=None):
+def step(name, command, *, env=None, log_dir, timeout=None, cancelled=None):
     started = time.monotonic()
     log = log_dir / (re.sub(r"[^\w.-]+", "_", name) + ".log")
     print(f"--> {name}: {' '.join(command)}", flush=True)
-    with log.open("w") as stream:
+    if cancelled is not None:
         try:
-            code = subprocess.run(command, cwd=ROOT, env=env, stdout=stream, stderr=subprocess.STDOUT,
-                                  timeout=timeout).returncode
-        except subprocess.TimeoutExpired:
-            code = "timeout"
-        except FileNotFoundError as error:
-            code = f"missing: {error.filename}"
-    text = log.read_text(errors="replace")
+            status = candidate_tests.batch(command, env, log, timeout, cancelled=cancelled)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            status = f"failed ({error})"
+    else:
+        with log.open("w") as stream:
+            try:
+                code = subprocess.run(command, cwd=ROOT, env=env, stdout=stream, stderr=subprocess.STDOUT,
+                                      timeout=timeout).returncode
+            except subprocess.TimeoutExpired:
+                code = "timeout"
+            except FileNotFoundError as error:
+                code = f"missing: {error.filename}"
+        status = "passed" if code == 0 else f"failed ({code})"
+    text = log.read_text(errors="replace") if log.exists() else ""
     skips = [{"test": where if where.endswith("." + test) else f"{where}.{test}", "reason": reason}
              for test, where, reason in SKIP_LINE.findall(text)]
     tail = re.findall(r"^(Ran \d+ tests? in .*|OK.*|FAILED.*|test result: .*)$", text, re.M)
-    result = {"name": name, "status": "passed" if code == 0 else f"failed ({code})",
+    result = {"name": name, "status": status,
               "seconds": round(time.monotonic() - started, 1), "log": str(log), "skips": skips,
               "summary": tail[-3:]}
     print(f"    {result['status']} in {result['seconds']} s" + (f"; {tail[-1]}" if tail else ""), flush=True)
@@ -104,40 +118,73 @@ def fast(args, log_dir):
     return results
 
 
-def manifest_env(manifest):
+def manifest_env(manifest, suites):
     """The image variables lab.candidate_tests would bind for a sealed candidate."""
-    sys.path.insert(0, str(ROOT))
-    from lab import candidate_tests
     release, _ = candidate_tests.read_release(manifest)
     env = {}
+    required = set(candidate_tests.RELEASE_ROLES)
+    modules = {suite.removeprefix("lab.tests.test_").split(".", 1)[0]
+               for suite in suites if suite.startswith("lab.tests.test_")}
+    unsealed = modules.intersection(candidate_tests.UNSEALED)
+    if unsealed:
+        raise ValueError("these suites use unsealed media: " + ", ".join(sorted(unsealed)))
+    if "laptop_smoke" in modules:
+        required.add("laptop_try")
+    if "wifi" in modules:
+        required.add("wifi_image")
     for role, names in candidate_tests.BINDINGS.items():
         key = candidate_tests.RELEASE_ROLES.get(role, role)
         record = release["artifacts"].get(key)
         if record:
             env.update(dict.fromkeys(names, str(manifest.parent / record["path"])))
+        elif role in required:
+            raise ValueError(f"manifest is missing {key}")
     return env
 
 
 def boot_gate(args, log_dir):
     env = dict(os.environ, BEING_GATE="1", PYTHONUNBUFFERED="1")
-    if args.manifest:
-        env.update(manifest_env(args.manifest))
     suites = list(args.suite or BOOT_GATE)
+    results = []
+    if args.manifest:
+        env.pop("BEING_LAPTOP_CABLE_TRY_IMAGE", None)
+        verify = [sys.executable, "-m", "lab.candidate_manifest", "verify", str(args.manifest), "--root", str(ROOT)]
+        if args.dry_run:
+            results.append({"name": "verify-candidate", "status": "dry run", "command": verify})
+        else:
+            result = step("verify-candidate", verify, env=env, log_dir=log_dir, timeout=900)
+            results.append(result)
+            if result["status"] != "passed":
+                return results
+        try:
+            env.update(manifest_env(args.manifest, suites))
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f"Could not select candidate media: {error}", file=sys.stderr)
+            return [*results, {"name": "candidate-media", "status": "failed", "error": str(error)}]
     if args.dry_run:
-        return [{"name": suite, "status": "dry run", "env": {k: v for k, v in env.items() if k.startswith("BEING_")}}
-                for suite in suites]
+        return results + [{"name": suite, "status": "dry run",
+                           "env": {k: v for k, v in env.items() if k.startswith("BEING_")}}
+                          for suite in suites]
+
+    cancelled = threading.Event()
 
     def run(suite):
+        if cancelled.is_set():
+            return {"name": suite, "status": "interrupted"}
         scratch = tempfile.mkdtemp(prefix="bgate-", dir="/tmp")    # short socket paths for QEMU
         try:
             lane_env = dict(env, TMPDIR=scratch, BEING_LAB_OUTPUT=str(log_dir / "lab" / suite))
-            return step(suite, [sys.executable, "-m", "unittest", "-v", suite], env=lane_env,
-                        log_dir=log_dir, timeout=args.suite_timeout)
+            return step(suite, [sys.executable, "-m", "lab.candidate_tests", "_worker", suite], env=lane_env,
+                        log_dir=log_dir, timeout=args.suite_timeout, cancelled=cancelled)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        return list(pool.map(run, suites))
+        try:
+            return results + list(pool.map(run, suites))
+        except KeyboardInterrupt:
+            cancelled.set()
+            return [*results, {"name": "boot-gate", "status": "interrupted"}]
 
 
 def full(args, log_dir):
@@ -147,6 +194,9 @@ def full(args, log_dir):
                "--output", str(log_dir / "candidate")]
     if args.wifi_image:
         command += ["--wifi-image", str(args.wifi_image)]
+    for flag, path in (("--persona-baseline", args.persona_baseline), ("--persona-result", args.persona_result)):
+        if path:
+            command += [flag, str(path)]
     if args.dry_run:
         return [{"name": "candidate-controller", "status": "dry run", "command": command}]
     return [step("candidate-controller", command, env=dict(os.environ, BEING_GATE="1"), log_dir=log_dir)]
@@ -160,8 +210,12 @@ def main(argv=None):
     parser.add_argument("--suite", action="append", help="boot-gate: run only this suite (repeatable)")
     parser.add_argument("--suite-timeout", type=int, default=3600)
     parser.add_argument("--wifi-image", type=Path)
+    parser.add_argument("--persona-baseline", type=Path, help="full: accepted synthetic persona report")
+    parser.add_argument("--persona-result", type=Path, help="full: current synthetic persona report after a change")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    if args.tier != "full" and (args.persona_baseline or args.persona_result):
+        parser.error("Persona reports are used by the full candidate gate")
     if args.manifest:
         args.manifest = args.manifest.resolve()
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -189,4 +243,12 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    for event in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(event, interrupt)
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None

@@ -154,5 +154,84 @@ class Words(unittest.TestCase):
         self.assertEqual(audio.edit_distance(list("kitten"), list("sitting")), 3)
 
 
+def floor_noise(seconds, rate, level_dbfs, seed):
+    generator = random.Random(seed)
+    spread = audio.from_dbfs(level_dbfs) * math.sqrt(3)
+    return [generator.uniform(-spread, spread) * audio.TOP for _ in range(int(seconds * rate))]
+
+
+def recorded_tone(rate=48000, *, start=0.34, seconds=3.0, total=4.0, tone_dbfs=-38.0, floor_dbfs=-63.0,
+                  drift_ppm=0.0, click_at=None):
+    """A floor with a faded 1 kHz tone from `start`, its clock off by `drift_ppm`."""
+    values = floor_noise(total, rate, floor_dbfs, 4)
+    tone = audio.tone(1000 * (1 + drift_ppm * 1e-6), seconds, rate, tone_dbfs)
+    first = int(start * rate)
+    for index, value in enumerate(tone[:len(values) - first]):
+        values[first + index] += value
+    if click_at is not None:
+        values[int(click_at * rate)] += 30000
+    return array("h", [max(-32768, min(32767, int(value))) for value in values])
+
+
+class Onsets(unittest.TestCase):
+    def test_the_onset_is_where_the_tone_starts(self):
+        found = audio.tone_onset(recorded_tone(), 48000, 1000)
+        # The 10 ms fade puts the half-level point 5 ms in.
+        self.assertAlmostEqual(found - audio.TONE_FADE / 2, 0.34, delta=0.002)
+
+    def test_a_click_before_the_tone_is_not_its_onset(self):
+        found = audio.tone_onset(recorded_tone(click_at=0.29), 48000, 1000)
+        self.assertAlmostEqual(found, 0.345, delta=0.003)
+
+    def test_no_tone_has_no_onset(self):
+        quiet = array("h", [int(value) for value in floor_noise(2.0, 48000, -63.0, 2)])
+        self.assertIsNone(audio.tone_onset(quiet, 48000, 1000))
+
+    def test_a_tone_at_16_khz_too(self):
+        found = audio.tone_onset(recorded_tone(16000, start=0.5), 16000, 1000)
+        self.assertAlmostEqual(found, 0.505, delta=0.003)
+
+
+class Drift(unittest.TestCase):
+    def test_a_clock_180_ppm_fast_is_measured(self):
+        # 44.1 kHz playback against 48 kHz capture on the laptop: about +180 ppm.
+        recording = recorded_tone(drift_ppm=180.0)
+        self.assertAlmostEqual(audio.drift_ppm(recording, 48000, 1000, start=0.7, end=2.9), 180.0, delta=10.0)
+
+    def test_the_same_clock_is_zero_and_slow_is_negative(self):
+        self.assertAlmostEqual(audio.drift_ppm(recorded_tone(), 48000, 1000, start=0.7, end=2.9), 0.0, delta=10.0)
+        slow = recorded_tone(drift_ppm=-500.0)
+        self.assertAlmostEqual(audio.drift_ppm(slow, 48000, 1000, start=0.7, end=2.9), -500.0, delta=10.0)
+
+    def test_too_short_is_none(self):
+        self.assertIsNone(audio.drift_ppm(recorded_tone(), 48000, 1000, start=0.7, end=0.75))
+
+
+class Bands(unittest.TestCase):
+    def test_band_noise_stays_in_its_band(self):
+        noise = audio.band_noise(1.5, 48000, 300, 1200, -20.0)
+        inside = audio.band_level(noise, 48000, 300, 1200)
+        self.assertAlmostEqual(inside, -20.5, delta=1.5)
+        self.assertLess(audio.band_level(noise, 48000, 2400, 8000), inside - 20)
+        self.assertEqual(noise, audio.band_noise(1.5, 48000, 300, 1200, -20.0))  # seeded
+
+    def test_the_filters_pass_their_band_and_cut_outside(self):
+        tone = audio.tone(4000, 0.5, 48000, -12.0)
+        self.assertAlmostEqual(audio.band_level(tone, 48000, 2400, 8000), audio.dbfs(audio.rms(tone)), delta=0.5)
+        self.assertLess(audio.band_level(tone, 48000, 300, 1200), audio.dbfs(audio.rms(tone)) - 40)
+        with self.assertRaises(ValueError):
+            audio.biquad([0.0], 48000, "bandstop", 1000)
+
+
+class AtLevel(unittest.TestCase):
+    def test_scaled_to_a_peak_with_a_floor_mixed_in(self):
+        tone = audio.tone(500, 1.0, RATE, -4.5)
+        quiet = audio.at_level(tone, -30.0, -64.0)
+        self.assertAlmostEqual(audio.dbfs(audio.peak(quiet)), -30.0, delta=0.5)
+        floor_only = audio.at_level(audio.silence(1.0, RATE), -30.0, -64.0)
+        self.assertAlmostEqual(audio.dbfs(audio.rms(floor_only)), -64.0, delta=0.5)
+        self.assertEqual(audio.at_level(tone, None, None), tone)
+
+
 if __name__ == "__main__":
     unittest.main()

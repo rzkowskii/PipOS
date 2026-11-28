@@ -19,6 +19,9 @@ CABLE_ONLY = {"being-cable-link.service", "being-cable-ssh.service", "being-cabl
 # The blocks that only lab, maintenance or cable development builds include.
 OPTIONAL_BLOCK = re.compile(r"ifeq \(\$\(BR2_PACKAGE_BEING_(?:LAN_MAINTENANCE|LAB_BODY|CABLE_DEV)\),y\).*?endif",
                             re.S)
+# Transient units: started with systemd-run --unit=NAME, so no unit file exists
+# anywhere; the module naming one must be the one that creates it.
+TRANSIENT = {"being-backup-publish.service", "being-removable-media.service", "being-restore-stage.service"}
 # Modules that only run on images that ship the lab units.
 LAB_MODULES = {"lab_access.py"}
 
@@ -71,6 +74,12 @@ class LaptopUnits(unittest.TestCase):
             if unit.startswith(("systemd-", "rauc")) or unit in units:
                 continue
             with self.subTest(unit=unit):
+                if unit in TRANSIENT:
+                    for name in files:
+                        text = (REPO / "mind" / name).read_text() if (REPO / "mind" / name).exists() else ""
+                        self.assertIn(f"--unit={unit.removesuffix('.service')}", text,
+                                      f"{name} names the transient {unit} without creating it")
+                    continue
                 self.assertIn(unit, LAB_ONLY, f"{unit} (named in {sorted(files)}) is not on the laptop image")
                 for name in files - LAB_MODULES:
                     text = (REPO / "mind" / name).read_text() if (REPO / "mind" / name).exists() else ""

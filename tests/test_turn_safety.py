@@ -172,6 +172,41 @@ class WhatCannotBeUndoneNeedsAPlainYes(MindCase):
             await self.mind._turn
         self.assertEqual(self.calls, ["poweroff"])
 
+    async def test_previous_system_requires_the_owner_and_an_exact_yes(self):
+        from mind import device, update_slots
+
+        cmdline = self.root / "cmdline"
+        cmdline.write_text("being.installed=1 rauc.slot=B\n")
+        plan = update_slots.Rollback("B", "A")
+        request = "Go back to how you were"
+        with (patch.object(device, "CMDLINE", cmdline),
+              patch.object(update_slots, "rollback_plan", return_value=plan) as read,
+              patch.object(update_slots, "schedule_rollback") as schedule):
+            self.assertIn("Only my owner", await self.ask(request, speaker="guest"))
+            read.assert_not_called()
+            for answer in ("yes please", "do it", "no"):
+                self.assertIn("previous system once", await self.ask(request))
+                await self.ask(answer)
+                schedule.assert_not_called()
+                self.assertEqual(self.calls, [])
+
+            self.assertIn("previous system once", await self.ask(request))
+            await self.ask("yes", speaker="guest")
+            schedule.assert_not_called()
+
+            self.assertIn("previous system once", await self.ask(request))
+            schedule.side_effect = ValueError("The available systems changed. Review them again.")
+            self.assertIn("systems changed", await self.ask("yes"))
+            self.assertEqual(self.calls, [])
+            schedule.reset_mock(side_effect=True)
+
+            self.assertIn("previous system once", await self.ask(request))
+            self.assertIn("scheduled one start", await self.ask("yes"))
+            async with asyncio.timeout(5):
+                await self.mind._turn
+            schedule.assert_called_once_with(plan)
+            self.assertEqual(self.calls, ["reboot"])
+
     async def test_okay_does_not_clear_a_list_or_the_notes(self):
         await self.ask("Add milk to my shopping list")
         await self.ask("Make a note: the plumber comes Thursday")

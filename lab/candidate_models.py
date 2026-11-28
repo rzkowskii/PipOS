@@ -9,10 +9,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 
 from lab.candidate_manifest import fingerprint, read_json, regular
-from lab.hardware_image import copy_partition, entries_for, member
+from lab.hardware_image import copy_partition, entries_for, member, member_fingerprint
 from mind.model_pack import ENVELOPE, MAX_METADATA, WEIGHTS
 
 
@@ -56,27 +55,6 @@ def metadata(tool, partition, entries, name):
     return data
 
 
-def weights_digest(tool, partition, expected_size):
-    # Hash the decompressed member as it streams. At most one filesystem
-    # partition lives on scratch disk, independent of the size of its GGUF.
-    command = [tool, "x", "-so", "-spd", "-tExt", str(partition), WEIGHTS]
-    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
-        timeout = threading.Timer(180, process.kill)
-        timeout.start()
-        try:
-            result = fingerprint(process.stdout, expected_size)
-            if process.stdout.read(1):
-                raise ValueError(f"{WEIGHTS} is larger than the frozen model")
-            if process.wait() != 0:
-                raise ValueError(f"7-Zip did not finish reading {WEIGHTS}")
-            return result
-        finally:
-            timeout.cancel()
-            timeout.join()
-            if process.poll() is None:
-                process.kill()
-
-
 def inspect(tool, image, label, model, expected_manifest):
     with regular(image) as (stream, info), tempfile.TemporaryDirectory(prefix="being-model-audit-") as folder:
         partitions = [part for part in entries_for(tool, "GPT", image)
@@ -92,7 +70,7 @@ def inspect(tool, image, label, model, expected_manifest):
             raise ValueError(f"{image}: packaged manifest differs from the frozen metadata")
         if regular_member(entries, WEIGHTS) != model["bytes"]:
             raise ValueError(f"{image}: packaged GGUF size differs from frozen bytes")
-        weights = weights_digest(tool, filesystem, model["bytes"])
+        weights = member_fingerprint(tool, "Ext", filesystem, WEIGHTS, model["bytes"], seconds=180)
         if weights["sha256"] != model["sha256"]:
             raise ValueError(f"{image}: packaged GGUF digest differs from frozen bytes")
         envelope = metadata(tool, filesystem, entries, ENVELOPE)

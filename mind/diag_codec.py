@@ -17,6 +17,15 @@ CONFIG_SND_HDA_RECONFIG) and root: a new fixup through
 /sys/class/sound/hwC0D0/{modelname,reconfig}, or raw verbs through the
 hwdep device's HDA_IOCTL_VERB_WRITE. Without them each reports skip. Raw
 verbs bypass the driver's cache, so a codec re-initialisation can undo them.
+
+Measured on the MacBookPro9,2 with kernel 6.18: a reconfig does not pick a
+fixup again (the driver picks one only when the codec is created), so
+`--model` is checked by its effect, a new "picked fixup" line or a changed
+coefficient, and reports skip when nothing changed. Only the boot-time
+snd_hda_intel.model= applies a fixup; `--coef 0x102a` (or 0x100a) is the live
+stand-in. There is one microphone, on the right channel: mbp81's 0x102a
+copies it to the left (bit 12) in single-ended mode (bit 5, 5.8 dB less
+level, no better signal-to-noise), so the generic Apple fixup is kept.
 """
 
 import re
@@ -245,16 +254,14 @@ def codec_checks(host, report=None):
     if fixup is None:
         checks.append(check("codec.fixup", "codec", "skip", None, "no 'picked fixup' line in the kernel log"))
     else:
-        status = "pass"
-        hint = ""
+        note = ""
         if cirrus and ssid == APPLE_SSID and not fixup["name"] and fixup["ssid"] == "106b:0000":
-            status = "warn"
-            hint = ("This Mac (106b:5200) has no fixup of its own, so the generic Apple one ran. "
-                    "Try the 'm' boot entry (model=mbp81) or `pip-diag codec --model mbp81`.")
-        checks.append(check("codec.fixup", "codec", status, fixup,
+            # Measured: mbp81 adds no microphone on this Mac, so the generic Apple fixup is right.
+            note = "; this Mac (106b:5200) has no entry of its own and the generic Apple fixup is the one to keep"
+        checks.append(check("codec.fixup", "codec", "pass", fixup,
                             f"{fixup['chip']}: {fixup['meaning']}"
                             + (f" ({fixup['reason']})" if fixup["reason"] else "")
-                            + (f", matched {fixup['match_type']} {fixup['ssid']}" if fixup["ssid"] else ""), hint))
+                            + (f", matched {fixup['match_type']} {fixup['ssid']}" if fixup["ssid"] else "") + note))
     params = intel_parameters(host)
     model = params.get("model", "")
     checks.append(check("codec.params", "codec", "pass", params,
@@ -287,14 +294,17 @@ def adc_checks(codec, ssid, cirrus, model=""):
                             "node 0x11 coefficients are not in the dump (needs root for dump_coef)"))
     else:
         meaning = {DEFAULT_ADC_CFG: "generic default, differential mic input",
-                   MBP81_ADC_CFG: "mbp81: right only, single ended"}.get(coeff, "unrecognised")
-        status, hint = "pass", ""
+                   MBP81_ADC_CFG: "mbp81: the right channel copied to the left, single ended",
+                   0x100A: "the right channel copied to the left, differential",
+                   0x002A: "single ended"}.get(coeff, "unrecognised")
+        note = ""
         if coeff == DEFAULT_ADC_CFG and ssid == APPLE_SSID:
-            status = "warn"
-            hint = ("The mic ADC is in the generic mode; on this Mac the left channel stays dead. "
-                    "Compare with the 'm' boot entry or `pip-diag codec --model mbp81`.")
-        checks.append(check("codec.adc_cfg", "codec", status, _hex(coeff),
-                            f"node 0x11 Coeff 0x02 = {_hex(coeff)} ({meaning}); model param '{model or '-'}'", hint))
+            note = "; on this Mac the one microphone is on the right channel, so the left reads nothing"
+        elif coeff == MBP81_ADC_CFG and ssid == APPLE_SSID:
+            note = "; measured on this Mac: 5.8 dB less level than 0x000a for the same signal-to-noise"
+        checks.append(check("codec.adc_cfg", "codec", "pass", _hex(coeff),
+                            f"node 0x11 Coeff 0x02 = {_hex(coeff)} ({meaning}); model param '{model or '-'}'"
+                            + note))
     pin = nodes.get(MIC_PIN)
     if pin is None:
         checks.append(check("codec.mic_pin", "codec", "skip", None, "no pin 0x0d in this codec"))
@@ -380,8 +390,41 @@ class Hwdep:
         return self.send(verb(nid, 0xF07, 0))       # GET_PIN_WIDGET_CONTROL
 
 
-def reconfigure(host, model):
-    """Switch the codec to another fixup now. Needs root, the voice stopped and no open PCM."""
+FIXUP_LINE = re.compile(r"picked fixup")
+# What each fixup writes to node 0x11 coefficient 0x02 on the CS4206, where it is known.
+EXPECTED_ADC_CFG = {"apple": DEFAULT_ADC_CFG, "mbp81": MBP81_ADC_CFG}
+
+
+def current_coefficient(host, *, hwdep_factory=None):
+    """Node 0x11 coefficient 0x02 as the codec holds it now, or None.
+
+    By a raw verb when the hwdep device is there (exact, after any re-init),
+    else from the codec dump with dump_coef (root)."""
+    hwdep, _ = live_available(host)
+    if hwdep:
+        try:
+            with (hwdep_factory or Hwdep)(str(host.path(HWDEP))) as device:
+                return device.read_coef(VENDOR_NODE, ADC_CFG_INDEX)
+        except OSError:
+            pass
+    dump = read_dump(host, 0, 0)
+    vendor = parse_codec(dump)["nodes"].get(VENDOR_NODE) if dump else None
+    return vendor["coeffs"].get(ADC_CFG_INDEX) if vendor else None
+
+
+def fixup_lines(log_text):
+    return [line for line in (log_text or "").splitlines() if FIXUP_LINE.search(line)]
+
+
+def reconfigure(host, model, *, hwdep_factory=None):
+    """Ask the driver for another fixup now, and check by its effect whether it took.
+
+    Needs root, the voice stopped and no open PCM. On kernel 6.18 a reconfig
+    rebuilds the codec but keeps the fixup it picked when the codec was
+    created: then no new "picked fixup" line appears and the coefficient
+    stays, and this says skip (the experiment could not be done live), not
+    pass. The value's `written` says the reconfig ran: the mixer then came
+    back at the driver's defaults, and the caller puts the levels back."""
     if model not in MODELS:
         return check("codec.reconfig", "codec", "fail", model, f"unknown model {model!r}",
                      f"Use one of: {', '.join(MODELS)}.")
@@ -390,27 +433,113 @@ def reconfigure(host, model):
         return check("codec.reconfig", "codec", "skip", model,
                      "this kernel has no HDA reconfig (CONFIG_SND_HDA_RECONFIG): use the cable build")
     before = (host.read(f"{HWDEP_SYSFS}/modelname") or "").strip()
+    coef_before = current_coefficient(host, hwdep_factory=hwdep_factory)
+    lines_before = len(fixup_lines(kernel_log(host)))
     if not host.write(f"{HWDEP_SYSFS}/modelname", model) or not host.write(f"{HWDEP_SYSFS}/reconfig", "1"):
-        return check("codec.reconfig", "codec", "fail", model, f"writing modelname/reconfig failed (was {before!r})",
+        return check("codec.reconfig", "codec", "fail", {"model": model, "before": before, "written": False},
+                     f"writing modelname/reconfig failed (was {before!r})",
                      "Something still has the sound card open (the voice, aplay or arecord).")
     after = (host.read(f"{HWDEP_SYSFS}/modelname") or "").strip()
-    return check("codec.reconfig", "codec", "pass", {"before": before, "after": after},
-                 f"codec reconfigured: model {before or '(default)'} -> {after}")
+    coef_after = current_coefficient(host, hwdep_factory=hwdep_factory)
+    log = kernel_log(host)
+    new_lines = fixup_lines(log)[lines_before:]
+    picked = picked_fixup("\n".join(new_lines)) if new_lines else None
+    value = {"model": model, "before": before, "after": after, "written": True, "coef_before": _hex(coef_before),
+             "coef_after": _hex(coef_after), "picked": picked}
+    expected = EXPECTED_ADC_CFG.get(model)
+    stand_in = ("A fixup is applied only at boot (snd_hda_intel.model=" + model + "); `pip-diag codec --coef "
+                "0x102a` (or 0x100a) writes the coefficient live instead.")
+    if picked is not None:
+        if picked["name"] and picked["name"] != model:
+            return check("codec.reconfig", "codec", "fail", value,
+                         f"asked for {model}, but the kernel picked {picked['name']}",
+                         "The driver does not know this model name for this codec.")
+        if expected is not None and coef_after is not None and coef_after != expected:
+            return check("codec.reconfig", "codec", "fail", value,
+                         f"the kernel picked a fixup again, but coef 0x02 is {_hex(coef_after)}, "
+                         f"not {model}'s {_hex(expected)}", "The fixup did not apply its codec setup.")
+        return check("codec.reconfig", "codec", "pass", value,
+                     f"codec reconfigured to {model}: the kernel picked {picked['meaning']}; coef 0x02 "
+                     f"{_hex(coef_before) or '?'} -> {_hex(coef_after) or '?'}")
+    if coef_before is not None and coef_after is not None and coef_after != coef_before:
+        if expected is not None and coef_after != expected:
+            return check("codec.reconfig", "codec", "fail", value,
+                         f"coef 0x02 changed {_hex(coef_before)} -> {_hex(coef_after)}, not to {model}'s "
+                         f"{_hex(expected)}", "The fixup did not apply its codec setup.")
+        return check("codec.reconfig", "codec", "pass", value,
+                     f"codec reconfigured to {model}: coef 0x02 {_hex(coef_before)} -> {_hex(coef_after)}")
+    if coef_before is None or coef_after is None:
+        return check("codec.reconfig", "codec", "skip", value,
+                     f"the codec was reconfigured with model {after or model}, but there is no new 'picked fixup' "
+                     "line and coef 0x02 could not be read, so whether the fixup changed is unknown", stand_in)
+    return check("codec.reconfig", "codec", "skip", value,
+                 f"the codec was reconfigured with model {after or model}, but the kernel kept its fixup: no new "
+                 f"'picked fixup' line and coef 0x02 still {_hex(coef_after)} (a fixup is picked only when the "
+                 "codec is created)", stand_in)
 
 
-def set_coefficient(host, value, *, hwdep_factory=Hwdep):
+def set_coefficient(host, value, *, hwdep_factory=None):
     """Write node 0x11 coefficient 0x02 by a raw verb and read it back."""
     hwdep, _ = live_available(host)
     if not hwdep:
         return check("codec.coef", "codec", "skip", _hex(value),
                      "no /dev/snd/hwC0D0 (CONFIG_SND_HDA_HWDEP): use the cable build")
     try:
-        with hwdep_factory(str(host.path(HWDEP))) as device:
+        with (hwdep_factory or Hwdep)(str(host.path(HWDEP))) as device:
             before = device.read_coef(VENDOR_NODE, ADC_CFG_INDEX)
             after = device.write_coef(VENDOR_NODE, ADC_CFG_INDEX, value)
     except OSError as error:
         return check("codec.coef", "codec", "fail", _hex(value), f"the hwdep verb failed: {error}")
     status = "pass" if after == value else "fail"
     return check("codec.coef", "codec", status, {"before": _hex(before), "after": _hex(after)},
-                 f"node 0x11 Coeff 0x02: {_hex(before)} -> {_hex(after)} (raw verb; a codec re-init undoes it)",
+                 f"node 0x11 Coeff 0x02: {_hex(before)} -> {_hex(after)} (raw verb; put back when the run ends)",
                  "" if status == "pass" else "The codec did not keep the new value.")
+
+
+# Putting the codec back ----------------------------------------------------------
+
+def experiment_state(host, *, hwdep_factory=None):
+    """What a live experiment changes, as it is now: the model name the next reconfig
+    uses (None without the sysfs file) and node 0x11 coefficient 0x02 (None if unreadable)."""
+    model = host.read(f"{HWDEP_SYSFS}/modelname")
+    return {"modelname": None if model is None else model.strip(),
+            "coef": current_coefficient(host, hwdep_factory=hwdep_factory)}
+
+
+def put_back(host, saved, *, hwdep_factory=None):
+    """Undo `codec --model` and `codec --coef`: the model name written back and the codec
+    reconfigured to it, then coefficient 0x02 written back by a raw verb if it still differs.
+
+    Needs the voice stopped. Never raises. Returns (what it did, whether it reconfigured
+    the codec: a reconfig resets the mixer, so the caller puts the levels back after)."""
+    done, reconfigured = [], False
+    if not isinstance(saved, dict):
+        return done, reconfigured
+    try:
+        wanted = saved.get("modelname")
+        now = host.read(f"{HWDEP_SYSFS}/modelname")
+        if isinstance(wanted, str) and now is not None and now.strip() != wanted:
+            # An empty name ("\n": a write of nothing never reaches sysfs) means the boot's own choice.
+            ok = host.write(f"{HWDEP_SYSFS}/modelname", wanted or "\n")
+            ok = ok and host.write(f"{HWDEP_SYSFS}/reconfig", "1")
+            reconfigured = ok
+            shown = wanted or "the boot's choice"
+            done.append(f"put the codec model back to {shown} and reconfigured it" if ok else
+                        f"could not put the codec model back to {shown} (it stays {now.strip()!r} until the reboot)")
+        coef = saved.get("coef")
+        if isinstance(coef, int):
+            now = current_coefficient(host, hwdep_factory=hwdep_factory)
+            if now is not None and now != coef:
+                after = None
+                if live_available(host)[0]:
+                    try:
+                        with (hwdep_factory or Hwdep)(str(host.path(HWDEP))) as device:
+                            after = device.write_coef(VENDOR_NODE, ADC_CFG_INDEX, coef)
+                    except OSError:
+                        after = None
+                done.append(f"put the codec coef 0x02 back to {_hex(coef)}" if after == coef else
+                            f"could not put the codec coef 0x02 back to {_hex(coef)} (it stays {_hex(now)} "
+                            "until the reboot)")
+    except Exception as error:  # restore must go on with the mixer and the voice
+        done.append(f"could not put the codec back: {type(error).__name__}: {error}")
+    return done, reconfigured

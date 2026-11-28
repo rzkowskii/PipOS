@@ -2,7 +2,7 @@ import unittest
 from datetime import date, datetime
 
 from mind.commands import (
-    Command, clock_time, correction_value, greeting, history_query, may_be_command, parse, reflect, ring_reply,
+    Command, clock_time, correction_value, event_range, greeting, history_query, may_be_command, parse, reflect, ring_reply,
     snooze_minutes, splice_correction, subject_of, volume_level,
 )
 
@@ -81,6 +81,16 @@ class CommandsTest(unittest.TestCase):
                 start = datetime(2026, 11, start_day).timestamp() if start_day else None
                 end = datetime(2026, 11, end_day).timestamp() if end_day else None
                 self.assertEqual(history_query(text, today=today), (topic, start, end))
+
+    def test_event_range_is_explicit_declarative_and_unambiguous(self):
+        today = date(2026, 11, 21)
+        start = datetime(2026, 11, 20).timestamp()
+        end = datetime(2026, 11, 21).timestamp()
+        self.assertEqual(event_range("Yesterday I repaired the radio", today=today), (start, end))
+        self.assertEqual(event_range("I repaired the radio on 2026-11-20", today=today), (start, end))
+        self.assertIsNone(event_range("What happened yesterday?", today=today))
+        self.assertIsNone(event_range("Yesterday, did I repair the radio", today=today))
+        self.assertIsNone(event_range("Yesterday I planned today", today=today))
 
     def test_forget(self):
         self.check("Forget that.", "forget_last")
@@ -228,6 +238,8 @@ class NewCommandsTest(unittest.TestCase):
     def test_look_no_longer_takes_what_is_this(self):
         self.assertIsNone(parse("What is this?", "Pip"))
         self.check("What do you see?", "look")
+        self.check("Can you see me?", "look", "me")
+        self.check("Can you see this?", "look", "this")
 
     def test_its_name_alone_is_a_hello(self):
         for text in ("Pip", "Hey Pip.", "hello Pip", "Hi, Pip!", "hey"):
@@ -339,7 +351,7 @@ class RoutinesCommandsTest(unittest.TestCase):
 
     def test_help(self):
         for said, kind, arg in (
-            ("What can you do?", "skills", ""), ("Help", "skills", ""), ("What can I say?", "skills", ""),
+            ("What can you do?", "skills", ""), ("Help", "skills", ""), ("What can I say?", "voice_help", ""),
             ("What else can you do?", "skills_more", ""),
             ("What can you do with lists?", "skills_group", "lists"),
             ("What can you do with the terminal?", "skills_group", "the terminal"),
@@ -369,3 +381,22 @@ class RoutinesCommandsTest(unittest.TestCase):
                      "stop being silly"):
             with self.subTest(said=said):
                 self.assertFalse(may_be_command(said, "Pip"), said)
+
+    def test_explicit_camera_and_dream_consent(self):
+        for said, kind, arg in (
+            ("You can use your camera", "camera_consent", "on"),
+            ("Stop watching", "camera_consent", "off"),
+            ("Turn camera on", "camera_consent", "on"),
+            ("Turn the camera off", "camera_consent", "off"),
+            ("You can dream tonight", "dream_consent", "tonight"),
+            ("Stop dreaming", "dream_consent", "off"),
+        ):
+            with self.subTest(said=said):
+                self.check(said, kind, arg)
+                self.assertTrue(may_be_command(said, "Pip"))
+        for said in (
+            "Can you use your camera?", "I use your camera", "Are you watching?",
+            "Can you dream tonight?", "I was dreaming", "Stop watching the birds",
+        ):
+            with self.subTest(said=said):
+                self.assertIsNone(parse(said, "Pip"), said)

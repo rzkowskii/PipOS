@@ -12,12 +12,13 @@ import tempfile
 import unittest
 import wave
 from array import array
-from contextlib import nullcontext, redirect_stdout
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from lab import sherpa_avx_smoke as smoke
-from mind import sherpa
+from mind import phonemize, sherpa
+from tests.test_phonemize import FakePhonemizer
 from tests.test_sherpa import FakeLibrary
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,8 +67,9 @@ def fake_assets(root, *, evil=False):
     (root / "tts").mkdir()
     piper = root / "tts/piper.tar.bz2"
     with tarfile.open(piper, "w:bz2") as archive:
-        for name in ("en_GB-alba-medium.onnx", "en_GB-alba-medium.onnx.json", "tokens.txt"):
+        for name in ("en_GB-alba-medium.onnx", "tokens.txt"):
             add(archive, f"vp/{name}", b"x")
+        add(archive, "vp/en_GB-alba-medium.onnx.json", b'{"espeak": {"voice": "en-gb-x-rp"}}')
         add(archive, "vp/espeak-ng-data", directory=True)
         add(archive, "vp/espeak-ng-data/voices", directory=True)
         add(archive, "vp/espeak-ng-data/voices/en", b"voice")
@@ -115,10 +117,12 @@ class PrepareTests(unittest.TestCase):
             for relative in ("runtime/libsherpa-onnx-c-api.so", "runtime/libonnxruntime.so", "models/silero_vad.onnx",
                              "models/moonshine-tiny/encoder_model.ort", "models/moonshine-tiny/decoder_model_merged.ort",
                              "models/moonshine-tiny/tokens.txt", "fixtures/0.wav", "models/piper/tokens.txt",
-                             "models/piper/en_GB-alba-medium.onnx", "models/piper/espeak-ng-data/voices/en",
-                             "models/piper/espeak-ng-data/en_dict", "py/mind/sherpa.py", "py/guest.py"):
+                             "models/piper/en_GB-alba-medium.onnx", "models/piper/en_GB-alba-medium.onnx.json",
+                             "models/piper/espeak-ng-data/voices/en", "models/piper/espeak-ng-data/en_dict",
+                             "py/mind/sherpa.py", "py/mind/phonemize.py", "py/guest.py"):
                 self.assertTrue((media / relative).is_file(), relative)
             self.assertEqual((media / "py/mind/sherpa.py").read_bytes(), smoke.BINDINGS.read_bytes())
+            self.assertEqual((media / "py/mind/phonemize.py").read_bytes(), smoke.PHONEMIZER.read_bytes())
 
     def test_unverified_and_unsafe_assets_are_refused(self):
         with tempfile.TemporaryDirectory() as assets, tempfile.TemporaryDirectory() as media:
@@ -136,7 +140,7 @@ class PrepareTests(unittest.TestCase):
 class GuestScriptTests(unittest.TestCase):
     """The guest script, run on the host against the fake library."""
 
-    def run_stage(self, stage, fake):
+    def run_stage(self, stage, fake, pronunciation=None):
         with tempfile.TemporaryDirectory() as assets, tempfile.TemporaryDirectory() as media:
             smoke.prepare_media(assets, media, fake_assets(assets))
             maps = Path(media) / "maps"
@@ -144,9 +148,9 @@ class GuestScriptTests(unittest.TestCase):
             script = smoke.GUEST_SCRIPT.replace('"/proc/self/maps"', repr(str(maps)))
             argv = ["guest.py", media, stage] + ([smoke.SENTENCE] if stage == "piper" else [])
             real_load = sherpa.load
+            load_phonemizer = phonemize.load
             with (patch.object(sys, "argv", argv), patch.object(sherpa, "load", lambda library=None: real_load(fake)),
-                  patch.object(sherpa.OfflineTts, "write", lambda self, text, path, length_scale=1.0: 1.5)
-                  if stage == "piper" else nullcontext(),
+                  patch.object(phonemize, "load", lambda library=None: load_phonemizer(pronunciation)),
                   redirect_stdout(io.StringIO()) as out):
                 exec(compile(script, "guest.py", "exec"), {"__name__": "__main__"})
         return smoke.judge(stage, 0, out.getvalue())
@@ -164,9 +168,17 @@ class GuestScriptTests(unittest.TestCase):
         # The 24 kHz recording goes to the recognizer at its own rate.
         self.assertEqual((fake.accept_rates, moonshine["sample_rate"], moonshine["audio_seconds"]),
                          ([24000], 24000, 1.0))
-        piper = self.run_stage("piper", FakeLibrary())
+
+    def test_piper_renders_phonemes_from_the_bundled_voice_card(self):
+        fake, pronunciation = FakeLibrary(), FakePhonemizer()
+        piper = self.run_stage("piper", fake, pronunciation)
         self.assertTrue(piper["passed"], piper)
         self.assertEqual(piper["versions"]["onnxruntime"], "1.28.2")
+        self.assertEqual(pronunciation.texts[-1], (smoke.SENTENCE.encode(), b"en-gb-x-rp"))
+        raw_text, lengths, spoken = fake.configs["phonemes"][0]
+        self.assertEqual(raw_text, b"")
+        self.assertEqual(len(lengths), 2)
+        self.assertEqual(spoken, smoke.SENTENCE.lower())
 
     def test_empty_transcript_fails(self):
         self.assertFalse(self.run_stage("moonshine", FakeLibrary(transcript=""))["passed"])
@@ -187,10 +199,158 @@ class VerdictTests(unittest.TestCase):
     def test_missing_report_fails(self):
         self.assertFalse(smoke.judge("vad", 0, "Traceback ...")["passed"])
 
+    def report(self, **changes):
+        stages = [{"stage": stage, "passed": True, "sigill": False, "status": 0, "log": "/home/someone/x",
+                   "versions": {"sherpa_onnx": "2.0.3", "onnxruntime": "1.28.2"}} for stage in smoke.STAGES]
+        report = {"image": "/home/someone/out/images/beingos-ivybridge.img", "qemu_cpu": "IvyBridge",
+                  "stages": stages, "passed": True, "sigill": False,
+                  "runtime_sha256": {"libsherpa-onnx-c-api.so": hashlib.sha256(b"api").hexdigest(),
+                                     "libonnxruntime.so": hashlib.sha256(b"ort").hexdigest()}}
+        report.update(changes)
+        return report
+
+    def test_the_shippable_verdict_has_the_outcome_and_pins_and_no_host_paths(self):
+        verdict = smoke.shippable_verdict(self.report())
+        self.assertEqual(verdict["source"], "qemu-ivybridge")
+        self.assertEqual(verdict["versions"], {"sherpa_onnx": "2.0.3", "onnxruntime": "1.28.2"})
+        self.assertEqual([stage["stage"] for stage in verdict["stages"]], list(smoke.STAGES))
+        self.assertNotIn("/home", json.dumps(verdict))
+        self.assertTrue(verdict["passed"])
+
+    def test_the_voice_accepts_the_verdict_for_the_bytes_it_tested(self):
+        from mind import voice_engines
+
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            (folder / "libsherpa-onnx-c-api.so").write_bytes(b"api")
+            (folder / "libonnxruntime.so").write_bytes(b"ort")
+            path = folder / "sherpa-avx-smoke.json"
+            path.write_text(json.dumps(smoke.shippable_verdict(self.report())))
+            library = folder / "libsherpa-onnx-c-api.so"
+            self.assertEqual(voice_engines.sherpa_smoke_passed(paths=[path], library=library), (True, None))
+            # A stripped library is other bytes: no pass.
+            (folder / "libonnxruntime.so").write_bytes(b"ort, stripped")
+            self.assertFalse(voice_engines.sherpa_smoke_passed(paths=[path], library=library)[0])
+
+    def test_an_incomplete_or_failed_run_is_no_pass(self):
+        for report in (self.report(passed=False), self.report(stages=self.report()["stages"][:1]),
+                       self.report(stages=[]), {"error": "boot failed"}):
+            self.assertFalse(smoke.shippable_verdict(report)["passed"])
+        self.assertTrue(smoke.shippable_verdict(self.report(stages=[{**self.report()["stages"][1], "status": 132,
+                                                           "sigill": True, "passed": False}]))["sigill"])
+
+    def test_both_images_keep_the_tested_libraries_unstripped(self):
+        for name in ("beingos_laptop_defconfig", "beingos_x86_64_defconfig"):
+            lines = (ROOT / "os/configs" / name).read_text().splitlines()
+            excluded = [line for line in lines if line.startswith("BR2_STRIP_EXCLUDE_FILES=")]
+            self.assertEqual(len(excluded), 1, name)
+            self.assertEqual(set(excluded[0].split("=", 1)[1].strip('"').split()), set(smoke.RUNTIME_FILES), name)
+
+    def test_other_runtime_bytes_can_be_tested_instead(self):
+        with tempfile.TemporaryDirectory() as assets, tempfile.TemporaryDirectory() as media, \
+                tempfile.TemporaryDirectory() as runtime:
+            smoke.prepare_media(assets, media, fake_assets(assets))
+            for name in smoke.RUNTIME_FILES:
+                (Path(runtime) / name).write_bytes(b"installed " + name.encode())
+            smoke.use_runtime(media, runtime)
+            self.assertEqual((Path(media) / "runtime/libonnxruntime.so").read_bytes(), b"installed libonnxruntime.so")
+            (Path(runtime) / "libonnxruntime.so").unlink()
+            with self.assertRaisesRegex(ValueError, "missing"):
+                smoke.use_runtime(media, runtime)
+
     def test_piper_command_quotes_the_sentence(self):
         self.assertTrue(smoke.guest_command("piper").endswith(f"piper '{smoke.SENTENCE}'"))
         self.assertNotIn("'", smoke.SENTENCE)
         self.assertNotIn("'", smoke.guest_command("vad"))
+
+
+class FakeVM:
+    """Answers the commands main() sends the guest, like an Ivy Bridge lab image would."""
+
+    def __init__(self, media, stage_status=None, login_error=None, **_):
+        self.media = Path(media.split(":", 2)[2])
+        self.stage_status = stage_status or {}
+        self.login_error = login_error
+        self.destroyed = False
+
+    def start(self):
+        pass
+
+    def login(self, timeout):
+        if self.login_error:
+            raise self.login_error
+
+    def destroy(self):
+        self.destroyed = True
+
+    def run(self, command, timeout):
+        if command == "uname -m":
+            return 0, "x86_64"
+        if "/proc/cpuinfo" in command:
+            return 0, "flags\t: fpu sse4_2 avx f16c aes"
+        if "sha256sum" in command:
+            return 0, "\n".join(f"{smoke.file_sha256(self.media / 'runtime' / name)}  {name}"
+                                for name in smoke.RUNTIME_FILES)
+        for stage in smoke.STAGES:
+            if command == smoke.guest_command(stage):
+                status = self.stage_status.get(stage, 0)
+                if status:
+                    return status, "Illegal instruction"
+                report = {"stage": stage, "segments": 1, "text": "hello", "audio_seconds": 1.5,
+                          "runtime_paths": [f"{smoke.GUEST_MEDIA}/runtime/libonnxruntime.so"],
+                          "versions": {"sherpa_onnx": "2.0.3", "onnxruntime": "1.28.2"}}
+                return 0, smoke.MARK + json.dumps(report)
+        return 0, ""
+
+
+class MainTests(unittest.TestCase):
+    """main() end to end with a fake VM: the shippable verdict is always written."""
+
+    def run_main(self, **vm_options):
+        with tempfile.TemporaryDirectory() as assets, tempfile.TemporaryDirectory() as out:
+            manifest = Path(out) / "manifest.json"
+            manifest.write_text(json.dumps(fake_assets(assets)))
+            image = Path(out) / "lab.img"
+            image.write_bytes(b"image")
+            verdict_path = Path(out) / "verdict.json"
+            argv = ["sherpa_avx_smoke", "--assets", assets, "--image", str(image),
+                    "--output", str(Path(out) / "report.json"), "--verdict", str(verdict_path)]
+            vms = []
+
+            def make_vm(**kwargs):
+                vms.append(FakeVM(kwargs["update_media"], **vm_options))
+                return vms[-1]
+
+            error = None
+            with patch.object(smoke, "MANIFEST", manifest), patch.object(smoke, "VM", make_vm), \
+                    patch.object(sys, "argv", argv), patch.object(smoke.signal, "signal"), \
+                    patch.object(smoke.signal, "setitimer"), redirect_stdout(io.StringIO()):
+                try:
+                    smoke.main()
+                except BaseException as caught:  # SystemExit or the run's own error
+                    error = caught
+            self.assertTrue(vms and vms[0].destroyed)
+            return error, json.loads(verdict_path.read_text())
+
+    def test_a_passing_run_writes_a_passing_verdict(self):
+        error, verdict = self.run_main()
+        self.assertIsNone(error)
+        self.assertTrue(verdict["passed"])
+        self.assertFalse(verdict["sigill"])
+        self.assertEqual(set(verdict["runtime_sha256"]), set(smoke.RUNTIME_FILES))
+        self.assertNotIn("/tmp", json.dumps(verdict))
+
+    def test_a_sigill_stage_writes_a_failed_verdict_naming_it(self):
+        error, verdict = self.run_main(stage_status={"moonshine": smoke.SIGILL_STATUS})
+        self.assertIsInstance(error, SystemExit)
+        self.assertFalse(verdict["passed"])
+        self.assertTrue(verdict["sigill"])
+
+    def test_a_failed_boot_keeps_its_own_error_and_writes_a_failed_verdict(self):
+        error, verdict = self.run_main(login_error=TimeoutError("no login prompt"))
+        self.assertIsInstance(error, TimeoutError)
+        self.assertFalse(verdict["passed"])
+        self.assertEqual(verdict["stages"], [])
 
 
 if __name__ == "__main__":

@@ -24,6 +24,8 @@ The sound stays in memory and only its peak and RMS level are kept.
 
 import argparse
 import array
+import asyncio
+import hashlib
 import json
 import math
 import os
@@ -54,7 +56,15 @@ LOGGING_OFF = "LOGGING-OFF.txt"        # on PIPLOGS: the owner switched Try diag
 FSYNC_EVERY = 3.0
 READ_LIMIT = 256 * 1024
 NOTABLE = (
+    ("mic_privacy", re.compile(r"brainstem: microphone capture stayed open after policy closed; "
+                               r"stopping ears and voice until reboot")),
     ("renderer", re.compile(r"face: drawn by")),
+    # The short-monotonic journal prefix is the boot timestamp. Together these
+    # lines show firmware framebuffer -> simpledrm/i915 -> first face swap.
+    # They are evidence only: Apple EFI gfxterm and the i915 mode-set gap still
+    # need the native high-frame-rate recording described in USB-READINESS.md.
+    ("boot_display", re.compile(r"efifb|efi[-_ ]framebuffer|EFI VGA|simple[-_ ]framebuffer|simpledrm|"
+                                r"fb0: switching|face: first (?:frame presented|visible eye frame)", re.I)),
     ("firmware", re.compile(r"firmware", re.I)),
     ("wifi", re.compile(r"\b(b43|bcma|brcm|wlan\d|wl\b|cfg80211)", re.I)),
     ("graphics", re.compile(r"\b(i915|drm|crocus|mesa|EGL|kmsdrm)", re.I)),
@@ -66,6 +76,7 @@ NOTABLE = (
 NOTABLE_KEEP = 40
 AUDIO_RUN = Path("run/being-audio")   # under the root: written by being-audio-init
 MIC_RESULT = Path("/") / AUDIO_RUN / "mic-level.json"
+MIC_POLICY_LATCH = Path("run/being/mic-policy-breach")
 MIC_SECONDS = 3
 MIC_RATE = 16000
 MIC_SETTLE = 0.1                      # seconds left out at the start, while the ADC ramps up
@@ -119,6 +130,8 @@ SERIALS = re.compile(
     r"(?:\"(?:[^\"\\]|\\.)*\"|[^\s\",;]+)")
 # Speech that reaches a log by mistake: bus payloads with a text field.
 SPEECH = re.compile(r'(?i)("(?:text|heard|transcript|partial)"\s*:\s*)"(?:[^"\\]|\\.)*"')
+VOICE_SPEECH = re.compile(r'(\bheard: )"(?:[^"\\]|\\.)*"|'
+                          r'(\b(?:(?:final|partial) transcript text|(?:no )?n-best transcripts): ).*')
 
 
 def scrub(text):
@@ -126,7 +139,8 @@ def scrub(text):
     text = mask_mac(text)
     text = SERIALS.sub(lambda match: match[1] + ('"[hidden]"' if match[0].endswith('"') and
                                                   match[0][len(match[1]):].startswith('"') else "[hidden]"), text)
-    return SPEECH.sub(r'\1"[speech removed]"', text)
+    text = SPEECH.sub(r'\1"[speech removed]"', text)
+    return VOICE_SPEECH.sub(lambda match: (match[1] or match[2]) + '"[speech removed]"', text)
 
 
 def kernel_log(root):
@@ -530,6 +544,8 @@ def cpu_power(root):
 
 def battery_health(root):
     """Cycle count, full versus design capacity, from every battery."""
+    from .hardware_metrics import battery_watts, number
+
     found = []
     for path in sorted((root / "sys/class/power_supply").glob("*")):
         values = uevent(path)
@@ -542,10 +558,11 @@ def battery_health(root):
             health = round(100 * int(full) / int(design), 1) if full and design and int(design) else None
         except ValueError:
             pass
+        power, current, voltage = (values.get(f"POWER_SUPPLY_{kind}_NOW") for kind in ("POWER", "CURRENT", "VOLTAGE"))
         found.append({"name": path.name, "cycle_count": values.get("POWER_SUPPLY_CYCLE_COUNT"),
                       "full": full, "design": design, "health_percent": health,
-                      "voltage_now": values.get("POWER_SUPPLY_VOLTAGE_NOW"),
-                      "power_now": values.get("POWER_SUPPLY_POWER_NOW") or values.get("POWER_SUPPLY_CURRENT_NOW"),
+                      "voltage_now": voltage, "current_now": current, "power_now": power,
+                      "watts": battery_watts(*(number(raw or "") for raw in (power, current, voltage))),
                       "status": values.get("POWER_SUPPLY_STATUS"), "capacity": values.get("POWER_SUPPLY_CAPACITY")})
     return found
 
@@ -982,7 +999,7 @@ def decibels(value):
 def mic_line(result):
     """'peak X dBFS, rms Y dBFS (...)' from a mic-test result, or why there is none."""
     if not result:
-        return "not measured on this boot (being-audio-init measures it before the voice starts)"
+        return "not measured on this boot (use a microphone diagnostic boot entry or pip-diag mic)"
     if result.get("status") != "ok":
         return f"not measured: {result.get('detail') or result.get('status') or 'unknown'}"
     peak, rms = result.get("peak_dbfs"), result.get("rms_dbfs")
@@ -1011,6 +1028,28 @@ def section(title, body):
     return f"===== {title} =====\n{body.rstrip()}\n\n"
 
 
+def cortex_build(root):
+    files = (
+        "usr/lib/systemd/system/being-cortex.service",
+        "usr/lib/systemd/system/being-dream-cortex.service",
+        "usr/lib/systemd/system/being-model-check.service",
+        "usr/share/being/chat-template.jinja",
+    )
+    hashes = {}
+    for name in files:
+        try:
+            with (root / name).open("rb") as stream:
+                hashes[name] = hashlib.file_digest(stream, "sha256").hexdigest()
+        except OSError:
+            hashes[name] = None
+    record = {"source_id": field(root / "etc/being/source-id"), "sha256": hashes}
+    if root == Path("/"):
+        # Report overlays without copying their environment values onto the USB.
+        active = run(["systemctl", "show", "--property=FragmentPath,DropInPaths", "being-cortex.service"], timeout=3)
+        record["active_unit_paths"] = active.strip().splitlines() if active else []
+    return record
+
+
 def hardware_report(root=Path("/"), *, slow=False, load=False):
     """A plain-text report of everything the kernel shows about this machine.
 
@@ -1029,6 +1068,7 @@ def hardware_report(root=Path("/"), *, slow=False, load=False):
 
     add("kernel", lambda: f"{read(root / 'proc/version') or ''}cmdline: {read(root / 'proc/cmdline') or ''}")
     add("build", lambda: read(root / "etc/being/build-id"))
+    add("cortex build", lambda: cortex_build(root))
     add("firmware (DMI/SMBIOS)", lambda: dmi(root))
     add("EFI", lambda: {"booted_with_efi": (root / "sys/firmware/efi").exists(),
                         "platform_bits": field(root / "sys/firmware/efi/fw_platform_size")})
@@ -1047,6 +1087,7 @@ def hardware_report(root=Path("/"), *, slow=False, load=False):
     add("alsa mixer (amixer -c 0 scontents)", lambda: simple_mixer(root))
     add("alsa mixer controls (amixer -c 0 contents)", lambda: card_controls(root))
     add("microphone level test", lambda: mic_result(root))
+    add("microphone safety", lambda: {"latched": (root / MIC_POLICY_LATCH).exists()})
     add("input devices", lambda: read(root / "proc/bus/input/devices"))
     add("lid", lambda: lid_state(root))
     add("hwmon (applesmc, coretemp, ...)", lambda: hwmon(root))
@@ -1092,7 +1133,7 @@ def kernel_features(root=Path("/")):
     config = root / "proc/config.gz"
     try:
         import gzip
-    except ImportError:             # the device's Python has no zlib
+    except ImportError:             # older or minimal Python images omit zlib
         gzip = None
     if config.is_file() and gzip is None:
         found["kernel config"] = "(not read: this Python has no zlib to unpack /proc/config.gz)"
@@ -1135,6 +1176,7 @@ def summary(root=Path("/"), *, boot=None, notable=None, journal_bytes=None, fail
 
     # Hearing and voice first: they are what a silent Pip needs answered.
     say("Mic level", guard(lambda: mic_line(mic_result(root)), "unreadable"))
+    say("Mic latch", "active until reboot" if (root / MIC_POLICY_LATCH).exists() else "off")
     say("Mixer", guard(lambda: "; ".join(part for part in (
         mixer_line(mixer if mixer is not None else simple_mixer(root)),
         jack_line(card_controls(root))) if part), "unreadable"))
@@ -1226,7 +1268,7 @@ def summary(root=Path("/"), *, boot=None, notable=None, journal_bytes=None, fail
     flags = guard(lambda: boot_flags(root, journal_transcripts=bool(notable.get("transcripts"))), {}) or {}
     say("Cable link", "ON: a cable development boot (being.cable=1), not a release boot" if flags.get("cable")
         else "off")
-    say("Voice debug", "ON: what the voice heard is written in journal.txt (from "
+    say("Voice debug", "ON: transcript text is enabled in the local journal (from "
         + ", ".join(flags.get("voice_debug_from") or ["unknown"]) + ")" if flags.get("voice_debug") else "off")
     if failed_units is not None:
         say("Failed units", failed_units.strip().replace("\n", "; ") or "none")
@@ -1236,7 +1278,9 @@ def summary(root=Path("/"), *, boot=None, notable=None, journal_bytes=None, fail
             f"Written {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}, "
             f"{uptime(root)} after power-on", ""]
     tail = []
-    for key, title in (("failed", "Failures and restarts"), ("firmware", "Firmware messages"),
+    for key, title in (("boot_display", "Boot display handoff"),
+                       ("mic_privacy", "Microphone privacy events"),
+                       ("failed", "Failures and restarts"), ("firmware", "Firmware messages"),
                        ("wifi", "Wi-Fi messages"), ("graphics", "Graphics messages"),
                        ("audio", "Audio messages"), ("smc", "applesmc messages")):
         if notable.get(key):
@@ -1272,6 +1316,7 @@ class Journal:
         self.restarts = 0
         self.partial = b""
         self.unwritten = b""
+        self.discard_line = False
         self.notable = notable if notable is not None else {}
         self.stopped = False
 
@@ -1303,18 +1348,26 @@ class Journal:
                     kept.append(scrub(text)[:300])
 
     def feed(self, data, free):
-        self.scan(data)
         if self.stopped:
             return
+        if self.discard_line:
+            _, newline, data = data.partition(b"\n")
+            if not newline:
+                return
+            self.discard_line = False
         # Identifiers are masked on whole lines, so none can hide across reads.
         pending = self.unwritten + data
         cut = pending.rfind(b"\n") + 1
-        if cut == 0 and len(pending) < 4096:
-            self.unwritten = pending
-            return
-        cut = cut or len(pending)
         self.unwritten = pending[cut:]
-        data = scrub(pending[:cut].decode("utf-8", "replace")).encode("utf-8")
+        data = pending[:cut]
+        self.scan(data)
+        data = scrub(data.decode("utf-8", "replace")).encode("utf-8")
+        if len(self.unwritten) >= 4096:
+            self.unwritten = b""
+            self.discard_line = True
+            data += b"[being-usb-logs: overlong journal line omitted]\n"
+        if not data:
+            return
         if self.written + len(data) > self.cap or free < STOP_SPACE:
             self.stream.write(b"\n[being-usb-logs: journal copy stopped here, "
                               + (b"size cap reached" if free >= STOP_SPACE else b"stick nearly full") + b"]\n")
@@ -1534,15 +1587,47 @@ def levels(data, channels=1, skip=0):
     return found
 
 
-def record(device, channels, seconds):
+class MicInterlocked(RuntimeError):
+    """The brainstem did not authorise the boot microphone measurement."""
+
+
+def _capture_while_open(command, seconds, allowed):
+    if not allowed():
+        raise MicInterlocked
+    with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE) as capture:
+        deadline = time.monotonic() + seconds + 5
+        try:
+            while allowed():
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise subprocess.TimeoutExpired(command, seconds + 5)
+                try:
+                    audio, error = capture.communicate(timeout=min(left, 0.1))
+                except subprocess.TimeoutExpired:
+                    continue
+                if allowed():
+                    return subprocess.CompletedProcess(command, capture.returncode, audio, error)
+                break
+            raise MicInterlocked
+        finally:
+            if capture.poll() is None:
+                capture.kill()
+                capture.communicate()
+
+
+def record(device, channels, seconds, *, allowed=None):
     """(returncode, audio bytes, error text) from arecord, kept in memory only."""
     if not shutil.which("arecord"):
         return None, b"", "arecord is not installed"
     command = ["arecord", "-q", "-D", device, "-t", "raw", "-f", "S16_LE", "-r", str(MIC_RATE),
                "-c", str(channels), "-d", str(seconds)]
     try:
-        done = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, timeout=seconds + 5, check=False)
+        if allowed is None:
+            done = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, timeout=seconds + 5, check=False)
+        else:
+            done = _capture_while_open(command, seconds, allowed)
     except (OSError, subprocess.SubprocessError) as error:
         return None, b"", f"arecord failed: {error}"
     return done.returncode, done.stdout, done.stderr.decode("utf-8", "replace")
@@ -1578,6 +1663,70 @@ def mic_test(card=0, *, recorder=record, listening=voice_listening, root=Path("/
         del both
     del data
     return result
+
+
+async def boot_mic_test(card):
+    """Wait briefly for the actual lid reading. Cancel if it changes or goes stale."""
+    from .bus import Bus
+
+    latch = Path("/") / MIC_POLICY_LATCH
+    latched = {"status": "skipped", "detail": "microphone safety latch is active until reboot"}
+    if latch.exists():
+        return latched
+
+    ready = asyncio.Event()
+    began = False
+    revoked = False
+    open_lid = False
+    lid_sequence = None
+    beat = float("-inf")
+
+    def update(event):
+        nonlocal open_lid, lid_sequence, beat, revoked
+        if event["t"] == "body.lid":
+            sequence = event.get("seq")
+            known_open = event.get("closed") is False and type(sequence) is int
+            if began and (not known_open or sequence != lid_sequence):
+                revoked = True
+            open_lid = known_open
+            lid_sequence = sequence if known_open else None
+        elif event["t"] == "stem.beat":
+            now = time.monotonic()
+            if began and now - beat >= 1.5:
+                revoked = True
+            beat = now
+        if open_lid and time.monotonic() - beat < 1.5:
+            ready.set()
+        else:
+            ready.clear()
+
+    def disconnected():
+        nonlocal open_lid, lid_sequence, beat, revoked
+        open_lid = False
+        lid_sequence = None
+        beat = float("-inf")
+        revoked = revoked or began
+        ready.clear()
+
+    def allowed():
+        return open_lid and not revoked and time.monotonic() - beat < 1.5 and not latch.exists()
+
+    def guarded(device, channels, seconds):
+        return record(device, channels, seconds, allowed=allowed)
+
+    skipped = {"status": "skipped", "detail": "the lid was closed, unknown, or its reading was lost"}
+    bus = Bus("boot-mic-meter", ("body.lid", "stem.beat"), urgent=update)
+    bus.on_disconnect = disconnected
+    await bus.start()
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=2.0)
+        began = True
+        result = await asyncio.to_thread(mic_test, card, recorder=guarded)
+        return result if allowed() else (latched if latch.exists() else skipped)
+    except (TimeoutError, MicInterlocked):
+        return latched if latch.exists() else skipped
+    finally:
+        await bus.stop()
 
 
 def save_mic_result(result, path=MIC_RESULT):
@@ -1786,10 +1935,11 @@ def main(argv=None):
     test = commands.add_parser("mic-test", help="measure the microphone level once (levels only, no audio kept)")
     test.add_argument("--card", type=int, default=0)
     test.add_argument("--out", default=str(MIC_RESULT))
+    test.add_argument("--require-open-lid", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "mic-test":
         try:
-            result = mic_test(args.card)
+            result = asyncio.run(boot_mic_test(args.card)) if args.require_open_lid else mic_test(args.card)
             save_mic_result(result, args.out)
             log(f"mic level: {mic_line(result)}")
         except Exception as error:      # a diagnostic never fails the boot

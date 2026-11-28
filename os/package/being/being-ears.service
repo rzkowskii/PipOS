@@ -1,0 +1,52 @@
+[Unit]
+Description=Being: isolated microphone capture
+ConditionPathExists=!/sys/firmware/qemu_fw_cfg/by_name/opt/beingos/serial/raw
+ConditionPathExists=!/run/being/mic-policy-breach
+After=being-brainstem.service being-audio-init.service sound.target
+Requires=being-brainstem.service
+Wants=being-audio-init.service
+Before=being-voice.service
+StartLimitIntervalSec=0
+
+[Service]
+EnvironmentFile=/etc/being/env
+Environment=BEING_EARS_SOCKET=/run/being/ears.sock
+ExecStart=/usr/bin/being-ears
+Restart=always
+RestartSec=1
+# Brainstem owns the shared runtime directory and is required above. Ears may
+# create only its socket there; stopping Ears must never remove the bus or a
+# persistent-for-this-boot privacy latch.
+ReadWritePaths=/run/being
+UMask=0007
+CPUWeight=1000
+WatchdogSec=0
+NoNewPrivileges=yes
+LimitCORE=0
+CapabilityBoundingSet=
+PrivateNetwork=yes
+IPAddressDeny=any
+DevicePolicy=closed
+DeviceAllow=/dev/snd/controlC0 rw
+DeviceAllow=/dev/snd/pcmC0D0c rw
+# QEMU's retained injected-cable path (hw:Loopback,1,0).
+DeviceAllow=/dev/snd/pcmC0D1c rw
+DeviceAllow=/dev/snd/controlC1 rw
+DeviceAllow=/dev/snd/pcmC1D0c rw
+DeviceAllow=/dev/snd/pcmC1D1c rw
+DeviceAllow=/dev/snd/timer rw
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

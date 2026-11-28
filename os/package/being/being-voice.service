@@ -1,14 +1,16 @@
 [Unit]
-Description=Being: local ears and voice
+Description=Being: local speech recognition and voice
 ConditionPathExists=!/mind/.being-restore-in-progress
 ConditionPathExists=!/sys/firmware/qemu_fw_cfg/by_name/opt/beingos/serial/raw
+ConditionPathExists=!/run/being/mic-policy-breach
 RequiresMountsFor=/mind
-After=being-brainstem.service sound.target
+After=being-brainstem.service being-ears.service sound.target
 StartLimitIntervalSec=0
 
 [Service]
 EnvironmentFile=/etc/being/env
 Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1
+Environment=BEING_EARS_SOCKET=/run/being/ears.sock
 ExecStart=/usr/bin/python3 -m mind.voice
 Restart=always
 RestartSec=1
@@ -20,20 +22,29 @@ CPUWeight=1000
 # hangs is restarted rather than left deaf.
 WatchdogSec=30s
 NotifyAccess=main
-# The ears and voice need the sound card and the bus, and no network.
-# The QEMU lab also gives them a virtio serial microphone port
-# (mind/mic_port.py) and has them load snd-aloop (mind/voice.py), so the
-# virtio ports stay allowed and kernel modules stay loadable. With cgroup BPF
-# in the kernel (linux.config) DevicePolicy= is enforced, not advisory.
+# Playback, mixer control and the bus, but never microphone capture. The QEMU
+# lab also gives the voice a virtio serial microphone port
+# (mind/mic_port.py), so the virtio ports stay allowed. With cgroup BPF in
+# the kernel (linux.config) DevicePolicy= is enforced.
 NoNewPrivileges=yes
+LimitCORE=0
+CapabilityBoundingSet=
 ProtectHome=yes
 PrivateNetwork=yes
 IPAddressDeny=any
 DevicePolicy=closed
-DeviceAllow=char-alsa rw
+DeviceAllow=/dev/snd/controlC0 rw
+DeviceAllow=/dev/snd/pcmC0D0p rw
+# A second-card/QEMU playback endpoint, without either card's capture node.
+DeviceAllow=/dev/snd/controlC1 rw
+DeviceAllow=/dev/snd/pcmC1D0p rw
+DeviceAllow=/dev/snd/timer rw
 DeviceAllow=char-virtio-portsdev rw
 ProtectKernelLogs=yes
 ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
 ProtectHostname=yes
 LockPersonality=yes
 RestrictSUIDSGID=yes

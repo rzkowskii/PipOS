@@ -358,7 +358,7 @@ class Reminders:
                 (now + minutes * 60.0, reminder_id))
         return self.get(reminder_id) if moved.rowcount else None
 
-    def clock_moved(self, delta, now=None) -> int:
+    def clock_moved(self, delta, now=None, *, resolve_wall=True) -> int:
         """The wall clock was set by `delta` seconds: delays keep counting real time.
 
         A timer, or a reminder or alarm said as a delay ("in two hours"),
@@ -380,6 +380,12 @@ class Reminders:
                 "next_at = CASE WHEN next_at IS NULL THEN NULL ELSE next_at + ? END "
                 "WHERE kind = 'timer' OR relative = 1",
                 (delta, delta, delta)).rowcount
+            if not resolve_wall:
+                # Preserve the held request's day offset until a trusted date
+                # arrives, while keeping its reference in the same clock.
+                self.db.execute("UPDATE reminders SET created_at = created_at + ? WHERE held_at IS NOT NULL",
+                                (delta,))
+                return moved
             held = self.db.execute(
                 "SELECT id, created_at, held_at, zone FROM reminders WHERE held_at IS NOT NULL").fetchall()
             for reminder_id, created_at, held_at, zone in held:
@@ -449,12 +455,12 @@ class Reminders:
         )
         return [Reminder(*row) for row in rows]
 
-    def between(self, start, end, *, kinds=("reminder", "alarm")) -> list[Reminder]:
+    def between(self, start, end, *, kinds=("reminder", "alarm"), limit=None) -> list[Reminder]:
         """Entries due in [start, end), for "today's reminders"."""
         marks = ", ".join("?" for _ in kinds)
         rows = self.db.execute(
             f"SELECT {_COLUMNS} FROM reminders WHERE due_at >= ? AND due_at < ? AND kind IN ({marks}) "
-            "ORDER BY due_at, id", (start, end, *kinds))
+            "ORDER BY due_at, id LIMIT ?", (start, end, *kinds, -1 if limit is None else limit))
         return [Reminder(*row) for row in rows]
 
     def matching(self, text, *, kind=None) -> list[Reminder]:
@@ -491,7 +497,8 @@ class Reminders:
             self._roll_stale(now)
         row = self.db.execute(
             f"""SELECT {_COLUMNS} FROM reminders
-               WHERE due_at <= ? AND (next_at IS NULL OR next_at <= ?) AND (? OR kind = 'timer' OR relative = 1)
+               WHERE due_at <= ? AND held_at IS NULL AND (next_at IS NULL OR next_at <= ?)
+                 AND (? OR kind = 'timer' OR relative = 1)
                ORDER BY due_at, id LIMIT 1""",
             (now, now, 1 if clock_trusted else 0),
         ).fetchone()

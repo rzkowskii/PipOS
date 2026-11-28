@@ -1,0 +1,2360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PipOS · Face Lab (expression concept)</title>
+<link rel="icon" href="data:,">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#06080b;--panel:#0c1116;--line:#18222c;--ink:#cfe6ef;--dim:#6b8696;--cy:#2defff;--cy2:#00b0ff}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.4 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:1560px;margin:0 auto;padding:18px;display:grid;grid-template-columns:minmax(0,1.55fr) minmax(340px,1fr);gap:20px;align-items:start}
+@media(max-width:1020px){.wrap{grid-template-columns:1fr}}
+h1{font-size:15px;font-weight:600;letter-spacing:.04em;margin:0 0 2px;color:#e8f8ff}
+h1 b{color:var(--cy)}
+.sub{color:var(--dim);margin:0 0 14px;font-size:12px}
+.bezel{background:linear-gradient(#20252b,#0f1215);border-radius:20px;padding:22px 22px 26px;box-shadow:0 30px 80px #000c,inset 0 1px 0 #ffffff14,inset 0 0 0 1px #000}
+.screen{position:relative;aspect-ratio:16/10;background:#000;border-radius:6px;overflow:hidden;box-shadow:0 0 0 2px #000,0 0 40px #00b0ff10 inset;cursor:crosshair}
+canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.hud{position:absolute;left:14px;bottom:10px;font:11px ui-monospace,Menlo,monospace;color:#2defff55;letter-spacing:.08em;pointer-events:none;text-transform:uppercase}
+.hud2{position:absolute;right:14px;bottom:10px;font:11px ui-monospace,Menlo,monospace;color:#2defff33;pointer-events:none}
+.hinge{height:8px;margin:0 -22px -26px;background:linear-gradient(#2a3037,#14181c);border-radius:0 0 18px 18px;margin-top:20px}
+.say{display:flex;gap:8px;margin-top:14px}
+.say input{flex:1;background:#0a0f14;border:1px solid var(--line);color:var(--ink);padding:9px 12px;border-radius:8px;font:inherit;outline:none}
+.say input:focus{border-color:#2defff66}
+button{font:inherit;color:var(--ink);background:#101820;border:1px solid var(--line);border-radius:8px;padding:6px 10px;cursor:pointer;transition:.12s}
+button:hover{border-color:#2defff77;background:#12212b}
+button.on{background:#0b3a46;border-color:var(--cy);color:#eaffff;box-shadow:0 0 14px #2defff30}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 14px 10px;margin-bottom:14px}
+.panel h2{margin:0 0 9px;font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
+.grp{width:100%;font-size:10.5px;color:#46606e;letter-spacing:.1em;text-transform:uppercase;margin:7px 0 1px}
+.grp:first-child{margin-top:0}
+.row{display:grid;grid-template-columns:96px 1fr 44px;gap:10px;align-items:center;margin:7px 0;color:var(--dim)}
+.row output{text-align:right;font-variant-numeric:tabular-nums;color:var(--ink)}
+input[type=range]{width:100%;accent-color:var(--cy)}
+select{background:#0a0f14;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px;font:inherit;width:100%}
+.tog{display:flex;flex-wrap:wrap;gap:6px}
+kbd{background:#111a22;border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:0 5px;font:11px ui-monospace,monospace;color:var(--ink)}
+.note{color:#51697a;font-size:12px;margin:8px 0 2px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div>
+    <h1>PIP<b>OS</b> · FACE LAB</h1>
+    <p class="sub">Audition the expression and motion concepts through PipOS’s eye shader. The Concept preview includes the optional layers and effects.</p>
+    <div class="bezel">
+      <div class="screen" id="screen">
+        <canvas id="cv"></canvas>
+        <div class="hud" id="hud">neutral</div>
+        <div class="hud2" id="fps"></div>
+      </div>
+      <div class="hinge"></div>
+    </div>
+    <div class="say">
+      <input id="sayText" placeholder="Type something for Pip to say (mouth follows the vowels)…" value="Hello! I am Pip. Nice to see you.">
+      <button id="sayBtn">Speak</button>
+    </div>
+    <p class="note">Move the cursor over the screen: Pip looks at it. Click the screen to poke Pip. Keys: <kbd>←</kbd><kbd>→</kbd> previous / next, <kbd>Space</kbd> random, <kbd>D</kbd> auto-demo, <kbd>B</kbd> blink, <kbd>1</kbd>–<kbd>9</kbd> first nine expressions.</p>
+  </div>
+
+  <div>
+    <div class="panel"><h2>Mood pad <span style="text-transform:none;letter-spacing:0;color:#46606e">· drag: unhappy ← → happy, calm ↓ ↑ intense</span></h2>
+      <canvas id="pad" width="640" height="400" style="position:relative;width:100%;aspect-ratio:8/5;border-radius:10px;background:#080d12;border:1px solid var(--line);cursor:crosshair;touch-action:none"></canvas></div>
+
+    <div class="panel"><h2>Scenes</h2><div class="chips" id="sceneChips"></div></div>
+
+    <div class="panel"><h2>Expressions <span id="count" style="text-transform:none;letter-spacing:0;color:#46606e"></span></h2>
+      <input id="filter" placeholder="Filter…" style="width:100%;background:#0a0f14;border:1px solid var(--line);color:var(--ink);padding:7px 10px;border-radius:8px;font:inherit;margin-bottom:8px;outline:none">
+      <div class="chips" id="emoChips"></div></div>
+
+    <div class="panel"><h2>Emotes (layered on top)</h2>
+      <div class="chips" id="fxChips"></div>
+      <div class="chips" id="actChips"></div>
+    </div>
+
+    <div class="panel"><h2>Mix</h2>
+      <div class="row"><span>Intensity</span><input type="range" id="intensity" min="0" max="150" value="100"><output id="intensityO">100%</output></div>
+      <div class="row"><span>Blend with</span><select id="blendSel" style="grid-column:2/4"></select></div>
+      <div class="row"><span>Blend amount</span><input type="range" id="blend" min="0" max="100" value="50"><output id="blendO">50%</output></div>
+    </div>
+
+    <div class="panel"><h2>Display</h2>
+      <div class="row"><label for="renderer">Renderer</label><select id="renderer" style="grid-column:2/4"><option value="device">PipOS eye shader</option><option value="concept">Concept layers</option></select></div>
+      <div class="grp" style="margin:0 0 4px">Style (PipOS setting; the device default is Eyes only)</div><div class="chips" id="styles"></div>
+      <div class="grp" style="margin:6px 0 4px">Layers</div><div class="tog" id="toggles"></div>
+      <div class="row"><span>Bloom</span><input type="range" id="bloom" min="0" max="200" value="100"><output id="bloomO">100%</output></div>
+      <div class="row"><span>LED grid</span><input type="range" id="grid" min="0" max="100" value="30"><output id="gridO">30%</output></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const DEVICE_FACE = {"header":"#version 300 es\nprecision highp float;\nprecision highp int;\n","vert":"// One triangle that covers the screen. No vertex buffers.\nuniform vec2 uRes;\nuniform vec4 uE[8];\nuniform float uGlowR;\n\nflat out vec4 vShape[2]; // cos(tilt), sin(tilt), diagonal bulge, padding\nflat out vec2 vBounds[2];\nflat out vec4 vEllipse[2]; // inverse half-axes and ellipse evolute factors\n\nvoid main() {\n    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n    for (int i = 0; i < 2; i++) {\n        vec2 r = max(uE[i * 4].zw, vec2(1e-4));\n        vec2 shape = uE[i * 4 + 1].xy;\n        float cs = cos(shape.y), sn = sin(shape.y);\n        float bulge = (pow(2.0, 0.5 - 1.0 / shape.x) - 1.0) * min(r.x, r.y);\n        vShape[i] = vec4(cs, sn, bulge, 0.0);\n        vEllipse[i] = vec4(1.0 / r, (r * r - r.yx * r.yx) / r);\n\n        // A rotated ellipse fits inside these half extents. Lids cut away\n        // from it, and diagonal bulge adds at most max(bulge, 0) to its reach.\n        vec2 extent = vec2(length(r * vec2(cs, sn)), length(r * vec2(sn, cs)));\n        // The bloom reaches exactly zero at uGlowR, so nothing lies beyond.\n        vBounds[i] = extent + max(bulge, 0.0) + max(2.0 / uRes.y, uGlowR);\n    }\n}\n","frag":"// Two glowing eyes on black. Each eye is a signed-distance shape:\n// an ellipse (optionally squared off a little) cut by an upper and a lower lid.\n//\n// Light is added up in linear terms and encoded for the screen once, at the\n// end, so the bloom fades into black the way real light does rather than in\n// visible steps. Colours arrive already linear (see render.rs: Look).\n//\n// Units: the screen is 2 high, centred on the origin, y up.\n// The version header is prepended at load time (desktop GL or GLES).\n\nflat in vec4 vShape[2];\nflat in vec2 vBounds[2];\nflat in vec4 vEllipse[2];\nout vec4 frag;\n\nuniform vec2 uRes;     // drawable size in pixels\nuniform vec4 uE[8];    // two eyes, four vec4 each (see eye.rs: Pose::uniforms)\nuniform vec3 uFill;    // colour at the rim of an eye, linear\nuniform vec3 uCore;    // hotter colour at its centre, linear\nuniform vec3 uHalo;    // bloom colour, linear\nuniform float uGrid;   // LED-grid depth, 0..1\nuniform float uPitch;  // LED-grid pitch in whole pixels\nuniform float uGlowR;  // reach of the bloom in screen units; it is zero beyond\nuniform vec2 uOrigin;  // where this viewport starts in the window, in pixels\n// Privacy marks (render.rs: Marks): glint, guest ring, covered ears, network\n// dot; then SSH mark and the fixed marks' level on screen.\nuniform vec4 uMarks[2];\n#ifdef FACE_DECOR\n// Two vec4s per brow, four for the mouth, two for optional eye details.\nuniform vec4 uDecor[10];\nuniform vec4 uGlitch; // three signed offsets and a presence flag\n#endif\n\n// Distance to a segment.\nfloat sdSegment(vec2 p, vec2 a, vec2 b) {\n    vec2 pa = p - a, ba = b - a;\n    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);\n    return length(pa - ba * h);\n}\n\n// The fixed marks, as a colour already encoded for the screen. They stay\n// dim (render.rs: MARK_LEVEL), so the lab never counts them as eyes.\nvec3 fixedMarks(vec2 p, float px) {\n    float aspect = uRes.x / uRes.y;\n    float level = uMarks[1].y;\n    float m = 0.0;\n    if (uMarks[0].z > 0.0) {\n        // Covered ears: a short rounded bar at each side of the face.\n        vec2 q = vec2(abs(p.x) - (aspect - 0.075), p.y);\n        float d = length(vec2(q.x, max(abs(q.y) - 0.11, 0.0))) - 0.018;\n        m = max(m, uMarks[0].z * clamp(0.5 - d / px, 0.0, 1.0));\n    }\n    if (uMarks[0].w > 0.0) {\n        // Network: a dot in the top right corner.\n        float d = length(p - vec2(aspect - 0.075, 0.915)) - 0.017;\n        m = max(m, uMarks[0].w * clamp(0.5 - d / px, 0.0, 1.0));\n    }\n    if (uMarks[1].x > 0.0) {\n        // SSH session: a small \">_\" prompt in the top left corner.\n        vec2 o = vec2(-aspect + 0.06, 0.915);\n        float d = min(sdSegment(p, o + vec2(0.0, 0.022), o + vec2(0.022, 0.0)),\n                      sdSegment(p, o + vec2(0.022, 0.0), o + vec2(0.0, -0.022)));\n        d = min(d, sdSegment(p, o + vec2(0.036, -0.024), o + vec2(0.070, -0.024))) - 0.005;\n        m = max(m, uMarks[1].x * clamp(0.5 - d / px, 0.0, 1.0));\n    }\n    return sqrt(uFill) * (level * m);\n}\n\n// Distance to an ellipse with half-axes ab. Three rounds of the closest-point\n// iteration are accurate at any aspect ratio, which a one-step estimate is not:\n// thin eyes need it for an even glow.\nfloat sdEllipse(vec2 pa, vec2 ab, vec2 inv, vec2 ee, vec2 u) {\n    vec2 t = vec2(0.70710678);\n    for (int i = 0; i < 3; i++) {\n        vec2 e = ee * t * t * t;\n        vec2 rr = ab * t - e;\n        vec2 qq = pa - e;\n        t = clamp((qq * (length(rr) * inversesqrt(max(dot(qq, qq), 1e-12))) + e) * inv, 0.0, 1.0);\n        t *= inversesqrt(max(dot(t, t), 1e-12));\n    }\n    float d = length(pa - ab * t);\n    return dot(u, u) > 1.0 ? d : -d;\n}\n\n// Maximum with the crease rounded off over a width k.\nfloat smax(float a, float b, float k) {\n    float h = max(k - abs(a - b), 0.0) / k;\n    return max(a, b) + h * h * k * 0.25;\n}\n\n// Also returns, in u, the point in the ellipse's unit-circle frame.\nfloat sdEye(vec2 p, vec4 a, vec4 b, vec4 c, vec3 shape, vec4 ellipse, out vec2 u) {\n    // a = (x, y, w, h)  b = (round, tilt, top, topSlant)\n    // c = (topCurve, bot, botSlant, botCurve)\n    vec2 q = p - a.xy;\n    float cs = shape.x, sn = shape.y;\n    q = vec2(cs * q.x + sn * q.y, -sn * q.x + cs * q.y);\n    vec2 r = max(a.zw, vec2(1e-4));\n\n    // \"round\" above 2 pushes the diagonals outward, toward a squircle.\n    u = abs(q) * ellipse.xy;\n    float dBase = sdEllipse(abs(q), r, ellipse.xy, ellipse.zw, u);\n    float diag = 2.0 * u.x * u.y / max(dot(u, u), 1e-6);\n    dBase -= shape.z * diag * diag;\n\n    // Lids are parabolas in the eye's own frame, heights in units of h.\n    float xn = q.x * ellipse.x;\n    float bow = 1.0 - xn * xn;\n    float yt = r.y * (b.z + b.w * xn + c.x * bow);\n    float st = r.y * (b.w - 2.0 * c.x * xn) * ellipse.x;\n    float dTop = (q.y - yt) / sqrt(1.0 + st * st);\n    float yb = r.y * (c.y + c.z * xn + c.w * bow);\n    float sb = r.y * (c.z - 2.0 * c.w * xn) * ellipse.x;\n    float dBot = (yb - q.y) / sqrt(1.0 + sb * sb);\n\n    float dLid = max(dTop, dBot);\n    // Where a lid meets the outline the corner is rounded over 0.04: enough\n    // to melt the knee where the resting egg's lids pinch it, and to soften\n    // concern's and tired's ends, while joy's tips still come to points.\n    float d = smax(dBase, dLid, 0.04);\n    if (dBase > 0.0 && dLid > 0.0) {\n        d = max(d, length(vec2(dBase, dLid)));\n    }\n    return d;\n}\n\n#ifdef FACE_DECOR\nfloat stroke(float d, float px) {\n    return clamp(0.5 - d / px, 0.0, 1.0);\n}\n\nfloat decorCoverage(vec2 p, float px) {\n    if (abs(p.x) > min(1.38, uRes.x / uRes.y - 0.12) || abs(p.y) > 0.86) return 0.0;\n    float result = 0.0;\n    for (int i = 0; i < 2; i++) {\n        vec4 shape = uDecor[2 * i];\n        vec3 ink = uDecor[2 * i + 1].xyz; // curve, thickness, alpha\n        if (ink.z <= 0.0) continue;\n        vec2 eye = uE[i * 4].xy;\n        float width = max(0.05, shape.z);\n        float slope = 0.60 * shape.w;\n        float arc = 0.10 * ink.x;\n        float radius = 0.5 * max(0.02, ink.y);\n        float inward = i == 0 ? 1.0 : -1.0;\n        vec2 center = vec2(eye.x + inward * shape.y, eye.y + shape.x);\n        center.y = min(center.y, 0.85 - width * abs(slope) - max(arc, 0.0) - radius);\n        vec2 q = p - center;\n        if (abs(q.x) > width + radius + px || abs(q.y) > width * abs(slope) + abs(arc) + radius + px) continue;\n        float along = clamp(inward * q.x / width, -1.0, 1.0);\n        float y = slope * width * along + arc * (1.0 - along * along);\n        float d = length(vec2(q.x - inward * along * width, q.y - y)) - radius;\n        result = max(result, ink.z * stroke(d, px));\n    }\n\n    vec4 m = uDecor[4]; // x, half-width, y, corner height\n    vec4 curve = uDecor[5]; // skew, arc, opening, roundness\n    vec4 detail = uDecor[6]; // cat curve, wave, zigzag, tongue\n    vec3 ink = uDecor[7].xyz; // lower lip, alpha, wave phase\n    if (ink.y > 0.0 && abs(p.x - m.x) < m.y + 0.15 && p.y > -0.86 && p.y < -0.32) {\n        vec2 eyeCenter = 0.5 * (uE[0].xy + uE[4].xy);\n        float width = max(0.025, m.y);\n        float gap = min(0.26 * curve.z, 0.22);\n        float roundness = clamp(max(curve.w, gap / (2.0 * width) * 1.1 - 0.35), 0.0, 1.0);\n        float x = p.x - m.x - 0.20 * eyeCenter.x;\n        float along = clamp(x / width, -1.0, 1.0);\n        float profile = max(1.0 - along * along, 0.0);\n        float cat = 2.0 * abs(along) - 1.0;\n        float catDip = 0.07 * clamp(width / 0.2, 0.4, 1.4) * (1.0 - cat * cat);\n        float wave = detail.y * 0.022 * sin(along * 8.79645943 + ink.z) * pow(profile, 0.35);\n        float zig = detail.z * 0.014 * (2.0 * abs(mod(along * 4.0 + 1.0, 2.0) - 1.0) - 1.0) * pow(profile, 0.2);\n        float center = max(m.z + m.w + 0.20 * eyeCenter.y, -0.80 + gap + ink.x + max(curve.y, 0.0));\n        float upper = center + 0.5 * curve.x * along - mix(curve.y * profile, catDip, detail.x) + wave + zig;\n        float lower = upper - gap * pow(profile, mix(0.90, 0.50, roundness)) - ink.x * profile + 0.6 * wave - 2.0 * zig;\n        float end = x - along * width;\n        float d = length(vec2(end, p.y - upper));\n        if (gap + ink.x > 0.014) {\n            d = min(d, length(vec2(end, p.y - lower)));\n            if (abs(along) < 1.0 && p.y < upper && p.y > lower) {\n                result = max(result, 0.17 * ink.y);\n                if (detail.w > 0.03) {\n                    float height = max(0.015, gap * 0.44 * detail.w);\n                    float tongue = length(vec2(along / 0.53, (p.y - lower - 0.2 * height) / height));\n                    result = max(result, ink.y * 0.75 * stroke((tongue - 1.0) * height, px));\n                }\n            }\n        }\n        result = max(result, ink.y * stroke(d - 0.017, px));\n    }\n    return result;\n}\n\nfloat sdHeart(vec2 p) {\n    p.x = abs(p.x);\n    if (p.x + p.y > 1.0) return length(p - vec2(0.25, 0.75)) - 0.35355339;\n    vec2 a = p - vec2(0.0, 1.0);\n    vec2 b = p - 0.5 * max(p.x + p.y, 0.0);\n    return sqrt(min(dot(a, a), dot(b, b))) * sign(p.x - p.y);\n}\n\nfloat sdStar(vec2 p) {\n    // Fold onto the wedge from an outer tip to its nearest inner corner.\n    const float sector = 1.25663706;\n    float a = abs(mod(atan(p.x, p.y + 1e-6) + 0.5 * sector, sector) - 0.5 * sector);\n    p = length(p) * vec2(sin(a), cos(a));\n    vec2 tip = vec2(0.0, 1.0), valley = vec2(0.26450, 0.36406);\n    vec2 edge = valley - tip, q = p - tip;\n    return sdSegment(p, tip, valley) * sign(edge.x * q.y - edge.y * q.x);\n}\n\nfloat specialEye(vec2 q, float radius, vec4 shape, float phase) {\n    float d = 2.0;\n    float strength = max(max(shape.x, shape.y), max(shape.z, shape.w));\n    if (shape.x > 0.0) {\n        float size = radius * (1.0 + 0.05 * sin(phase));\n        d = min(d, sdHeart(q * (0.63 / size) + vec2(0.0, 0.49)) * size / 0.63 + 0.22 * (strength - shape.x));\n    }\n    if (shape.y > 0.0) {\n        vec2 p = abs(q);\n        d = min(d, sdSegment(p, vec2(0.0), vec2(0.63 * radius)) - 0.041 + 0.22 * (strength - shape.y));\n    }\n    if (shape.z > 0.0) {\n        float angle = atan(q.y, q.x + 1e-6) - phase;\n        float radial = length(q);\n        float turn = radius / 2.6;\n        float space = (radial / turn - angle / 6.28318531);\n        float spiral = abs(space - round(space)) * turn;\n        d = min(d, max(spiral - 0.025, radial - radius) + 0.22 * (strength - shape.z));\n    }\n    if (shape.w > 0.0) {\n        float angle = 0.18 * sin(phase);\n        vec2 p = mat2(cos(angle), -sin(angle), sin(angle), cos(angle)) * q;\n        float size = 1.07 * radius * (1.0 + 0.04 * sin(phase));\n        d = min(d, sdStar(p / size) * size + 0.22 * (strength - shape.w));\n    }\n    return d;\n}\n\n#endif\n\nvoid main() {\n    vec2 p = (gl_FragCoord.xy - uOrigin - 0.5 * uRes) / (0.5 * uRes.y);\n    float px = 1.0 / (0.5 * uRes.y);\n    vec2 eyePoint = p;\n#ifdef FACE_DECOR\n    if (uGlitch.w > 0.0 && uMarks[0].x + uMarks[0].y == 0.0) {\n        vec3 centers = vec3(-0.16, 0.015, 0.19);\n        vec3 widths = vec3(0.025, 0.041, 0.030);\n        vec3 bands = 1.0 - smoothstep(widths, widths + 0.004, abs(p.y - centers));\n        eyePoint.x += dot(uGlitch.xyz, bands);\n    }\n#endif\n\n    vec3 lit = vec3(0.0); // the eyes themselves\n    float cover = 0.0;    // how much of this pixel an eye covers\n    float halo = 0.0;     // bloom from both eyes\n#ifdef FACE_DECOR\n    vec4 special = uDecor[8];\n    float morph = clamp(max(max(special.x, special.y), max(special.z, special.w)), 0.0, 1.0);\n#endif\n    for (int i = 0; i < 2; i++) {\n        vec4 eye = uE[i * 4];\n        vec2 bounds = vBounds[i];\n#ifdef FACE_DECOR\n        float radius = min(eye.z, 1.12 * eye.w);\n        if (morph > 0.0) bounds = max(bounds, vec2(1.20 * radius + uGlowR));\n#endif\n        if (any(greaterThan(abs(eyePoint - eye.xy), bounds))) {\n            continue;\n        }\n        vec2 u;\n        vec4 lid = uE[i * 4 + 1], crease = uE[i * 4 + 2];\n        float d = sdEye(eyePoint, eye, lid, crease, vShape[i].xyz, vEllipse[i], u);\n#ifdef FACE_DECOR\n        vec4 details = uDecor[9]; // pupil, shine, wet lower edge, phase\n        vec2 q = eyePoint - eye.xy;\n        float aperture = lid.z + crease.x - crease.y - crease.w;\n        if (morph > 0.0) {\n            vec2 rotation = vShape[i].xy;\n            vec2 local = vec2(dot(q, rotation), dot(q, vec2(-rotation.y, rotation.x)));\n            float phase = (i == 0 ? details.w : -details.w);\n            float change = morph * smoothstep(0.10, 0.75, aperture);\n            d = mix(d, specialEye(local, radius, special, phase), change);\n        }\n#endif\n        // Glow is a brightness on screen; squared, it scales linear light.\n        float g = uE[i * 4 + 3].x;\n        float g2 = g * g;\n\n        // A one-pixel ramp: crisp, but no stair steps.\n        float c = clamp(0.5 - d / px, 0.0, 1.0);\n        // Hotter toward the middle of the ellipse, so a crescent cut from its\n        // top stays the rim colour, and easing off just inside every edge.\n        // (Depth alone would show creases along the shape's midlines.)\n        float rmin = 1.0 / max(vEllipse[i].x, vEllipse[i].y);\n        float t = max(1.0 - dot(u, u), 0.0) * smoothstep(0.0, 0.45 * rmin, -d);\n        // A dimmed eye loses its hot centre first, so it stays a deep cyan\n        // instead of fading to grey.\n        t *= clamp(2.5 * g - 1.5, 0.0, 1.0);\n        // Further down, the rim itself deepens toward the bloom's blue, the\n        // way a dim light looks bluer, rather than greying into teal.\n        vec3 rim = mix(uFill, uHalo, 0.5 * clamp(1.5 - 1.5 * g, 0.0, 1.0));\n        vec3 colour = mix(rim, uCore, t);\n#ifdef FACE_DECOR\n        if (c > 0.0 && details.x + details.y + details.z > 0.0) {\n            if (details.x > 0.0 && aperture > 0.40) {\n                float pupil = stroke(length(q - vec2(0.04 * eye.x, 0.02)) - details.x * rmin, px);\n                colour *= 1.0 - 0.94 * pupil * smoothstep(0.40, 0.95, aperture);\n            }\n            if (details.y + details.z > 0.0) {\n                float shine = 0.0;\n                if (uMarks[0].x <= 0.0) {\n                    // Keep a capture glint recognizable while the camera may see.\n                    shine = stroke(length(q - eye.zw * vec2(-0.28, 0.32)) - 0.14 * rmin * details.y, px);\n                    shine = max(shine, 0.7 * stroke(length(q - eye.zw * vec2(0.30, -0.28)) - 0.08 * rmin * details.y, px));\n                }\n                float wet = 1.0 - smoothstep(-0.82, -0.20, q.y / eye.w);\n                colour = mix(colour, uCore, clamp(0.9 * shine * details.y + 0.7 * wet * details.z, 0.0, 1.0));\n            }\n        }\n#endif\n        if (uMarks[0].x > 0.0) {\n            // The camera may capture: a small glint up and to the left in\n            // each eye, in the eye's own hottest colour (never white).\n            vec2 at = eye.xy + vec2(-0.34 * eye.z, 0.36 * eye.w);\n            float r = 0.16 * min(eye.z, eye.w);\n            float glint = clamp(1.0 - length(p - at) / r, 0.0, 1.0);\n            colour = mix(colour, uCore * 1.35, uMarks[0].x * smoothstep(0.0, 0.45, glint));\n        }\n        lit = max(lit, colour * (c * g2));\n        cover = max(cover, c);\n        if (uMarks[0].y > 0.0) {\n            // Guest mode: a soft ring just outside each eye.\n            float ring = 1.0 - smoothstep(0.0, 0.012, abs(d - 0.05));\n            halo += uMarks[0].y * 0.22 * g2 * ring;\n        }\n\n        // Bloom: a bright skin hugging the edge, then a broad soft falloff\n        // that reaches exactly zero at uGlowR, with no edge of its own.\n        float o = max(d, 0.0);\n        float w = 1.0 - min(o / uGlowR, 1.0);\n        w *= w;\n        halo += g2 * (0.34 * exp(-o / (0.055 * uGlowR)) + 0.10 * w * w);\n    }\n\n    vec3 marks = vec3(0.0);\n    if (uMarks[0].z + uMarks[0].w + uMarks[1].x > 0.0) {\n        marks = fixedMarks(p, px);\n    }\n    // Only the eyes receive the LED grid. The thin strokes keep their outline.\n    float decor = 0.0;\n#ifdef FACE_DECOR\n    if (uDecor[1].z + uDecor[3].z + uDecor[7].y > 0.0) {\n        decor = decorCoverage(p, px) * (1.0 - cover);\n    }\n#endif\n    if (cover == 0.0 && halo == 0.0 && decor == 0.0) {\n        frag = vec4(marks, 1.0);\n        return;\n    }\n\n    // A fine screen-door of dark lines between LED cells, aligned to pixels.\n    if (cover > 0.0 && uGrid > 0.0) {\n        ivec2 m = ivec2(gl_FragCoord.xy) % int(uPitch);\n        if (m.x == 0 || m.y == 0) {\n            lit *= 1.0 - uGrid;\n        }\n    }\n\n    lit = max(lit, mix(uFill, uCore, 0.26) * (0.82 * decor * decor));\n    vec3 col = lit + uHalo * (halo * (1.0 - max(cover, decor)));\n    // Encode for the screen (gamma 2), then roll highlights off softly so a\n    // bright eye turns cyan-white without a hard clip.\n    col = sqrt(col);\n    vec3 over = max(col - 0.92, 0.0);\n    col = min(col, 0.92) + 0.08 * (1.0 - exp(-over / 0.08));\n    // A little ordered noise below one 8-bit step hides banding in the bloom.\n    float n = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));\n    col += (n - 0.5) / 255.0;\n    frag = vec4(max(col, marks), 1.0);\n}\n","look":{"fill":[0.03,0.86,1.0],"core":[0.3,0.98,1.0],"halo":[0.0,0.48,1.0],"grid":0.16,"glow_r":0.22,"markLevel":0.22},"presets":{"neutral":[-0.8,0.03,0.48,0.34,2.1,-0.34,0.37,-0.17,0.63,-0.45,0.1,-0.55,1.0,0.8,0.03,0.48,0.34,2.1,0.34,0.37,0.17,0.63,-0.45,-0.1,-0.55,1.0],"attentive":[-0.8,0.05,0.5,0.365,2.1,-0.28,0.37,-0.17,0.63,-0.45,0.1,-0.55,1.06,0.8,0.05,0.5,0.365,2.1,0.28,0.37,0.17,0.63,-0.45,-0.1,-0.55,1.06],"listening":[-0.8,0.065,0.5,0.355,2.1,-0.41,0.37,-0.17,0.63,-0.45,0.1,-0.55,1.03,0.8,-0.005,0.5,0.355,2.1,0.27,0.37,0.17,0.63,-0.45,-0.1,-0.55,1.03],"thinking":[-0.7,0.1,0.48,0.34,2.1,-0.34,0.22,-0.02,0.42,-0.45,0.1,-0.55,1.0,0.84,0.1,0.48,0.34,2.1,0.34,0.12,0.1,0.4,-0.45,-0.1,-0.55,1.0],"speaking":[-0.8,0.03,0.48,0.34,2.1,-0.34,0.37,-0.17,0.63,-0.45,0.1,-0.55,1.0,0.8,0.03,0.48,0.34,2.1,0.34,0.37,0.17,0.63,-0.45,-0.1,-0.55,1.0],"joy":[-0.72,-0.18,0.55,0.47,2.0,0.0,1.5,0.0,0.0,0.0,0.0,0.5,1.05,0.72,-0.18,0.55,0.47,2.0,-0.0,1.5,-0.0,0.0,0.0,-0.0,0.5,1.05],"curiosity":[-0.7,0.03,0.47,0.43,2.25,-0.1,1.5,0.0,0.0,-1.5,0.0,0.0,1.04,0.74,-0.12,0.48,0.28,2.0,0.4,0.0,-0.25,1.0,-1.5,0.0,0.0,1.0],"surprise":[-0.68,0.03,0.45,0.56,2.05,0.0,1.5,0.0,0.0,-1.5,0.0,0.0,1.1,0.68,0.03,0.45,0.56,2.05,-0.0,1.5,-0.0,0.0,-1.5,-0.0,0.0,1.1],"skepticism":[-0.72,-0.12,0.5,0.075,2.0,0.0,1.5,0.0,0.0,-1.5,0.0,0.0,1.0,0.74,0.1,0.54,0.46,2.1,0.0,0.05,0.12,0.0,-1.5,0.0,0.0,1.0],"concern":[-0.72,-0.12,0.48,0.36,2.1,0.26,0.22,0.62,0.35,-1.5,0.0,0.0,1.0,0.72,-0.12,0.48,0.36,2.1,-0.26,0.22,-0.62,0.35,-1.5,-0.0,0.0,1.0],"sleepy":[-0.72,-0.12,0.52,0.22,2.3,0.0,0.0,0.0,-0.5,-1.5,0.0,0.0,0.9,0.72,-0.12,0.52,0.22,2.3,-0.0,0.0,-0.0,-0.5,-1.5,-0.0,0.0,0.9],"asleep":[-0.72,-0.14,0.5,0.2,2.3,0.0,0.0,0.0,-0.82,-1.5,0.0,0.0,0.3,0.72,-0.14,0.5,0.2,2.3,-0.0,0.0,-0.0,-0.82,-1.5,-0.0,0.0,0.3],"dreaming":[-0.72,-0.14,0.5,0.21,2.3,0.0,-0.04,0.0,-0.76,-1.5,0.0,0.0,0.34,0.72,-0.14,0.5,0.21,2.3,-0.0,-0.04,-0.0,-0.76,-1.5,-0.0,0.0,0.34],"tired":[-0.8,-0.04,0.48,0.34,2.1,-0.34,-0.02,0.22,0.18,-0.45,0.1,-0.55,0.55,0.8,-0.04,0.48,0.34,2.1,0.34,-0.02,-0.22,0.18,-0.45,-0.1,-0.55,0.55],"muted":[-0.74,0.0,0.34,0.05,4.0,0.0,1.5,0.0,0.0,-1.5,0.0,0.0,0.5,0.74,0.0,0.34,0.05,4.0,-0.0,1.5,-0.0,0.0,-1.5,-0.0,0.0,0.5],"dazed":[-0.74,0.08,0.3,0.3,2.0,0.0,1.5,0.0,0.0,-1.5,0.0,0.0,0.6,0.78,-0.06,0.4,0.2,2.0,-0.25,1.5,0.0,0.0,-1.5,0.0,0.0,0.6],"loading":[-0.8,0.03,0.48,0.31,2.1,-0.34,0.26,-0.17,0.63,-0.45,0.1,-0.55,0.78,0.8,0.03,0.48,0.31,2.1,0.34,0.26,0.17,0.63,-0.45,-0.1,-0.55,0.78],"sad":[-0.76,-0.22,0.43,0.38,2.1,0.26,0.16,0.62,0.3,-0.87,0,-0.21,0.85,0.76,-0.22,0.43,0.38,2.1,-0.26,0.16,-0.62,0.3,-0.87,0,-0.21,0.85],"laugh":[-0.72,-0.055,0.55,0.37,2,0,1.5,0,0,0.16,0,-0.52,1.05,0.72,-0.055,0.55,0.37,2,0,1.5,0,0,0.16,0,-0.52,1.05],"love":[-0.71,0.105,0.52,0.37,2.1,-0.16,0.65,0.11,0.33,-0.41,0.05,-0.23,1.045,0.71,0.105,0.52,0.37,2.1,0.16,0.65,-0.11,0.33,-0.41,-0.05,-0.23,1.045],"embarrassed":[-0.83,-0.13,0.4,0.31,2.1,-0.23,0.38,-0.17,0.37,-0.45,0.1,-0.55,0.95,0.83,-0.13,0.4,0.31,2.1,0.23,0.38,0.17,0.37,-0.45,-0.1,-0.55,0.95],"scared":[-0.81,0.1,0.32,0.49,2.05,0.12,0.92,0.2,0,-1.03,0,0,1.055,0.81,0.1,0.32,0.49,2.05,-0.12,0.92,-0.2,0,-1.03,0,0,1.055],"annoyed":[-0.71,0.035,0.47,0.32,2.1,-0.06,0.21,-0.53,-0.15,-1.5,0,0,0.94,0.71,0.035,0.47,0.32,2.1,0.06,0.21,0.53,-0.15,-1.5,0,0,0.94],"smug":[-0.72,-0.02,0.52,0.3,2.1,0,0.37,0.17,0,-0.53,0,-0.25,1,0.72,-0.105,0.52,0.3,2.1,0,0.05,-0.07,0,-0.7,0,0,1],"confused":[-0.81,-0.115,0.39,0.295,2,-0.31,0.19,0.23,0,-0.7,0,0,1,0.76,0.048,0.43,0.39,2.2,0.1,0.63,-0.21,0.12,-1.5,0,0,1.03],"wink":[-0.72,0.03,0.49,0.36,2.2,0,1.5,0,0,-1.5,0,0,1.05,0.72,-0.105,0.51,0.34,2,0,0.17,0,0.08,0.1,0,-0.02,1.05],"bored":[-0.79,-0.16,0.47,0.25,2.1,0,-0.02,0.02,-0.13,-0.93,0,0,0.82,0.79,-0.16,0.47,0.25,2.1,0,-0.02,-0.02,-0.13,-0.93,0,0,0.82],"relieved":[-0.74,-0.115,0.48,0.29,2.1,0.045,0.29,0.1,0.17,-0.35,0,-0.27,0.96,0.74,-0.115,0.48,0.29,2.1,-0.045,0.29,-0.1,0.17,-0.35,0,-0.27,0.96],"excited":[-0.7,0.03,0.52,0.5,2.05,0,1.5,0,0,-1.5,0,0,1.15,0.7,0.03,0.52,0.5,2.05,0,1.5,0,0,-1.5,0,0,1.15],"starstruck":[-0.76,0,0.52,0.46,2.1,-0.34,0.37,-0.17,0.63,-0.45,0.1,-0.55,1,0.76,0,0.52,0.46,2.1,0.34,0.37,0.17,0.63,-0.45,-0.1,-0.55,1],"proud":[-0.72,-0.12,0.54,0.34,2,0,1.5,0,0,-0.15,0,0.45,1.08,0.72,-0.12,0.54,0.34,2,0,1.5,0,0,-0.15,0,0.45,1.08],"idea":[-0.8,0.06,0.5,0.38,2.1,-0.28,0.37,-0.17,0.63,-0.45,0.1,-0.55,1.08,0.8,0.06,0.5,0.38,2.1,0.28,0.37,0.17,0.63,-0.45,-0.1,-0.55,1.08],"crying":[-0.72,-0.12,0.5,0.3,2,0.22,0.15,0.55,0.2,-1.5,0,0,0.9,0.72,-0.12,0.5,0.3,2,-0.22,0.15,-0.55,0.2,-1.5,0,0,0.9],"nervous":[-0.72,0.03,0.4,0.4,2,0,1.5,0,0,-1.5,0,0,1,0.72,0.03,0.4,0.4,2,0,1.5,0,0,-1.5,0,0,1],"sick":[-0.74,0.08,0.3,0.3,2,0,1.5,0,0,-1.5,0,0,0.6,0.78,-0.06,0.4,0.2,2,-0.25,1.5,0,0,-1.5,0,0,0.6],"angry":[-0.72,-0.1,0.52,0.36,2.2,-0.12,0.5,-0.9,-0.1,-1.5,0,0,1.1,0.72,-0.1,0.52,0.36,2.2,0.12,0.5,0.9,-0.1,-1.5,0,0,1.1],"mischief":[-0.72,-0.1,0.52,0.34,2.1,-0.1,0.4,-0.7,0,-0.2,0,0.45,1,0.72,-0.1,0.52,0.34,2.1,0.1,0.4,0.7,0,-0.2,0,0.45,1],"determined":[-0.72,-0.06,0.5,0.34,2.15,-0.1,0.65,-0.45,0,-1.5,0,0,1.1,0.72,-0.06,0.5,0.34,2.15,0.1,0.65,0.45,0,-1.5,0,0,1.1],"cheeky":[-0.72,-0.16,0.5,0.4,2,0,1.5,0,0,-0.05,0,0.55,1.05,0.74,0,0.5,0.38,2.1,0.15,1.5,0,0,-1.5,0,0,1.05],"sing":[-0.72,-0.14,0.5,0.4,2,0,1.5,0,0,-0.05,0,0.55,1.05,0.72,-0.14,0.5,0.4,2,0,1.5,0,0,-0.05,0,0.55,1.05],"dizzy":[-0.76,0,0.5,0.42,2.1,-0.34,0.37,-0.17,0.63,-0.45,0.1,-0.55,1,0.76,0,0.5,0.42,2.1,0.34,0.37,0.17,0.63,-0.45,-0.1,-0.55,1],"ko":[-0.76,0,0.5,0.42,2.1,-0.34,0.37,-0.17,0.63,-0.45,0.1,-0.55,1,0.76,0,0.5,0.42,2.1,0.34,0.37,0.17,0.63,-0.45,-0.1,-0.55,1],"grateful":[-0.72,-0.06,0.5,0.4,2.1,0.12,0.5,0.2,0.4,-0.25,0,0.3,1.02,0.72,-0.06,0.5,0.4,2.1,-0.12,0.5,-0.2,0.4,-0.25,0,0.3,1.02],"hopeful":[-0.7,0.06,0.46,0.46,2.2,0,1.5,0,0,-1.5,0,0,1.08,0.7,0.06,0.46,0.46,2.2,0,1.5,0,0,-1.5,0,0,1.08],"giggle":[-0.72,-0.14,0.52,0.28,2,0,0.5,0,0.3,-0.08,0,0.6,1.04,0.72,-0.14,0.52,0.28,2,0,0.5,0,0.3,-0.08,0,0.6,1.04],"bashful":[-0.74,-0.08,0.44,0.3,2.1,0.1,0.35,0.1,0.4,-1.5,0,0,0.95,0.74,-0.08,0.44,0.3,2.1,-0.1,0.35,-0.1,0.4,-1.5,0,0,0.95],"cozy":[-0.72,-0.12,0.52,0.2,2,0,0.15,0,0.5,-0.05,0,0.7,0.9,0.72,-0.12,0.52,0.2,2,0,0.15,0,0.5,-0.05,0,0.7,0.9],"flirty":[-0.72,-0.06,0.5,0.22,2,0.1,0.2,-0.1,0.4,-1.5,0,0,1.05,0.72,-0.1,0.5,0.38,2,0.1,1.5,0,0,0,0,0.55,1.05],"victorious":[-0.72,-0.04,0.54,0.34,2,-0.18,0.4,-0.35,0.2,-0.2,0,0.4,1.18,0.72,-0.04,0.54,0.34,2,0.18,0.4,0.35,0.2,-0.2,0,0.4,1.18],"pleased":[-0.72,-0.1,0.52,0.3,2,0,0.3,0,0.5,-0.15,0,0.5,1,0.72,-0.1,0.52,0.3,2,0,0.3,0,0.5,-0.15,0,0.5,1],"adoring":[-0.72,0.04,0.5,0.5,2.3,0,1.5,0,0,-1.5,0,0,1.1,0.72,0.04,0.5,0.5,2.3,0,1.5,0,0,-1.5,0,0,1.1],"dreamy":[-0.72,0.02,0.5,0.3,2.2,0.1,0.3,0.1,0.4,-0.4,0,-0.1,0.92,0.72,0.02,0.5,0.3,2.2,-0.1,0.3,-0.1,0.4,-0.4,0,-0.1,0.92],"reassuring":[-0.72,-0.04,0.5,0.34,2.1,0.05,0.6,0,0.35,-0.4,0,0.1,1,0.72,-0.04,0.5,0.34,2.1,-0.05,0.6,0,0.35,-0.4,0,0.1,1],"amused":[-0.72,-0.1,0.5,0.28,2,0,0.25,-0.1,0.4,-0.2,0,0.4,1,0.74,-0.02,0.5,0.36,2.1,0,0.5,0,0.3,-0.1,0,0.3,1],"encouraging":[-0.7,0.04,0.5,0.44,2.1,0,1.5,0,0,-1.5,0,0,1.12,0.7,0.04,0.5,0.44,2.1,0,1.5,0,0,-1.5,0,0,1.12],"disappointed":[-0.72,-0.17,0.49,0.3,2.1,0.12,0.05,0.3,0.2,-1.5,0,0,0.82,0.72,-0.17,0.49,0.3,2.1,-0.12,0.05,-0.3,0.2,-1.5,0,0,0.82],"heartbroken":[-0.72,-0.1,0.5,0.34,2,0.24,0.2,0.55,0.25,-1.5,0,0,0.85,0.72,-0.1,0.5,0.34,2,-0.24,0.2,-0.55,0.25,-1.5,0,0,0.85],"guilty":[-0.74,-0.13,0.4,0.33,2.05,0.24,0.4,0.45,0.3,-1.5,0,0,0.88,0.74,-0.13,0.4,0.33,2.05,-0.24,0.4,-0.45,0.3,-1.5,0,0,0.88],"jealous":[-0.72,-0.04,0.52,0.17,2,-0.3,0.1,-0.35,0.1,-1.5,0,0,0.95,0.72,-0.04,0.48,0.14,2,0.38,0.1,0.3,0.1,-1.5,0,0,0.95],"raging":[-0.68,0.02,0.52,0.3,2,-0.6,-0.2,-0.6,-0.1,-1.5,0,0,1.25,0.68,0.02,0.52,0.3,2,0.6,-0.2,0.6,-0.1,-1.5,0,0,1.25],"disgusted":[-0.72,-0.08,0.5,0.2,2,0.1,0.1,0.18,0.35,-0.2,0,0.3,0.9,0.74,-0.12,0.44,0.13,2,-0.2,-0.1,-0.3,0.4,-1.5,0,0,0.88],"panicked":[-0.7,0.02,0.46,0.58,2.05,0,1.5,0,0,-1.5,0,0,1.2,0.68,0,0.4,0.6,2.1,0,1.5,0,0,-1.5,0,0,1.2],"freezing":[-0.72,-0.04,0.46,0.22,2.1,0.08,0.2,0.25,0.3,-0.3,0,0.2,0.75,0.72,-0.04,0.46,0.22,2.1,-0.08,0.2,-0.25,0.3,-0.3,0,0.2,0.75],"lonely":[-0.62,-0.12,0.4,0.36,2.1,0.2,0.35,0.4,0.3,-1.5,0,0,0.65,0.62,-0.12,0.4,0.36,2.1,-0.2,0.35,-0.4,0.3,-1.5,0,0,0.65],"pouting":[-0.72,0,0.46,0.42,2.25,0.12,0.7,0.1,0.2,-1.5,0,0,1.02,0.72,0,0.46,0.42,2.25,-0.12,0.7,-0.1,0.2,-1.5,0,0,1.02],"grumpy":[-0.72,-0.12,0.52,0.22,2,-0.18,-0.3,-0.38,-0.2,-1.5,0,0,0.88,0.72,-0.12,0.52,0.22,2,0.18,-0.3,0.38,-0.2,-1.5,0,0,0.88],"resigned":[-0.72,-0.1,0.5,0.15,2,0.05,0.15,0.1,0.05,-1.5,0,0,0.78,0.72,-0.1,0.5,0.15,2,-0.05,0.15,-0.1,0.05,-1.5,0,0,0.78],"queasy":[-0.74,0.04,0.34,0.34,2,0.1,0.5,0.2,0.4,-1.5,0,0,0.65,0.74,-0.08,0.42,0.2,2,-0.28,0.1,-0.2,0.4,-1.5,0,0,0.65],"awkward":[-0.72,0.04,0.4,0.4,2.1,0,1.5,0,0,-1.5,0,0,1,0.72,-0.02,0.5,0.5,2.05,0,1.5,0,0,-1.5,0,0,1],"p_processing":[-0.72,0.02,0.44,0.4,2.1,0,1.5,0,0,-1.5,0,0,1.12,0.72,0.02,0.44,0.4,2.1,0,1.5,0,0,-1.5,0,0,1.12],"p_searching":[-0.66,0.05,0.5,0.42,2.2,0,1.5,0,0,-1.5,0,0,1.06,0.78,0,0.42,0.34,2.1,0.12,1.5,0,0,-1.5,0,0,1],"p_glitch":[-0.7,0.04,0.3,0.52,2.0,0.2,1.5,0,0,-1.5,0,0,1.15,0.8,-0.08,0.52,0.2,2.0,-0.35,0.4,0.3,0,-1.5,0,0,0.8],"p_success":[-0.72,-0.1,0.54,0.42,2,0,1.5,0,0,-0.05,0,0.55,1.12,0.72,-0.1,0.54,0.42,2,0,1.5,0,0,-0.05,0,0.55,1.12],"p_music":[-0.72,-0.1,0.56,0.17,2,-0.1,0.3,0,0.3,-0.05,0,0.7,1.02,0.72,-0.1,0.56,0.17,2,0.1,0.3,0,0.3,-0.05,0,0.7,1.02],"p_scan":[-0.76,0,0.62,0.11,2.0,0,0.8,0,0,-0.8,0,0,1.25,0.76,0,0.62,0.11,2.0,0,0.8,0,0,-0.8,0,0,1.25],"p_deadpan":[-0.72,-0.04,0.52,0.2,2,0,0.1,0,0,-0.1,0,0,0.92,0.72,-0.04,0.52,0.2,2,0,0.1,0,0,-0.1,0,0,0.92],"p_yawn":[-0.72,-0.12,0.52,0.12,2,0.12,0.4,0,0.4,-0.15,0,0.45,0.75,0.72,-0.12,0.52,0.12,2,-0.12,0.4,0,0.4,-0.15,0,0.45,0.75],"p_sneeze":[-0.72,-0.06,0.54,0.075,2.0,-0.15,1.5,0,0,-1.5,0,0,1.1,0.72,-0.06,0.54,0.075,2.0,0.15,1.5,0,0,-1.5,0,0,1.1],"p_hiccup":[-0.7,0.04,0.44,0.46,2.1,0,1.5,0,0,-1.5,0,0,1.08,0.72,0,0.42,0.4,2.1,0,1.5,0,0,-1.5,0,0,1.04],"p_lowbat":[-0.72,-0.2,0.46,0.18,2,0.2,0.2,0.55,0.3,-1.5,0,0,0.4,0.72,-0.2,0.46,0.18,2,-0.2,0.2,-0.55,0.3,-1.5,0,0,0.4],"p_wake":[-0.72,-0.08,0.5,0.14,2,0,0.25,0,0.4,-0.3,0,0.2,0.7,0.72,-0.02,0.5,0.23,2,-0.12,0.3,-0.1,0.4,-1.5,0,0,0.8],"p_smug":[-0.72,-0.1,0.54,0.24,2,-0.12,0.12,-0.25,0.2,-0.2,0,0.5,1.05,0.72,-0.1,0.54,0.24,2,0.12,0.12,0.25,0.2,-0.2,0,0.5,1.05],"p_sound":[-0.68,0.05,0.5,0.5,2.2,-0.15,1.5,0,0,-1.5,0,0,1.1,0.76,-0.02,0.44,0.34,2.1,0.18,0.5,-0.1,0.4,-1.5,0,0,1],"shocked":[-0.66,0.02,0.4,0.62,2.05,0,1.5,0,0,-1.5,0,0,1.2,0.66,0.02,0.4,0.62,2.05,0,1.5,0,0,-1.5,0,0,1.2],"startled":[-0.7,0,0.43,0.6,2,0.1,1.5,0,0,-1.5,0,0,1.25,0.74,0.07,0.49,0.66,2.1,0.02,1.5,0,0,-1.5,0,0,1.25],"gasp":[-0.7,0.06,0.41,0.48,2.2,-0.08,1.5,0,0,-1.5,0,0,1.1,0.7,0.06,0.41,0.48,2.2,0.08,1.5,0,0,-1.5,0,0,1.1],"amazed":[-0.72,0.07,0.52,0.52,2.1,0,1.5,0,0,-0.55,0,0.25,1.2,0.72,0.07,0.52,0.52,2.1,0,1.5,0,0,-0.55,0,0.25,1.2],"bewildered":[-0.7,0.1,0.43,0.48,2.1,0.12,1.5,0,0,-1.5,0,0,1,0.76,-0.06,0.4,0.24,2,0.38,0.2,-0.2,0.8,-1.5,0,0,1],"speechless":[-0.72,0,0.46,0.42,2.1,0,1.5,0,0,-1.5,0,0,0.9,0.72,0,0.46,0.42,2.1,0,1.5,0,0,-1.5,0,0,0.9],"horror":[-0.7,0.03,0.44,0.64,2,0.2,1.2,0.15,0,-1.5,0,0,1.15,0.7,0.03,0.44,0.64,2,-0.2,1.2,-0.15,0,-1.5,0,0,1.15],"stunned":[-0.66,0.02,0.27,0.31,2.2,0,1.5,0,0,-1.5,0,0,0.75,0.66,0.02,0.27,0.31,2.2,0,1.5,0,0,-1.5,0,0,0.75]},"sources":{"eye.vert":"0f1e6bc79642aab6829ff11126a1f931e79ca9bc41397a06705d03635b691f65","eye.frag":"54e62fb4d66c1cc696dd7913d18b16eafd5fdfd2dc912525491e52518e89429b","eye.rs":"9a595b90a2c7cce0bd8ab09223b0b3d23d8dfddf160dcf5a5f524a9bad88525c","anim.rs":"100640380261b2ad9b64a16b3f25c93b11f227c013978bd965e181a225a0c669","pace.rs":"d05157e34a6c78b57f37737f99b400650ab35e2e10957349b51b84e8334aa7ea","render.rs":"e1e2877379a6d010586beba44502073d24fee3410f09dc7aa9eadd8a9b183133","panel.rs":"bb41a416531a374a3f00e4751c9a8d6b0efa95914bbaefd53184ac7df78118c5","colour.rs":"856f460b0711e393f892a706ad084cd504c785ec6fb5f9766200fd9dd5b865d2","../expressions.json":"a21438fead2d08f85589fc6b48798189f07d35659c053c12df67535175bce67c","../concept-expressions.json":"28405aa7f9a99bf268d65667cd43055732e84d622002d3942342e8cdb986b75d","../build.rs":"f498ab2efb274b0e832636d0c15b3d385e1578dc54962932dbee2cf7dfabdc4c"}};
+// PipGL: draws Pip's eyes with the real shader (crates/face/src/eye.vert and
+// eye.frag, inlined verbatim by build.py) the way render.rs draw_in() does.
+// Rects are in GL window pixels, origin bottom-left, like panel::Rect.
+(function () {
+  'use strict';
+  function compile(gl, type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s) || 'shader failed');
+    return s;
+  }
+  // render.rs: fn linear(c) = c * c (gamma 2, matching the shader's output).
+  const linear = (c) => c.map((v) => v * v);
+  // render.rs: fn grid(h, depth): about 266 cells down the screen.
+  function grid(h, depth) {
+    const cells = h / 266.0;
+    const pitch = Math.max(2, Math.round(cells));
+    const d = cells < 1.5 ? 0 : pitch < 3 ? depth * 0.5 : depth;
+    return [pitch, d];
+  }
+  function create(canvas, src) {
+    const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, premultipliedAlpha: false, preserveDrawingBuffer: true });
+    if (!gl) throw new Error('WebGL2 is not available');
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, src.header + src.vert));
+    gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, src.header + src.frag));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || 'link failed');
+    const vao = gl.createVertexArray();
+    const L = (n) => gl.getUniformLocation(prog, n);
+    const u = { res: L('uRes'), origin: L('uOrigin'), e: L('uE'), fill: L('uFill'), core: L('uCore'), halo: L('uHalo'), grid: L('uGrid'), pitch: L('uPitch'), glowR: L('uGlowR'), marks: L('uMarks') };
+    return {
+      gl,
+      clear() {
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.clearColor(0, 0, 0, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      },
+      // draw_in(rect, eyes[32], look): look = {fill, core, halo, grid, glow_r, marks:{glint,ring,ears,network,ssh}, markLevel}
+      draw(rect, eyes, look) {
+        gl.viewport(rect.x, rect.y, rect.w, rect.h);
+        gl.useProgram(prog);
+        gl.bindVertexArray(vao);
+        gl.uniform2f(u.res, rect.w, rect.h);
+        gl.uniform2f(u.origin, rect.x, rect.y);
+        gl.uniform4fv(u.e, eyes);
+        gl.uniform3fv(u.fill, linear(look.fill));
+        gl.uniform3fv(u.core, linear(look.core));
+        gl.uniform3fv(u.halo, linear(look.halo));
+        const [pitch, depth] = grid(rect.h, look.grid);
+        gl.uniform1f(u.grid, depth);
+        gl.uniform1f(u.pitch, pitch);
+        gl.uniform1f(u.glowR, look.glow_r);
+        const m = look.marks || {};
+        gl.uniform4fv(u.marks, [m.glint || 0, m.ring || 0, m.ears || 0, m.network || 0, m.ssh || 0, look.markLevel, 0, 0]);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      },
+      // lab/vm.py eyes(): lit = r+g+b > 120, cyan = b > r+30 and g > r, split at the centre.
+      labCheck(step = 2) {
+        const w = canvas.width, h = canvas.height, px = new Uint8Array(w * h * 4);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        let lit = 0, cyan = 0;
+        const boxes = [null, null];
+        for (let y = 0; y < h; y += step) for (let x = 0; x < w; x += step) {
+          const i = (y * w + x) * 4, r = px[i], g = px[i + 1], b = px[i + 2];
+          if (r + g + b <= 120) continue;
+          lit++;
+          if (b > r + 30 && g > r) cyan++;
+          const yy = h - 1 - y, s = x < w / 2 ? 0 : 1, bx = boxes[s];
+          boxes[s] = bx ? [Math.min(bx[0], x), Math.min(bx[1], yy), Math.max(bx[2], x), Math.max(bx[3], yy)] : [x, yy, x, yy];
+        }
+        return { lit, cyan: lit ? cyan / lit : 0, boxes };
+      },
+    };
+  }
+  // panel.rs layout(): eyes glide into a strip at the top centre as amount goes 0 to 1.
+  function smoothstep(x) { x = Math.min(1, Math.max(0, x)); return x * x * (3 - 2 * x); }
+  function layout(w, h, amount, stripFraction) {
+    const s = smoothstep(amount);
+    const stripH = Math.max(1, Math.round(h * stripFraction));
+    const stripW = Math.round(stripH * w / Math.max(1, h));
+    const lerp = (a, b) => Math.round(a + (b - a) * s);
+    return {
+      eyes: { x: lerp(0, (w - stripW) / 2), y: lerp(0, h - stripH), w: lerp(w, stripW), h: lerp(h, stripH) },
+      panel: { x: 0, y: 0, w, h: h - stripH },
+      panelAlpha: s,
+    };
+  }
+  // panel.rs gaze_at(): where the eyes look for a point on the panel.
+  function gazeAt(x, y, width, height) {
+    const fx = x / Math.max(1, width), fy = y / Math.max(1, height);
+    return [Math.max(-1, Math.min(1, (fx * 2 - 1) * 0.9)), Math.max(-1, Math.min(1, -0.55 - 0.4 * fy))];
+  }
+  const api = { create, layout, gazeAt, smoothstep, grid };
+  if (typeof window !== 'undefined') window.PipGL = api;
+  if (typeof module !== 'undefined') module.exports = api;
+})();
+
+/*
+ * face-anim.js: a JavaScript port of Pip's face animation.
+ *
+ * Source of truth: crates/face/src/anim.rs (the spec), eye.rs and pace.rs.
+ * Every layer of Anim::frame is ported: the exact underdamped spring, blinks
+ * (with the 74/26 lid curve, soft, repeat and surprise double blinks),
+ * saccades and idle gaze, thinking search hops, survey looks, presence,
+ * touch glances, panel focus (typing / watching / paused), breathing, the
+ * speech-level envelope and accent, the engaged focus pulse, Content and
+ * Yawn gestures, the head roll, heavy lids, drives, low-battery cue, dazed /
+ * loading / restless-sleep wobble, the dream flutter, the lid wake and the
+ * birth ceremony, and activity() with pace::hz.
+ *
+ * What is ported as constants rather than taken from `presets`:
+ *   - Eye::OPEN (eye.rs lines 40-54), used by the lid-wake closed line
+ *     (anim.rs 480) and the birth line of light (anim.rs 328).
+ *   - eye::NAMES (eye.rs 143-160), the names express() accepts.
+ *   - Eye::mirror (eye.rs 57-65) and pace::hz (pace.rs 24-36).
+ * Every preset shape comes from the `presets` argument.
+ *
+ * Numerics. Rust does the shape maths in f32 and keeps time (t, breath
+ * phase) in f64; this port uses JS doubles throughout, except that the
+ * random source rounds exactly like Rust's f32 (Rng::next/range, anim.rs
+ * 9-22) and the breath rate is rounded to f32 (anim.rs 1188), so a seed
+ * gives the same blink, glance and gesture schedule as the Rust face.
+ * Poses agree with the Rust build to about 1e-5.
+ *
+ * Simplified or skipped:
+ *   - Anim::frame takes a `receive` closure (anim.rs 1099-1125) that stamps
+ *     events after time has caught up. frame(dt, receive) here takes the
+ *     same optional callback; methods called between frames are stamped
+ *     with the previous frame's time, exactly as calling them before
+ *     Anim::frame does in Rust.
+ *   - `touch(x, y, hold)` is not a Rust entry point: the Rust touch is the
+ *     glance (anim.rs 892-897, face.gaze with a hold, link.rs 388-393).
+ *     touch() here is glance() with a default hold of 0.75 s.
+ *   - wake() and sleep() are conveniences over set_lid / set_state (anim.rs
+ *     901-949, 734-804): wake() sets the state (default "idle", as the solo
+ *     demo does, main.rs 324-326), then opens the lid, which plays the
+ *     1.23 s lid wake. The Rust lid sensor, DPMS and panel dark states are
+ *     reachable through setLid() if wanted.
+ *   - The #[cfg(test)] helper being_born (anim.rs 679-682) is exposed as
+ *     beingBorn() for convenience.
+ *   Nothing in the animation itself is left out.
+ */
+(function (root) {
+  'use strict';
+
+  var TAU = Math.PI * 2;
+  var fr = Math.fround;
+
+  // eye.rs: the field order of Eye::to_array, and the 16 expression names.
+  var FIELDS = ['x', 'y', 'w', 'h', 'round', 'tilt', 'top', 'top_slant', 'top_curve',
+    'bot', 'bot_slant', 'bot_curve', 'glow'];
+  var N = 13, M = 26;
+  var NAMES = ['neutral', 'attentive', 'listening', 'thinking', 'speaking', 'joy', 'curiosity',
+    'surprise', 'skepticism', 'concern', 'sleepy', 'asleep', 'dreaming', 'tired', 'muted', 'dazed'];
+  // eye.rs Eye::OPEN.
+  var OPEN = { x: -0.80, y: 0.03, w: 0.46, h: 0.33, round: 2.3, tilt: 0.0, top: 1.5, top_slant: 0.0,
+    top_curve: 0.0, bot: -1.5, bot_slant: 0.0, bot_curve: 0.0, glow: 1.0 };
+
+  // anim.rs constants (lines 85-102).
+  var WAKE_DURATION = 1.23;
+  var BIRTH = 7.6;
+  var BIRTH_HANDOVER = 0.4;
+  var BIRTH_LOOKS = 3.9;
+  var BIRTH_PENDING = 600.0;
+  var REUNION_GAP = 600.0;
+  var YAWN_STRETCH = 0.9;
+  var CALM = 0.82;
+  var MISSED_HOLD = 1.1;
+  function center() { return [0.0, 0.0]; }
+
+  // ---- eye helpers (eye.rs) ----
+  function eyeFrom(a, o) {
+    var e = {};
+    for (var i = 0; i < N; i++) e[FIELDS[i]] = a[o + i];
+    return e;
+  }
+  function eyeArray(e, out, o) {
+    for (var i = 0; i < N; i++) out[o + i] = e[FIELDS[i]];
+  }
+  function copyEye(e) {
+    var c = {};
+    for (var i = 0; i < N; i++) c[FIELDS[i]] = e[FIELDS[i]];
+    return c;
+  }
+  function with_(e, changes) {
+    var c = copyEye(e);
+    for (var k in changes) c[k] = changes[k];
+    return c;
+  }
+  function mirror(e) {
+    var c = copyEye(e);
+    c.x = -e.x; c.tilt = -e.tilt; c.top_slant = -e.top_slant; c.bot_slant = -e.bot_slant;
+    return c;
+  }
+  function sym(l) { return { l: l, r: mirror(l) }; }
+  function poseFrom(a) { return { l: eyeFrom(a, 0), r: eyeFrom(a, N) }; }
+  function poseArray(p) {
+    var out = new Array(M);
+    eyeArray(p.l, out, 0);
+    eyeArray(p.r, out, N);
+    return out;
+  }
+  function uniforms(p, out) {
+    out = out || new Float32Array(32);
+    var eyes = [p.l, p.r];
+    for (var i = 0; i < 2; i++) {
+      var e = eyes[i], o = i * 16;
+      out[o] = e.x; out[o + 1] = e.y; out[o + 2] = e.w; out[o + 3] = e.h;
+      out[o + 4] = e.round; out[o + 5] = e.tilt; out[o + 6] = e.top; out[o + 7] = e.top_slant;
+      out[o + 8] = e.top_curve; out[o + 9] = e.bot; out[o + 10] = e.bot_slant; out[o + 11] = e.bot_curve;
+      out[o + 12] = e.glow; out[o + 13] = 0; out[o + 14] = 0; out[o + 15] = 0;
+    }
+    return out;
+  }
+
+  // ---- pace.rs ----
+  var ACTIVITY_HZ = { blank: 5, asleep: 15, calm: 30, active: 60 };
+  function hz(activity, software) {
+    var r = ACTIVITY_HZ[activity];
+    return software ? Math.min(r, 20) : r;
+  }
+
+  // ---- anim.rs 8-22: xorshift32 with f32 output ----
+  function Rng(seed) { this.s = seed >>> 0; }
+  Rng.prototype.next = function () {
+    var s = this.s;
+    s = (s ^ (s << 13)) >>> 0;
+    s = (s ^ (s >>> 17)) >>> 0;
+    s = (s ^ (s << 5)) >>> 0;
+    this.s = s;
+    return (s >>> 8) / 16777216;
+  };
+  Rng.prototype.range = function (lo, hi) {
+    var l = fr(lo), h = fr(hi);
+    return fr(l + fr(fr(h - l) * this.next()));
+  };
+
+  // ---- small maths (anim.rs 104-118, 202-204) ----
+  function clamp(v, lo, hi) { return Math.min(Math.max(v, lo), hi); }
+  function ease(t, start, end) {
+    var x = clamp((t - start) / (end - start), 0.0, 1.0);
+    return x * x * (3.0 - 2.0 * x);
+  }
+  function mix(a, b, amount) { return a + (b - a) * amount; }
+  function blendEye(a, b, amount) {
+    var c = {};
+    for (var i = 0; i < N; i++) { var k = FIELDS[i]; c[k] = mix(a[k], b[k], amount); }
+    return c;
+  }
+  function blendPose(a, b, amount) { return { l: blendEye(a.l, b.l, amount), r: blendEye(a.r, b.r, amount) }; }
+  function distance(a, b) { return Math.max(Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1])); }
+  function same(a, b) { return a[0] === b[0] && a[1] === b[1]; }
+  // anim.rs 39-41
+  function reflect(p) { return { l: mirror(p.r), r: mirror(p.l) }; }
+
+  // ---- anim.rs 120-165: close along the eye's own lid curves ----
+  function closeLids(e, amount) {
+    var takeUp = ease(amount, 0.0, 0.23);
+    var closure = clamp((amount - 0.10) / 0.90, 0.0, 1.0);
+    var top = mix(e.top, Math.min(e.top, 1.05), takeUp);
+    var bot = mix(e.bot, Math.max(e.bot, -1.05), takeUp);
+    var clearTop = ease(e.top + e.top_curve, 0.6, 1.0);
+    var clearBot = ease(-(e.bot + e.bot_curve), 0.6, 1.0);
+    var arch = Math.max(0.85 - e.top_curve, 0.0) * takeUp * clearTop;
+    var sag = Math.max(0.6 + e.bot_curve, 0.0) * takeUp * clearBot;
+    top = top - arch;
+    bot = bot + sag;
+    e.top_curve += arch;
+    e.bot_curve -= sag;
+    var sliver = Math.min(0.014 / (2.1 * Math.max(e.h, 0.01)), 0.05);
+    var upper = closure * 0.74;
+    var lower = closure * (0.26 - sliver);
+    e.top = mix(top, bot, upper);
+    e.bot = mix(bot, top, lower);
+    var ts = e.top_slant, bs = e.bot_slant;
+    e.top_slant = mix(ts, bs, upper);
+    e.bot_slant = mix(bs, ts, lower);
+    var tc = e.top_curve, bc = e.bot_curve;
+    e.top_curve = mix(tc, bc, upper);
+    e.bot_curve = mix(bc, tc, lower);
+    var level = ease(amount, 0.30, 1.0);
+    if (level > 0.0 && e.tilt !== 0.0) {
+      var gap = 0.5 * e.h * (e.top + e.top_curve + e.bot + e.bot_curve);
+      var tilt = e.tilt * (1.0 - level);
+      var s0 = Math.sin(e.tilt), c0 = Math.cos(e.tilt);
+      var s1 = Math.sin(tilt), c1 = Math.cos(tilt);
+      e.x += gap * (s1 - s0);
+      e.y += gap * (c0 - c1);
+      e.tilt = tilt;
+    }
+    e.glow *= 1.0 - 0.20 * ease(amount, 0.55, 1.0);
+  }
+
+  // anim.rs 167-170
+  function blinkClosure(t, close, hold, open) {
+    var down = clamp(t / close, 0.0, 1.0);
+    return (down * (2.0 - down)) * (1.0 - ease(t, close + hold, close + hold + open));
+  }
+
+  // anim.rs 172-200
+  function Blink(o) {
+    this.start = o.start; this.close = o.close; this.hold = o.hold; this.open = o.open;
+    this.stagger = o.stagger; this.depth = o.depth; this.repeat = o.repeat;
+  }
+  Blink.prototype.elapsed = function (now) { return now - this.start; };
+  Blink.prototype.closure = function (now, side) {
+    var t = this.elapsed(now) - Math.max(side * this.stagger, 0.0);
+    return this.depth * blinkClosure(t, this.close, this.hold, this.open);
+  };
+  Blink.prototype.done = function (now) {
+    return this.elapsed(now) >= this.close + this.hold + this.open + Math.abs(this.stagger);
+  };
+
+  // anim.rs 206-236: an interruptible movement between two fixations.
+  function Gaze() { this.from = center(); this.to = center(); this.start = 0.0; this.duration = 0.08; }
+  Gaze.prototype.position = function (now) {
+    var p = ease(now - this.start, 0.0, this.duration);
+    return [mix(this.from[0], this.to[0], p), mix(this.from[1], this.to[1], p)];
+  };
+  Gaze.prototype.track = function (target, now, unhurried) {
+    var current = this.position(now);
+    if (!same(target, this.to)) {
+      this.from = current;
+      this.to = [target[0], target[1]];
+      this.start = now;
+      this.duration = Math.max(0.070 + 0.095 * Math.sqrt(Math.min(distance(this.from, target), 1.35)), unhurried);
+    }
+    return current;
+  };
+
+  // anim.rs 263-283: drives (null means the body cannot tell).
+  function tiredness(d) {
+    var flat = d.energy == null ? 0.0 : clamp((0.6 - d.energy) / 0.5, 0.0, 1.0);
+    var hot = d.comfort == null ? 0.0 : clamp((0.6 - d.comfort) / 0.6, 0.0, 1.0);
+    return Math.min(0.20 * flat + 0.08 * hot, 0.26);
+  }
+  function gazeTempo(d) { return d.arousal == null ? 1.0 : mix(1.4, 0.85, clamp(d.arousal, 0.0, 1.0)); }
+  function eagerness(d) { return d.social == null ? 0.0 : clamp((0.6 - d.social) / 0.6, 0.0, 1.0); }
+
+  // anim.rs 303-320
+  var FLICKER = [[0.0, 0.0], [0.35, 0.55], [0.42, 0.0], [0.80, 0.0], [0.86, 0.8], [0.93, 0.25],
+    [1.18, 0.0], [1.26, 0.9], [1.33, 0.45], [1.52, 1.0], [1.58, 0.7], [1.80, 1.0]];
+  function flicker(t) {
+    for (var i = FLICKER.length - 1; i >= 0; i--) if (t >= FLICKER[i][0]) return FLICKER[i][1];
+    return 0.0;
+  }
+
+  function dreamFlutter(e, amount) {
+    e.x += 0.022 * amount;
+    e.top += 0.075 * amount;
+    e.glow *= 1.0 + 0.07 * amount;
+  }
+  // anim.rs 370-394
+  function hop(age, period, count) {
+    if (age <= 0.0 || age >= period * count) return 0.0;
+    return Math.abs(Math.sin(Math.PI * age / period)) * Math.exp(-age / period);
+  }
+  function anticipation(age) { return ease(age, 0.0, 0.05) * (1.0 - ease(age, 0.05, 0.15)); }
+  var LIVELY = { attentive: 1, listening: 1, thinking: 1, joy: 1, curiosity: 1, surprise: 1, skepticism: 1, concern: 1 };
+  function lively(name) { return LIVELY[name] === 1; }
+  function dampingFor(name) {
+    if (name === 'joy' || name === 'surprise') return 0.64;
+    if (name === 'attentive' || name === 'curiosity' || name === 'skepticism') return 0.72;
+    return CALM;
+  }
+  // anim.rs 397-412
+  var GESTURE_LENGTH = { content: 2.3, yawn: 2.6 };
+
+  // anim.rs 427-476: one frame's acting, applied to each eye.
+  function applyLife(life, e, side, heaviness, head) {
+    var tuck = life.tuck, bounce = life.bounce, pop = life.pop, content = life.content,
+      inhale = life.inhale, squeeze = life.squeeze, smile = life.smile;
+    heaviness = heaviness * (1.0 - 0.85 * inhale);
+    e.h *= 1.0 - 0.06 * tuck + 0.7 * bounce + 0.09 * pop + 0.17 * inhale;
+    e.w *= 1.0 + 0.025 * tuck - 0.25 * bounce + 0.06 * pop - 0.05 * inhale;
+    e.y += bounce - 0.008 * tuck + 0.04 * inhale - 0.015 * squeeze + 0.012 * content - 0.012 * heaviness;
+    e.glow *= (1.0 + 1.2 * bounce + 0.08 * pop + 0.06 * inhale) * (1.0 - 0.10 * squeeze) * (1.0 - 0.12 * heaviness);
+    if (smile) {
+      var joy = side < 0.0 ? smile.l : smile.r;
+      var amount = 0.70 * content;
+      var keys = ['top', 'top_slant', 'top_curve', 'bot', 'bot_slant', 'bot_curve', 'round', 'tilt'];
+      for (var i = 0; i < keys.length; i++) e[keys[i]] = mix(e[keys[i]], joy[keys[i]], amount);
+      closeLids(e, 0.18 * content);
+    }
+    if (squeeze > 0.0) {
+      e.bot_curve += 0.35 * squeeze;
+      e.tilt -= side * 0.04 * squeeze;
+      closeLids(e, 0.86 * squeeze);
+    }
+    if (heaviness > 0.0) {
+      var a = (0.1 + 0.8 * heaviness) * ease(heaviness, 0.0, 0.08);
+      e.tilt *= 1.0 - 0.8 * Math.min(2.0 * a, 1.0);
+      e.top_slant -= side * 0.3 * a;
+      closeLids(e, a);
+    }
+    if (head !== 0.0) {
+      var s = Math.sin(head), c = Math.cos(head);
+      var x = e.x, y = e.y;
+      e.x = x * c - y * s;
+      e.y = x * s + y * c;
+      e.tilt += head;
+    }
+  }
+
+  // ---- Spring (anim.rs 24-83) ----
+  function Spring(anim, name) {
+    this.anim = anim;
+    var target = anim.preset(name).slice();
+    this.x = target.slice();
+    this.v = new Array(M).fill(0.0);
+    this.name = name;
+    this.target = target;
+    this.settled = true;
+    this.damping = CALM;
+    this.flip = false;
+    this.flipped = false;
+  }
+  Spring.prototype.step = function (name, dt, omega) {
+    if (this.name !== name || this.flip !== this.flipped) {
+      this.name = name;
+      this.flipped = this.flip;
+      var pose = poseFrom(this.anim.preset(name));
+      this.target = poseArray(this.flip ? reflect(pose) : pose);
+      this.settled = false;
+    }
+    if (this.settled || dt === 0.0) return;
+    var decay = this.damping * omega;
+    var frequency = Math.sqrt(1.0 - this.damping * this.damping) * omega;
+    var sin = Math.sin(frequency * dt), cos = Math.cos(frequency * dt);
+    var envelope = Math.exp(-decay * dt);
+    var travel = envelope * sin / frequency;
+    var forward = envelope * cos + decay * travel;
+    var backward = envelope * cos - decay * travel;
+    var acceleration = -omega * omega * travel;
+    var settled = true;
+    for (var i = 0; i < M; i++) {
+      var offset = this.x[i] - this.target[i];
+      var displacement = forward * offset + travel * this.v[i];
+      this.v[i] = acceleration * offset + backward * this.v[i];
+      this.x[i] = this.target[i] + displacement;
+      settled = settled && Math.abs(displacement) < 0.00002 && Math.abs(this.v[i]) < 0.00015;
+    }
+    this.settled = settled;
+    if (settled) {
+      this.x = this.target.slice();
+      this.v = new Array(M).fill(0.0);
+    }
+  };
+
+  // ---- birth and lid wake (anim.rs 322-358, 478-509) ----
+  function birthPose(anim, t, ready) {
+    var sleepy = anim.pose('sleepy'), curious = anim.pose('curiosity');
+    var line = with_(OPEN, { h: 0.016 + 0.012 * ease(t, 0.3, 2.4), glow: 0.42 * flicker(t) });
+    var lines = sym(line);
+    var out = [lines.l, lines.r];
+    var readies = [ready.l, ready.r], sleepies = [sleepy.l, sleepy.r], curiouses = [curious.l, curious.r];
+    var look = -ease(t, 3.9, 4.7) * (1.0 - ease(t, 4.9, 5.6)) + ease(t, 5.5, 6.2) * (1.0 - ease(t, 6.3, 7.0));
+    var tilt = ease(t, 6.5, 6.95) * (1.0 - ease(t, 7.05, BIRTH));
+    var head = -0.08 * tilt;
+    for (var i = 0; i < 2; i++) {
+      var lag = 0.1 * i;
+      var opened = blendEye(out[i], sleepies[i], ease(t, 2.4 + lag, 3.1 + lag));
+      var e = blendEye(opened, readies[i], ease(t, 3.0 + lag, 3.9 + lag));
+      e = blendEye(e, curiouses[i], 0.55 * tilt);
+      e.x += 0.30 * look;
+      e.y -= 0.03 * Math.abs(look);
+      e.tilt += 0.05 * look;
+      var near = 1.0 + 0.06 * (2.0 * i - 1.0) * look;
+      e.w *= near;
+      e.h *= near;
+      closeLids(e, blinkClosure(t - 5.05, 0.13, 0.07, 0.22));
+      if (head !== 0.0) {
+        var s = Math.sin(head), c = Math.cos(head), x = e.x, y = e.y;
+        e.x = x * c - y * s;
+        e.y = x * s + y * c;
+        e.tilt += head;
+      }
+      out[i] = e;
+    }
+    return { l: out[0], r: out[1] };
+  }
+
+  function lidWakePose(anim, t, ready, dreamed) {
+    var closed = sym(with_(OPEN, { h: 0.016, glow: 0.34 }));
+    var sleepy = anim.pose('sleepy'), curious = anim.pose('curiosity'), neutral = anim.pose('neutral');
+    var l = blendEye(closed.l, sleepy.l, ease(t, 0.09, 0.44));
+    var r = blendEye(closed.r, sleepy.r, ease(t, 0.18, 0.53));
+    var peer = ease(t, 0.30, 0.48) * (1.0 - ease(t, 0.69, 0.88));
+    var perk = ease(t, 0.68, 0.88);
+    l = blendEye(l, blendEye(neutral.l, curious.l, 0.64), perk);
+    r = blendEye(r, blendEye(neutral.r, curious.r, 0.56), perk);
+    l.x -= 0.052 * peer;
+    r.x -= 0.052 * peer;
+    l.y -= 0.018 * peer;
+    r.y -= 0.018 * peer;
+    closeLids(l, blinkClosure(t - 0.605, 0.080, 0.042, 0.154));
+    closeLids(r, blinkClosure(t - 0.618, 0.080, 0.042, 0.168));
+    if (dreamed) {
+      var pairs = [[t, l], [t - 0.028, r]];
+      for (var i = 0; i < 2; i++) {
+        var age = pairs[i][0];
+        dreamFlutter(pairs[i][1], ease(age, 0.68, 0.755) * (1.0 - ease(age, 0.765, 0.91)));
+      }
+    }
+    var settle = ease(t, 0.90, WAKE_DURATION);
+    return { l: blendEye(l, ready.l, settle), r: blendEye(r, ready.r, settle) };
+  }
+
+  // ---- Anim (anim.rs 511-1547) ----
+  function Anim(presets, seed, software) {
+    if (!presets) throw new Error('PipAnim.create needs presets');
+    var all = NAMES.concat(['loading']);
+    for (var i = 0; i < all.length; i++) {
+      var p = presets[all[i]];
+      if (!p || p.length !== M) throw new Error('preset missing or not 26 numbers: ' + all[i]);
+    }
+    this.presets = presets;
+    this.software = !!software;
+    this.t = 0.0;
+    this.rng = new Rng(((seed >>> 0) | 1) >>> 0);
+    this.spring = new Spring(this, 'asleep');
+    this.omega = 2.5;
+    this.state = 'waking';
+    this.state_at = 0.0;
+    this.muted = false;
+    this.unwell = false;
+    this.link_lost = false;
+    this.emotion = null; // [name, until]
+    this.battery_cue = null; // {next, until}
+    this.preview_dream = false;
+    this.lid_open = false;
+    this.panel_blank = false;
+    this.lid_wake = null; // {started, dreamed}
+    this.gaze = new Gaze();
+    this.fixation = center();
+    this.gaze_next = 2.2;
+    this.gaze_away = false;
+    this.thought_side = 1.0;
+    this.presence = null; // [point, until]
+    this._touch = null; // [point, until]
+    this.blink = null;
+    this.blink_next = 3.0;
+    this.blink_repeat = false;
+    this.breath_phase = 0.0;
+    this.breath_depth = 0.0;
+    this.level = 0.0;
+    this.level_target = 0.0;
+    this.level_at = -10.0;
+    this.acting = 'asleep';
+    this.acted_from = 'asleep';
+    this.acted_at = -10.0;
+    this.double_blink = false;
+    this.head = 0.0;
+    this.head_v = 0.0;
+    this.listen_side = 1.0;
+    this.gesture = null; // [kind, at, side]
+    this.gesture_next = 16.0;
+    this.quiet_since = 0.0;
+    this.heaviness = 0.0;
+    this.yawned = false;
+    this.thought_spot = center();
+    this.search_next = 0.0;
+    this.surveying = false;
+    this.drives = { energy: null, arousal: null, social: null, comfort: null };
+    this.reunion = 0.0;
+    this.reunited_at = -Infinity;
+    this.birth = null; // {started, cut}
+    this.birth_pending = null;
+    this.lit_at = 0.0;
+    this.loading = false;
+    this.focus = null; // {kind: 'typing'|'watching'|'paused', at: [x, y]}
+    this.focus_seen = center();
+    this.focus_next = 0.0;
+    this.typing_hidden = false;
+    this._u = new Float32Array(32);
+  }
+
+  var A = Anim.prototype;
+
+  A.preset = function (name) { return this.presets[name]; };
+  A.pose = function (name) { return poseFrom(this.presets[name]); };
+
+  // anim.rs 656-682
+  A.born = function () {
+    if (this.panel_blank) {
+      this.birth_pending = this.t;
+    } else if (!this.birth) {
+      var skip = this.t - this.lit_at > 1.5 ? BIRTH_LOOKS : 0.0;
+      this.startBirth(skip);
+    }
+  };
+  A.startBirth = function (skip) {
+    this.birth_pending = null;
+    this.birth = { started: this.t - skip, cut: null };
+    this.lid_wake = null;
+    this.blink = null;
+    this.blink_repeat = false;
+    this.double_blink = false;
+    this.gesture = null;
+    this.blink_next = this.t + BIRTH + 0.8;
+    this.quiet_since = this.t;
+  };
+  A.beingBorn = function () { return this.birth != null; };
+
+  /** drives: {energy, arousal, social, comfort}, each 0..1 or null/absent. */
+  A.setDrives = function (d) {
+    d = d || {};
+    this.drives = {
+      energy: d.energy == null ? null : d.energy,
+      arousal: d.arousal == null ? null : d.arousal,
+      social: d.social == null ? null : d.social,
+      comfort: d.comfort == null ? null : d.comfort,
+    };
+  };
+  A.setLoading = function (on) { this.loading = !!on; };
+
+  function sameFocusKind(a, b) { return (a ? a.kind : null) === (b ? b.kind : null); }
+  // anim.rs 694-707
+  A.setFocus = function (focus) {
+    if (focus) focus = { kind: focus.kind, at: [focus.at[0], focus.at[1]] };
+    else focus = null;
+    if (!sameFocusKind(focus, this.focus)) {
+      this.focus_next = this.t;
+      if (!focus) this.resetFixation();
+    }
+    this.focus = focus;
+  };
+  A.setTypingHidden = function (on) { this.typing_hidden = !!on; };
+
+  // anim.rs 710-732
+  A.activity = function () {
+    if (this.panel_blank) return 'blank';
+    var gazeMoving = (this.t - this.gaze.start) < this.gaze.duration;
+    var busy = this.lid_wake != null || this.birth != null || this.blink != null || this.gesture != null ||
+      !this.spring.settled || this.level > 0.0 || this._touch != null || gazeMoving ||
+      Math.abs(this.head_v) > 0.002 || (this.engaged() && !this.muted);
+    if (busy) return 'active';
+    if (this.asleep()) return 'asleep';
+    return 'calm';
+  };
+
+  // anim.rs 734-804
+  A.setStateFull = function (state, muted, unwell) {
+    muted = !!muted; unwell = !!unwell;
+    this.preview_dream = false;
+    var changed = state !== this.state;
+    if (changed) {
+      if (state === 'waking' && this.asleep()) this.omega = 2.5;
+      if (this.state === 'speaking') {
+        this.emotion = null;
+        this.level_target = 0.0;
+      }
+      if (state === 'asleep') {
+        this._touch = null;
+        this.presence = null;
+        this.emotion = null;
+        this.blink_repeat = false;
+        this.double_blink = false;
+        if (this.blink) this.blink.repeat = false;
+      }
+      if (state === 'thinking') this.thought_side = this.rng.next() < 0.5 ? -1.0 : 1.0;
+      if (state === 'listening') this.listen_side = this.rng.next() < 0.5 ? -1.0 : 1.0;
+      var yawning = this.gesture != null && this.gesture[0] === 'yawn';
+      if (!(yawning && state === 'asleep')) this.gesture = null;
+      if (state === 'drowsy' && !muted && !unwell && !this.link_lost && !this.panel_blank) this.startGesture('yawn');
+      this.reunion = 0.0;
+      var s = this.state;
+      var fromRest = s === 'idle' || s === 'drowsy' || s === 'waking' || s === 'asleep';
+      if (state === 'attending' && fromRest && !muted && !unwell) {
+        var eager = eagerness(this.drives);
+        if (eager > 0.0 && this.t - this.reunited_at >= REUNION_GAP) {
+          this.reunion = eager;
+          this.reunited_at = this.t;
+        }
+      }
+      if ((state === 'attending' || state === 'listening' || state === 'speaking') && this.birth) {
+        if (this.birth.cut == null) this.birth.cut = this.t;
+      }
+      if (state === 'idle') this.gesture_next = this.t + this.rng.range(12.0, 24.0);
+      this.quiet_since = this.t;
+      this.yawned = false;
+      this.state = state;
+      this.state_at = this.t;
+    }
+    var statusChanged = muted !== this.muted || unwell !== this.unwell;
+    this.muted = muted;
+    this.unwell = unwell;
+    if (changed || statusChanged) {
+      this.resetFixation();
+      if (this.engaged()) {
+        this.blink_next = Math.max(this.blink_next, this.t + 0.9);
+        this.blink_repeat = false;
+      }
+    }
+  };
+  /** setState(name[, muted, unwell]): muted and unwell default to their current values. */
+  A.setState = function (state, muted, unwell) {
+    this.setStateFull(state, muted === undefined ? this.muted : muted, unwell === undefined ? this.unwell : unwell);
+  };
+  A.setMuted = function (on) { this.setStateFull(this.state, !!on, this.unwell); };
+  A.setUnwell = function (on) { this.setStateFull(this.state, this.muted, !!on); };
+
+  A.engaged = function () {
+    var s = this.state;
+    return s === 'attending' || s === 'listening' || s === 'speaking';
+  };
+  A.followsPresence = function () {
+    return !this.muted && !this.unwell && !this.link_lost && (this.engaged() || this.state === 'idle');
+  };
+  // anim.rs 814-824
+  A.resetFixation = function () {
+    this.gaze_away = false;
+    this.surveying = false;
+    this.gaze_next = this.t;
+    if (this.state === 'idle' && this.presence == null) {
+      this.fixation = center();
+      this.gaze_next += this.rng.range(2.4, 4.5);
+    } else if (this.state === 'thinking' && !this.muted && !this.dazed()) {
+      this.gaze_next += 0.12;
+    }
+  };
+
+  // anim.rs 826-836
+  A.express = function (name, hold) {
+    if (hold === undefined) hold = 2.5; // link.rs: face.express hold defaults to 2.5 s
+    if (!this.panel_blank && !this.asleep() && name !== 'dreaming') {
+      if (NAMES.indexOf(name) >= 0) {
+        this.emotion = [name, this.t + clamp(hold, 0.2, 600.0)];
+        this.quiet_since = this.t;
+        if (this.gesture != null && this.gesture[0] === 'content') this.gesture = null;
+      }
+    }
+  };
+  A.previewDreaming = function () {
+    this.setStateFull('asleep', false, false);
+    this.preview_dream = true;
+    this.state_at = this.t;
+  };
+  // anim.rs 845-851
+  A.setLowBattery = function (low) {
+    if (low) {
+      if (!this.battery_cue) this.battery_cue = { next: this.t, until: this.t };
+    } else {
+      this.battery_cue = null;
+    }
+  };
+  A.endReply = function () {
+    if (this.state === 'thinking' || this.state === 'speaking') {
+      this.emotion = null;
+      this.level_target = 0.0;
+    }
+  };
+  // anim.rs 860-883
+  A.setGaze = function (x, y) {
+    if (this.panel_blank || this.asleep()) return;
+    var measured = [clamp(x, -1.0, 1.0), clamp(y, -1.0, 1.0)];
+    var point = measured;
+    if (this.presence && distance(this.presence[0], measured) < 0.08) point = this.presence[0];
+    if (this.followsPresence() && (this.presence == null || !same(this.presence[0], point))) this.gaze_next = this.t;
+    var arriving = this.presence == null && this.state === 'idle' && this.followsPresence();
+    if (arriving && eagerness(this.drives) > 0.5 && this.t - this.reunited_at >= REUNION_GAP) {
+      this.reunited_at = this.t;
+      this.express('joy', 1.2);
+    }
+    this.presence = [point, this.t + 2.0];
+    this.quiet_since = this.t;
+  };
+  A.clearGaze = function () {
+    if (this.presence) {
+      this.presence = null;
+      this.fixation = center();
+      this.resetFixation();
+    }
+  };
+  // anim.rs 892-897
+  A.glance = function (x, y, hold) {
+    if (hold === undefined) hold = 0.75;
+    if (!this.panel_blank && !this.asleep()) {
+      this._touch = [[clamp(x, -1.0, 1.0), clamp(y, -1.0, 1.0)], this.t + clamp(hold, 0.1, 2.0)];
+      this.quiet_since = this.t;
+    }
+  };
+  /** A touch on the screen: the Rust touch is a glance with a hold. */
+  A.touch = function (x, y, hold) { this.glance(x || 0, y || 0, hold); };
+
+  // anim.rs 901-949. closed: true / false / null (unknown).
+  A.setLid = function (closed, showFace, snapshot) {
+    var open = closed === false;
+    var wasBlank = this.panel_blank;
+    this.panel_blank = !(open || (closed == null && !!showFace));
+    if (wasBlank && !this.panel_blank) this.lit_at = this.t;
+    if (this.panel_blank) {
+      if (!wasBlank) this.spring = new Spring(this, 'asleep');
+      this.lid_wake = null;
+      this.level = 0.0;
+      this.level_target = 0.0;
+      this.emotion = null;
+      this.blink = null;
+      this.blink_repeat = false;
+      this.double_blink = false;
+      if (this.battery_cue) this.battery_cue.until = this.t;
+      this._touch = null;
+      this.presence = null;
+      this.fixation = center();
+      this.gaze = new Gaze();
+      this.gesture = null;
+      this.heaviness = 0.0;
+      this.head = 0.0;
+      this.head_v = 0.0;
+      if (this.birth) {
+        var b = this.birth;
+        this.birth = null;
+        if (b.cut == null) this.birth_pending = this.t;
+      }
+      this.resetFixation();
+    } else if (this.birth_pending != null && this.t - this.birth_pending <= BIRTH_PENDING) {
+      this.lit_at = this.t;
+      this.startBirth(0.0);
+    } else if (open && !this.lid_open && !snapshot) {
+      this.quiet_since = this.t;
+      this.lid_wake = { started: this.t, dreamed: false };
+      this.blink = null;
+      this.blink_repeat = false;
+      this.blink_next = this.t + 2.8;
+    }
+    this.lid_open = open;
+    return !this.panel_blank;
+  };
+  A.dreamCompletedOnOpen = function () {
+    if (this.lid_wake && this.lid_wake.started === this.t) this.lid_wake.dreamed = true;
+  };
+
+  /**
+   * The lid wake (1.23 s): closed line, peek, blink, perk up, settle into
+   * the live face. opts.state (default "idle") is set first, as the solo
+   * demo does; opts.dreamed adds the dream flutter to the waking blink.
+   */
+  A.wake = function (opts) {
+    opts = opts || {};
+    if (this.lid_open) this.setLid(true, false, false);
+    this.setState(opts.state || 'idle');
+    this.setLid(false, false, false);
+    if (opts.dreamed) this.dreamCompletedOnOpen();
+  };
+  A.sleep = function () { this.setState('asleep'); };
+
+  // anim.rs 961-997
+  A.perform = function (name) {
+    var g;
+    if (name === 'content') g = 'content';
+    else if (name === 'yawn') g = 'yawn';
+    else if (name === 'survey') {
+      if (!this.panel_blank && this.state === 'idle' && this.presence == null) this.survey();
+      return true;
+    } else return false;
+    if (!this.panel_blank && !this.asleep()) this.startGesture(g);
+    return true;
+  };
+  A.startGesture = function (g) {
+    var side = this.rng.next() < 0.5 ? -1.0 : 1.0;
+    this.gesture = [g, this.t, side];
+    var end = this.t + GESTURE_LENGTH[g];
+    this.blink_next = Math.max(this.blink_next, end + this.rng.range(0.3, 1.2));
+  };
+  A.survey = function () {
+    var side = this.rng.next() < 0.5 ? -1.0 : 1.0;
+    this.gaze_away = true;
+    this.surveying = true;
+    var fx = side * this.rng.range(0.72, 0.95);
+    this.fixation = [fx, this.rng.range(-0.08, 0.18)];
+    this.gaze_next = this.t + this.rng.range(1.8, 2.8);
+    if (this.blink == null && this.gesture == null) this.blink_next = Math.min(this.blink_next, this.t + 0.06);
+  };
+
+  A.panelBlank = function () { return this.panel_blank; };
+  // anim.rs 1003-1012
+  A.setLevel = function (v) {
+    if (this.panel_blank) return;
+    this.level_target = Math.sqrt(clamp((v - 0.06) / 0.94, 0.0, 1.0));
+    this.level_at = this.t;
+    if (this.level_target > 0.0) this.quiet_since = this.t;
+  };
+  A.setLinkLost = function (lost) {
+    lost = !!lost;
+    if (this.link_lost !== lost) {
+      this.link_lost = lost;
+      this.resetFixation();
+    }
+  };
+  A.asleep = function () { return this.state === 'asleep'; };
+  A.isMuted = function () { return this.muted; };
+  A.resting = function () {
+    var s = this.state;
+    return !this.panel_blank && !this.muted && !this.dazed() && (s === 'idle' || s === 'drowsy' || s === 'asleep');
+  };
+  A.missed = function () {
+    if (!this.muted && !this.dazed()) this.express('skepticism', MISSED_HOLD);
+  };
+  A.dazed = function () { return this.unwell || this.link_lost; };
+
+  // anim.rs 1049-1075: the override order.
+  A.targetName = function () {
+    if (this.asleep()) return this.preview_dream ? 'dreaming' : 'asleep';
+    if (this.dazed()) return this.loading && !this.unwell ? 'loading' : 'dazed';
+    if (this.muted) return 'muted';
+    if (this.emotion && this.t < this.emotion[1]) return this.emotion[0];
+    if (this.state === 'idle' && this.battery_cue && this.t < this.battery_cue.until) return 'tired';
+    switch (this.state) {
+      case 'attending': return 'attentive';
+      case 'listening': return 'listening';
+      case 'thinking': return 'thinking';
+      case 'speaking': return 'speaking';
+      case 'drowsy': return 'sleepy';
+      default: return 'neutral';
+    }
+  };
+  A.shapeName = function () {
+    var name = this.targetName();
+    var stretching = this.gesture != null && this.gesture[0] === 'yawn' && (this.t - this.gesture[1]) < YAWN_STRETCH;
+    return stretching && (name === 'sleepy' || name === 'asleep') ? 'neutral' : name;
+  };
+  A.facingLeft = function () {
+    if (this.shapeName() !== 'thinking') return false;
+    var p = this.presets.thinking;
+    return (p[0] + p[N]) * this.thought_side < -0.01;
+  };
+
+  /** Rust Anim::frame: returns the pose {l, r}. */
+  A.step = function (elapsed, receive) {
+    elapsed = Math.max(elapsed, 0.0);
+    var dt = Math.min(elapsed, 0.1);
+    var previous = this.t;
+    var now = previous + elapsed;
+    if (!this.panel_blank) {
+      var s = this.state;
+      var tempo = (s === 'attending' || s === 'listening') ? 20.0 : (s === 'drowsy' || s === 'asleep') ? 8.0 : 14.0;
+      var speed = s === 'waking' ? 0.8 : 4.5;
+      this.omega += (tempo - this.omega) * Math.min(dt * speed, 1.0);
+      var held = this.emotion ? clamp(this.emotion[1] - previous, 0.0, elapsed) : elapsed;
+      this.spring.damping = dampingFor(this.targetName());
+      this.spring.flip = this.facingLeft();
+      this.spring.step(this.shapeName(), held, this.omega);
+      if (held < elapsed) {
+        this.emotion = null;
+        this.spring.damping = dampingFor(this.targetName());
+        this.spring.flip = this.facingLeft();
+        this.spring.step(this.shapeName(), elapsed - held, this.omega);
+      }
+      this.stepVoice(elapsed);
+    }
+    this.t = now;
+    if (receive) receive(this);
+
+    var arriving = this.targetName();
+    if (arriving !== this.acting) {
+      this.acted_from = this.acting;
+      this.acting = arriving;
+      this.acted_at = this.t;
+      if (arriving === 'surprise' && !this.panel_blank && this.lid_wake == null) {
+        this.double_blink = true;
+        if (this.blink == null) this.blink_next = this.t + 0.30;
+      }
+    }
+
+    var p = poseFrom(this.spring.x);
+    if (this.panel_blank) {
+      p.l.glow = 0.0;
+      p.r.glow = 0.0;
+      return p;
+    }
+
+    var asleep = this.asleep();
+    var t = this.t;
+    var gaze = this.stepGaze();
+    var wake = null;
+    if (this.lid_wake && (this.t - this.lid_wake.started) < WAKE_DURATION) {
+      wake = [this.t - this.lid_wake.started, this.lid_wake.dreamed];
+    }
+    if (!wake) this.lid_wake = null;
+    var birth = null;
+    if (this.birth) {
+      var age0 = this.t - this.birth.started;
+      var cut0 = this.birth.cut == null ? null : this.t - this.birth.cut;
+      if (age0 < BIRTH && (cut0 == null || cut0 < BIRTH_HANDOVER)) birth = [age0, cut0];
+    }
+    if (!birth) this.birth = null;
+    if (!wake && !birth) this.stepBlink();
+    if (this.lid_open && !wake && this.state === 'idle' && !this.muted && !this.dazed() && this.emotion == null) {
+      var cue = this.battery_cue;
+      if (cue && this.t >= cue.next) {
+        cue.until = this.t + 6.0;
+        cue.next = this.t + 45.0;
+      }
+    }
+    var depth = asleep ? 1.0 : 0.0;
+    this.breath_depth += (depth - this.breath_depth) * dt;
+    var rate = fr(mix(0.22, 0.13, this.breath_depth));
+    this.breath_phase = (this.breath_phase + TAU * rate * elapsed) % TAU;
+    var breath = Math.sin(this.breath_phase);
+    var restless = asleep && this.dazed() && !this.loading;
+    if (restless) breath *= 0.65 + 0.35 * Math.sin(t * 0.37);
+
+    var expressive = !asleep && !this.muted && !this.dazed();
+    var life = this.stepLife(elapsed, dt, expressive, wake == null);
+    var engaged = this.engaged() && expressive;
+    var speech = expressive ? this.level : 0.0;
+    var age = this.t - this.state_at;
+    var drift = [0.006 * Math.sin(t * 0.081), 0.004 * Math.sin(t * 0.107 + 1.0)];
+    var wave = function (r, phase) { return Math.sin(r * t + phase); };
+    var eyes = [[-1.0, p.l], [1.0, p.r]];
+    for (var i = 0; i < 2; i++) {
+      var side = eyes[i][0], e = eyes[i][1];
+      e.h *= 1.0 + mix(0.011, 0.045, this.breath_depth) * breath;
+      e.y += mix(0.003, 0.012, this.breath_depth) * breath;
+      e.x += gaze[0] * 0.137 + drift[0];
+      e.y += gaze[1] * 0.083 + drift[1];
+      var near = 1.0 + 0.045 * side * gaze[0];
+      e.w *= near;
+      e.h *= near;
+      e.tilt += 0.038 * gaze[0];
+
+      if (engaged) {
+        var focusAge = age - (side + 1.0) * 0.012;
+        var focus = ease(focusAge, 0.0, 0.10) * (1.0 - ease(focusAge, 0.12, 0.38));
+        e.h *= 1.0 + 0.048 * focus;
+        e.y += 0.013 * focus;
+      }
+      var accent = speech * (1.0 - 0.11 * side);
+      e.h *= 1.0 + 0.086 * accent;
+      e.y += 0.012 * accent;
+      e.glow *= 1.0 + 0.105 * speech;
+      applyLife(life, e, side, this.heaviness, this.head);
+
+      if (!asleep && this.dazed()) {
+        if (this.loading && !this.unwell) {
+          e.glow *= 0.88 + 0.12 * wave(1.6, 0.0);
+        } else {
+          e.tilt += 0.038 * wave(1.65, side);
+          e.glow *= 0.94 + 0.055 * wave(2.2, 2.0 * side);
+        }
+      }
+      if (restless) {
+        e.tilt += 0.05 * side + 0.02 * wave(0.29, side);
+        e.y += 0.010 * side;
+        e.top += 0.05 * (side + 1.0) * 0.5;
+        e.glow *= 0.92 + 0.06 * wave(0.53, 1.0 + side);
+      }
+      if (this.preview_dream) {
+        var dage = age - (side + 1.0) * 0.055;
+        dreamFlutter(e, ease(dage, 0.42, 0.62) * (1.0 - ease(dage, 0.64, 1.05)));
+      }
+      e.h = Math.max(e.h, 0.012);
+      if (this.blink) closeLids(e, this.blink.closure(this.t, side));
+    }
+    if (wake) p = lidWakePose(this, wake[0], p, wake[1]);
+    if (birth) {
+      if (birth[1] == null) return birthPose(this, birth[0], p);
+      return blendPose(birthPose(this, birth[0], p), p, ease(birth[1], 0.0, BIRTH_HANDOVER));
+    }
+    return p;
+  };
+
+  // anim.rs 1265-1356
+  A.stepLife = function (elapsed, dt, expressive, awake) {
+    if (this.gesture != null && (this.t - this.gesture[1]) >= GESTURE_LENGTH[this.gesture[0]]) this.gesture = null;
+    var composed = !this.muted && !this.dazed();
+    if (!composed) this.gesture = null;
+
+    var alone = this.state === 'idle' && expressive && awake && this.emotion == null;
+    var heavy = 0.0;
+    if (alone && this.presence == null && this._touch == null) {
+      var quiet = 0.42 * ease(this.t - this.quiet_since, 150.0, 480.0);
+      heavy = Math.min(quiet + tiredness(this.drives), 0.42);
+    }
+    var timeConstant = heavy > this.heaviness ? 4.0 : 0.35;
+    this.heaviness += (heavy - this.heaviness) * (1.0 - Math.exp(-elapsed / timeConstant));
+    if (heavy === 0.0 && this.heaviness < 0.05) this.yawned = false;
+    if (alone && this.gesture == null && this.blink == null && !this.typing_hidden && this.focus == null) {
+      if (this.heaviness > 0.3 && !this.yawned) {
+        this.yawned = true;
+        this.startGesture('yawn');
+      } else if (this.t >= this.gesture_next) {
+        this.gesture_next = this.t + this.rng.range(20.0, 38.0);
+        if (this.heaviness < 0.2 && (this.battery_cue == null || this.t >= this.battery_cue.until)) {
+          this.startGesture('content');
+        }
+      }
+    }
+
+    var kind = null, gAge = 0.0, gSide = 0.0;
+    if (this.gesture) { kind = this.gesture[0]; gAge = this.t - this.gesture[1]; gSide = this.gesture[2]; }
+    var content = kind === 'content' ? ease(gAge, 0.0, 0.45) * (1.0 - ease(gAge, 1.35, 2.2)) : 0.0;
+    var inhale = 0.0, squeeze = 0.0;
+    if (kind === 'yawn') {
+      inhale = ease(gAge, 0.0, 0.45) * (1.0 - ease(gAge, 0.55, 0.85));
+      squeeze = ease(gAge, 0.6, 0.95) * (1.0 - ease(gAge, 1.5, 2.3));
+    }
+
+    var roll = 0.0;
+    if (expressive) {
+      if (this.acting === 'curiosity') roll = -0.075;
+      else if (this.acting === 'listening') roll = 0.028 * this.listen_side;
+      else if (this.acting === 'thinking') roll = 0.04 * this.thought_side;
+    }
+    roll += gSide * (0.035 * content + 0.05 * squeeze);
+    var steps = Math.max(Math.ceil(fr(fr(dt) / fr(0.02))), 1.0);
+    var h = dt / steps;
+    for (var i = 0; i < steps; i++) {
+      this.head_v += (70.0 * (roll - this.head) - 13.4 * this.head_v) * h;
+      this.head += this.head_v * h;
+    }
+
+    var age = this.t - this.acted_at;
+    var tuck = expressive && lively(this.acting) ? anticipation(age) * (this.acting === 'surprise' ? 1.6 : 1.0) : 0.0;
+    var bounce = 0.0;
+    if (expressive) {
+      if (this.acting === 'joy') bounce = 0.042 * hop(age - 0.07, 0.24, 2.0);
+      else if (this.acting === 'attentive' &&
+        (this.acted_from === 'neutral' || this.acted_from === 'sleepy' || this.acted_from === 'tired')) {
+        bounce = 0.036 * (1.0 + 1.2 * this.reunion) * hop(age - 0.04, 0.26, 1.0);
+      }
+    }
+    var pop = expressive && this.acting === 'surprise' ? ease(age, 0.04, 0.11) * (1.0 - ease(age, 0.13, 0.45)) : 0.0;
+    var smile = content > 0.0 ? this.pose('joy') : null;
+    return { tuck: tuck, bounce: bounce, pop: pop, content: content, inhale: inhale, squeeze: squeeze, smile: smile };
+  };
+
+  // anim.rs 1358-1373
+  A.stepVoice = function (elapsed) {
+    var audible = this.state === 'speaking' && !this.muted && !this.dazed() && this.level_target > 0.0;
+    var voiced = audible ? clamp(this.level_at + 0.20 - this.t, 0.0, elapsed) : 0.0;
+    if (voiced > 0.0 && this.level !== this.level_target) {
+      var tc = this.level_target > this.level ? 0.044 : 0.15;
+      this.level = mix(this.level, this.level_target, 1.0 - Math.exp(-voiced / tc));
+    }
+    if (this.level > 0.0 && elapsed > voiced) {
+      this.level *= Math.exp(-(elapsed - voiced) / 0.15);
+      if (this.level < 0.0005) this.level = 0.0;
+    }
+  };
+
+  // anim.rs 1375-1448
+  A.stepGaze = function () {
+    if (this.presence && this.t >= this.presence[1]) {
+      this.presence = null;
+      if (this.followsPresence()) this.resetFixation();
+    }
+    if (this.focus && this.followsFocus()) return this.stepFocus(this.focus);
+
+    if (this.t >= this.gaze_next) {
+      var subject = this.presence ? this.presence[0] : center();
+      var returning = this.surveying && this.gaze_away;
+      this.surveying = false;
+      var point, wait;
+      if (this.asleep() || this.muted || this.dazed() || this.state === 'waking') {
+        point = center(); wait = 1.0;
+      } else if (this.engaged() || (this.state === 'idle' && this.presence)) {
+        this.gaze_away = false;
+        var cx = this.rng.range(-0.027, 0.027), cy = this.rng.range(-0.018, 0.018);
+        point = [fr(subject[0] + cx), fr(subject[1] + cy)];
+        wait = this.rng.range(0.9, 2.0);
+      } else if (this.state === 'drowsy') {
+        point = [0.0, -0.22]; wait = 3.0;
+      } else if (this.state === 'thinking') {
+        this.gaze_away = !this.gaze_away;
+        if (this.gaze_away) {
+          var x = fr(this.thought_side * this.rng.range(0.50, 0.68));
+          this.thought_spot = [x, this.rng.range(0.38, 0.56)];
+          this.search_next = this.t + this.rng.range(0.55, 1.0);
+          point = this.thought_spot; wait = this.rng.range(3.8, 6.4);
+        } else {
+          point = [fr(0.65 * subject[0]), fr(0.65 * subject[1])];
+          wait = this.rng.range(0.55, 0.90);
+        }
+      } else if (this.gaze_away) {
+        this.gaze_away = false;
+        this.surveying = returning;
+        point = center(); wait = this.rng.range(2.5, 5.3);
+      } else if (this.state === 'idle' && !this.typing_hidden && this.rng.next() < 0.28) {
+        this.survey();
+        point = this.fixation; wait = fr(this.gaze_next - this.t);
+      } else {
+        this.gaze_away = true;
+        var side = this.rng.next() < 0.5 ? -1.0 : 1.0;
+        var gx = fr(side * this.rng.range(0.24, 0.51));
+        point = [gx, this.rng.range(-0.22, 0.29)];
+        wait = this.rng.range(0.75, 1.55);
+      }
+      this.fixation = [clamp(point[0], -1.0, 1.0), clamp(point[1], -1.0, 1.0)];
+      var wandering = this.state === 'idle' && this.presence == null && !this.surveying;
+      var tempo = wandering ? fr(gazeTempo(this.drives)) : 1.0;
+      this.gaze_next = this.t + fr(wait * tempo);
+    } else if (this.state === 'thinking' && this.gaze_away && !this.muted && !this.dazed() &&
+      this.t >= this.search_next && this.t + 0.35 < this.gaze_next) {
+      var reach = fr(this.thought_side * this.rng.range(-0.07, 0.14));
+      var spot = this.thought_spot;
+      var fx = clamp(fr(spot[0] + reach), -1.0, 1.0);
+      this.fixation = [fx, clamp(fr(spot[1] + this.rng.range(-0.07, 0.07)), -1.0, 1.0)];
+      this.search_next = this.t + this.rng.range(0.4, 0.9);
+    }
+
+    if (this._touch && this.t >= this._touch[1]) this._touch = null;
+    var unhurried = this.surveying && this._touch == null ? 0.62 : 0.0;
+    return this.gaze.track(this._touch ? this._touch[0] : this.fixation, this.t, unhurried);
+  };
+
+  A.followsFocus = function () {
+    var s = this.state;
+    return !this.muted && !this.dazed() && !this.asleep() && (s === 'idle' || s === 'thinking');
+  };
+  // anim.rs 1456-1483
+  A.stepFocus = function (focus) {
+    this.surveying = false;
+    this.gaze_away = false;
+    this.gaze_next = this.t + 0.5;
+    if (focus.kind === 'paused') {
+      this.fixation = [0.0, 0.12];
+    } else {
+      var target = [clamp(focus.at[0], -1.0, 1.0), clamp(focus.at[1], -1.0, 1.0)];
+      if (distance(target, this.focus_seen) > 0.015) {
+        var enter = target[1] < this.focus_seen[1] - 0.004 && target[0] < this.focus_seen[0] - 0.3;
+        this.focus_seen = target;
+        this.focus_next = this.t + this.rng.range(0.08, 0.16);
+        if (enter && focus.kind === 'typing' && this.blink == null) this.blink_next = Math.min(this.blink_next, this.t + 0.12);
+      }
+      if (this.t >= this.focus_next) this.fixation = this.focus_seen;
+    }
+    if (this._touch && this.t >= this._touch[1]) this._touch = null;
+    return this.gaze.track(this._touch ? this._touch[0] : this.fixation, this.t, 0.0);
+  };
+
+  // anim.rs 1485-1546
+  A.stepBlink = function () {
+    if (this.asleep()) {
+      if (this.blink && this.blink.done(this.t)) this.blink = null;
+      this.blink_next = this.t + 2.0;
+      return;
+    }
+    var tn = this.targetName();
+    var drowsy = tn === 'sleepy' || tn === 'tired' || this.heaviness > 0.22;
+    if (this.blink) {
+      if (!this.blink.done(this.t)) return;
+      this.blink_repeat = this.blink.repeat;
+      this.blink = null;
+      var wait;
+      if (this.double_blink) wait = Math.max(fr(this.acted_at + 0.30 - this.t), 0.05);
+      else if (this.blink_repeat) wait = this.rng.range(0.14, 0.23);
+      else if (this.state === 'listening') wait = this.rng.range(3.8, 6.8);
+      else if (this.focus && this.focus.kind === 'typing') wait = this.rng.range(4.0, 8.5);
+      else wait = this.rng.range(2.5, 5.6);
+      this.blink_next = this.t + wait;
+    }
+    if (this.t < this.blink_next) return;
+    var double = this.double_blink;
+    if (this.state === 'speaking' && this.level > 0.32 && this.t < this.blink_next + 0.42 && !this.blink_repeat && !double) return;
+    this.double_blink = false;
+    var secondary = this.blink_repeat;
+    var soft = !drowsy && !double && this.rng.next() < 0.22;
+    var depth = soft ? this.rng.range(0.55, 0.78) : 1.0;
+    var pace = double ? 0.8 : drowsy ? 1.55 : this.rng.range(0.87, 1.17);
+    var stagger = this.rng.range(0.007, 0.018);
+    var close = fr(0.075 * pace), hold = fr(0.035 * pace), open = fr(0.120 * pace);
+    var signed = this.rng.next() < 0.5 ? stagger : -stagger;
+    var repeat = double || (!secondary && !soft && !drowsy && this.state !== 'listening' && this.rng.next() < 0.12);
+    this.blink = new Blink({ start: this.t, close: close, hold: hold, open: open, stagger: signed, depth: depth, repeat: repeat });
+    this.blink_repeat = false;
+  };
+
+  /**
+   * One display frame. dt in seconds since the last frame; receive is an
+   * optional callback run after time catches up (Rust's receive closure).
+   * Returns {u: Float32Array(32) in Pose::uniforms layout, activity, hz, pose}.
+   */
+  A.frame = function (dt, receive) {
+    var p = this.step(dt, receive);
+    var activity = this.activity();
+    return { u: uniforms(p, this._u), activity: activity, hz: hz(activity, this.software), pose: p };
+  };
+
+  var PipAnim = {
+    /**
+     * opts.presets: name -> 26 numbers (Pose::to_array), all NAMES plus "loading".
+     * opts.seed: u32 (same seed, same idle life as the Rust face). Random if absent.
+     * opts.software: cap the frame rate at 20 Hz as for a software renderer.
+     * opts.lid: "open" to start with the lid known open without a wake
+     *   (Rust set_lid(Some(false), false, true)); default leaves it unknown,
+     *   lit, as Anim::new does.
+     */
+    create: function (opts) {
+      opts = opts || {};
+      var seed = opts.seed == null ? Math.floor(Math.random() * 4294967296) : opts.seed;
+      var a = new Anim(opts.presets, seed, opts.software);
+      if (opts.lid === 'open') a.setLid(false, false, true);
+      return a;
+    },
+    NAMES: NAMES.slice(),
+    STATES: ['waking', 'idle', 'attending', 'listening', 'thinking', 'speaking', 'drowsy', 'asleep'],
+    hz: hz,
+    uniforms: function (p) { return uniforms(p); },
+    closeLids: closeLids,
+    poseArray: poseArray,
+    poseFrom: poseFrom,
+    // Internals exposed for tests and tooling.
+    _internal: { Anim: Anim, Spring: Spring, Rng: Rng, Blink: Blink, closeLids: closeLids, applyLife: applyLife,
+      reflect: reflect, ease: ease, blinkClosure: blinkClosure, BIRTH: BIRTH, BIRTH_HANDOVER: BIRTH_HANDOVER,
+      MISSED_HOLD: MISSED_HOLD, WAKE_DURATION: WAKE_DURATION },
+  };
+
+  root.PipAnim = PipAnim;
+  if (typeof module !== 'undefined' && module.exports) module.exports = PipAnim;
+})(typeof window !== 'undefined' ? window : typeof globalThis !== 'undefined' ? globalThis : this);
+
+// Project the concept animation's eye channels onto Pip's shader uniforms.
+(function () {
+  'use strict';
+  const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
+
+  function packed(left, right, motion = {}) {
+    const { x = 0, y = 0, roll = 0, gazeX = 0, gazeY = 0, breath = 1, blink = 0 } = motion;
+    const cosine = Math.cos(roll), sine = Math.sin(roll);
+    function project(eye) {
+      const localX = eye.x + gazeX, localY = eye.y + gazeY;
+      const w = clamp(eye.w, .02, 1.45), h = clamp(eye.h * breath, .02, .85);
+      const projected = {
+        x: clamp(cosine * localX - sine * localY + x, -1.48 + w, 1.48 - w),
+        y: clamp(sine * localX + cosine * localY + y, -.88 + h, .88 - h),
+        w, h, round: Math.max(2, eye.round), tilt: eye.tilt + roll,
+        top: eye.top, top_slant: eye.topSlant, top_curve: eye.topCurve,
+        bot: eye.bot, bot_slant: eye.botSlant, bot_curve: eye.botCurve,
+        glow: clamp(eye.glow, 0, 1.3),
+      };
+      if (blink > 0) PipAnim.closeLids(projected, clamp(blink, 0, 1));
+      return projected;
+    }
+    return PipAnim.uniforms({ l: project(left), r: project(right) });
+  }
+
+  const api = { packed };
+  if (typeof window !== 'undefined') window.FaceLabDeviceEyes = api;
+  if (typeof module !== 'undefined') module.exports = api;
+})();
+
+(()=>{
+'use strict';
+const TAU=Math.PI*2, clamp=(v,a,b)=>Math.min(b,Math.max(a,v)), lerp=(a,b,t)=>a+(b-a)*t, rnd=(a=1,b)=>b===undefined?Math.random()*a:a+Math.random()*(b-a);
+
+/* ---------- expression data ---------- */
+const EYE_KEYS=['x','y','w','h','round','tilt','top','topSlant','topCurve','bot','botSlant','botCurve','glow'];
+// Numbers copied from crates/face/src/eye.rs (Eye::OPEN and rest()).
+const OPEN={x:-.80,y:.03,w:.46,h:.33,round:2.3,tilt:0,top:1.5,topSlant:0,topCurve:0,bot:-1.5,botSlant:0,botCurve:0,glow:1};
+const REST={...OPEN,w:.48,h:.34,round:2.1,tilt:-.34,top:.37,topSlant:-.17,topCurve:.63,bot:-.45,botSlant:.10,botCurve:-.55};
+const o=d=>({...OPEN,...d}), r=d=>({...REST,...d});
+const mirror=e=>({...e,x:-e.x,tilt:-e.tilt,topSlant:-e.topSlant,botSlant:-e.botSlant});
+
+const BROW_D={y:.58,dx:0,len:.25,tilt:0,curve:.25,th:.045,a:0};
+const MOUTH_D={x:0,w:.12,y:-.6,corner:0,skew:0,arc:0,open:0,round:0,cat:0,wave:0,zig:0,tongue:0,low:0,a:.5,talk:0};
+const FX_KEYS=['sweat','cry','blush','hearts','sparkle','zzz','question','exclaim','anger','steam','notes','bulb','dots','gloom','shiver','bounce','sway','breath','snow','flame','glitch','scan','bubble','check','warn','battery'];
+const MISC_D={sp_heart:0,sp_x:0,sp_spiral:0,sp_star:0,pup:0,shine:0,wet:0,ac:0,acr:1,acg:.3,acb:.3,gbx:0,gby:0,roll:0};
+const BLUE={ac:.5,acr:.28,acg:.52,acb:1};
+
+function mk(s){
+  const f={}, L=s.L||REST, R=s.R||mirror(L);
+  EYE_KEYS.forEach(k=>{f['L_'+k]=L[k];f['R_'+k]=R[k];});
+  const bl={...BROW_D,...(s.b||{}),...(s.bL||{})}, br={...BROW_D,...(s.b||{}),...(s.bR||{})};
+  Object.keys(BROW_D).forEach(k=>{f['bL_'+k]=bl[k];f['bR_'+k]=br[k];});
+  const m={...MOUTH_D,...(s.m||{})}; Object.keys(MOUTH_D).forEach(k=>f['m_'+k]=m[k]);
+  const fx=s.fx||{}; FX_KEYS.forEach(k=>f['fx_'+k]=fx[k]??(k==='breath'?1:0));
+  const x=s.x||{}; Object.keys(MISC_D).forEach(k=>f[k]=x[k]??MISC_D[k]);
+  return f;
+}
+
+const P=[]; const byId={};
+function add(id,label,group,snd,spec){const p={id,label,group,snd,f:mk(spec),kick:spec.kick};P.push(p);byId[id]=p;}
+const G={core:'Core',happy:'Happy',sad:'Sad & anxious',mad:'Angry & sly',play:'Playful',odd:'Sleepy & odd',tense:'Tense & unwell'};
+
+add('neutral','Neutral',G.core,[440,470,.08],{L:REST,b:{a:.28,y:.56},m:{w:.12,corner:.012,arc:.03,a:.5}});
+add('attentive','Attentive',G.core,[520,600,.07],{L:r({y:.05,w:.5,h:.365,tilt:-.28,glow:1.06}),b:{y:.66,a:.5,curve:.3},m:{w:.12,corner:.02,arc:.04,a:.55}});
+add('listening','Listening',G.core,[500,560,.07],{L:r({y:.065,w:.5,h:.355,tilt:-.41,glow:1.03}),R:{...mirror(r({w:.5,h:.355,glow:1.03})),y:-.005,tilt:.27},bL:{y:.72,a:.55},bR:{y:.6,a:.5},m:{w:.11,corner:.015,arc:.03,a:.55},x:{roll:.06}});
+add('thinking','Thinking',G.core,[420,380,.1],{L:r({x:-.70,y:.10,top:.22,topSlant:-.02,topCurve:.42}),R:{...mirror(REST),x:.84,y:.10,top:.12,topSlant:.10,topCurve:.40},bL:{y:.6,a:.4},bR:{y:.8,tilt:.3,curve:.5,a:.6},m:{x:.12,w:.08,corner:-.01,skew:.02,a:.6},fx:{dots:1},x:{gbx:.5,gby:.6}});
+add('surprise','Surprise',G.core,[400,980,.09],{L:o({x:-.72,y:.0,w:.48,h:.5,round:2.0,glow:1.18}),b:{y:.8,len:.27,curve:.8,tilt:.22,a:.9,th:.05},m:{w:.1,y:-.62,open:.8,round:1,corner:0,a:.95},x:{pup:.2,shine:.35},kick:{pop:.6,recoil:.05,roll:.03,burst:1,pupil:.25}});
+add('curiosity','Curious',G.core,[460,720,.12],{L:o({x:-.70,y:.03,w:.47,h:.43,round:2.25,tilt:-.10,glow:1.04}),R:o({x:.74,y:-.12,w:.48,h:.28,round:2,tilt:.4,top:0,topSlant:-.25,topCurve:1}),bL:{y:.72,tilt:.1,a:.6},bR:{y:.88,tilt:.2,curve:.7,a:.7},m:{x:.07,w:.09,corner:.02,arc:.03,open:.25,round:1,a:.8},fx:{question:.9},x:{roll:.05,gbx:.2,gby:.1}});
+add('skepticism','Skeptical',G.core,[300,260,.14],{L:o({x:-.72,y:-.12,w:.50,h:.075,round:2}),R:o({x:.74,y:.10,w:.54,h:.46,round:2.1,top:.05,topSlant:.12}),bL:{y:.35,tilt:-.3,len:.26,a:.6},bR:{y:.72,tilt:.1,curve:.8,a:.7},m:{x:.04,w:.13,corner:-.01,skew:.07,arc:-.02,a:.7},x:{roll:-.03}});
+
+add('joy','Joy',G.happy,[520,880,.12],{L:o({x:-.72,y:-.18,w:.55,h:.47,round:2,bot:0,botCurve:.5,glow:1.05}),b:{y:.78,curve:.6,a:.55,len:.24,tilt:.1},m:{w:.27,y:-.62,corner:.09,arc:.13,open:.4,a:.9},fx:{sparkle:.4,blush:.25}});
+add('laugh','Laughing',G.happy,[600,900,.1],{L:o({x:-.72,y:-.12,w:.56,h:.40,round:2,bot:-.1,botCurve:.62,glow:1.08}),b:{y:.8,tilt:.15,curve:.7,a:.6},m:{w:.31,y:-.58,corner:.10,arc:0,open:1,round:.25,tongue:.8,a:.95,low:.05},fx:{bounce:1,cry:.2,sparkle:.3,blush:.3},x:{wet:.5}});
+add('excited','Excited',G.happy,[600,1000,.1],{L:o({x:-.70,y:.03,w:.52,h:.50,round:2.05,glow:1.15}),b:{y:.92,curve:.7,a:.8,tilt:.15},m:{w:.27,y:-.6,corner:.1,arc:.05,open:.85,tongue:.5,a:.95},fx:{sparkle:1,bounce:.7},x:{shine:1}});
+add('love','In love',G.happy,[500,780,.16],{L:r({x:-.78,y:0,w:.5,h:.4,glow:1.1}),b:{y:.8,curve:.6,a:.5,tilt:.2},m:{w:.2,y:-.62,corner:.07,arc:.1,open:.2,a:.9},fx:{hearts:1,blush:.8},x:{sp_heart:1,ac:1,acr:1,acg:.28,acb:.58}});
+add('starstruck','Starstruck',G.happy,[500,1100,.14],{L:r({x:-.76,y:0,w:.52,h:.46}),b:{y:.84,curve:.6,a:.7},m:{w:.2,y:-.6,corner:.05,arc:.08,open:.7,round:.5,a:.95},fx:{sparkle:1},x:{sp_star:1,ac:.5,acr:1,acg:.85,acb:.3}});
+add('proud','Proud',G.happy,[440,700,.14],{L:o({x:-.72,y:-.12,w:.54,h:.34,round:2,bot:-.15,botCurve:.45,glow:1.08}),b:{y:.8,curve:.5,a:.6,tilt:.1},m:{w:.2,y:-.62,corner:.07,arc:.1,a:.9},fx:{sparkle:.7},x:{shine:.6,gby:.3}});
+add('idea','Idea!',G.happy,[500,1000,.12],{L:r({y:.06,w:.5,h:.38,tilt:-.28,glow:1.08}),b:{y:.7,curve:.5,a:.7,tilt:.15},m:{w:.12,corner:.04,arc:.07,open:.25,round:.6,a:.85},fx:{bulb:1,sparkle:.4},x:{shine:.7,gby:.4}});
+
+add('sad','Sad',G.sad,[520,260,.25],{L:o({x:-.72,y:-.14,w:.48,h:.36,round:2.1,tilt:.26,top:.28,topSlant:.7,topCurve:.3,glow:.85}),b:{y:.6,tilt:.7,curve:.1,a:.75},m:{w:.15,y:-.62,corner:-.07,arc:-.13,wave:.1,a:.85},fx:{cry:.25,gloom:.4},x:{...BLUE,wet:.65,gby:-.4}});
+add('crying','Crying',G.sad,[520,200,.4],{L:o({x:-.72,y:-.12,w:.5,h:.3,round:2,tilt:.22,top:.15,topSlant:.55,topCurve:.2,glow:.9}),b:{y:.55,tilt:.8,a:.8},m:{w:.2,y:-.56,corner:-.08,arc:-.16,open:.55,wave:.6,round:.2,a:.9},fx:{cry:1,shiver:.4,gloom:.5,blush:.25},x:{...BLUE,wet:1,gby:-.3}});
+add('concern','Concerned',G.sad,[420,340,.18],{L:o({x:-.72,y:-.12,w:.48,h:.36,round:2.1,tilt:.26,top:.22,topSlant:.62,topCurve:.35}),b:{y:.62,tilt:.55,curve:.1,a:.7},m:{w:.13,corner:-.05,arc:-.09,wave:.15,a:.8},fx:{sweat:.3},x:{ac:.15,acr:.3,acg:.55,acb:1}});
+add('nervous','Nervous',G.sad,[480,420,.25],{L:o({x:-.72,y:.03,w:.40,h:.40,round:2}),b:{y:.68,tilt:.6,a:.7},m:{w:.2,corner:-.01,wave:1,a:.8},fx:{sweat:1,shiver:.5},x:{pup:.18}});
+add('scared','Terrified',G.sad,[300,1100,.3],{L:o({x:-.70,y:.02,w:.42,h:.54,round:2.05,glow:1.15}),b:{y:.92,tilt:.7,a:.85},m:{w:.17,corner:-.03,arc:-.05,open:.8,wave:.9,round:.2,a:.9},fx:{sweat:1,shiver:1},x:{pup:.2,ac:.35,acr:.6,acg:.7,acb:1}});
+add('embarrassed','Embarrassed',G.sad,[600,500,.2],{L:r({x:-.74,y:-.02,w:.44,h:.30,top:.25,glow:.95}),b:{y:.5,tilt:.35,a:.55},m:{w:.1,corner:.02,arc:.02,wave:.7,a:.7},fx:{blush:1,sweat:.5},x:{ac:.4,acr:1,acg:.4,acb:.6,gbx:-.8,gby:-.5}});
+add('sick','Sick',G.sad,[300,180,.35],{L:o({x:-.74,y:.08,w:.30,h:.30,round:2,glow:.6}),R:o({x:.78,y:-.06,w:.40,h:.20,round:2,tilt:-.25,glow:.6}),b:{y:.5,tilt:.5,a:.5},m:{w:.16,y:-.58,corner:-.05,arc:-.05,wave:1,open:.2,a:.7},fx:{sweat:.5,gloom:.3,shiver:.3},x:{ac:.85,acr:.45,acg:1,acb:.4}});
+
+add('angry','Angry',G.mad,[200,130,.3],{L:o({x:-.72,y:-.1,w:.52,h:.36,round:2.2,tilt:-.12,top:.5,topSlant:-.9,topCurve:-.1,glow:1.1}),b:{y:.5,tilt:-.75,curve:-.1,a:.9,th:.055,len:.28},m:{w:.2,corner:-.05,arc:-.07,open:.25,zig:1,a:.95},fx:{anger:1,steam:.8,shiver:.35},x:{ac:1,acr:1,acg:.2,acb:.12}});
+add('annoyed','Annoyed',G.mad,[260,230,.14],{L:o({x:-.72,y:-.1,w:.5,h:.3,round:2.1,top:.1,topSlant:-.25,topCurve:0,glow:.95}),b:{y:.45,tilt:-.35,curve:0,a:.7},m:{w:.12,y:-.58,corner:-.02,skew:-.04,arc:-.02,a:.7},x:{gbx:-.6}});
+add('smug','Smug',G.mad,[330,520,.16],{L:o({x:-.72,y:-.08,w:.52,h:.30,round:2.1,top:.2,glow:1}),bL:{y:.5,tilt:-.1,a:.6},bR:{y:.78,tilt:.2,curve:.6,a:.7},m:{x:.06,w:.17,corner:.03,skew:.1,arc:.08,a:.9},fx:{sparkle:.35}});
+add('mischief','Scheming',G.mad,[300,600,.2],{L:o({x:-.72,y:-.1,w:.52,h:.34,round:2.1,tilt:-.1,top:.4,topSlant:-.7,bot:-.2,botCurve:.45}),b:{y:.52,tilt:-.55,a:.85},m:{w:.2,corner:.06,cat:1,arc:.04,a:.9},fx:{sparkle:.3},x:{ac:.35,acr:.7,acg:.3,acb:1}});
+add('determined','Determined',G.mad,[320,480,.14],{L:o({x:-.72,y:-.06,w:.5,h:.34,round:2.15,tilt:-.1,top:.65,topSlant:-.45,glow:1.1}),b:{y:.52,tilt:-.45,a:.85,th:.052},m:{w:.16,corner:-.01,a:.9},fx:{sparkle:.35}});
+
+add('wink','Wink',G.play,[500,900,.12],{L:o({x:-.72,y:.03,w:.49,h:.36,round:2.2,glow:1.05}),R:o({x:.72,y:-.1,w:.52,h:.40,round:2,bot:0,botCurve:.5,glow:1.05}),bL:{y:.66,a:.6},bR:{y:.56,tilt:.1,a:.7,curve:.5},m:{x:.04,w:.2,corner:.06,skew:.05,arc:.1,open:.3,tongue:.5,a:.9},fx:{sparkle:.7}});
+add('cheeky','Cheeky',G.play,[480,800,.14],{L:o({x:-.72,y:-.16,w:.5,h:.40,round:2,bot:-.05,botCurve:.55,glow:1.05}),R:o({x:.74,y:0,w:.5,h:.38,round:2.1,tilt:.15,glow:1.05}),bL:{y:.7,tilt:.2,a:.6},bR:{y:.78,tilt:-.1,a:.7},m:{x:.03,w:.2,y:-.58,corner:.05,arc:.08,open:.5,tongue:1,a:.95},fx:{notes:.6}});
+add('sing','Singing',G.play,[500,740,.1],{L:o({x:-.72,y:-.14,w:.5,h:.40,round:2,bot:-.05,botCurve:.55,glow:1.05}),b:{y:.76,curve:.6,a:.55},m:{w:.16,corner:.04,arc:.04,open:.4,round:.5,talk:.85,a:.9},fx:{notes:1,bounce:.35,sway:.6}});
+add('confused','Confused',G.play,[420,300,.16],{L:o({x:-.70,y:.03,w:.50,h:.44,round:2.2,tilt:-.1,glow:1.03}),R:o({x:.74,y:-.06,w:.42,h:.30,round:2,tilt:.35,top:.2,topSlant:-.15}),bL:{y:.74,tilt:.5,a:.65},bR:{y:.52,tilt:-.45,a:.65},m:{x:-.05,w:.15,corner:-.02,skew:-.06,wave:.7,a:.75},fx:{question:1,sweat:.2},x:{roll:-.07}});
+add('dizzy','Dizzy',G.play,[500,250,.4],{L:r({x:-.76,y:0,w:.5,h:.42}),b:{y:.7,tilt:.3,a:.4},m:{w:.12,open:.35,round:.8,wave:.8,a:.8},fx:{sway:1},x:{sp_spiral:1}});
+add('ko','Knocked out',G.play,[400,100,.5],{L:r({x:-.76,y:0,w:.5,h:.42}),b:{a:0},m:{w:.16,y:-.58,corner:-.04,arc:-.04,open:.35,tongue:.7,a:.85},fx:{gloom:1,breath:.3},x:{sp_x:1}});
+
+add('sleepy','Sleepy',G.odd,[320,200,.4],{L:o({x:-.72,y:-.12,w:.52,h:.22,top:0,topCurve:-.5,glow:.9}),b:{y:.42,a:.3,tilt:.1},m:{w:.07,y:-.6,open:.35,round:1,a:.55},fx:{zzz:.5,breath:1.8}});
+add('asleep','Asleep',G.odd,[200,150,.5],{L:o({x:-.72,y:-.14,w:.5,h:.2,top:0,topCurve:-.82,glow:.3}),b:{a:0},m:{w:.05,y:-.58,open:.2,round:1,a:.35},fx:{zzz:1,breath:2.5}});
+add('tired','Tired',G.odd,[300,200,.35],{L:r({y:-.04,top:-.02,topSlant:.22,topCurve:.18,glow:.55}),b:{y:.45,tilt:.4,a:.3},m:{w:.1,y:-.58,open:.4,round:1,corner:-.02,a:.5},fx:{sweat:.3,gloom:.2}});
+add('bored','Bored',G.odd,[260,240,.2],{L:o({x:-.72,y:-.12,w:.50,h:.26,round:2.1,top:0,glow:.8}),b:{y:.42,a:.4,curve:0},m:{x:.06,w:.09,y:-.58,corner:-.01,skew:.03,a:.55},fx:{dots:1},x:{gbx:.6,gby:.2}});
+add('dazed','Dazed',G.odd,[360,300,.3],{L:o({x:-.74,y:.08,w:.30,h:.30,round:2,glow:.6}),R:o({x:.78,y:-.06,w:.40,h:.20,round:2,tilt:-.25,glow:.6}),b:{y:.5,a:.4},m:{w:.1,y:-.58,open:.15,round:1,wave:.4,a:.6},fx:{sway:.5}});
+add('muted','Muted',G.odd,[200,200,.05],{L:o({x:-.74,y:0,w:.34,h:.05,round:4,glow:.5}),b:{a:0},m:{a:0}});
+add('loading','Loading',G.odd,[400,440,.06],{L:r({h:.31,top:.26,glow:.78}),b:{a:0},m:{a:.3,w:.08}});
+
+add('grateful','Grateful','Warm & social',[480,640,.18],{L:o({x:-.72,y:-.06,w:.5,h:.4,round:2.1,tilt:.12,top:.5,topSlant:.2,topCurve:.4,bot:-.25,botCurve:.3,glow:1.02}),b:{y:.66,tilt:.4,curve:.35,a:.6},m:{w:.17,y:-.62,corner:.07,arc:.1,open:.1,a:.85},fx:{blush:.5,hearts:.3,sparkle:.3},x:{wet:.55,shine:.5,gby:.15}});
+add('hopeful','Hopeful','Warm & social',[460,760,.16],{L:o({x:-.70,y:.06,w:.46,h:.46,round:2.2,glow:1.08}),b:{y:.84,tilt:.5,curve:.4,a:.7},m:{w:.11,y:-.62,corner:.04,arc:.07,open:.08,a:.8},fx:{sparkle:.6},x:{shine:.9,wet:.25,gbx:.15,gby:.8,roll:.03}});
+add('giggle','Giggling','Warm & social',[620,880,.08],{L:o({x:-.72,y:-.14,w:.52,h:.28,round:2,bot:-.08,botCurve:.6,top:.5,topCurve:.3,glow:1.04}),bL:{y:.74,tilt:.15,curve:.5,a:.6},bR:{y:.66,tilt:.05,curve:.5,a:.55},m:{w:.2,y:-.6,corner:.08,arc:.02,cat:.8,open:.2,a:.9},fx:{bounce:.9,blush:.5,sparkle:.2},x:{roll:.04}});
+add('bashful','Bashful smile','Warm & social',[460,540,.2],{L:o({x:-.74,y:-.08,w:.44,h:.3,round:2.1,tilt:.1,top:.35,topSlant:.1,topCurve:.4,glow:.95}),b:{y:.56,tilt:.3,curve:.3,a:.55},m:{x:.05,w:.11,y:-.62,corner:.05,skew:.04,arc:.08,a:.8},fx:{blush:1,sway:.4},x:{gbx:-.7,gby:-.5,ac:.3,acr:1,acg:.5,acb:.6,wet:.2,roll:-.04}});
+add('relieved','Relieved','Warm & social',[360,300,.28],{L:o({x:-.72,y:-.1,w:.5,h:.26,round:2.1,tilt:.08,top:.1,topSlant:.1,topCurve:.35,bot:-.2,botCurve:.25,glow:.95}),b:{y:.6,tilt:.45,curve:.2,a:.6},m:{w:.1,y:-.6,corner:.04,arc:.04,open:.4,round:1,a:.75},fx:{sweat:.3,breath:1.6,gloom:0},x:{wet:.3,gby:-.1,roll:.03}});
+add('cozy','Cozy','Warm & social',[330,420,.3],{L:o({x:-.72,y:-.12,w:.52,h:.2,round:2,top:.15,topCurve:.5,bot:-.05,botCurve:.7,glow:.9}),b:{y:.56,tilt:.15,curve:.4,a:.45},m:{w:.15,y:-.6,corner:.06,arc:.07,cat:.4,a:.8},fx:{blush:.6,zzz:.2,sway:.7,breath:1.4},x:{ac:.3,acr:1,acg:.65,acb:.35,roll:.04}});
+add('flirty','Flirty','Warm & social',[560,720,.14],{L:o({x:-.72,y:-.06,w:.5,h:.22,round:2,tilt:.1,top:.2,topSlant:-.1,topCurve:.4,glow:1.05}),R:o({x:.72,y:-.1,w:.5,h:.38,round:2,tilt:.1,bot:0,botCurve:.55,glow:1.05}),bL:{y:.72,tilt:-.1,curve:.6,a:.65},bR:{y:.5,tilt:-.1,curve:.3,a:.5},m:{x:.06,w:.17,y:-.61,corner:.07,skew:.07,arc:.1,open:.18,tongue:.4,a:.9},fx:{hearts:.4,sparkle:.5,blush:.3},x:{ac:.4,acr:1,acg:.4,acb:.7,shine:.6,gbx:.3,roll:.08}});
+add('victorious','Victorious','Warm & social',[640,1000,.1],{L:o({x:-.72,y:-.04,w:.54,h:.34,round:2,tilt:-.18,top:.4,topSlant:-.35,topCurve:.2,bot:-.2,botCurve:.4,glow:1.18}),b:{y:.7,tilt:-.2,curve:.3,a:.75,len:.27},m:{w:.3,y:-.6,corner:.1,arc:.12,open:.75,tongue:.2,a:.95},fx:{sparkle:1,bounce:1},x:{shine:1,gby:.3,ac:.3,acr:1,acg:.85,acb:.3}});
+add('pleased','Pleased','Warm & social',[470,620,.18],{L:o({x:-.72,y:-.1,w:.52,h:.3,round:2,top:.3,topCurve:.5,bot:-.15,botCurve:.5,glow:1.0}),b:{y:.62,tilt:.1,curve:.4,a:.55},m:{w:.19,y:-.61,corner:.07,arc:.11,a:.88},fx:{sparkle:.2,blush:.2,breath:1.2},x:{shine:.3,gby:.1}});
+add('adoring','Adoring','Warm & social',[540,820,.16],{L:o({x:-.72,y:.04,w:.5,h:.5,round:2.3,glow:1.1}),b:{y:.76,tilt:.45,curve:.5,a:.6},m:{w:.1,y:-.62,corner:.05,arc:.1,open:.12,round:.6,a:.85},fx:{hearts:.5,blush:.7,sparkle:.5},x:{pup:.25,shine:1,wet:.6,gby:.45,ac:.7,acr:1,acg:.4,acb:.7}});
+add('dreamy','Dreamy','Warm & social',[330,520,.3],{L:o({x:-.72,y:.02,w:.5,h:.3,round:2.2,tilt:.1,top:.3,topSlant:.1,topCurve:.4,bot:-.4,botCurve:-.1,glow:.92}),b:{y:.66,tilt:.25,curve:.5,a:.45},m:{x:.04,w:.1,y:-.62,corner:.04,skew:.03,arc:.07,a:.75},fx:{notes:.6,sparkle:.6,sway:1,breath:1.3},x:{gbx:.6,gby:.7,roll:.1,shine:.6,wet:.25,ac:.6,acr:.75,acg:.5,acb:1}});
+add('reassuring','Reassuring','Warm & social',[400,500,.2],{L:o({x:-.72,y:-.04,w:.5,h:.34,round:2.1,tilt:.05,top:.6,topCurve:.35,bot:-.4,botCurve:.1,glow:1.0}),b:{y:.68,tilt:.35,curve:.35,a:.6},m:{w:.17,y:-.61,corner:.06,arc:.09,a:.85},fx:{breath:1.3},x:{ac:.35,acr:.5,acg:1,acb:.75,shine:.3,roll:.05}});
+add('amused','Amused','Warm & social',[500,680,.12],{L:o({x:-.72,y:-.1,w:.5,h:.28,round:2,top:.25,topSlant:-.1,topCurve:.4,bot:-.2,botCurve:.4}),R:o({x:.74,y:-.02,w:.5,h:.36,round:2.1,top:.5,topCurve:.3,bot:-.1,botCurve:.3}),bL:{y:.58,tilt:-.1,curve:.3,a:.55},bR:{y:.8,tilt:.1,curve:.7,a:.7},m:{x:.07,w:.15,y:-.61,corner:.06,skew:.09,arc:.08,open:.1,a:.9},fx:{bounce:.3,sparkle:.2},x:{gbx:.4,roll:-.06,shine:.4}});
+add('encouraging','Encouraging','Warm & social',[560,880,.12],{L:o({x:-.70,y:.04,w:.5,h:.44,round:2.1,glow:1.12}),b:{y:.85,tilt:.2,curve:.6,a:.75,len:.26},m:{w:.26,y:-.61,corner:.09,arc:.12,open:.4,a:.95},fx:{sparkle:.6,bounce:.6},x:{shine:.9,gby:.2,roll:-.06,ac:.5,acr:.5,acg:1,acb:.8}});
+add('disappointed','Disappointed',G.tense,[330,240,.22],{L:o({x:-.72,y:-.17,w:.49,h:.30,round:2.1,tilt:.12,top:.05,topSlant:.3,topCurve:.2,glow:.82}),b:{y:.56,tilt:.4,curve:.1,a:.65},m:{x:.02,w:.14,y:-.62,corner:-.06,arc:-.09,skew:.02,a:.75},fx:{gloom:.6,sweat:.1},x:{gby:-.6,gbx:.1}});
+add('heartbroken','Heartbroken',G.tense,[480,160,.4],{L:o({x:-.72,y:-.1,w:.5,h:.34,round:2,tilt:.24,top:.2,topSlant:.55,topCurve:.25,glow:.85}),b:{y:.56,tilt:.85,curve:.15,a:.85,len:.26},m:{w:.17,y:-.6,corner:-.09,arc:-.17,open:.35,wave:.5,round:.15,a:.9},fx:{cry:.8,gloom:.7,shiver:.3},x:{sp_heart:.3,ac:.9,acr:.55,acg:.35,acb:1,wet:1,gby:-.35}});
+add('guilty','Guilty',G.tense,[380,300,.2],{L:o({x:-.74,y:-.13,w:.40,h:.33,round:2.05,tilt:.24,top:.4,topSlant:.45,topCurve:.3,glow:.88}),b:{y:.56,tilt:.65,curve:.1,a:.75},bR:{y:.6,tilt:.5},m:{x:-.04,w:.1,y:-.6,corner:-.04,arc:-.06,skew:-.04,wave:.35,a:.75},fx:{sweat:.5,blush:.35,gloom:.3},x:{gbx:-.85,gby:-.7,roll:-.05,wet:.3}});
+add('jealous','Jealous',G.tense,[260,330,.18],{L:o({x:-.72,y:-.04,w:.52,h:.17,round:2,tilt:-.3,top:.1,topSlant:-.35,topCurve:.1,glow:.95}),R:mirror(o({x:-.72,y:-.04,w:.48,h:.14,round:2,tilt:-.38,top:.1,topSlant:-.3,topCurve:.1,glow:.95})),b:{y:.5,tilt:-.45,curve:.2,a:.75,len:.26},m:{x:-.05,w:.15,y:-.6,corner:-.07,arc:-.1,skew:-.08,wave:.1,a:.85},fx:{gloom:.35,steam:.2},x:{ac:.95,acr:.35,acg:1,acb:.25,gbx:.9,gby:.05,roll:.04}});
+add('raging','Raging',G.tense,[200,1000,.3],{L:o({x:-.68,y:.02,w:.52,h:.3,round:2,tilt:-.6,top:-.2,topSlant:-.6,topCurve:-.1,glow:1.25}),b:{y:.52,tilt:-1,curve:0,a:1,len:.3,th:.06},m:{w:.3,y:-.56,corner:-.1,arc:-.18,open:.85,zig:1,round:.05,a:1,talk:.4},fx:{anger:1,steam:1,shiver:.7,bounce:.3},x:{ac:1,acr:1,acg:.08,acb:.05,pup:.25}});
+add('disgusted','Disgusted',G.tense,[220,200,.2],{L:o({x:-.72,y:-.08,w:.5,h:.2,round:2,tilt:.1,top:.1,topSlant:.18,topCurve:.35,bot:-.2,botCurve:.3,glow:.9}),R:o({x:.74,y:-.12,w:.44,h:.13,round:2,tilt:-.2,top:-.1,topSlant:-.3,topCurve:.4,glow:.88}),bL:{y:.5,tilt:-.35,a:.7},bR:{y:.66,tilt:.3,curve:.6,a:.7},m:{x:.03,w:.16,y:-.62,corner:-.12,arc:-.14,skew:.12,wave:.6,open:.25,round:.15,tongue:.35,a:.9},fx:{sweat:.2},x:{ac:.6,acr:.65,acg:.95,acb:.3,roll:-.05,gbx:-.4}});
+add('panicked','Panicked',G.tense,[260,1200,.3],{L:o({x:-.70,y:.02,w:.46,h:.58,round:2.05,glow:1.2}),R:o({x:.68,y:.0,w:.4,h:.6,round:2.1,glow:1.2}),b:{y:.95,tilt:.9,curve:.5,a:1},m:{w:.22,y:-.58,corner:-.04,arc:-.08,open:1,round:.5,wave:.6,a:1,talk:.5},fx:{sweat:1,shiver:1,exclaim:1,bounce:.8},x:{pup:.3,shine:.2,ac:.4,acr:.8,acg:.8,acb:1}});
+add('freezing','Freezing',G.tense,[300,160,.35],{L:o({x:-.72,y:-.04,w:.46,h:.22,round:2.1,tilt:.08,top:.2,topSlant:.25,topCurve:.3,bot:-.3,botCurve:.2,glow:.75}),b:{y:.56,tilt:.5,curve:.3,a:.8},m:{w:.2,y:-.6,corner:-.04,arc:-.06,open:.25,zig:1,wave:.9,a:.9,talk:.6},fx:{shiver:1,breath:1,gloom:.2},x:{ac:1,acr:.45,acg:.85,acb:1,wet:.3,gby:-.1}});
+add('lonely','Lonely',G.tense,[260,170,.5],{L:o({x:-.62,y:-.12,w:.4,h:.36,round:2.1,tilt:.2,top:.35,topSlant:.4,topCurve:.3,glow:.65}),R:mirror(o({x:-.62,y:-.12,w:.4,h:.36,round:2.1,tilt:.2,top:.35,topSlant:.4,topCurve:.3,glow:.65})),b:{y:.54,tilt:.5,curve:.1,a:.6},m:{x:.03,w:.09,y:-.62,corner:-.05,arc:-.08,a:.55},fx:{gloom:1,dots:.6,sway:.25},x:{ac:.7,acr:.4,acg:.55,acb:1,wet:.45,gbx:-.7,gby:-.3}});
+add('pouting','Pouting',G.tense,[400,360,.16],{L:o({x:-.72,y:.0,w:.46,h:.42,round:2.25,tilt:.12,top:.7,topSlant:.1,topCurve:.2,glow:1.02}),b:{y:.62,tilt:.25,curve:.2,a:.6},m:{x:.02,w:.08,y:-.6,corner:-.08,arc:-.07,open:.15,round:1,skew:.03,a:.8},fx:{blush:.9,steam:.15},x:{gbx:.9,gby:-.1,shine:.6,wet:.55,roll:.05}});
+add('grumpy','Grumpy',G.tense,[170,150,.28],{L:o({x:-.72,y:-.12,w:.52,h:.22,round:2,tilt:-.18,top:-.3,topSlant:-.38,topCurve:-.2,glow:.88}),b:{y:.42,tilt:-.7,curve:.05,a:.9,len:.28,th:.055},m:{w:.2,y:-.6,corner:-.11,arc:-.2,a:.9},fx:{steam:.4,gloom:.3},x:{ac:.4,acr:1,acg:.5,acb:.2,gby:-.15}});
+add('resigned','Resigned',G.tense,[300,170,.4],{L:o({x:-.72,y:-.1,w:.5,h:.15,round:2,tilt:.05,top:.15,topSlant:.1,topCurve:.05,glow:.78}),b:{y:.58,tilt:.2,curve:.05,a:.5},m:{w:.14,y:-.62,corner:-.02,arc:-.02,skew:.02,wave:.2,a:.6},fx:{sweat:.25,gloom:.3,sway:.2,breath:1},x:{gby:-.3}});
+add('queasy','Queasy',G.tense,[160,140,.4],{L:o({x:-.74,y:.04,w:.34,h:.34,round:2,tilt:.1,top:.5,topSlant:.2,topCurve:.4,glow:.65}),R:o({x:.74,y:-.08,w:.42,h:.2,round:2,tilt:-.28,top:.1,topSlant:-.2,topCurve:.4,glow:.65}),b:{y:.52,tilt:.55,a:.6},bR:{y:.64,tilt:.1},m:{x:.03,w:.17,y:-.6,corner:-.07,arc:-.1,skew:.05,wave:1,open:.3,round:.4,a:.8},fx:{sweat:.7,sway:.8,shiver:.35,gloom:.4},x:{ac:.9,acr:.5,acg:1,acb:.3,roll:.1,gbx:.3,gby:-.2}});
+add('awkward','Awkward',G.tense,[360,260,.2],{L:o({x:-.72,y:.04,w:.4,h:.4,round:2.1,glow:1}),R:o({x:.72,y:-.02,w:.5,h:.5,round:2.05,glow:1}),bL:{y:.62,tilt:.3,curve:.3,a:.65},bR:{y:.78,tilt:-.2,curve:.5,a:.7},m:{x:.02,w:.2,y:-.6,corner:.02,arc:.0,skew:.1,zig:.7,wave:.3,open:.1,a:.85},fx:{sweat:.85,blush:.45,dots:.7},x:{ac:.3,acr:1,acg:.6,acb:.6,gbx:-.8,gby:.1,roll:-.04,pup:.1}});
+add('p_processing','Processing',  'Pip states',[360,420,.14],{L:o({x:-.72,y:.02,w:.44,h:.40,round:2.1,glow:1.12}),b:{y:.7,tilt:-.12,curve:.2,a:.6},m:{w:.1,y:-.6,corner:-.01,wave:.25,a:.6},fx:{dots:1,steam:.35},x:{sp_spiral:.85,ac:.7,acr:.3,acg:.85,acb:1,gbx:0,gby:.15}});
+add('p_searching','Searching','Pip states',[420,520,.12],{L:o({x:-.66,y:.05,w:.5,h:.42,round:2.2,glow:1.06}),R:o({x:.78,y:.0,w:.42,h:.34,round:2.1,tilt:.12}),bL:{y:.78,tilt:.15,curve:.5,a:.65},bR:{y:.66,tilt:-.05,a:.55},m:{x:-.05,w:.07,y:-.62,open:.3,round:1,a:.75},fx:{question:.5,dots:.4},x:{pup:.1,shine:.3,gbx:.95,gby:.35,roll:-.05}});
+add('p_glitch','Glitch / Error','Pip states',[200,150,.3],{L:o({x:-.70,y:.04,w:.30,h:.52,round:1.8,tilt:.2,glow:1.15}),R:o({x:.80,y:-.08,w:.52,h:.20,round:1.6,tilt:-.35,top:.4,topSlant:.3,glow:.8}),bL:{y:.8,tilt:.5,a:.7},bR:{y:.5,tilt:-.45,a:.7},m:{x:.03,w:.17,y:-.6,corner:-.02,skew:.1,zig:1,wave:.8,open:.25,a:.85},fx:{shiver:1,question:.4},x:{sp_x:.45,ac:1,acr:1,acg:.12,acb:.25,roll:.07}});
+add('p_success','Task complete','Pip states',[520,980,.12],{L:o({x:-.72,y:-.1,w:.54,h:.42,round:2,bot:-.05,botCurve:.55,glow:1.12}),b:{y:.84,curve:.6,a:.7,tilt:.15},m:{w:.24,y:-.62,corner:.1,arc:.12,open:.35,a:.95},fx:{sparkle:1,bounce:.5},x:{ac:.85,acr:.3,acg:1,acb:.45,shine:.8,gby:.25}});
+add('p_music','Grooving','Pip states',[330,520,.14],{L:o({x:-.72,y:-.1,w:.56,h:.17,round:2,top:.3,topCurve:.3,bot:-.05,botCurve:.7,tilt:-.1,glow:1.02}),b:{y:.74,tilt:.2,curve:.6,a:.45},m:{x:.02,w:.16,y:-.6,corner:.07,arc:.1,open:.25,round:.5,skew:.03,a:.8},fx:{notes:1,sway:1,blush:.2},x:{ac:.6,acr:.75,acg:.4,acb:1,roll:.09}});
+add('p_scan','Scanning','Pip states',[480,360,.1],{L:o({x:-.76,y:.0,w:.62,h:.11,round:1.5,top:.8,bot:-.8,glow:1.25}),b:{y:.5,tilt:-.08,len:.3,curve:0,a:.4},m:{w:.11,y:-.6,corner:0,arc:0,a:.45},fx:{dots:.3},x:{ac:1,acr:.25,acg:1,acb:.55,gbx:1,gby:0}});
+add('p_deadpan','Deadpan','Pip states',[320,260,.2],{L:o({x:-.72,y:-.04,w:.52,h:.20,round:2,top:.1,topSlant:0,topCurve:0,bot:-.1,botCurve:0,glow:.92}),b:{y:.48,tilt:0,curve:0,len:.27,a:.5},m:{w:.13,y:-.6,corner:0,arc:0,skew:0,a:.5},fx:{},x:{gbx:.15,gby:-.05}});
+add('p_yawn','Yawning','Pip states',[360,200,.5],{L:o({x:-.72,y:-.12,w:.52,h:.12,round:2,top:.4,topCurve:.4,bot:-.15,botCurve:.45,tilt:.12,glow:.75}),b:{y:.66,tilt:.35,curve:.5,a:.65},m:{x:.0,w:.2,y:-.58,open:1,round:.7,low:.1,corner:-.02,a:.9},fx:{zzz:.4,breath:1.6,cry:.1},x:{wet:.5,gby:-.1,roll:-.04}});
+add('p_sneeze','Sneezing','Pip states',[620,140,.18],{L:o({x:-.72,y:-.06,w:.54,h:.075,round:1.8,tilt:-.15,glow:1.1}),b:{y:.46,tilt:-.38,curve:.3,a:.75},m:{x:.02,w:.2,y:-.58,open:1,round:.35,low:.06,corner:-.03,a:.95},fx:{steam:1,exclaim:.5,bounce:1,shiver:.5},x:{roll:.1,gby:-.3}});
+add('p_hiccup','Hiccup','Pip states',[300,640,.1],{L:o({x:-.70,y:.04,w:.44,h:.46,round:2.1,glow:1.08}),R:o({x:.72,y:.0,w:.42,h:.40,round:2.1,glow:1.04}),bL:{y:.88,tilt:.25,a:.7},bR:{y:.8,tilt:.2,a:.65},m:{x:.02,w:.06,y:-.62,corner:-.01,open:.5,round:1,a:.85},fx:{bounce:1,exclaim:.3,blush:.3},x:{pup:.18,shine:.3,roll:.05,gby:.1}});
+add('p_lowbat','Low battery','Pip states',[260,140,.4],{L:o({x:-.72,y:-.2,w:.46,h:.18,round:2,tilt:.2,top:.2,topSlant:.55,topCurve:.3,glow:.4}),b:{y:.52,tilt:.5,curve:.1,a:.45},m:{w:.12,y:-.6,corner:-.04,arc:-.06,wave:.35,a:.55},fx:{gloom:.9,sweat:.2,breath:.6},x:{ac:.75,acr:1,acg:.2,acb:.15,gby:-.55}});
+add('p_wake','Waking up','Pip states',[200,520,.45],{L:o({x:-.72,y:-.08,w:.5,h:.14,round:2,top:.25,topCurve:.4,bot:-.3,botCurve:.2,glow:.7}),R:{...mirror(o({x:-.72,y:-.02,w:.5,h:.23,round:2,top:.3,topSlant:.1,topCurve:.4,tilt:.12,glow:.8}))},bL:{y:.44,tilt:.15,a:.5},bR:{y:.56,tilt:.05,a:.55},m:{x:-.02,w:.12,y:-.6,open:.35,round:.7,skew:.04,corner:-.01,a:.7},fx:{zzz:.3,breath:1.4},x:{wet:.3,gbx:-.2,gby:-.3,roll:.06}});
+add('p_smug','Smug','Pip states',[440,700,.16],{L:o({x:-.72,y:-.1,w:.54,h:.24,round:2,top:.12,topSlant:-.25,topCurve:.2,bot:-.2,botCurve:.5,tilt:-.12,glow:1.05}),b:{y:.62,tilt:-.15,curve:.4,a:.6},bR:{y:.7,tilt:-.05},m:{x:.04,w:.19,y:-.6,corner:.1,skew:.14,arc:.08,a:.9},fx:{sparkle:.5},x:{shine:1,gbx:.2,gby:.35,roll:-.06}});
+add('p_sound','Heard that?','Pip states',[560,780,.12],{L:o({x:-.68,y:.05,w:.50,h:.50,round:2.2,tilt:-.15,glow:1.1}),R:o({x:.76,y:-.02,w:.44,h:.34,round:2.1,tilt:.18,top:.5,topSlant:-.1,topCurve:.4}),bL:{y:.94,tilt:.2,curve:.7,a:.75},bR:{y:.68,tilt:-.1,a:.6},m:{x:-.05,w:.07,y:-.62,corner:.01,open:.25,round:1,a:.8},fx:{question:.45,notes:.3,exclaim:.2},x:{pup:.12,shine:.4,gbx:-.9,gby:.2,roll:.12}});
+add('shocked','Shocked','Shock & awe',[300,1000,.12],{L:o({x:-.66,y:.02,w:.40,h:.62,round:2.05,glow:1.2}),b:{y:.93,len:.26,curve:.7,a:.85},m:{w:.1,y:-.52,open:1,round:.7,low:.15,a:.95},fx:{exclaim:1,sweat:.5,shiver:.2},x:{pup:.05,shine:.15,ac:.2,acr:.7,acg:.9,acb:1}});
+add('startled','Startled (jump scare)','Shock & awe',[200,1300,.1],{L:o({x:-.70,y:.0,w:.43,h:.60,round:2,tilt:.1,glow:1.25}),R:o({x:.74,y:.07,w:.49,h:.66,round:2.1,tilt:.02,glow:1.25}),bL:{y:.93,tilt:.5,curve:.8,a:.9},bR:{y:.85,tilt:.15,curve:.5,a:.8},m:{x:.05,w:.2,y:-.5,open:.9,round:0,zig:.6,skew:.1,corner:-.03,a:.95},fx:{exclaim:1,bounce:1,shiver:.6,sweat:.7},x:{pup:.04,gbx:-.3,gby:.35,roll:-.1}});
+add('gasp','Gasp','Shock & awe',[500,900,.07],{L:o({x:-.70,y:.06,w:.41,h:.48,round:2.2,tilt:-.08,glow:1.1}),b:{y:.9,len:.24,tilt:.3,curve:.85,a:.8},m:{w:.055,y:-.5,open:.65,round:1,corner:0,a:.9},fx:{breath:2,exclaim:.3,blush:.25},x:{pup:.1,shine:.5,gby:.35}});
+add('amazed','Awestruck','Shock & awe',[400,1200,.3],{L:o({x:-.72,y:.07,w:.52,h:.52,round:2.1,bot:-.55,botCurve:.25,glow:1.2}),b:{y:.88,tilt:.22,curve:.55,len:.26,a:.65},m:{w:.2,y:-.58,open:.55,round:.4,corner:.05,arc:.06,a:.9},fx:{sparkle:1,breath:1.3},x:{shine:1,wet:.55,gby:.55,roll:.05,ac:.45,acr:.6,acg:.95,acb:1}});
+add('bewildered','Bewildered','Shock & awe',[420,330,.2],{L:o({x:-.70,y:.1,w:.43,h:.48,round:2.1,tilt:.12}),R:o({x:.76,y:-.06,w:.40,h:.24,round:2,tilt:.38,top:.2,topSlant:-.2,topCurve:.8}),bL:{y:.9,tilt:.35,curve:.7,a:.7},bR:{y:.55,tilt:-.35,len:.26,a:.65},m:{x:-.1,w:.14,y:-.6,corner:-.03,skew:.12,wave:.5,open:.22,round:.4,a:.75},fx:{question:1,sweat:.3,sway:.6},x:{roll:.12,gbx:.5,gby:.4,sp_spiral:.25}});
+add('speechless','Speechless','Shock & awe',[260,180,.4],{L:o({x:-.72,y:.0,w:.46,h:.42,round:2.1,glow:.9}),b:{y:.78,len:.27,tilt:.1,curve:.3,a:.55},m:{w:.22,y:-.56,open:.85,round:0,corner:-.02,arc:-.04,a:.8},fx:{dots:1,breath:.4},x:{pup:.08,gby:.1,ac:.25,acr:.7,acg:.85,acb:.95}});
+add('horror','Dramatic horror','Shock & awe',[160,1400,.5],{L:o({x:-.70,y:.03,w:.44,h:.64,round:2,tilt:.2,top:1.2,topSlant:.15,glow:1.15}),b:{y:.93,tilt:.95,len:.27,curve:.5,a:.95},m:{w:.14,y:-.5,open:1,round:.8,low:.4,wave:.3,corner:-.05,arc:-.1,a:1},fx:{shiver:1,gloom:1,sweat:1,exclaim:.5},x:{pup:.28,roll:.15,gby:.1,ac:.7,acr:.6,acg:.3,acb:1}});
+add('stunned','Stunned silence','Shock & awe',[220,200,.5],{L:o({x:-.66,y:.02,w:.27,h:.31,round:2.2,glow:.75}),b:{y:.68,len:.3,tilt:0,curve:.05,a:.5},m:{w:.09,y:-.58,open:.1,round:0,corner:0,arc:0,a:.6},fx:{sweat:.6,gloom:.35,breath:0},x:{pup:.02,gby:0,ac:.15,acr:.8,acg:.85,acb:.9}});
+
+// ---- engine-side extras layered onto the designed batches
+function patch(id,o){const p=byId[id];if(!p){console.warn('patch: missing',id);return;}
+  for(const[k,v]of Object.entries(o.fx||{}))p.f['fx_'+k]=v;
+  for(const[k,v]of Object.entries(o.x||{}))p.f[k]=v;
+  if(o.kick)p.kick=o.kick;}
+patch('freezing',{fx:{snow:1}});
+patch('raging',{fx:{flame:1},kick:{pop:.4,recoil:.04,burst:1}});
+patch('p_glitch',{fx:{glitch:1,warn:.8}});
+patch('p_scan',{fx:{scan:1}});
+patch('p_success',{fx:{check:1}});
+patch('p_lowbat',{fx:{battery:1}});
+patch('asleep',{fx:{bubble:.8}});
+patch('p_sneeze',{kick:{pop:.5,recoil:.09,roll:.04,burst:1}});
+patch('p_hiccup',{kick:{pop:.35,recoil:.05}});
+patch('startled',{kick:{pop:.8,recoil:.1,roll:.05,burst:1,pupil:.3}});
+patch('shocked',{kick:{pop:.5,recoil:.04,burst:1}});
+patch('gasp',{kick:{pop:.55,recoil:.05,burst:0}});
+patch('horror',{kick:{pop:.6,recoil:.06,burst:1,pupil:.3}});
+patch('panicked',{kick:{pop:.5,recoil:.05,burst:1}});
+patch('scared',{kick:{pop:.4,recoil:.05,burst:1,pupil:.2}});
+patch('excited',{kick:{pop:.4,recoil:.04}});
+patch('idea',{kick:{pop:.35,recoil:.03,burst:1}});
+
+/* ---------- state ---------- */
+const NEUTRAL=byId.neutral.f;
+const KEYS=Object.keys(NEUTRAL);
+const cur={}, vel={};
+KEYS.forEach(k=>{cur[k]=NEUTRAL[k];vel[k]=0;});
+let target={...NEUTRAL};
+const ui={A:'neutral',B:'',mix:.5,inten:1,brows:false,mouth:false,fx:false,details:false,colour:false,grid:.3,bloom:1,life:true,follow:true,sound:false,demo:false,original:false};
+const manual={};
+let tmpOverride=null;
+
+function stiff(k){
+  if(k.startsWith('fx_'))return[42,13];
+  if(k==='ac'||k==='acr'||k==='acg'||k==='acb')return[55,15];
+  if(k.startsWith('sp_')||k==='pup'||k==='wet'||k==='shine')return[110,21];
+  if(k.startsWith('m_')||k.startsWith('b'))return[170,16];
+  if(k==='gbx'||k==='gby'||k==='roll')return[60,13];
+  return[190,17];
+}
+const SK={};KEYS.forEach(k=>SK[k]=stiff(k));
+
+function computeTarget(){
+  const A=shapeFields(tmpOverride||ui.A), B=(ui.B&&!tmpOverride)?shapeFields(ui.B):null;
+  const N=shapeFields('neutral'), t={};
+  for(const k of KEYS){
+    let v=A[k]; if(B)v=lerp(v,B[k],ui.mix);
+    if(k!=='acr'&&k!=='acg'&&k!=='acb') v=N[k]+(v-N[k])*ui.inten;
+    t[k]=v;
+  }
+  for(const k of FX_KEYS) if(manual[k]) t['fx_'+k]=Math.max(t['fx_'+k],1);
+  if(ui.original){for(const k of KEYS){ if(k.startsWith('fx_')&&k!=='fx_breath')t[k]=0;} t.bL_a=t.bR_a=t.m_a=0;t.ac=0;t.sp_heart=t.sp_star=t.sp_spiral=t.sp_x=0;t.wet=t.shine=t.pup=0;}
+  else{
+    if(!ui.brows)t.bL_a=t.bR_a=0;
+    if(!ui.mouth)t.m_a=0;
+    if(!ui.fx){for(const k of KEYS) if(k.startsWith('fx_')&&k!=='fx_breath'&&k!=='fx_bounce'&&k!=='fx_sway'&&k!=='fx_shiver')t[k]=0;}
+    if(!ui.colour)t.ac=0;
+    if(!ui.details){t.sp_heart=t.sp_star=t.sp_spiral=t.sp_x=0;t.pup=t.wet=t.shine=0;}
+  }
+  target=t;
+}
+
+function shapeFields(id){
+  const concept=byId[id].f;
+  const pose=rendererChoice.value==='device'&&DEVICE_FACE.presets[id];
+  if(!pose)return concept;
+  const actual={...concept};
+  for(let i=0;i<EYE_KEYS.length;i++){
+    actual['L_'+EYE_KEYS[i]]=pose[i];
+    actual['R_'+EYE_KEYS[i]]=pose[i+EYE_KEYS.length];
+  }
+  return actual;
+}
+
+/* ---------- canvas ---------- */
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+const rendererChoice=document.getElementById('renderer');
+const deviceCanvas=document.createElement('canvas');
+deviceCanvas.width=1280;deviceCanvas.height=800;
+let deviceRenderer=null;
+function chooseRenderer(value){
+  rendererChoice.value=deviceRenderer&&value==='device'?'device':'concept';
+}
+function deviceUnavailable(){
+  deviceRenderer=null;
+  rendererChoice.options[0].disabled=true;
+  rendererChoice.options[0].textContent='PipOS eye shader (WebGL2 unavailable)';
+  chooseRenderer('concept');
+}
+try{deviceRenderer=PipGL.create(deviceCanvas,DEVICE_FACE);}
+catch(error){console.info('Face Lab:',error.message);deviceUnavailable();}
+rendererChoice.onchange=()=>{chooseRenderer(rendererChoice.value);computeTarget();};
+deviceCanvas.addEventListener('webglcontextlost',deviceUnavailable);
+const lit=document.createElement('canvas'), L=lit.getContext('2d');
+const small=document.createElement('canvas'), S=small.getContext('2d');
+const tmpC=document.createElement('canvas'),tmpX=tmpC.getContext('2d');
+const blurA=document.createElement('canvas'), BA=blurA.getContext('2d');
+const blurB=document.createElement('canvas'), BB=blurB.getContext('2d');
+const HAS_FILTER=('filter' in ctx);
+let W=0,H=0,DPR=1,gridPat=null,pitch=3;
+function resize(){
+  const rc=document.getElementById('screen').getBoundingClientRect();
+  DPR=Math.min(window.devicePixelRatio||1,1.5);
+  W=Math.max(320,Math.round(rc.width*DPR));H=Math.round(W/1.6);
+  for(const c of[cv,lit]){c.width=W;c.height=H;}
+  const sw=Math.round(W/4),sh=Math.round(H/4);
+  for(const c of[small,blurA,blurB]){c.width=sw;c.height=sh;}
+  pitch=Math.max(3,Math.round(W/330));
+  const pc=document.createElement('canvas');pc.width=pc.height=pitch;const p=pc.getContext('2d');
+  p.fillStyle='#000';p.fillRect(0,0,pitch,1);p.fillRect(0,0,1,pitch);
+  gridPat=L.createPattern(pc,'repeat');
+}
+resize();
+new ResizeObserver(resize).observe(document.getElementById('screen'));
+
+/* ---------- colours ---------- */
+let col={fill:[44,237,255],core:[140,252,255],halo:[0,176,255],tear:[170,232,255]};
+const mixc=(a,b,t)=>[lerp(a[0],b[0],t),lerp(a[1],b[1],t),lerp(a[2],b[2],t)];
+const rgba=(c,a=1)=>`rgba(${c[0]|0},${c[1]|0},${c[2]|0},${clamp(a,0,1).toFixed(3)})`;
+const PINK=[255,98,150], GOLD=[255,214,90], RED=[255,70,50], WHITE=[255,255,255];
+function updateColours(){
+  const ac=clamp(cur.ac,0,1.2), acc=[cur.acr*255,cur.acg*255,cur.acb*255];
+  const fill=mixc([44,237,255],acc,clamp(ac,0,1));
+  col={fill,core:mixc(fill,WHITE,.5*(1-.7*clamp(ac,0,1))),halo:mixc([0,176,255],fill,.5),tear:mixc([170,232,255],fill,.25)};
+}
+
+/* ---------- idle life, gaze, blink, speech ---------- */
+let T=0;
+const gaze={x:0,y:0,tx:0,ty:0,next:1};
+const mouse={in:false,x:0,y:0};
+let blinkT=-1,blinkNext=1.5,blinkMul=1;
+const act={type:null,t:0,dur:1};
+const speech={q:[],t:0,open:0,w:0,round:0,tOpen:0,tW:0,tRound:0,talking:false,env:0,envT:0};
+let audio=null;
+
+function ensureAudio(){ if(!audio){try{audio=new (window.AudioContext||window.webkitAudioContext)();}catch(e){}} if(audio&&audio.state==='suspended')audio.resume(); return audio; }
+function chirp(f0,f1,dur,vol=.05,type='triangle'){
+  if(!ui.sound||!ensureAudio())return;
+  const t=audio.currentTime, osc=audio.createOscillator(), g=audio.createGain();
+  osc.type=type; osc.frequency.setValueAtTime(f0,t); osc.frequency.exponentialRampToValueAtTime(Math.max(40,f1),t+dur);
+  g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(vol,t+.012); g.gain.exponentialRampToValueAtTime(.0008,t+dur);
+  osc.connect(g).connect(audio.destination); osc.start(t); osc.stop(t+dur+.02);
+}
+function emoSound(p){ const[a,b,d]=p.snd; const ty=(p.group===G.mad)?'sawtooth':'triangle';
+  chirp(a,b,d,.04,ty); if(p.group===G.happy||p.group===G.play) setTimeout(()=>chirp(b,b*1.2,d*.8,.035),d*900); }
+
+const VIS={a:[.85,.12,0,520],e:[.5,.28,0,620],i:[.25,.34,0,760],o:[.7,-.38,1,400],u:[.4,-.46,1,340],
+  m:[0,-.05,0,0],b:[0,-.05,0,0],p:[0,-.05,0,0],f:[.1,.12,0,300],v:[.1,.12,0,300]};
+function sayText(txt){
+  speech.q=[...txt.toLowerCase()]; speech.t=0; speech.talking=true; ensureAudio();
+}
+function updateSpeech(dt){
+  const talkParam=cur.m_talk;
+  if(speech.q.length){
+    speech.t-=dt;
+    while(speech.t<=0&&speech.q.length){
+      const ch=speech.q.shift();
+      if(VIS[ch]){const v=VIS[ch];speech.tOpen=v[0];speech.tW=v[1];speech.tRound=v[2];speech.t+=.085; if(v[3])chirp(v[3]+rnd(-30,30),v[3]*rnd(.8,1.3),.07,.035);}
+      else if(/[a-z]/.test(ch)){speech.tOpen=.3;speech.tW=0;speech.tRound=0;speech.t+=.06; if(Math.random()<.5)chirp(rnd(250,420),rnd(250,420),.04,.02);}
+      else if(/[,.!?;:]/.test(ch)){speech.tOpen=0;speech.tW=0;speech.tRound=0;speech.t+=.28;}
+      else {speech.tOpen=0;speech.tW=0;speech.tRound=0;speech.t+=.1;}
+    }
+    if(!speech.q.length&&speech.t<=0){speech.talking=false;}
+  } else if(talkParam>.05){
+    speech.envT-=dt;
+    if(speech.envT<=0){speech.tOpen=rnd(.1,.9)*talkParam;speech.tW=rnd(-.3,.25);speech.tRound=Math.random()<.35?1:0;speech.envT=rnd(.1,.26);
+      if(Math.random()<.7)chirp(rnd(380,760),rnd(380,900),.1,.03);}
+  } else {speech.tOpen=0;speech.tW=0;speech.tRound=0;}
+  const k=1-Math.exp(-dt*28);
+  speech.open+=(speech.tOpen-speech.open)*k; speech.w+=(speech.tW-speech.w)*k; speech.round+=(speech.tRound-speech.round)*k;
+}
+
+function blinkAmount(dt){
+  if(blinkT<0){
+    blinkNext-=dt;
+    if(blinkNext<=0&&ui.life)blinkT=0;
+    return 0;
+  }
+  blinkT+=dt;
+  const c=.07*blinkMul,h=.035,o=.13*blinkMul, tt=blinkT;
+  let v;
+  if(tt<c)v=tt/c; else if(tt<c+h)v=1; else if(tt<c+h+o)v=1-(tt-c-h)/o; else {v=0;blinkT=-1;blinkNext=Math.random()<.2?.12:rnd(2,5.5);}
+  return v*v*(3-2*v);
+}
+function doBlink(){ if(blinkT<0){blinkT=0;} }
+
+function startAct(type,dur){act.type=type;act.t=0;act.dur=dur;}
+
+/* ---------- drawing helpers (world: y up, height 2) ---------- */
+function poly(c,pts){c.beginPath();c.moveTo(pts[0][0],pts[0][1]);for(let i=1;i<pts.length;i++)c.lineTo(pts[i][0],pts[i][1]);}
+function heartPts(cx,cy,s){const pts=[];for(let i=0;i<=48;i++){const t=i/48*TAU;pts.push([cx+16*Math.pow(Math.sin(t),3)*s/17,cy+(13*Math.cos(t)-5*Math.cos(2*t)-2*Math.cos(3*t)-Math.cos(4*t)+2.5)*s/17]);}return pts;}
+function starPts(cx,cy,R,rot){const pts=[];for(let i=0;i<10;i++){const a=rot+Math.PI/2+i*Math.PI/5,rr=i%2?R*.46:R;pts.push([cx+Math.cos(a)*rr,cy+Math.sin(a)*rr]);}return pts;}
+function sparkle(c,x,y,rr){c.beginPath();c.moveTo(x,y+rr);c.quadraticCurveTo(x+.1*rr,y+.1*rr,x+rr,y);c.quadraticCurveTo(x+.1*rr,y-.1*rr,x,y-rr);c.quadraticCurveTo(x-.1*rr,y-.1*rr,x-rr,y);c.quadraticCurveTo(x-.1*rr,y+.1*rr,x,y+rr);c.closePath();}
+function dropPath(c,x,y,s){
+  c.beginPath();c.moveTo(x,y+1.7*s);c.bezierCurveTo(x+.25*s,y+1.0*s,x+s,y+.55*s,x+s,y);
+  for(let i=1;i<=12;i++){const a=-Math.PI*i/12;c.lineTo(x+Math.cos(a)*s,y+Math.sin(a)*s);}
+  c.bezierCurveTo(x-s,y+.55*s,x-.25*s,y+1.0*s,x,y+1.7*s);c.closePath();
+}
+function glyph(c,txt,x,y,size,rot=0){c.save();c.translate(x,y);c.rotate(rot);c.scale(size/100,-size/100);c.font='800 100px ui-monospace,Menlo,"SF Mono",monospace';c.textAlign='center';c.textBaseline='middle';c.fillText(txt,0,0);c.restore();}
+
+/* ---------- eye ---------- */
+const MING=.012;
+function eyeGeom(e,blink){
+  const N=60,top=[],bot=[],w=Math.max(e.w,.02),h=Math.max(e.h,.02),n=Math.max(e.round,1.8);
+  for(let i=0;i<=N;i++){
+    const th=Math.PI*i/N,xl=-w*Math.cos(th),xn=xl/w;
+    const ye=h*Math.pow(Math.max(0,1-Math.pow(Math.abs(xn),n)),1/n);
+    let yt=Math.min(ye,h*(e.top+e.topSlant*xn+e.topCurve*(1-xn*xn)));
+    let yb=Math.max(-ye,h*(e.bot+e.botSlant*xn+e.botCurve*(1-xn*xn)));
+    if(yt<yb-.004)continue;
+    if(yt-yb<MING){const m=(yt+yb)/2;yt=m+MING/2;yb=m-MING/2;}
+    if(blink>0){const m=(yt+yb)/2;yt=lerp(yt,m+MING/2,blink);yb=lerp(yb,m-MING/2,blink);}
+    top.push([xl,yt]);bot.push([xl,yb]);
+  }
+  return top.length<2?null:top.concat(bot.reverse());
+}
+function toWorld(pts,cx,cy,tilt){const cs=Math.cos(tilt),sn=Math.sin(tilt);return pts.map(p=>[cx+p[0]*cs-p[1]*sn,cy+p[0]*sn+p[1]*cs]);}
+
+const EP={L:{},R:{}};
+function eyeOf(side){const e={};for(const k of EYE_KEYS)e[k]=cur[side+'_'+k];return e;}
+
+function drawEye(c,side,blink,ox,oy,breathS){
+  const e=eyeOf(side);
+  const g=clamp(e.glow,0,1.3), al=clamp(g*g,0,1.1);
+  const cx=e.x+ox, cy=e.y+oy;
+  EP[side]={cx,cy,w:e.w,h:e.h,bx:e.x,by:e.y};
+  const spMax=Math.max(cur.sp_heart,cur.sp_x,cur.sp_spiral,cur.sp_star);
+  const normal=clamp(1-spMax,0,1);
+  const sz=Math.min(e.w,e.h*1.1);
+  const dir=side==='L'?1:-1;
+  // special eyes
+  c.save();
+  if(cur.sp_heart>.01){
+    const beat=1+.09*Math.max(0,Math.sin(T*7.5))*Math.max(0,Math.sin(T*7.5+.7));
+    const s=Math.max(e.w,e.h)*1.2*beat*(.6+.4*cur.sp_heart);
+    const pts=heartPts(cx,cy,s),gr=c.createRadialGradient(cx,cy+s*.1,0,cx,cy,s);
+    gr.addColorStop(0,rgba(col.core,1));gr.addColorStop(.6,rgba(col.fill,1));gr.addColorStop(1,rgba(col.fill,1));
+    c.globalAlpha=clamp(cur.sp_heart,0,1)*al;c.fillStyle=gr;poly(c,pts);c.fill();c.strokeStyle=rgba(col.fill,1);c.lineWidth=.03;c.lineJoin='round';c.stroke();
+  }
+  if(cur.sp_star>.01){
+    const R=Math.max(e.w,e.h)*1.15*(.7+.3*cur.sp_star)*(1+.06*Math.sin(T*6+dir));
+    const pts=starPts(cx,cy,R,Math.sin(T*2.4+dir)*.18);
+    c.globalAlpha=clamp(cur.sp_star,0,1)*al;c.fillStyle=rgba(col.fill,1);poly(c,pts);c.fill();c.strokeStyle=rgba(col.core,1);c.lineWidth=.035;c.lineJoin='round';c.stroke();
+  }
+  if(cur.sp_x>.01){
+    const s=sz*.75;c.globalAlpha=clamp(cur.sp_x,0,1)*al;c.strokeStyle=rgba(col.fill,1);c.lineWidth=.085;c.lineCap='round';
+    c.beginPath();c.moveTo(cx-s,cy-s);c.lineTo(cx+s,cy+s);c.moveTo(cx-s,cy+s);c.lineTo(cx+s,cy-s);c.stroke();
+  }
+  if(cur.sp_spiral>.01){
+    c.globalAlpha=clamp(cur.sp_spiral,0,1)*al;c.strokeStyle=rgba(col.fill,1);c.lineWidth=.05;c.lineCap='round';c.lineJoin='round';
+    const R=Math.max(e.w,e.h)*.95,rot=T*5*dir;c.beginPath();
+    for(let i=0;i<=90;i++){const th=i/90*TAU*2.6,rr=R*i/90,a=th+rot;const x=cx+Math.cos(a)*rr,y=cy+Math.sin(a)*rr;i?c.lineTo(x,y):c.moveTo(x,y);}
+    c.stroke();
+  }
+  c.restore();
+  if(normal<.02)return;
+
+  const pts=eyeGeom(e,blink);
+  if(!pts)return;
+  const wp=toWorld(pts,cx,cy,e.tilt);
+  const R=Math.max(e.w,e.h)*1.05;
+  const gr=c.createRadialGradient(cx,cy,0,cx,cy,R);
+  const hot=clamp(2.5*g-1.5,0,1);
+  gr.addColorStop(0,rgba(mixc(col.fill,col.core,hot),1));gr.addColorStop(.7,rgba(col.fill,1));gr.addColorStop(1,rgba(col.fill,1));
+  c.save();
+  c.globalAlpha=al*normal;
+  c.fillStyle=gr;poly(c,wp);c.closePath();c.fill();
+  c.strokeStyle=rgba(col.fill,1);c.lineWidth=.026;c.lineJoin='round';c.stroke();
+  // clip inside the eye for wetness / shine / pupil
+  if(cur.wet>.02||cur.shine>.02){
+    c.save();poly(c,wp);c.closePath();c.clip();
+    if(cur.wet>.02){
+      const by=cy-e.h*.95,gg=c.createLinearGradient(0,by,0,by+e.h*1.1);
+      gg.addColorStop(0,`rgba(235,252,255,${.8*cur.wet})`);gg.addColorStop(1,'rgba(235,252,255,0)');
+      c.fillStyle=gg;c.fillRect(cx-e.w*1.2,by,e.w*2.4,e.h*1.1);
+      const sh=.5+.5*Math.sin(T*3+dir*2);
+      c.fillStyle=`rgba(255,255,255,${.5*cur.wet*sh})`;c.beginPath();c.arc(cx+dir*e.w*.1,cy-e.h*.45,.025,0,TAU);c.fill();
+    }
+    if(cur.shine>.02){
+      c.fillStyle=`rgba(255,255,255,${clamp(.95*cur.shine,0,1)})`;
+      c.beginPath();c.arc(cx-e.w*.28,cy+e.h*.32,.14*sz*cur.shine+.01,0,TAU);c.fill();
+      c.beginPath();c.arc(cx+e.w*.30,cy-e.h*.28,.07*sz*cur.shine+.005,0,TAU);c.fill();
+    }
+    c.restore();
+  }
+  if(cur.pup>.02&&blink<.5){
+    c.globalCompositeOperation='destination-out';c.fillStyle='#000';
+    c.beginPath();c.arc(cx+gaze.x*.03,cy+gaze.y*.02,Math.max(.01,cur.pup*sz),0,TAU);c.fill();
+  }
+  c.restore();
+}
+
+/* ---------- brows ---------- */
+function drawBrow(c,side,ox,oy){
+  const a=cur['b'+side+'_a'];if(a<.03)return;
+  const e=EP[side],inner=side==='L'?1:-1;
+  const len=Math.max(.05,cur['b'+side+'_len']),dx=cur['b'+side+'_dx'],y=cur['b'+side+'_y'],tilt=cur['b'+side+'_tilt'],curve=cur['b'+side+'_curve'];
+  const bx=e.bx+ox*.55,by=e.by+oy*.5+y;
+  const pts=[];
+  for(let i=0;i<=14;i++){const u=-1+2*i/14;pts.push([bx+inner*(dx+u*len),by+tilt*u*len*.6+curve*.1*(1-u*u)]);}
+  c.save();c.globalAlpha=clamp(a,0,1)*.92;c.strokeStyle=rgba(col.fill,1);c.lineWidth=Math.max(.02,cur['b'+side+'_th']);c.lineCap='round';c.lineJoin='round';
+  poly(c,pts);c.stroke();c.restore();
+}
+
+/* ---------- mouth ---------- */
+function drawMouth(c,ox,oy){
+  const a=cur.m_a;if(a<.03)return;
+  const spo=speech.open*(speech.talking||speech.q.length||cur.m_talk>.05?1:0);
+  const w=Math.max(.025,cur.m_w*(1+speech.w)), open=clamp(cur.m_open+speech.open,0,1.1);
+  const gapH=.26*open, round=clamp(Math.max(cur.m_round+speech.round,gapH/(2*w)*1.1-.35),0,1);
+  const _unused=0,  x0=cur.m_x+ox*.3, yBase=cur.m_y+oy*.25;
+  const yc=yBase+cur.m_corner;
+  const N=44,U=[],Lw=[];
+  const dip=.07*clamp(w/.2,.4,1.4);
+  const pw=lerp(.9,.5,round);
+  for(let i=0;i<=N;i++){
+    const xn=-1+2*i/N, ax=Math.abs(xn), prof=Math.max(0,1-xn*xn);
+    const cy=yc+cur.m_skew*.5*xn;
+    const yArc=cy-cur.m_arc*prof;
+    const yCat=cy-dip*(1-Math.pow(2*ax-1,2));
+    let yU=lerp(yArc,yCat,clamp(cur.m_cat,0,1));
+    const wv=cur.m_wave*.022*Math.sin(xn*TAU*1.4+T*9)*Math.pow(prof,.35);
+    const tri=2*Math.abs(((xn*4+1)%2+2)%2-1)-1;
+    const zg=cur.m_zig*.014*tri*Math.pow(prof,.2);
+    yU+=wv+zg;
+    let yL=yU-gapH*Math.pow(prof,pw)-cur.m_low*prof;
+    yL+=wv*.6-zg*2;
+    U.push([x0+xn*w,yU]);Lw.push([x0+xn*w,yL]);
+  }
+  const th=.034;
+  c.save();c.globalAlpha=clamp(a,0,1);
+  c.lineCap='round';c.lineJoin='round';c.strokeStyle=rgba(col.fill,1);c.lineWidth=th;
+  if(gapH>.014){
+    const pts=U.concat(Lw.slice().reverse());
+    c.fillStyle=rgba(col.fill,.2);poly(c,pts);c.closePath();c.fill();
+    if(cur.m_tongue>.03){
+      c.save();poly(c,pts);c.closePath();c.clip();
+      const mid=Lw[N>>1][1],tw=w*.5,tr=Math.max(.02,gapH*.55)*cur.m_tongue;
+      c.fillStyle=rgba(PINK,.92*Math.min(1,cur.m_tongue*1.3));
+      c.beginPath();c.ellipse(x0+w*.05,mid+tr*.3,tw,tr,0,0,TAU);c.fill();
+      c.strokeStyle=rgba([255,170,200],.8);c.lineWidth=.012;c.beginPath();c.moveTo(x0+w*.05,mid+tr*.2);c.lineTo(x0+w*.05,mid+tr*1.1);c.stroke();
+      c.restore();
+    }
+    poly(c,pts);c.closePath();c.stroke();
+  } else {
+    poly(c,U);c.stroke();
+  }
+  c.restore();
+}
+
+/* ---------- particles / emotes ---------- */
+const sweat=[],tears=[],hearts=[],sparks=[],notes=[],zs=[],puffs=[],flakes=[];
+const acc={flake:0,sweat:0,tear:0,heart:0,spark:0,note:0,z:0,puff:0};
+function spawnRate(key,rate,dt,fn){acc[key]+=rate*dt;while(acc[key]>=1){acc[key]--;fn();}}
+
+function updateFx(dt){
+  const fx=k=>cur['fx_'+k];
+  // sweat
+  if(sweat.length<7)spawnRate('sweat',fx('sweat')*.8,dt,()=>sweat.push({x:(Math.random()<.35&&fx('sweat')>.6?-1:1)*rnd(1.28,1.42),y:rnd(.45,.62),vy:0,age:0,sz:rnd(.04,.065),fly:fx('sweat')>.8}));
+  for(let i=sweat.length-1;i>=0;i--){const p=sweat[i];p.age+=dt;if(p.age>.55){p.vy-=.42*dt;p.y+=p.vy*dt;p.x+=Math.sign(p.x)*(p.fly?.12:.02)*dt;}if(p.y<-1.1)sweat.splice(i,1);}
+  // tears
+  const crying=fx('cry');
+  if(tears.length<14)spawnRate('tear',crying*2.4,dt,()=>{const side=Math.random()<.5?'L':'R',e=EP[side];if(!e)return;tears.push({x:e.cx+rnd(-.5,.5)*e.w,y:e.cy-e.h*rnd(.55,.85),y0:e.cy-e.h*rnd(.55,.85),vy:0,age:0,sz:rnd(.05,.075)});});
+  for(let i=tears.length-1;i>=0;i--){const p=tears[i];p.age+=dt;if(p.age>.5){p.vy-=1.0*dt;p.y+=p.vy*dt;}if(p.y<-1.1)tears.splice(i,1);}
+  // hearts
+  if(hearts.length<12)spawnRate('heart',fx('hearts')*1.7,dt,()=>hearts.push({x:rnd(-1.3,1.3),y:rnd(-.5,-.1),vy:rnd(.28,.45),ph:rnd(TAU),sz:rnd(.06,.12),age:0}));
+  for(let i=hearts.length-1;i>=0;i--){const p=hearts[i];p.age+=dt;p.y+=p.vy*dt;if(p.y>1.15)hearts.splice(i,1);}
+  // sparkles
+  spawnRate('spark',fx('sparkle')*5,dt,()=>sparks.push({x:rnd(-1.45,1.45),y:rnd(-.85,.9),age:0,life:rnd(.7,1.3),sz:rnd(.04,.11)}));
+  for(let i=sparks.length-1;i>=0;i--){const p=sparks[i];p.age+=dt;if(p.age>p.life)sparks.splice(i,1);}
+  // notes
+  spawnRate('note',fx('notes')*1.3,dt,()=>notes.push({x:(Math.random()<.5?-1:1)*rnd(1.1,1.45),y:rnd(-.3,.2),vy:rnd(.25,.4),ph:rnd(TAU),ch:Math.random()<.5?'♪':'♫',sz:rnd(.14,.22),age:0}));
+  for(let i=notes.length-1;i>=0;i--){const p=notes[i];p.age+=dt;p.y+=p.vy*dt;if(p.y>1.1)notes.splice(i,1);}
+  // zzz
+  spawnRate('z',fx('zzz')*.85,dt,()=>zs.push({x:.95,y:.35,age:0}));
+  for(let i=zs.length-1;i>=0;i--){const p=zs[i];p.age+=dt;p.x+=.07*dt;p.y+=.17*dt;if(p.age>2.6)zs.splice(i,1);}
+  // snow
+  spawnRate('flake',fx('snow')*9,dt,()=>flakes.push({x:rnd(-1.6,1.6),y:1.05,vy:-rnd(.15,.3),ph:rnd(TAU),sz:rnd(.02,.05),age:0}));
+  for(let i=flakes.length-1;i>=0;i--){const p=flakes[i];p.age+=dt;p.y+=p.vy*dt;if(p.y<-1.05)flakes.splice(i,1);}
+  // steam
+  spawnRate('puff',fx('steam')*5,dt,()=>{const s=Math.random()<.5?-1:1;puffs.push({x:s*1.28,y:.6,vx:s*rnd(.03,.12),vy:rnd(.2,.38),r:.04,age:0});});
+  for(let i=puffs.length-1;i>=0;i--){const p=puffs[i];p.age+=dt;p.x+=p.vx*dt;p.y+=p.vy*dt;p.r+=.06*dt;if(p.age>1.1)puffs.splice(i,1);}
+}
+
+function drawFx(c){
+  const fx=k=>clamp(cur['fx_'+k],0,1.2);
+  c.save();c.lineCap='round';c.lineJoin='round';
+  // gloom: hanging dim lines
+  if(fx('gloom')>.03){
+    for(let i=0;i<9;i++){
+      const x=-1.4+i*.35+Math.sin(i*7.1)*.07,len=.35+.3*Math.abs(Math.sin(i*3.3)),sw=Math.sin(T*1.2+i)*.01;
+      const gr=c.createLinearGradient(0,1,0,1-len);gr.addColorStop(0,rgba(col.halo,.5*fx('gloom')));gr.addColorStop(1,rgba(col.halo,0));
+      c.strokeStyle=gr;c.lineWidth=.022;c.beginPath();c.moveTo(x,1);c.lineTo(x+sw,1-len);c.stroke();
+    }
+  }
+  // blush: slanted hatch marks under each eye
+  if(cur.fx_blush>.03){
+    const b=clamp(cur.fx_blush,0,1.1);
+    for(const s of[-1,1]){
+      const bx=s*.98+ (EP.L?.cx? (s<0?EP.L.cx+.18:EP.R.cx-.18)-s*.98:0)*.0, by=-.36;
+      c.fillStyle=rgba(PINK,.14*b);c.beginPath();c.ellipse(bx,by,.24,.12,0,0,TAU);c.fill();
+      c.strokeStyle=rgba(PINK,.95*b);c.lineWidth=.028;
+      for(let i=-1;i<=1;i++){c.beginPath();c.moveTo(bx+i*.085-.03,by-.05);c.lineTo(bx+i*.085+.03,by+.05);c.stroke();}
+    }
+  }
+  // sweat
+  for(const p of sweat){
+    const grow=clamp(p.age/.5,0,1),s=p.sz*grow,fade=p.y<-.8?clamp((p.y+1.1)/.3,0,1):1;
+    c.globalAlpha=.95*fade;dropPath(c,p.x,p.y,s);c.fillStyle=rgba(col.tear,.9);c.fill();
+    c.fillStyle='rgba(255,255,255,.85)';c.beginPath();c.arc(p.x-s*.35,p.y+s*.2,s*.25,0,TAU);c.fill();c.globalAlpha=1;
+  }
+  // tears
+  for(const p of tears){
+    const grow=clamp(p.age/.5,0,1),s=p.sz*(.5+.5*grow);
+    if(p.age>.5){const gr=c.createLinearGradient(0,p.y0,0,p.y);gr.addColorStop(0,rgba(col.tear,0));gr.addColorStop(1,rgba(col.tear,.75));
+      c.strokeStyle=gr;c.lineWidth=.032;c.beginPath();c.moveTo(p.x,p.y0);c.lineTo(p.x,p.y);c.stroke();}
+    dropPath(c,p.x,p.y,s);c.fillStyle=rgba(col.tear,.95);c.fill();
+    c.fillStyle='rgba(255,255,255,.85)';c.beginPath();c.arc(p.x-s*.3,p.y+s*.15,s*.22,0,TAU);c.fill();
+  }
+  // hearts
+  for(const p of hearts){
+    const a=Math.min(1,p.age/.25)*clamp((1.1-p.y)/.35,0,1),x=p.x+Math.sin(T*2.4+p.ph)*.06;
+    c.globalAlpha=a*.95;c.fillStyle=rgba(PINK,1);poly(c,heartPts(x,p.y,p.sz*2));c.closePath();c.fill();c.globalAlpha=1;
+  }
+  // sparkles
+  for(const p of sparks){
+    const k=Math.sin(Math.PI*p.age/p.life),rr=p.sz*(.35+.65*k);
+    c.globalAlpha=k;c.fillStyle=rgba(mixc(col.core,WHITE,.5),1);sparkle(c,p.x,p.y,rr);c.fill();c.globalAlpha=1;
+  }
+  // notes
+  c.fillStyle=rgba(col.core,.95);
+  for(const p of notes){c.globalAlpha=clamp(p.age/.3,0,1)*clamp((1.05-p.y)/.3,0,1);glyph(c,p.ch,p.x+Math.sin(T*3+p.ph)*.08,p.y,p.sz*2,Math.sin(T*2+p.ph)*.25);}
+  c.globalAlpha=1;
+  // zzz
+  c.fillStyle=rgba(col.fill,1);
+  for(const p of zs){c.globalAlpha=Math.min(1,p.age/.4)*clamp((2.6-p.age)/.8,0,1)*.9;glyph(c,'Z',p.x,p.y,.12+p.age*.09,-.15);}
+  c.globalAlpha=1;
+  // steam
+  for(const p of puffs){c.globalAlpha=(1-p.age/1.1)*.55;c.fillStyle=rgba([255,170,150],1);c.beginPath();c.arc(p.x,p.y,p.r,0,TAU);c.fill();}
+  c.globalAlpha=1;
+  // question mark
+  if(fx('question')>.03){const k=fx('question'),bob=Math.sin(T*3)*.03;c.globalAlpha=Math.min(1,k);c.fillStyle=rgba(col.core,1);glyph(c,'?',1.2,.72+bob,.55*(.5+.5*k),-.18+Math.sin(T*2)*.08);c.globalAlpha=1;}
+  // exclaim
+  if(fx('exclaim')>.03){const k=fx('exclaim'),sh=Math.sin(T*40)*.012*(1-clamp((T-exclaimT)/.6,0,1));c.globalAlpha=Math.min(1,k);c.fillStyle=rgba(GOLD,1);glyph(c,'!',1.2+sh,.72,.6*(.4+.6*k),.12);c.globalAlpha=1;}
+  // anger vein (anime cross)
+  if(fx('anger')>.03){
+    const k=fx('anger'),pu=1+.12*Math.sin(T*9),x=1.13,y=.78,s=.1*pu*k;
+    c.globalAlpha=Math.min(1,k);c.strokeStyle=rgba(RED,1);c.lineWidth=.03;
+    for(const[sx,sy]of[[1,1],[-1,1],[-1,-1],[1,-1]]){c.beginPath();c.moveTo(x+sx*s*.3,y+sy*s*1.3);c.quadraticCurveTo(x+sx*s*.3,y+sy*s*.3,x+sx*s*1.3,y+sy*s*.3);c.stroke();}
+    c.globalAlpha=1;
+  }
+  // lightbulb
+  if(fx('bulb')>.03){
+    const k=Math.min(1,fx('bulb')),bx=0,by=.84+Math.sin(T*3)*.015,r=.09*k,pul=.6+.4*Math.sin(T*8);
+    c.globalAlpha=k;c.strokeStyle=rgba(GOLD,.5*pul);c.lineWidth=.02;
+    for(let i=0;i<8;i++){const a=i*TAU/8+.2;c.beginPath();c.moveTo(bx+Math.cos(a)*r*1.5,by+Math.sin(a)*r*1.5);c.lineTo(bx+Math.cos(a)*r*(1.9+.3*pul),by+Math.sin(a)*r*(1.9+.3*pul));c.stroke();}
+    c.fillStyle=rgba(GOLD,1);c.beginPath();c.arc(bx,by,r,0,TAU);c.fill();
+    c.fillRect(bx-r*.5,by-r*1.35,r,r*.35);
+    c.fillStyle='rgba(255,255,255,.8)';c.beginPath();c.arc(bx-r*.3,by+r*.3,r*.25,0,TAU);c.fill();c.globalAlpha=1;
+  }
+  // dots (...)
+  if(fx('dots')>.03){
+    c.fillStyle=rgba(col.core,1);
+    for(let i=0;i<3;i++){const k=.5+.5*Math.sin(T*4-i*.9);c.globalAlpha=Math.min(1,fx('dots'))*(.25+.75*k);c.beginPath();c.arc(1.05+i*.13,.66+k*.03,.035+.012*k,0,TAU);c.fill();}
+    c.globalAlpha=1;
+  }
+  // snow
+  c.fillStyle=rgba([220,245,255],1);c.strokeStyle=rgba([220,245,255],.9);c.lineWidth=.008;
+  for(const p of flakes){const x=p.x+Math.sin(T*1.5+p.ph)*.07;c.globalAlpha=.85*clamp((p.y+1.05)/.3,0,1);
+    for(let i=0;i<3;i++){const a=i*Math.PI/3+T*.3+p.ph;c.beginPath();c.moveTo(x-Math.cos(a)*p.sz,p.y-Math.sin(a)*p.sz);c.lineTo(x+Math.cos(a)*p.sz,p.y+Math.sin(a)*p.sz);c.stroke();}}
+  c.globalAlpha=1;
+  // startle burst: radiating jump lines from each eye
+  {const age=T-burstT;if(age>=0&&age<1.0){const f=1-age/1.0,gr=Math.min(1,age/.12);
+    c.strokeStyle=rgba(mixc(col.core,WHITE,.4),1);c.lineWidth=.026;c.globalAlpha=f;
+    for(const sd of['L','R']){const e=EP[sd];if(!e||!e.cx)continue;const R0=Math.max(e.w,e.h)*1.3;
+      for(let i=0;i<9;i++){const a=(i/9)*TAU+(sd==='L'?.2:.5);const r1=R0+.05*gr,r2=R0+(.07+.13*gr)*(i%2?1:1.35);
+        c.beginPath();c.moveTo(e.cx+Math.cos(a)*r1,e.cy+Math.sin(a)*r1);c.lineTo(e.cx+Math.cos(a)*r2,e.cy+Math.sin(a)*r2);c.stroke();}}
+    c.globalAlpha=1;}}
+  // flames above the brows
+  if(fx('flame')>.03){const k=fx('flame');
+    for(const sd of['L','R']){const e=EP[sd];if(!e||!e.cx)continue;
+      for(let j=0;j<3;j++){const bx=e.cx+(j-1)*.17,by=e.cy+e.h+.28;
+        const hgt=(.2+.09*Math.sin(T*11+j*2+(sd==='L'?0:1.7)))*k*(j===1?1.5:1);
+        const g=c.createLinearGradient(0,by,0,by+hgt);g.addColorStop(0,'rgba(255,90,20,.95)');g.addColorStop(1,'rgba(255,210,60,0)');
+        c.fillStyle=g;c.beginPath();c.moveTo(bx-.08,by);c.quadraticCurveTo(bx-.07,by+hgt*.5,bx+Math.sin(T*9+j)*.03,by+hgt);c.quadraticCurveTo(bx+.07,by+hgt*.5,bx+.08,by);c.closePath();c.fill();}}}
+  // scan line
+  if(fx('scan')>.03){const y=1-((T*.55)%1.15)*2.1;c.globalAlpha=Math.min(1,fx('scan'));
+    const g=c.createLinearGradient(0,y+.12,0,y-.12);g.addColorStop(0,rgba(col.fill,0));g.addColorStop(.5,rgba(col.core,.55));g.addColorStop(1,rgba(col.fill,0));
+    c.fillStyle=g;c.fillRect(-1.6,y-.12,3.2,.24);c.fillStyle=rgba(col.core,.95);c.fillRect(-1.6,y-.004,3.2,.008);c.globalAlpha=1;}
+  // sleep bubble
+  if(fx('bubble')>.03){const k=Math.min(1,fx('bubble')),r=(.05+.07*(.5+.5*Math.sin(T*1.7)))*k+.01;
+    c.strokeStyle=rgba(col.core,.9);c.lineWidth=.014;c.beginPath();c.arc(.34,-.5,r,0,TAU);c.stroke();
+    c.fillStyle='rgba(255,255,255,.7)';c.beginPath();c.arc(.34-r*.4,-.5+r*.4,r*.18,0,TAU);c.fill();}
+  // checkmark
+  if(fx('check')>.03){const k=fx('check');c.globalAlpha=Math.min(1,k);c.strokeStyle=rgba([90,255,140],1);c.lineWidth=.06*Math.min(1.1,k);c.beginPath();
+    const x=1.22,y=.72,s=.15*Math.min(1.2,k);c.moveTo(x-s,y);c.lineTo(x-s*.25,y-s*.75);c.lineTo(x+s*1.1,y+s*.7);c.stroke();c.globalAlpha=1;}
+  // warning triangle
+  if(fx('warn')>.03){const k=fx('warn'),pu=.55+.45*Math.sin(T*7);c.globalAlpha=Math.min(1,k)*pu;const x=1.22,y=.7,s=.17*Math.min(1.2,k);
+    c.strokeStyle=rgba(GOLD,1);c.lineWidth=.03;c.beginPath();c.moveTo(x,y+s);c.lineTo(x+s*1.05,y-s*.8);c.lineTo(x-s*1.05,y-s*.8);c.closePath();c.stroke();
+    c.fillStyle=rgba(GOLD,1);glyph(c,'!',x,y-.03,s*1.2);c.globalAlpha=1;}
+  // low battery
+  if(fx('battery')>.03){const k=Math.min(1,fx('battery')),x=1.05,y=.78;c.globalAlpha=k;c.strokeStyle=rgba(col.fill,.9);c.lineWidth=.02;
+    c.strokeRect(x,y,.3,.14);c.fillStyle=rgba(col.fill,.9);c.fillRect(x+.3,y+.04,.03,.06);
+    c.fillStyle=rgba(RED,(.4+.6*Math.max(0,Math.sin(T*5))));c.fillRect(x+.02,y+.02,.06,.1);c.globalAlpha=1;}
+  c.restore();
+}
+let exclaimT=-9, burstT=-9;
+const recoil={y:0,roll:0,vy:0,vr:0};
+function triggerBurst(){burstT=T;}
+function applyKick(k){if(!k)return;if(k.pop){for(const key of['L_w','L_h','R_w','R_h'])vel[key]+=k.pop*3.2;}if(k.recoil){recoil.vy+=k.recoil*14;recoil.vr+=(k.roll||0)*14;}if(k.burst)triggerBurst();if(k.pupil){vel.pup-=k.pupil*8;}}
+
+/* ---------- frame ---------- */
+let last=performance.now(),fpsAcc=0,fpsN=0,fpsShow=0;
+function frame(now){
+  requestAnimationFrame(frame);
+  let dt=Math.min(.05,(now-last)/1000);last=now;if(dt<=0)return;
+  T+=dt;
+  // springs
+  const sub=2,h=dt/sub;
+  for(let s=0;s<sub;s++)for(const k of KEYS){const[kk,cc]=SK[k];const a=kk*(target[k]-cur[k])-cc*vel[k];vel[k]+=a*h;cur[k]+=vel[k]*h;}
+  updateColours();
+
+  // gaze
+  gaze.next-=dt;
+  if(ui.life&&gaze.next<=0){gaze.tx=rnd(-.7,.7);gaze.ty=rnd(-.4,.4);gaze.next=rnd(1.1,3.8);if(Math.random()<.4){gaze.tx*=.25;gaze.ty*=.25;}}
+  if(!ui.life){gaze.tx=0;gaze.ty=0;}
+  let tx=gaze.tx,ty=gaze.ty;
+  if(ui.follow&&mouse.in){tx=mouse.x;ty=mouse.y;}
+  tx=clamp(tx+cur.gbx,-1.2,1.2);ty=clamp(ty+cur.gby,-1,1);
+  // actions
+  let ax=0,ay=0,aroll=0,agx=0,agy=0;
+  if(act.type){act.t+=dt;const p=act.t/act.dur;
+    if(p>=1)act.type=null;
+    else if(act.type==='nod'){ay=-.045*Math.sin(p*TAU*2)*(1-p);agy=-.5*Math.sin(p*TAU*2)*(1-p);}
+    else if(act.type==='shake'){ax=.05*Math.sin(p*TAU*3)*(1-p);agx=.9*Math.sin(p*TAU*3)*(1-p);aroll=.05*Math.sin(p*TAU*3)*(1-p);}
+    else if(act.type==='giggle'){ay=Math.abs(Math.sin(p*TAU*3))*.04*(1-p);}
+    else if(act.type==='double'){agx=p<.35?-1:(p<.6?1:0);}
+    else if(act.type==='eyeroll'){const a=p*TAU*1.1-Math.PI/2;agx=Math.cos(a)*1.1;agy=Math.sin(a)*.9+.2;}
+    else if(act.type==='lookaround'){agx=p<.25?-1:(p<.6?1:(p<.8?-.4:0));agy=p<.6?.1:0;}
+    else if(act.type==='jump'){ay=Math.abs(Math.sin(p*Math.PI))*.12*(1-p*.4);}
+    else if(act.type==='wiggle'){aroll=.1*Math.sin(p*TAU*4)*(1-p);ax=.03*Math.sin(p*TAU*4)*(1-p);}
+    else if(act.type==='tremble'){ax=(Math.random()-.5)*.03;ay=(Math.random()-.5)*.02;}
+  }
+  const kg=1-Math.exp(-dt*(ui.life?16:10));
+  gaze.x+=((tx+agx)-gaze.x)*kg;gaze.y+=((ty+agy)-gaze.y)*kg;
+
+  // face transforms
+  const breathAmp=cur.fx_breath;
+  const br=Math.sin(T*1.7)*.007*breathAmp, breathS=1+Math.sin(T*1.7)*.012*breathAmp;
+  const bounce=Math.abs(Math.sin(T*9))*.04*clamp(cur.fx_bounce,0,1.2);
+  const sh=clamp(cur.fx_shiver,0,1.2),shx=(Math.random()-.5)*.016*sh,shy=(Math.random()-.5)*.012*sh;
+  const roll=cur.roll+clamp(cur.fx_sway,0,1.2)*Math.sin(T*2.6)*.13+aroll+recoil.roll;
+  recoil.vy+=(-90*recoil.y-12*recoil.vy)*dt;recoil.y+=recoil.vy*dt;recoil.vr+=(-90*recoil.roll-12*recoil.vr)*dt;recoil.roll+=recoil.vr*dt;
+  const fx0=ax+shx,fy0=br+bounce+ay+shy+recoil.y;
+  const ox=gaze.x*.085,oy=gaze.y*.06;
+
+  // blink
+  let blink=blinkAmount(dt);
+  const spMax=Math.max(cur.sp_heart,cur.sp_x,cur.sp_spiral,cur.sp_star);
+  if(spMax>.5)blink=0;
+
+  // speech
+  updateSpeech(dt);
+
+  if(deviceRenderer&&rendererChoice.value==='device'){
+    const eyes=FaceLabDeviceEyes.packed(eyeOf('L'),eyeOf('R'),{
+      x:fx0,y:fy0,roll,gazeX:ox,gazeY:oy,breath:breathS,blink,
+    });
+    const look={...DEVICE_FACE.look,
+      grid:DEVICE_FACE.look.grid*(ui.grid/.3),
+      glow_r:DEVICE_FACE.look.glow_r*Math.max(.01,ui.bloom),
+    };
+    deviceRenderer.draw({x:0,y:0,w:1280,h:800},eyes,look);
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.globalCompositeOperation='copy';
+    ctx.drawImage(deviceCanvas,0,0,W,H);
+    ctx.globalCompositeOperation='source-over';
+  }else{
+  // ---- draw to lit layer
+  L.setTransform(1,0,0,1,0,0);L.globalCompositeOperation='source-over';L.globalAlpha=1;L.clearRect(0,0,W,H);
+  const Sx=H/2;
+  L.setTransform(Sx,0,0,-Sx,W/2,H/2);
+  L.save();
+  L.translate(fx0,fy0);L.rotate(roll);
+  // eyes (scale with breath about their own centre via h)
+  EP.L={};EP.R={};
+  const eL=eyeOf('L'),eR=eyeOf('R');
+  const keepL=cur.L_h,keepR=cur.R_h;cur.L_h*=breathS;cur.R_h*=breathS;
+  drawEye(L,'L',blink,ox,oy);drawEye(L,'R',blink,ox,oy);
+  cur.L_h=keepL;cur.R_h=keepR;
+  drawBrow(L,'L',ox,oy);drawBrow(L,'R',ox,oy);
+  drawMouth(L,ox,oy);
+  L.restore();
+  updateFx(dt);
+  drawFx(L);
+
+  if(cur.fx_glitch>.05&&Math.random()<.35+.4*cur.fx_glitch){
+    tmpC.width=W;tmpC.height=H;tmpX.drawImage(lit,0,0);
+    const n=2+(Math.random()*4|0);
+    for(let i=0;i<n;i++){const y=Math.random()*H,hh=H*(.015+Math.random()*.06),dx=(Math.random()-.5)*W*.09*cur.fx_glitch;
+      L.setTransform(1,0,0,1,0,0);L.clearRect(0,y,W,hh);L.drawImage(tmpC,0,y,W,hh,dx,y,W,hh);}
+    if(Math.random()<.3){L.globalAlpha=.5;L.globalCompositeOperation='lighter';L.drawImage(tmpC,W*.006,0);L.globalCompositeOperation='source-over';L.globalAlpha=1;}
+  }
+  // ---- composite
+  const bl=ui.bloom;
+  ctx.setTransform(1,0,0,1,0,0);ctx.globalCompositeOperation='source-over';ctx.globalAlpha=1;ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
+  if(bl>0){
+    S.setTransform(1,0,0,1,0,0);S.clearRect(0,0,small.width,small.height);S.drawImage(lit,0,0,small.width,small.height);
+    BA.setTransform(1,0,0,1,0,0);BA.clearRect(0,0,small.width,small.height);BB.setTransform(1,0,0,1,0,0);BB.clearRect(0,0,small.width,small.height);
+    if(HAS_FILTER){
+      BA.filter='blur(2.5px)';BA.drawImage(small,0,0);BA.filter='none';
+      BB.filter='blur(9px)';BB.drawImage(small,0,0);BB.filter='none';
+    } else {BA.drawImage(small,0,0);BB.drawImage(small,0,0);}
+    ctx.globalCompositeOperation='lighter';
+    ctx.globalAlpha=clamp(.95*bl,0,1.6);ctx.drawImage(blurB,0,0,W,H);
+    ctx.globalAlpha=clamp(.85*bl,0,1.6);ctx.drawImage(blurB,0,0,W,H);
+    ctx.globalAlpha=clamp(.8*bl,0,1.6);ctx.drawImage(blurA,0,0,W,H);
+    ctx.globalCompositeOperation='source-over';ctx.globalAlpha=1;
+  }
+  if(ui.grid>0&&gridPat){
+    L.setTransform(1,0,0,1,0,0);L.globalCompositeOperation='destination-out';L.globalAlpha=ui.grid;L.fillStyle=gridPat;L.fillRect(0,0,W,H);L.globalCompositeOperation='source-over';L.globalAlpha=1;
+  }
+  ctx.drawImage(lit,0,0);
+  }
+
+  fpsAcc+=dt;fpsN++;if(fpsAcc>.5){fpsShow=Math.round(fpsN/fpsAcc);fpsAcc=0;fpsN=0;fpsEl.textContent=fpsShow+' fps';}
+  if(ui.demo){demoT-=dt;if(demoT<=0){demoNext();}}
+}
+
+/* ---------- UI ---------- */
+const hud=document.getElementById('hud'),fpsEl=document.getElementById('fps');
+function label(id){return byId[id].label;}
+function setHud(){hud.textContent=(ui.B?label(ui.A)+' + '+label(ui.B):label(ui.A))+(tmpOverride?'  ·  '+label(tmpOverride):'');}
+function setEmotion(id,silent){
+  if(!byId[id])return;
+  ui.A=id;if(id==='surprise'||ui.B==='surprise')exclaimT=T;
+  blinkMul=(id==='sleepy'||id==='tired')?1.6:1;
+  computeTarget();setHud();if(!silent)applyKick(byId[id].kick);
+  document.querySelectorAll('#emoChips button').forEach(b=>b.classList.toggle('on',b.dataset.id===id));if(window.__drawPad)window.__drawPad();
+  if(!silent)emoSound(byId[id]);
+  if(id==='surprise'||id==='scared'||id==='excited')exclaimT=T;
+}
+function flash(id,ms){tmpOverride=id;exclaimT=T;computeTarget();setHud();emoSound(byId[id]);applyKick(byId[id].kick);setTimeout(()=>{tmpOverride=null;computeTarget();setHud();},ms);}
+
+const emoChips=document.getElementById('emoChips');
+let lastGroup=null;
+P.forEach((p,i)=>{
+  if(p.group!==lastGroup){const g=document.createElement('div');g.className='grp';g.textContent=p.group;emoChips.appendChild(g);lastGroup=p.group;}
+  const b=document.createElement('button');b.textContent=p.label;b.dataset.id=p.id;b.onclick=()=>{ui.demo=false;syncToggle('demo');setEmotion(p.id);};emoChips.appendChild(b);
+});
+const blendSel=document.getElementById('blendSel');
+blendSel.innerHTML='<option value="">— none —</option>'+P.map(p=>`<option value="${p.id}">${p.label}</option>`).join('');
+blendSel.onchange=()=>{ui.B=blendSel.value;computeTarget();setHud();};
+
+const FXCH=[['sweat','💧 Sweat'],['cry','😭 Tears'],['blush','Blush'],['hearts','♥ Hearts'],['sparkle','✦ Sparkle'],['zzz','Zzz'],['question','? Question'],['exclaim','! Exclaim'],['anger','Anger mark'],['steam','Steam'],['notes','♪ Notes'],['bulb','Idea bulb'],['dots','… Dots'],['gloom','Gloom'],['shiver','Shiver'],['bounce','Bounce'],['sway','Sway'],['snow','❄ Snow'],['flame','🔥 Flames'],['glitch','Glitch'],['scan','Scan line'],['bubble','Sleep bubble'],['check','✓ Success'],['warn','⚠ Warning'],['battery','Low battery']];
+const fxChips=document.getElementById('fxChips');
+FXCH.forEach(([k,l])=>{const b=document.createElement('button');b.textContent=l;b.onclick=()=>{manual[k]=!manual[k];if(manual[k])chooseRenderer('concept');b.classList.toggle('on',manual[k]);computeTarget();};fxChips.appendChild(b);});
+const actChips=document.getElementById('actChips');
+[['Blink',()=>doBlink()],['Nod yes',()=>startAct('nod',.9)],['Shake no',()=>startAct('shake',.9)],['Double take',()=>startAct('double',1.1)],['Giggle',()=>{startAct('giggle',.9);chirp(700,1000,.08);setTimeout(()=>chirp(760,1100,.08),110);}],['Gasp',()=>flash('surprise',900)],['Poke',()=>poke()],['Eye roll',()=>startAct('eyeroll',1.3)],['Look around',()=>startAct('lookaround',1.8)],['Jump',()=>startAct('jump',.5)],['Wiggle',()=>startAct('wiggle',1)],['Tremble',()=>startAct('tremble',1.2)],['Startle burst',()=>{triggerBurst();applyKick({pop:.5,recoil:.05,roll:.02});}]].forEach(([l,f])=>{const b=document.createElement('button');b.textContent=l;b.onclick=f;actChips.appendChild(b);});
+
+function bindRange(id,fn,fmt){const el=document.getElementById(id),out=document.getElementById(id+'O');const u=()=>{fn(+el.value);if(out)out.textContent=el.value+'%';};el.oninput=u;}
+bindRange('intensity',v=>{ui.inten=v/100;computeTarget();});
+bindRange('blend',v=>{ui.mix=v/100;computeTarget();});
+bindRange('bloom',v=>{ui.bloom=v/100;});
+bindRange('grid',v=>{ui.grid=v/100;});
+
+const TOG=[['brows','Brows'],['mouth','Mouth'],['fx','Emotes'],['details','Eye details'],['colour','Mood colour'],['life','Idle life'],['follow','Follow cursor'],['sound','Chirps'],['demo','Auto-demo'],['original','Original face (eyes only)']];
+const togWrap=document.getElementById('toggles'),togBtn={};
+TOG.forEach(([k,l])=>{const b=document.createElement('button');b.textContent=l;togBtn[k]=b;b.classList.toggle('on',ui[k]);
+  b.onclick=()=>{ui[k]=!ui[k];b.classList.toggle('on',ui[k]);if(ui[k]&&['brows','mouth','fx','details','colour'].includes(k))chooseRenderer('concept');if(k==='sound'&&ui[k]){ensureAudio();chirp(500,900,.1);}if(k==='demo'&&ui[k])demoT=0;computeTarget();};togWrap.appendChild(b);});
+const STYLES=[['Eyes only',{brows:0,mouth:0,fx:0,details:0,colour:0}],['Eyes + brows',{brows:1,mouth:0,fx:0,details:0,colour:0}],['Eyes + mouth',{brows:0,mouth:1,fx:0,details:0,colour:0}],['Expressive',{brows:1,mouth:1,fx:0,details:0,colour:0}],['Full',{brows:1,mouth:1,fx:1,details:1,colour:1}]];
+const styleWrap=document.getElementById('styles');
+STYLES.forEach(([n,f])=>{const b=document.createElement('button');b.textContent=n;b.onclick=()=>{Object.entries(f).forEach(([k,v])=>{ui[k]=!!v;syncToggle(k);});chooseRenderer(Object.values(f).some(Boolean)?'concept':'device');ui.original=false;syncToggle('original');computeTarget();};styleWrap.appendChild(b);});
+function syncToggle(k){togBtn[k].classList.toggle('on',ui[k]);}
+
+let demoT=0,demoI=0;
+const DEMO=['neutral','attentive','curiosity','surprise','joy','laugh','love','wink','smug','mischief','angry','annoyed','sad','crying','concern','nervous','scared','embarrassed','confused','thinking','idea','excited','starstruck','sing','bored','sleepy','asleep','dizzy','ko','sick','proud','cheeky'];
+function demoNext(){setEmotion(DEMO[demoI++%DEMO.length]);demoT=3.2;}
+
+function poke(){flash('surprise',700);doBlink();chirp(900,1400,.07,.05);}
+
+// ---- filter + count
+document.getElementById('count').textContent='· '+P.length;
+document.getElementById('filter').addEventListener('input',e=>{
+  const q=e.target.value.trim().toLowerCase();
+  const kids=[...emoChips.children];let showGrp=null,any=false;
+  for(let i=kids.length-1;i>=0;i--){const el=kids[i];
+    if(el.classList.contains('grp')){el.style.display=any?'':'none';any=false;}
+    else{const ok=!q||el.textContent.toLowerCase().includes(q);el.style.display=ok?'':'none';if(ok)any=true;}}
+});
+document.getElementById('filter').addEventListener('keydown',e=>e.stopPropagation());
+
+// ---- mood pad: every expression gets a valence/arousal position from its own numbers
+const GBIAS={[G.happy]:.25,'Warm & social':.25,[G.sad]:-.2,'Tense & unwell':-.2,[G.mad]:-.3,[G.play]:.1};
+function hash01(str){let h=2166136261;for(const ch of str){h^=ch.charCodeAt(0);h=Math.imul(h,16777619);}return((h>>>0)%1000)/1000;}
+P.forEach(p=>{
+  const f=p.f;
+  let v=clamp(4.2*(f.m_corner+.55*f.m_arc)+(GBIAS[p.group]||0)+(f.sp_heart?.3:0)-(f.fx_gloom*.3)-(f.fx_cry*.2),-1,1);
+  let a=clamp((f.L_h-.34)*3.2+f.m_open*.5+f.fx_bounce*.5+f.fx_shiver*.4+f.fx_sparkle*.25+(f.fx_anger?.3:0)-(f.L_glow<.7?.45:0)-f.fx_zzz*.5-(f.L_h<.2?.3:0),-1,1);
+  v=clamp(v+(hash01(p.id)-.5)*.22,-1,1);a=clamp(a+(hash01(p.id+'a')-.5)*.22,-1,1);
+  p.pad={v,a};
+});
+const pad=document.getElementById('pad'),px=pad.getContext('2d');
+function drawPad(sel){
+  const w=pad.width,h=pad.height;px.clearRect(0,0,w,h);
+  px.strokeStyle='#17232d';px.lineWidth=1;px.beginPath();px.moveTo(w/2,0);px.lineTo(w/2,h);px.moveTo(0,h/2);px.lineTo(w,h/2);px.stroke();
+  px.font='11px ui-monospace,Menlo,monospace';px.fillStyle='#2a4050';px.textAlign='center';
+  px.fillText('INTENSE',w/2,14);px.fillText('CALM',w/2,h-6);px.textAlign='left';px.fillText('UNHAPPY',6,h/2-5);px.textAlign='right';px.fillText('HAPPY',w-6,h/2-5);
+  for(const p of P){const x=(p.pad.v+1)/2*(w-40)+20,y=(1-(p.pad.a+1)/2)*(h-40)+20;const on=p.id===ui.A||p.id===ui.B;
+    px.fillStyle=on?'#2defff':'#2f6a78';px.beginPath();px.arc(x,y,on?5:3,0,TAU);px.fill();
+    if(on||p.id===padHover){px.fillStyle='#cfe6ef';px.font='11px ui-sans-serif,system-ui';px.textAlign=x>w*.7?'right':'left';px.fillText(p.label,x+(x>w*.7?-8:8),y+4);}}
+  if(sel){px.strokeStyle='#2defff88';px.beginPath();px.arc(sel[0],sel[1],10,0,TAU);px.stroke();}
+}
+let padHover=null,padDown=false;
+function padPick(ev){
+  const rc=pad.getBoundingClientRect(),x=(ev.clientX-rc.left)/rc.width,y=(ev.clientY-rc.top)/rc.height;
+  const v=x*2-1,a=1-y*2;
+  const ds=P.map(p=>({p,d:Math.hypot((p.pad.v-v)*1,(p.pad.a-a)*1)})).sort((m,n)=>m.d-n.d);
+  const A=ds[0],B=ds[1];padHover=A.p.id;
+  if(!padDown)return drawPad();
+  ui.demo=false;syncToggle('demo');
+  if(A.d<.06){ui.B='';}
+  else{ui.B=B.p.id;ui.mix=clamp(A.d/(A.d+B.d),0,.5);}
+  blendSel.value=ui.B;document.getElementById('blend').value=Math.round(ui.mix*100);document.getElementById('blendO').textContent=Math.round(ui.mix*100)+'%';
+  if(ui.A!==A.p.id)setEmotion(A.p.id);else{computeTarget();setHud();}
+  drawPad([(x)*pad.width,y*pad.height]);
+}
+pad.addEventListener('pointerdown',e=>{padDown=true;pad.setPointerCapture(e.pointerId);padPick(e);});
+pad.addEventListener('pointermove',padPick);
+pad.addEventListener('pointerup',()=>{padDown=false;});
+pad.addEventListener('pointerleave',()=>{padHover=null;drawPad();});
+window.__drawPad=()=>drawPad();drawPad();
+const _setEmotion=setEmotion;
+
+// ---- scenes: short scripted stories
+const SCENES={
+ 'Wake up':[['asleep',2.2],['sleepy',2],['p_wake',1.6,'blink'],['attentive',1.2,'lookaround'],['joy',2.2]],
+ 'Jump scare':[['neutral',1.4,'lookaround'],['surprise',1.3],['scared',1.8],['nervous',1.6],['embarrassed',1.6],['laugh',2.2]],
+ 'Heartbreak':[['joy',1.3],['love',1.8],['concern',1.3],['sad',1.6],['heartbroken',2],['crying',3]],
+ 'Plot twist':[['thinking',1.8],['idea',1.4],['mischief',1.6],['smug',1.4],['laugh',2.2]],
+ 'Meltdown':[['annoyed',1.4],['grumpy',1.4],['angry',1.8],['raging',2.2],['dizzy',1.8],['ko',2],['dazed',1.6]],
+ 'Flirt':[['smug',1.4],['flirty',1.6],['wink',1.4],['love',1.8],['bashful',2]],
+ 'Boot up':[['muted',.8],['loading',1.6],['p_glitch',1.4],['p_scan',1.8],['p_success',1.6],['attentive',1.5],['joy',1.8]],
+ 'Bad news':[['neutral',1,'blink'],['p_processing',1.6],['concern',1.6],['disappointed',1.8],['resigned',1.8],['p_deadpan',1.6]],
+ 'Cold night':[['neutral',1],['freezing',2.8],['cozy',2.4],['sleepy',1.8],['asleep',2.5]],
+};
+let sceneTok=0;
+function runScene(steps){
+  const tok=++sceneTok;ui.demo=false;syncToggle('demo');
+  const list=steps.filter(s=>byId[s[0]]);let i=0;
+  (function next(){if(tok!==sceneTok||i>=list.length)return;
+    const[id,sec,a]=list[i++];ui.B='';blendSel.value='';setEmotion(id);if(a==='blink')doBlink();else if(a)startAct(a,1.4);
+    setTimeout(next,sec*1000);})();
+}
+const sceneChips=document.getElementById('sceneChips');
+for(const[name,st]of Object.entries(SCENES)){const b=document.createElement('button');b.textContent='▶ '+name;b.onclick=()=>runScene(st);sceneChips.appendChild(b);}
+// manual picks cancel a running scene
+emoChips.addEventListener('click',()=>{sceneTok++;});
+
+// pointer
+const screen=document.getElementById('screen');
+screen.addEventListener('pointermove',e=>{const rc=screen.getBoundingClientRect();mouse.in=true;mouse.x=clamp(((e.clientX-rc.left)/rc.width-.5)*2,-1,1);mouse.y=clamp(-((e.clientY-rc.top)/rc.height-.5)*2,-1,1);});
+screen.addEventListener('pointerleave',()=>mouse.in=false);
+screen.addEventListener('click',poke);
+
+// say
+const sayInput=document.getElementById('sayText');
+document.getElementById('sayBtn').onclick=()=>sayText(sayInput.value);
+sayInput.addEventListener('keydown',e=>{if(e.key==='Enter')sayText(sayInput.value);e.stopPropagation();});
+
+// keys
+addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;
+  const idx=P.findIndex(p=>p.id===ui.A);
+  if(e.key==='ArrowRight'){setEmotion(P[(idx+1)%P.length].id);e.preventDefault();}
+  else if(e.key==='ArrowLeft'){setEmotion(P[(idx-1+P.length)%P.length].id);e.preventDefault();}
+  else if(e.key===' '){setEmotion(P[Math.floor(Math.random()*P.length)].id);e.preventDefault();}
+  else if(e.key==='d'||e.key==='D'){ui.demo=!ui.demo;syncToggle('demo');demoT=0;}
+  else if(e.key==='b'||e.key==='B')doBlink();
+  else if(/^[1-9]$/.test(e.key))setEmotion(P[+e.key-1].id);
+});
+
+// test hook
+window.pip={set:setEmotion,P,cur,ui,say:sayText,flash,act:startAct,manual,computeTarget,snap(){for(const k of KEYS){cur[k]=target[k];vel[k]=0;}}};
+
+resize();setEmotion('neutral',true);
+requestAnimationFrame(t=>{last=t;frame(t);});
+})();
+</script>
+</body>
+</html>

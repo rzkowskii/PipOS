@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -172,6 +173,7 @@ class ChooseTtsTests(unittest.TestCase):
         self.state = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.now = 1_800_000_000.0
         self.enterContext(patch.dict(ve._silent, clear=True))
+        self.enterContext(patch.object(ve, "RUN_STATE", self.state / "run" / "tts.json"))
 
     def choose(self, preference, piper, **options):
         return ve.choose_tts(preference, state_dir=self.state, build="b1", engine=piper, now=self.now, **options)
@@ -300,6 +302,7 @@ class ProbeTests(unittest.TestCase):
         self.state = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.now = 1_800_000_000.0
         self.enterContext(patch.dict(ve._silent, clear=True))
+        self.enterContext(patch.object(ve, "RUN_STATE", self.state / "run" / "tts.json"))
 
     def choose(self, preference, piper, **options):
         # Made here, so a voice that fails is the chooser's to unload.
@@ -403,6 +406,7 @@ class ProbeTests(unittest.TestCase):
     def test_a_clause_failure_later_is_kept_for_this_build(self):
         piper = FakePiper()
         self.assertIs(self.choose("auto", piper)[0], piper)
+        self.assertTrue(piper.sticky, "only the voice organ's engine silences itself")
         piper.on_silent("a clause took more than 9 s")
         self.assertEqual(ve.silent_reason("b1", piper), "a clause took more than 9 s")
         engine, note = self.choose("auto", FakePiper())
@@ -504,6 +508,45 @@ class ChooseAsrTests(unittest.TestCase):
         self.assertIsNone(self.refresh(broken)[1])
         self.assertEqual(builds, [1])   # the second refresh waited instead of loading again
 
+    def test_refresh_switches_on_a_kept_speed_without_measuring_again(self):
+        # The hardware smoke keeps Moonshine's speed; a running voice's refresh then adopts it.
+        self.enterContext(patch.dict(ve._failures, clear=True))
+        self.enterContext(patch.dict("os.environ", {"BEING_ASR_ENGINE": "auto"}))
+        self.install(wav=False)
+        built = []
+
+        def factory():
+            built.append(type("Engine", (), {"recognizer": FakeMoonshine(), "vad": FakeMoonshine()})())
+            return built[-1]
+
+        ve.record(self.state, "asr", ve.asr_key("b1", "tiny"), {"rtf": 0.9, "runs": [0.9]}, self.now)
+        self.assertIsNone(self.refresh(factory)[1])
+        self.assertEqual(built, [], "a speed over the limit loads nothing")
+        ve.record(self.state, "asr", ve.asr_key("b1", "tiny"), {"rtf": 0.138, "runs": [0.138]}, self.now)
+        self.assertIsNone(self.refresh(factory, idle=False)[1])
+        self.assertEqual(built, [])
+        with patch.object(ve, "measure_asr", side_effect=AssertionError("measured again")):
+            wake, result = self.refresh(factory)
+        engine, note = result
+        self.assertIs(engine, built[0])
+        self.assertIn("0.14", note)
+
+    def test_refresh_with_a_kept_speed_backs_off_when_moonshine_will_not_load(self):
+        self.enterContext(patch.dict(ve._failures, clear=True))
+        self.enterContext(patch.dict("os.environ", {"BEING_ASR_ENGINE": "auto"}))
+        self.install()
+        ve.record(self.state, "asr", ve.asr_key("b1", "tiny"), {"rtf": 0.138, "runs": [0.138]}, self.now)
+        builds = []
+
+        def broken():
+            builds.append(1)
+            from mind import sherpa
+            raise sherpa.Unavailable("the model would not load")
+
+        self.assertIsNone(self.refresh(broken)[1])
+        self.assertIsNone(self.refresh(broken)[1])
+        self.assertEqual(builds, [1])
+
     def test_forced_moonshine_skips_the_speed_rule(self):
         self.install()
         ve.record(self.state, "asr", ve.asr_key("b1", "tiny"), {"rtf": 0.9, "runs": [0.9]}, self.now)
@@ -534,6 +577,7 @@ class HandlerTests(unittest.TestCase):
     def setUp(self):
         self.state = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(patch.dict(ve._silent, clear=True))
+        self.enterContext(patch.object(ve, "RUN_STATE", self.state / "run" / "tts.json"))
         self.sent = []
         self.piper = FakePiper()
         self.enterContext(patch.object(ve, "_piper", return_value=self.piper))
@@ -592,24 +636,66 @@ class HandlerTests(unittest.TestCase):
         # Guests may ask.
         self.assertIsNotNone(self.say("Which voice are you using?", guest=True))
 
-    def test_which_voice_is_honest_after_the_natural_voice_fell_back(self):
-        # The voice organ (another process) reports Flite where the natural voice was expected.
+    def report(self, why="the voice produced no audio", pid=None, build="b1"):
+        """What the voice organ (another process) writes when the natural voice made no sound."""
+        ve._write_json(ve.RUN_STATE, {"key": ve.tts_key(build, self.piper), "reason": why,
+                                      "pid": os.getpid() if pid is None else pid})
+
+    def test_speaking_flite_alone_is_not_a_fall_back(self):
+        # While the natural voice loads, or with being.tts=flite, the voice reports Flite.
         self.assertEqual(self.say("Which voice are you using?", voice={"tts": "flite"}).line,
-                         "[neutral] I'm using my original voice. My natural voice isn't working here right now.")
+                         "[neutral] I'm using my original voice for now.")
         reply = self.say("Use your natural voice", voice={"tts": "flite"})
-        self.assertEqual(reply.line, "[concern] My natural voice isn't working here right now, so I'll keep "
-                                     "this one for now.")
+        self.assertEqual(reply.line, "[joy] Okay, I'll use my natural voice.")
         self.assertEqual(self.sent, [("voice.engine", {"tts": "piper"})])
-        # In the process where the probe failed, the reason is known.
-        ve._keep_silent("b1", self.piper, "the voice produced no audio")
+
+    def test_which_voice_is_honest_after_the_natural_voice_fell_back(self):
+        self.report()
         for voice in ({}, {"tts": "flite"}):
             self.assertEqual(self.say("Which voice are you using?", voice=voice).line,
                              "[neutral] I'm using my original voice. My natural voice made no sound on this "
                              "laptop, so I switched.")
-        # The owner's own choice of the original voice is not a fall-back.
+        reply = self.say("Use your natural voice", voice={"tts": "flite"})
+        self.assertEqual(reply.line, "[concern] My natural voice made no sound on this laptop, so I'll keep "
+                                     "this one for now.")
+        self.assertEqual(self.sent, [("voice.engine", {"tts": "piper"})])
+        # The owner's own choice of the original voice is not a fall-back...
         ve.save_preference(self.state, "flite")
         self.assertEqual(self.say("what voice is this", voice={"tts": "flite"}).line,
                          "[neutral] I'm using my original voice.")
+        # ...but asking for the natural voice again still makes no promise.
+        self.assertEqual(self.say("Use your natural voice", voice={"tts": "flite"}).line,
+                         "[concern] My natural voice made no sound on this laptop, so I'll keep this one for now.")
+        # The voice organ speaking with the natural voice wins over an old report.
+        ve.save_preference(self.state, "auto")
+        self.assertIn("natural voice, Alba", self.say("Which voice are you using?", voice={"tts": "piper"}).line)
+
+    def test_a_report_from_a_voice_that_has_gone_or_another_build_counts_for_nothing(self):
+        dead = 2 ** 22 + 12345
+        with patch.object(ve, "_alive", side_effect=lambda pid: pid != dead):
+            self.report(pid=dead)
+            self.assertIsNone(ve.tts_status(self.state)["silent"])
+            self.report(build="b0")
+            self.assertIsNone(ve.tts_status(self.state)["silent"])
+            self.report()
+            status = ve.tts_status(self.state)
+        self.assertEqual((status["active"], status["silent"]), ("flite", "the voice produced no audio"))
+        self.assertTrue(ve._alive(os.getpid()))
+        self.assertFalse(ve._alive("1"))
+
+    def test_the_voice_organ_reports_its_fall_back_to_setup_and_clears_it_when_the_voice_speaks(self):
+        # Setup's voice page is another process: it reads the report, not the voice's RAM.
+        ve._keep_silent("b1", self.piper, "the voice produced no audio")
+        report = json.loads(ve.RUN_STATE.read_text())
+        self.assertEqual(report, {"key": ve.tts_key("b1", self.piper), "reason": "the voice produced no audio",
+                                  "pid": os.getpid()})
+        ve._silent.clear()
+        status = ve.tts_status(self.state)
+        self.assertEqual((status["active"], status["silent"]), ("flite", "the voice produced no audio"))
+        # After a restart whose probe passes, the report goes.
+        ve._clear_silent("b1", self.piper)
+        self.assertFalse(ve.RUN_STATE.exists())
+        self.assertEqual(ve.tts_status(self.state)["active"], "piper")
 
     def test_other_words_pass(self):
         self.assertIsNone(self.say("tell me a joke"))

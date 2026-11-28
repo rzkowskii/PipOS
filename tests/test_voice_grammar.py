@@ -72,7 +72,7 @@ class Policy(unittest.TestCase):
 
     def test_every_offered_phrase_is_a_safe_command_in_every_context(self):
         grammar = self.grammar()
-        self.assertEqual([phrase for phrase in command_phrases() if not grammar.safe(phrase)], [])
+        self.assertEqual([phrase for phrase in command_phrases() if not grammar.safe_meaning(phrase)], [])
 
     def test_destructive_and_unknown_phrases_are_never_safe(self):
         grammar = self.grammar()

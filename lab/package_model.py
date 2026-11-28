@@ -313,11 +313,14 @@ def main(argv=None):
     parser.add_argument("--certificate", required=True, type=Path)
     parser.add_argument("--key", required=True, type=Path)
     parser.add_argument("--roles", default=",".join(IMAGE_ROLES),
-                        help="comma-separated roles to stage (default: every image role)")
+                        help="comma-separated roles to stage (default: every image role; optionally add vision)")
     parser.add_argument("--bench", action="store_true", help="also stage out/models/bench as /models/bench")
     args = parser.parse_args(argv)
     roles = [role for role in args.roles.split(",") if role]
-    unknown = [role for role in roles if role not in IMAGE_ROLES]
+    # Vision is an owner-selected optional pack: it is accepted when named
+    # explicitly, but remains absent from the default IMAGE_ROLES expansion.
+    explicit_roles = set(IMAGE_ROLES) | {"vision"}
+    unknown = [role for role in roles if role not in explicit_roles]
     if unknown:
         parser.error(f"unknown roles: {', '.join(unknown)}")
     if "conversation" not in roles:

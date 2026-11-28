@@ -9,6 +9,7 @@ from pathlib import Path
 
 from mind.memory import Memory
 from mind.night_shift import DREAMING, ORDER, Gate, NightShift, VectorJob, standard_jobs, upkeep_only
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 OPEN = Gate(night=True, on_ac=True, body_ok=True)
 
@@ -113,17 +114,17 @@ class Gating(unittest.IsolatedAsyncioTestCase):
         results = await shift.step(upkeep_only(), night="2026-11-24")
         self.assertEqual(log, [name for name in ORDER if name not in DREAMING])
         self.assertEqual({name for name, result in results.items() if result == "waiting"}, set(DREAMING))
-        self.assertEqual(DREAMING, {"journal", "dream"}, "the database check, vectors, backup and re-warm never wait")
+        self.assertEqual(DREAMING, {"journal", "dream", "core"}, "the database check, vectors, backup and re-warm never wait")
         self.assertTrue(shift.settled(dreams=False))
         self.assertFalse(shift.settled(dreams=True), "consent given later: the dreams are still owed tonight")
         # The owner says yes the same night: only the dreams are left to run.
         await shift.step(OPEN, night="2026-11-24")
-        self.assertEqual(log[-2:], ["journal", "dream"])
+        self.assertEqual(log[-3:], ["journal", "dream", "core"])
         self.assertTrue(shift.settled(dreams=True))
 
     async def test_a_gate_without_consent_refuses_only_the_dreaming_jobs(self):
         gate = Gate(night=True, on_ac=True, body_ok=True, dreams=False)
-        self.assertEqual([name for name in ORDER if not gate.allows(name)], ["journal", "dream"])
+        self.assertEqual([name for name in ORDER if not gate.allows(name)], ["journal", "dream", "core"])
         self.assertTrue(OPEN.allows("dream"), "a gate that does not mention consent keeps its old meaning")
         self.assertFalse(upkeep_only(False).allows("checkpoint"))
 
@@ -293,7 +294,7 @@ class MemoryJobs(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(memory.close)
             ended, outcome = threading.Event(), []
 
-            def slow_optimise(db=None):
+            def slow_maintain(db=None, *, force=False):
                 # Seconds of SQLite work: a VACUUM or quick_check of a big
                 # archive on the old laptop's disk.
                 self.assertIsNotNone(db, "the night's own connection, not memory's")
@@ -308,7 +309,7 @@ class MemoryJobs(unittest.IsolatedAsyncioTestCase):
                 finally:
                     ended.set()
 
-            memory.optimize_search = slow_optimise
+            memory.maintain_search = slow_maintain
             shift = NightShift()
             shift.register("search", standard_jobs(NightShift(), memory, owner="R", night="n").jobs["search"])
             task = asyncio.create_task(shift.step(OPEN))

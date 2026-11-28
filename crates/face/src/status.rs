@@ -1,5 +1,5 @@
-//! What the face shows about privacy that the bus does not carry: guest mode,
-//! a live network link and an open SSH (maintenance) session. A background
+//! Privacy readings from the host: guest mode, network, SSH, ALSA capture,
+//! and the internal camera's USB authorisation. A background
 //! thread looks once a second, so no file or /proc read ever lands on a frame.
 //!
 //! Each reading is honest about its source:
@@ -20,10 +20,32 @@ const NETWORK: u8 = 2;
 const SSH: u8 = 4;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Reading {
+    #[default]
+    Unknown = 0,
+    Closed = 1,
+    Open = 2,
+}
+
+impl Reading {
+    fn decode(bits: u8) -> Self {
+        match bits & 3 {
+            1 => Self::Closed,
+            2 => Self::Open,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Privacy {
     pub guest: bool,
     pub network: bool,
     pub ssh: bool,
+    pub mic: Reading,
+    pub mic_latched: bool,
+    pub camera_usb: Reading,
 }
 
 /// The latest reading, shared with the poller thread.
@@ -60,10 +82,18 @@ impl Watch {
 
 fn encode(p: Privacy) -> u8 {
     (if p.guest { GUEST } else { 0 }) | (if p.network { NETWORK } else { 0 }) | (if p.ssh { SSH } else { 0 })
+        | ((p.mic as u8) << 3) | ((p.camera_usb as u8) << 5) | (u8::from(p.mic_latched) << 7)
 }
 
 fn decode(bits: u8) -> Privacy {
-    Privacy { guest: bits & GUEST != 0, network: bits & NETWORK != 0, ssh: bits & SSH != 0 }
+    Privacy {
+        guest: bits & GUEST != 0,
+        network: bits & NETWORK != 0,
+        ssh: bits & SSH != 0,
+        mic: Reading::decode(bits >> 3),
+        mic_latched: bits & (1 << 7) != 0,
+        camera_usb: Reading::decode(bits >> 5),
+    }
 }
 
 fn under(root: &Path, path: &str) -> PathBuf {
@@ -71,7 +101,78 @@ fn under(root: &Path, path: &str) -> PathBuf {
 }
 
 pub fn read(root: &Path) -> Privacy {
-    Privacy { guest: under(root, GUEST_FILE).exists(), network: network_up(root), ssh: ssh_session(root) }
+    Privacy {
+        guest: under(root, GUEST_FILE).exists(),
+        network: network_up(root),
+        ssh: ssh_session(root),
+        mic: mic_stream(root),
+        mic_latched: under(root, "/run/being/mic-policy-breach").is_file(),
+        camera_usb: camera_usb(root),
+    }
+}
+
+fn numbered(name: &std::ffi::OsStr, prefix: &str, suffix: &str) -> bool {
+    name.to_str()
+        .and_then(|name| name.strip_prefix(prefix))
+        .and_then(|rest| rest.strip_suffix(suffix))
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|c| c.is_ascii_digit()))
+}
+
+fn mic_stream(root: &Path) -> Reading {
+    let Ok(cards) = std::fs::read_dir(under(root, "/proc/asound")) else { return Reading::Unknown };
+    let mut closed = false;
+    let mut incomplete = false;
+    for card in cards.flatten().take(64).filter(|entry| numbered(&entry.file_name(), "card", "")) {
+        let card = card.path();
+        let Ok(id) = std::fs::read_to_string(card.join("id")) else {
+            incomplete = true;
+            continue;
+        };
+        if id.trim() == "Loopback" {
+            continue;
+        }
+        let Ok(pcms) = std::fs::read_dir(card) else {
+            incomplete = true;
+            continue;
+        };
+        for pcm in pcms.flatten().take(64).filter(|entry| numbered(&entry.file_name(), "pcm", "c")) {
+            let Ok(streams) = std::fs::read_dir(pcm.path()) else {
+                incomplete = true;
+                continue;
+            };
+            for stream in streams.flatten().take(64).filter(|entry| numbered(&entry.file_name(), "sub", "")) {
+                let value = std::fs::read_to_string(stream.path().join("status"));
+                match value.as_deref().ok().and_then(|text| text.lines().next()).map(str::trim) {
+                    Some("closed") => closed = true,
+                    Some(state) if state.starts_with("state:") => return Reading::Open,
+                    _ => incomplete = true,
+                }
+            }
+        }
+    }
+    if closed && !incomplete { Reading::Closed } else { Reading::Unknown }
+}
+
+fn camera_usb(root: &Path) -> Reading {
+    let Some((vendor, product)) = bus::body_map::at(root).camera else { return Reading::Unknown };
+    let Ok(devices) = std::fs::read_dir(under(root, "/sys/bus/usb/devices")) else {
+        return Reading::Unknown;
+    };
+    let mut blocked = false;
+    let mut incomplete = false;
+    for device in devices.flatten().take(128) {
+        let path = device.path();
+        let matches = |name: &str, value| std::fs::read_to_string(path.join(name))
+            .is_ok_and(|contents| contents.trim() == value);
+        if matches("idVendor", vendor) && matches("idProduct", product) {
+            match std::fs::read_to_string(path.join("authorized")).as_deref().map(str::trim) {
+                Ok("1") => return Reading::Open,
+                Ok("0") => blocked = true,
+                _ => incomplete = true,
+            }
+        }
+    }
+    if blocked && !incomplete { Reading::Closed } else { Reading::Unknown }
 }
 
 /// Any interface but loopback that the kernel calls up.
@@ -158,7 +259,11 @@ mod tests {
         write(root, "/sys/class/net/eth0/operstate", b"up\n");
         write(root, "/proc/201/cmdline", b"sshd-session: root@notty\0");
         write(root, "/run/being/guest", b"");
-        assert_eq!(read(root), Privacy { guest: true, network: true, ssh: true });
+        assert_eq!(read(root), Privacy { guest: true, network: true, ssh: true, ..Privacy::default() });
+        write(root, "/run/being/mic-policy-breach", b"latched\n");
+        let latched = read(root);
+        assert!(latched.mic_latched);
+        assert_eq!(decode(encode(latched)), latched);
     }
 
     #[test]

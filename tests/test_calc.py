@@ -177,6 +177,16 @@ class Review(unittest.TestCase):
         self.assertEqual(calc.answer("what's 6 × 7"), "[neutral] Six times seven is forty-two.")
         self.assertEqual(calc.answer("what's 12 ÷ 4"), "[neutral] Twelve divided by four is three.")
 
+    def test_keyboard_uses_bounded_exact_arithmetic(self):
+        for expression, result in (
+            ("(2 + 3)*4", "20"), ("0.1 + .2", "0.3"), ("2.", "2"),
+            ("-2^2", "-4"), ("2^3^2", "512"), ("1/3", "About 0.333"),
+        ):
+            self.assertEqual(calc.keyboard(expression), (result, False), expression)
+        for expression in ("2 * *3", "2 3", "4+oops", "[1, 2]", "2//3", "2^101", "2 / 0",
+                           "(((1/9)^99)^99)^99", "9" * 73):
+            self.assertTrue(calc.keyboard(expression)[1], expression)
+
     def test_long_input_is_not_a_sum(self):
         self.assertIsNone(calc.answer("what's " + " plus ".join(["1"] * 2000)))
         self.assertIsNone(calc.answer("what's " + " plus ".join(["1"] * 60)))

@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "scenarios": [
+    {
+      "name": "echo-only-does-not-interrupt",
+      "seed": 4101,
+      "rate": 16000,
+      "duration_ms": 4000,
+      "frame_ms": 10,
+      "echo_lag_ms": 47,
+      "echo_gain": 0.34,
+      "residual_rms_threshold": 0.025,
+      "hold_ms": 150,
+      "interruptions": [],
+      "expect": {"false_candidates_max": 0, "missed_interruptions_max": 0}
+    },
+    {
+      "name": "owner-barges-in-over-echo",
+      "seed": 4102,
+      "rate": 16000,
+      "duration_ms": 5000,
+      "frame_ms": 10,
+      "echo_lag_ms": 61,
+      "echo_gain": 0.42,
+      "residual_rms_threshold": 0.025,
+      "hold_ms": 150,
+      "interruptions": [
+        {"start_ms": 1800, "end_ms": 2600, "gain": 0.16}
+      ],
+      "expect": {"false_candidates_max": 0, "detected_interruptions_min": 1, "missed_interruptions_max": 0}
+    },
+    {
+      "name": "short-room-noise-is-not-barge-in",
+      "seed": 4103,
+      "rate": 16000,
+      "duration_ms": 4000,
+      "frame_ms": 10,
+      "echo_lag_ms": 38,
+      "echo_gain": 0.28,
+      "residual_rms_threshold": 0.025,
+      "hold_ms": 150,
+      "interruptions": [],
+      "disturbances": [
+        {"start_ms": 2100, "end_ms": 2180, "gain": 0.2}
+      ],
+      "expect": {"false_candidates_max": 0, "missed_interruptions_max": 0}
+    }
+  ]
+}

@@ -8,9 +8,13 @@ intent. It replaces the design half of [DESIGN-AND-PLAN.md](../DESIGN-AND-PLAN.m
 ahead in [IMPROVEMENT-PLAN.md](IMPROVEMENT-PLAN.md), and every commitment that
 changed, with the owner's answer, in [DECISIONS.md](DECISIONS.md).
 
+The tags below record the 23 November design review. See
+[design coverage](DESIGN-COVERAGE.md#continuation--26-november-2026)
+for later implementation and physical evidence.
+
 Each commitment carries a tag:
 
-- **Built**: in the source and verified at least in QEMU or on the host. Nothing is verified on the MacBook yet.
+- **Built**: in the source and verified at least in QEMU or on the host at that checkpoint.
 - **Changed**: built differently from the original design; the row in DECISIONS.md says how and why.
 - **Not built**: still intent. The plan task that builds it is named.
 
@@ -82,7 +86,7 @@ for the workshop was dropped (see [design/voice-apps.md](design/voice-apps.md)).
 
 ## 4. The face
 
-- Two glowing cyan shapes on black, no mouth, no head, from the owner's mockups. **Built** (matches the EVE mockups on the host).
+- Two glowing cyan shapes on black from the owner's mockups. **Built.** Eyes-only is the product default. Optional, independently configurable brows and mouth were approved on 25 November and are tracked in the [Face Lab plan](../research/2026-11-25-face-expression-integration-plan.md#45-face-style-settings-decided-customisable-optional-default-eyes-only).
 - Every parameter moves on a damped spring; gaze, blink, breathing, micro-saccades and a speech pulse layer on top. **Built.**
 - Chirps and earcons ("heard you", "thinking", "yes", "no") 200-300 ms after speech. **Not built** (5.1).
 - Backlight follows room light and is off in sleep. **Not built**: bl_power does nothing on this LVDS panel, so the face must turn the connector off through DPMS (2.2).
@@ -94,7 +98,7 @@ for the workshop was dropped (see [design/voice-apps.md](design/voice-apps.md)).
 - "Hey Pip", a pause, then the request. **Built.** "Hey Pip, what time is it?" in one breath is **not built** (3.11).
 - An attention key (Space, Return, trackpad click) for when wake spotting fails. **Not built** (1.16).
 - Half-duplex: Esc interrupts a reply. **Built.** Trackpad-click interrupt is staged, not merged (1.21). Voice barge-in **not built** (5.5).
-- Mute is a key (M, or fn+F10) and closes the mic in software. **Built**; mute is lost on a brainstem restart (1.14).
+- Mute is a key (M, or fn+F10) and closes the mic in software. The brainstem retains mute across its own restarts within a boot (1.14).
 - Volume control and saved mixer levels. **Not built** (1.17).
 - Natural voice (Piper through sherpa-onnx) with Flite as fallback. **Not built** (5.3); the owner's choice of voice is in [DECISIONS-OWNER.md](DECISIONS-OWNER.md).
 - A voice organ that survives audio errors. **Not built** (1.13): today one codec error kills it.
@@ -120,7 +124,7 @@ for the workshop was dropped (see [design/voice-apps.md](design/voice-apps.md)).
 
 ## 8. Dreaming
 
-- **Changed.** Today a deterministic nightly journal runs midnight to 5 am with consent hidden behind a root file. The intent: whenever the lid is closed on AC (the owner's window choice), a second small model, **Qwen3-1.7B Q4_0** on its own `llama-server`, reads the day, proposes candidate facts that quote their sources verbatim, and Python checks every quote before anything is kept. A candidate becomes a fact on recurrence or the owner's confirmation; forgetting cascades to it. A 4B model is an optional "long cool night" arm only. **Not built** (6.1, 6.2).
+- **Changed.** Today a deterministic nightly journal runs midnight to 5 am with consent hidden behind a root file. The intent: whenever the lid is closed on AC (the owner's window choice), a second small model, **Qwen3-1.7B** (Q4_K_M until the laptop bench compares Q4_0) on its own `llama-server`, reads the day, proposes candidate facts that quote their sources verbatim, and Python checks every quote before anything is kept. A candidate becomes a fact on recurrence or the owner's confirmation; forgetting cascades to it. A 4B model is an optional "long cool night" arm only. **Not built** (6.1, 6.2).
 - Dreams are visible: "What did you dream about?" is answered from the journal with sources, or honestly ("I didn't dream last night"). **Not built** (6.1).
 - Thermal gate: bodycare holds the owner's package-temperature target and stops on hard limits (92 °C package, 40 °C battery, lid open, AC lost). **Not built** (2.8).
 
@@ -153,7 +157,7 @@ for the workshop was dropped (see [design/voice-apps.md](design/voice-apps.md)).
 | The workshop: voice-driven terminal, body monitor and clock in a RAM-only sandbox ([design/voice-apps.md](design/voice-apps.md)) | Not built (7.8) |
 | Birth ceremony and first words | Partly built (first words); ceremony not built (7.1) |
 | Owner recognition by face, opt-in | Not built (7.7) |
-| A capability policy listing what Pip may do | Not built (7.9) |
+| A capability policy listing what Pip may do | In source (7.9). Care → Permissions lists camera, network, workshop, announcement and dream settings. Ask “What are you allowed to do?” for a private summary. [`mind/policy.py`](../mind/policy.py) reads the existing owner settings so they also apply after an A/B rollback. |
 
 ## 12. What is deliberately out
 

@@ -1,0 +1,30 @@
+[Unit]
+Description=Being: deferred diagnostic microphone level
+ConditionKernelCommandLine=being.try=1
+ConditionKernelCommandLine=being.mic_test=1
+After=being-brainstem.service being-voice.service being-ears.service
+Wants=being-brainstem.service being-voice.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/being/env
+ExecStart=/usr/libexec/being/being-audio-measure
+# Also runs after SIGKILL/timeout, when the shell's trap cannot run.
+ExecStopPost=-/usr/libexec/being/being-audio-measure --restore
+TimeoutStartSec=20
+PrivateNetwork=yes
+NoNewPrivileges=yes
+LimitCORE=0
+Nice=10
+IOSchedulingClass=idle
+DevicePolicy=closed
+DeviceAllow=char-alsa rw
+ProtectSystem=strict
+# Make these paths writable under ProtectSystem=strict. Keep the shared
+# diagnostics directory and its lock inode across unit exits.
+RuntimeDirectory=being-audio being-audio-measure being-diag
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,57 @@
+[Unit]
+Description=Being: full check of the Try stick's model packs
+# On a Try stick the organs trust a pack once its signature, descriptor and
+# file sizes check out, without hashing it first: hashing the conversation
+# model from a USB 2 stick held the first answer back 23 s. This finishes
+# the check: every pack is hashed in full, a pack that fails is refused for
+# the rest of the boot, and the organs that loaded it are restarted so their
+# own check refuses it (mind/model_pack.py, check_media).
+# Pulled in by being-cortex.service; installed systems hash before use.
+ConditionKernelCommandLine=being.try=1
+ConditionKernelCommandLine=!being.bench=1
+ConditionKernelCommandLine=!being.model_check=full
+ConditionPathExists=!/mind/.being-restore-in-progress
+# It starts as soon as /models and /mind are mounted (4.7 s on the laptop),
+# not after basic.target (9.1 s, later still behind the cable link): reading
+# only while nothing else reads the stick, it fills the page cache with the
+# model and the voices before the cortex and the voice ask for them.
+DefaultDependencies=no
+RequiresMountsFor=/models /mind
+After=systemd-journald.socket local-fs.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=exec
+ExecStartPre=+/bin/mkdir -p /mind/cortex
+ExecStart=/usr/bin/python3 /usr/lib/being/mind/model_pack.py check-media
+# /run/being-model-check: status.json and a <role>.refused mark per failed
+# pack, read by every later check on this boot.
+RuntimeDirectory=being-model-check
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# Only what the face, the voice, the mind and the cortex leave: the CPU when
+# it is otherwise idle, and the stick when nothing else is reading it.
+Nice=19
+CPUSchedulingPolicy=idle
+CPUWeight=20
+IOSchedulingClass=idle
+# It reads /models, writes the verdict cache and its own folder, and asks
+# systemd to restart an organ; it needs no network.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-/mind/cortex
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native

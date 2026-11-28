@@ -1,11 +1,13 @@
 """Search-index upkeep, the disk guard and the lost clock."""
 
 import os
+import sqlite3
 import sys
 import tempfile
 import time
 import types
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,10 +20,42 @@ def statvfs(free_fraction, total_blocks=1_000_000, block=4096):
                               int(total_blocks * free_fraction), 0, 0, 0, 0, 255))
 
 
+class SchemaGuard(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.path = self.root / "mind.db"
+
+    def test_reject_incompatible_or_malformed_stamps_before_writing(self):
+        for version, error, message in (("0", RuntimeError, "schema is version 0"),
+                                        ("200", RuntimeError, "schema is version 200"),
+                                        ("unknown", ValueError, "schema version is invalid")):
+            with self.subTest(version=version):
+                with closing(sqlite3.connect(self.path)) as db, db:
+                    db.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                    db.execute("INSERT INTO meta VALUES ('schema', ?)", (version,))
+                before = self.path.read_bytes()
+                with self.assertRaisesRegex(error, message):
+                    Memory(self.root, embedder=None)
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertEqual(set(self.root.iterdir()), {self.path})
+                self.path.unlink()
+
+    def test_unstamped_old_archive_keeps_the_original_initialisation_path(self):
+        with closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            db.execute("INSERT INTO meta VALUES ('unrelated', 'preserve')")
+        with closing(Memory(self.root, embedder=None)) as archive:
+            self.assertEqual(memory_module.archive_schema(archive.db), memory_module.SCHEMA_VERSION)
+            self.assertEqual(archive.db.execute("SELECT value FROM meta WHERE key='unrelated'").fetchone(), ("preserve",))
+
+
 class IncrementalSearch(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        # Start from a roomy disk whatever the dev machine has; tests that
+        # are about the guard patch their own reading over this one.
+        self.enterContext(patch("mind.memory.os.statvfs", return_value=statvfs(0.5)))
         self.memory = Memory(self.root, embedder=None)
 
     def tearDown(self):
@@ -64,11 +98,26 @@ class IncrementalSearch(unittest.TestCase):
         self.assertEqual(len(self.memory.recall_history("orchids")), 1)
         self.assertEqual(len(self.memory.recall("orchid")), 1)
 
+    def test_event_time_is_opt_in_and_legacy_rows_fall_back_to_telling_time(self):
+        event = self.memory.log("heard", "Yesterday I repaired the radio", "Richard",
+                                event_start=100.0, event_end=200.0)
+        legacy = self.memory.log("heard", "I cleaned the radio", "Richard")
+        told = self.memory.db.execute("SELECT ts FROM episodes WHERE id = ?", (legacy,)).fetchone()[0]
+        self.assertEqual([row.id for row in self.memory.recall_history(
+            "radio", start=100.0, end=200.0, time_basis="event")], [event])
+        self.assertEqual([row.id for row in self.memory.recall_history(
+            "radio", start=told - 1.0, end=told + 1.0)], [legacy, event])
+        self.assertIn(legacy, [row.id for row in self.memory.recall_history(
+            "radio", start=told - 1.0, end=told + 1.0, time_basis="event")])
+
 
 class DiskGuard(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        # Start from a roomy disk whatever the dev machine has; tests that
+        # are about the guard patch their own reading over this one.
+        self.enterContext(patch("mind.memory.os.statvfs", return_value=statvfs(0.5)))
         self.memory = Memory(self.root, embedder=None)
 
     def tearDown(self):
@@ -141,23 +190,20 @@ class LostClock(unittest.TestCase):
     REAL = 1_795_392_000.0  # 2026-11-23 UTC
 
     def setUp(self):
-        self.fake = types.ModuleType("mind.clock_epoch")
-        self.fake.epoch_advanced = lambda: True
-        patcher = patch.dict(sys.modules, {"mind.clock_epoch": self.fake})
+        from mind import clock_epoch as real
+
+        class Fake:
+            """The real clock_epoch, except for the one question under test."""
+            epoch_advanced = staticmethod(lambda: True)
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        self.fake = Fake()
+        # Memory binds the module at import time, so patch it where it is used.
+        patcher = patch.object(memory_module, "clock_epoch", self.fake)
         patcher.start()
         self.addCleanup(patcher.stop)
-        import mind
-
-        had = hasattr(mind, "clock_epoch")
-        old = getattr(mind, "clock_epoch", None)
-        mind.clock_epoch = self.fake
-
-        def restore():
-            if had:
-                mind.clock_epoch = old
-            else:
-                del mind.clock_epoch
-        self.addCleanup(restore)
         self.memory = Memory(None, embedder=None)
 
     def test_nothing_may_expire_while_the_clock_is_lost(self):

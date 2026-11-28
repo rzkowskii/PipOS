@@ -13,7 +13,9 @@ only if its files are present and its idle real-time factor on a test
 recording is at most 0.3. A real-time factor is compute time over audio time,
 so 0.3 means a 2-second clause takes 0.6 s. Measurements are kept in
 /mind/audio/engines.json, keyed by build-id and voice or model, and taken
-again after a week. Nothing is measured while the being is busy.
+again after a week. Nothing is measured while the being is busy: the CPU
+pressure and the voice's own CPU use decide that (cpu_quiet), and the load
+average only where the kernel has no pressure figures.
 
 The owner's choice ("auto", "piper" or "flite") is the voice organ's: it is
 the "tts" field of /mind/audio/voice.json, which the voice writes when the
@@ -29,13 +31,18 @@ Before the natural voice is chosen, in "auto" or forced, it says one short word
 (PROBE_TEXT) within PROBE_TIMEOUT_S. If that raises, gives no samples, is only
 silence or takes too long, Flite is used and the note says why; the failure is
 kept in RAM for this build, so it is not tried again on every clause or choice.
-A natural voice that fails a clause later silences itself (mind/tts_sherpa.py)
-and the failure is kept the same way.
+A natural voice that is broken later silences itself (mind/tts_sherpa.py) and
+the failure is kept the same way. The voice organ also writes it to RUN_STATE
+(RAM, under /run), with its process id, so the mind's "which voice" answer and
+Setup's voice page say the original voice speaks, and why, while that voice
+process lives.
 
 Moonshine runs inside the voice process (sherpa-onnx through ctypes), so an
 instruction the CPU lacks would kill the voice. "auto" therefore never loads
-it unless a passed Ivy Bridge speech smoke test (lab/sherpa_avx_smoke.py) is
-recorded for the installed runtime; see `sherpa_smoke_passed`. Saying "use your natural voice", "use your original
+it unless a passed Ivy Bridge speech smoke test is recorded for the installed
+runtime: the QEMU run of lab/sherpa_avx_smoke.py shipped in the image, or a
+run on this laptop (`python3 -m mind.voice_engines smoke --record`); see
+`sherpa_smoke_passed` and `hardware_smoke`. Saying "use your natural voice", "use your original
 voice" or "which voice are you using?" reaches `handle` below through the
 everyday registry; the answer is fixed in code.
 
@@ -69,7 +76,12 @@ MAX_AGE_S = 7 * 24 * 3600
 # Twelve words, the same every time, so measurements compare across builds.
 SENTENCE = "I keep your timers and notes, and I remember what you say."
 MAX_FILE_BYTES = 64 * 1024
-# The 1-minute load average must be under this for a measurement to count as idle.
+# Where the kernel has no pressure figures, the 1-minute load average must be
+# under this for a measurement to count as idle. On the laptop it never is
+# with the face up: the i915 page-flip worker sits in uninterruptible sleep
+# about 82% of the time, which adds about 0.8 to the load average while the CPU
+# is 93% idle (measured: load 1.51 against CPU pressure 0.16). Pressure, which
+# that worker does not touch, is used wherever it exists.
 IDLE_LOAD = 0.7
 CMDLINE = Path("/proc/cmdline")
 # Forced engines: the environment (a drop-in) wins over the kernel argument,
@@ -79,20 +91,28 @@ ASR_ENV, TTS_ENV = "BEING_ASR", "BEING_TTS"
 LEGACY_ASR_ENV = "BEING_ASR_ENGINE"
 _ALIASES = {"sherpa": "moonshine", "sherpa-onnx": "moonshine"}
 # The CPU counts as quiet when tasks waited for it less than this share of the
-# last 10 s (/proc/pressure/cpu, "some avg10", in percent).
+# last 10 s (/proc/pressure/cpu, "some avg10", in percent; 0.0 to 0.2 at rest
+# on the laptop with the face up, tens while the model answers), and this
+# process itself used less than OWN_CPU_LIMIT of one core over the last
+# OWN_CPU_WINDOW seconds (a dictation decoding, or a reply being synthesized,
+# is no time to measure).
 CPU_PRESSURE = Path("/proc/pressure/cpu")
 QUIET_PRESSURE = 5.0
-# The Ivy Bridge speech smoke report (lab/sherpa_avx_smoke.py), as the image
-# build installs it, or as a diagnostics run on this laptop records it.
+OWN_CPU_LIMIT = 0.35
+OWN_CPU_WINDOW = 0.25
+# The Ivy Bridge speech smoke report: the verdict of lab/sherpa_avx_smoke.py's
+# QEMU -cpu IvyBridge run, as the image build installs it, or one recorded on
+# this laptop (`python3 -m mind.voice_engines smoke --record`, see
+# hardware_smoke) in the mind.
 SMOKE_VERDICTS = (Path("/usr/share/being/voice/sherpa-avx-smoke.json"),)
 SMOKE_STATE = Path("audio") / "sherpa-avx-smoke.json"
 
 
 # Files ----------------------------------------------------------------------------
 
-def build_id(path=BUILD_ID):
+def build_id(path=None):
     try:
-        value = Path(path).read_text(encoding="utf-8").strip()
+        value = Path(BUILD_ID if path is None else path).read_text(encoding="utf-8").strip()
     except OSError:
         return "unknown"
     return value if re.fullmatch(r"[A-Za-z0-9._-]{1,96}", value) else "unknown"
@@ -211,12 +231,36 @@ def cpu_pressure(path=CPU_PRESSURE):
     return None
 
 
-def cpu_quiet(threshold=QUIET_PRESSURE, path=CPU_PRESSURE, load_threshold=IDLE_LOAD):
-    """True when the CPU is not contended now: pressure under `threshold` (else the load average)."""
+def own_cpu(window=OWN_CPU_WINDOW, clock=time.monotonic, cpu=time.process_time, sleep=time.sleep):
+    """This process's CPU use over the next `window` seconds, in cores (every
+    thread counts). Blocking for `window`; None when it cannot be told."""
+    if window <= 0:
+        return None
+    try:
+        began, used = clock(), cpu()
+        sleep(window)
+        wall, spent = clock() - began, cpu() - used
+    except OSError:
+        return None
+    return spent / wall if wall > 0 and spent >= 0 else None
+
+
+def cpu_quiet(threshold=QUIET_PRESSURE, path=CPU_PRESSURE, load_threshold=IDLE_LOAD, own_limit=OWN_CPU_LIMIT,
+              window=OWN_CPU_WINDOW, own=None):
+    """True when the CPU is not contended now and this process is not busy.
+
+    CPU pressure under `threshold` (the load average under `load_threshold`
+    only where the kernel has no pressure figures), and this process's own use
+    over `window` seconds under `own_limit` of a core (`own` measures it; a
+    window of 0 skips it). Blocking for `window`: call it off the event loop."""
     pressure = cpu_pressure(path)
     if pressure is None:
-        return system_idle(load_threshold)
-    return pressure < threshold
+        if not system_idle(load_threshold):
+            return False
+    elif pressure >= threshold:
+        return False
+    used = (own or own_cpu)(window) if window > 0 else None
+    return used is None or used < own_limit
 
 
 # Forced choices -------------------------------------------------------------------
@@ -271,6 +315,13 @@ def _sha256(path):
 SMOKE_PINNED = ("libsherpa-onnx-c-api.so", "libonnxruntime.so")
 
 
+def _smoke_pass(report):
+    stages = report.get("stages") if isinstance(report.get("stages"), list) else []
+    moonshine = [stage for stage in stages if isinstance(stage, dict) and stage.get("stage") == "moonshine"]
+    return report.get("passed") is True and report.get("sigill") is False and bool(moonshine) \
+        and all(stage.get("passed") is True for stage in moonshine)
+
+
 def sherpa_smoke_passed(state_dir=None, paths=SMOKE_VERDICTS, library=None):
     """(ok, reason): may "auto" load Moonshine in this process? Blocking (it hashes the runtime).
 
@@ -278,42 +329,341 @@ def sherpa_smoke_passed(state_dir=None, paths=SMOKE_VERDICTS, library=None):
     passed Moonshine stage among them, and a runtime_sha256 pin that the
     installed sherpa-onnx C API and the ONNX Runtime next to it both match
     byte for byte. A report without the pin, or a library missing, is no pass:
-    a report kept in /mind outlives updates that change the runtime."""
-    candidates = list(paths)
-    if state_dir is not None:
-        candidates.append(Path(state_dir) / SMOKE_STATE)
+    a report kept in /mind outlives updates that change the runtime. A report
+    that names the build it was recorded on (one made on this laptop) counts
+    only on that build.
+
+    The laptop's own record (state_dir/SMOKE_STATE) is read first. When it
+    names this build and does not pin other runtime bytes, it decides on its
+    own, pass or fail: a failure on this CPU outweighs a pass shipped in the
+    image from QEMU, which only imitates an Ivy Bridge. Only without such a
+    record do the shipped verdicts count."""
     reasons = []
     digests = {}
-    for path in candidates:
-        report = _read_json(path)
-        if not report:
-            continue
-        stages = report.get("stages") if isinstance(report.get("stages"), list) else []
-        moonshine = [stage for stage in stages if isinstance(stage, dict) and stage.get("stage") == "moonshine"]
-        if report.get("passed") is not True or report.get("sigill") is not False or not moonshine \
-                or not all(stage.get("passed") is True for stage in moonshine):
-            reasons.append(f"{path} does not record a pass")
-            continue
-        pinned = report.get("runtime_sha256")
-        if not isinstance(pinned, dict) or not all(isinstance(pinned.get(name), str) for name in SMOKE_PINNED):
-            reasons.append(f"{path} does not pin the sherpa-onnx and ONNX Runtime bytes it tested")
-            continue
-        try:
-            if not digests:
+
+    def installed():
+        """The installed bytes' digests, or None (with the reason noted) when they cannot be read."""
+        if not digests:
+            try:
                 from . import sherpa
 
                 api = Path(library) if library is not None else sherpa.library_path()
                 # The C API finds its runtime in its own folder (the release's RUNPATH is $ORIGIN).
                 digests["libsherpa-onnx-c-api.so"] = _sha256(api)
                 digests["libonnxruntime.so"] = _sha256(api.parent / "libonnxruntime.so")
-        except (OSError, ImportError) as error:
-            reasons.append(f"the installed sherpa-onnx could not be checked ({error})")
+            except (OSError, ImportError) as error:
+                reasons.append(f"the installed sherpa-onnx could not be checked ({error})")
+                return None
+        return digests
+
+    def pins(report):
+        pinned = report.get("runtime_sha256")
+        if isinstance(pinned, dict) and all(isinstance(pinned.get(name), str) for name in SMOKE_PINNED):
+            return pinned
+        return None
+
+    if state_dir is not None:
+        path = Path(state_dir) / SMOKE_STATE
+        report = _read_json(path)
+        if report and report.get("build", build_id()) == build_id():
+            pinned = pins(report)
+            current = installed()
+            if current is None:
+                return False, "; ".join(reasons)
+            if pinned is None or all(current[name] == pinned[name] for name in SMOKE_PINNED):
+                if not _smoke_pass(report):
+                    return False, f"{path} records a failed smoke on this laptop"
+                if pinned is None:
+                    return False, f"{path} does not pin the sherpa-onnx and ONNX Runtime bytes it tested"
+                return True, None
+            reasons.append(f"{path} tested another sherpa-onnx or ONNX Runtime build")
+        elif report:
+            reasons.append(f"{path} was recorded on another build")
+    for path in paths:
+        report = _read_json(path)
+        if not report:
+            continue
+        if not _smoke_pass(report):
+            reasons.append(f"{path} does not record a pass")
+            continue
+        if "build" in report and report.get("build") != build_id():
+            reasons.append(f"{path} was recorded on another build")
+            continue
+        pinned = pins(report)
+        if pinned is None:
+            reasons.append(f"{path} does not pin the sherpa-onnx and ONNX Runtime bytes it tested")
+            continue
+        current = installed()
+        if current is None:
             break
-        if any(digests[name] != pinned[name] for name in SMOKE_PINNED):
+        if any(current[name] != pinned[name] for name in SMOKE_PINNED):
             reasons.append(f"{path} tested another sherpa-onnx or ONNX Runtime build")
             continue
         return True, None
     return False, "; ".join(reasons) or "no Ivy Bridge speech smoke test is recorded on this build"
+
+
+# Recording the smoke on this laptop -------------------------------------------------
+#
+# The same three stages as lab/sherpa_avx_smoke.py (Silero VAD, a Moonshine
+# decode of the pack's own test recording, one Piper sentence), with the
+# installed runtime and models, each in a Python process of its own: an
+# instruction this CPU lacks kills only that process (SIGILL), never the voice.
+# A pass is pinned to the bytes of the installed sherpa-onnx C API and ONNX
+# Runtime, and to this build. With record, the verdict (pass or fail) replaces
+# the mind's SMOKE_STATE, so a failure also withdraws an older pass. The voice
+# picks a pass up at its next engine choice: a restart, or its next idle
+# refresh (refresh_asr switches on the speed the smoke kept). A failure does
+# not unload a Moonshine already running; restart being-voice for that.
+#
+#     PYTHONPATH=/usr/lib/being python3 -m mind.voice_engines smoke --record
+
+SMOKE_STAGES = ("vad", "moonshine", "piper")
+SMOKE_SENTENCE = "Hello. I am Pip, and this is my natural voice."
+SMOKE_STAGE_TIMEOUT_S = 300
+SMOKE_MARK = "SMOKE "
+SMOKE_VERSION = 1
+
+
+def _sigill(status):
+    import signal
+
+    return status in (-signal.SIGILL, 128 + signal.SIGILL)
+
+
+def runtime_pins(library=None):
+    """{library name: sha256} of the installed C API and the ONNX Runtime beside it. Raises OSError."""
+    from . import sherpa
+
+    api = Path(library) if library is not None else sherpa.library_path()
+    return {"libsherpa-onnx-c-api.so": _sha256(api), "libonnxruntime.so": _sha256(api.parent / "libonnxruntime.so")}
+
+
+def _cpu():
+    """The CPU's model name and the instruction sets the smoke cares about."""
+    try:
+        text = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    model = next((line.split(":", 1)[1].strip() for line in text.splitlines() if line.startswith("model name")),
+                 None)
+    flags = next((line.split(":", 1)[1].split() for line in text.splitlines() if line.startswith("flags")), [])
+    return {"model": model, **{flag: flag in flags for flag in ("avx", "avx2", "fma", "f16c")}}
+
+
+def smoke_stage(stage, *, root=None, library=None, sentence=SMOKE_SENTENCE, out=None):
+    """Run one stage in this process and print its SMOKE line (the child's side)."""
+    import sys
+
+    from . import asr_sherpa, sherpa
+
+    out = out or sys.stdout
+    root = Path(root) if root is not None else asr_sherpa.ROOT
+    report = {"stage": stage, "versions": sherpa.version(library)}
+    started = time.perf_counter()
+    if stage == "vad":
+        wav = asr_sherpa.test_wav(root, "tiny")
+        if wav is None:
+            raise FileNotFoundError("the Moonshine pack has no test recording")
+        samples, rate = sherpa.read_wav(wav)
+        samples = sherpa.resample(samples, rate, 16000)
+        vad = asr_sherpa.load_vad(root, library)
+        try:
+            segments = []
+            for index in range(0, len(samples) - asr_sherpa.WINDOW + 1, asr_sherpa.WINDOW):
+                vad.accept(samples[index:index + asr_sherpa.WINDOW])
+                segments += vad.pop_segments()
+            vad.flush()
+            segments += vad.pop_segments()
+        finally:
+            vad.close()
+        report.update(segments=len(segments), passed=len(segments) >= 1)
+    elif stage == "moonshine":
+        wav = asr_sherpa.test_wav(root, "tiny")
+        if wav is None:
+            raise FileNotFoundError("the Moonshine pack has no test recording")
+        samples, rate = sherpa.read_wav(wav)
+        recognizer = asr_sherpa.load_moonshine(root, "tiny", library)
+        try:
+            loaded = time.perf_counter()
+            text = recognizer.transcribe(samples, rate)
+            report.update(chars=len(text.strip()), rtf=round((time.perf_counter() - loaded) / (len(samples) / rate), 4),
+                          passed=bool(text.strip()))
+        finally:
+            recognizer.close()
+    elif stage == "piper":
+        from .tts_sherpa import PiperEngine
+
+        engine = PiperEngine(library=library)
+        folder = tempfile.mkdtemp(prefix="being-smoke-")
+        try:
+            seconds = engine.synthesize_blocking(sentence, Path(folder) / "smoke.wav", 1.0)
+            report.update(audio_seconds=round(seconds, 3), passed=seconds > 0)
+        finally:
+            engine.close()
+            shutil.rmtree(folder, ignore_errors=True)
+    else:
+        raise ValueError(f"unknown smoke stage {stage!r}")
+    report["seconds"] = round(time.perf_counter() - started, 3)
+    with suppress(OSError):
+        with open("/proc/self/maps", encoding="utf-8", errors="replace") as maps:
+            report["runtime_paths"] = sorted({line.split()[-1] for line in maps
+                                              if "libonnxruntime" in line or "libsherpa" in line})
+    print(SMOKE_MARK + json.dumps(report), file=out, flush=True)
+
+
+def judge_stage(stage, status, output, library_dir):
+    """A stage's verdict from its exit status and its one SMOKE line."""
+    result = {"stage": stage, "status": status, "sigill": _sigill(status), "passed": False}
+    lines = [line[len(SMOKE_MARK):] for line in (output or "").splitlines() if line.startswith(SMOKE_MARK)]
+    if status != 0 or len(lines) != 1:
+        result["error"] = "it was killed by SIGILL" if result["sigill"] else \
+            f"exit status {status}" if status != 0 else "it gave no verdict"
+        return result
+    try:
+        report = json.loads(lines[0])
+    except ValueError:
+        result["error"] = "its verdict could not be read"
+        return result
+    if not isinstance(report, dict):
+        result["error"] = "its verdict could not be read"
+        return result
+    paths = report.get("runtime_paths")
+    here = str(Path(library_dir).resolve())
+    loaded_here = isinstance(paths, list) and bool(paths) and all(
+        isinstance(path, str) and str(Path(path).resolve().parent) == here for path in paths)
+    result.update({key: value for key, value in report.items() if key not in ("stage", "passed")})
+    result["passed"] = report.get("passed") is True and loaded_here
+    if not loaded_here:
+        result["error"] = "it loaded a different sherpa-onnx or ONNX Runtime"
+    elif report.get("passed") is not True:
+        result["error"] = "its engine gave no result"
+    return result
+
+
+def _stage_environment(environ=None):
+    environ = dict(os.environ if environ is None else environ)
+    package = str(Path(__file__).resolve().parent.parent)
+    environ["PYTHONPATH"] = package + (os.pathsep + environ["PYTHONPATH"] if environ.get("PYTHONPATH") else "")
+    environ["PYTHONDONTWRITEBYTECODE"] = "1"
+    return environ
+
+
+def run_stage(stage, *, python=None, timeout=SMOKE_STAGE_TIMEOUT_S, environ=None):
+    """(exit status, standard output) of one stage in a Python process of its own."""
+    import subprocess
+    import sys
+
+    try:
+        done = subprocess.run([python or sys.executable, "-m", "mind.voice_engines", "smoke-stage", stage],
+                              capture_output=True, text=True, timeout=timeout, env=_stage_environment(environ),
+                              check=False)
+    except subprocess.TimeoutExpired:
+        return None, f"it took more than {timeout} s"
+    except OSError as error:
+        return None, f"it could not start ({error})"
+    return done.returncode, done.stdout + done.stderr[-2000:]
+
+
+def hardware_smoke(state_dir=None, *, record=False, library=None, runner=run_stage, now=None):
+    """Run the speech smoke on this laptop. Returns the report; with `record`,
+    also keeps it as the mind's SMOKE_STATE (state_dir), pass or fail. Blocking:
+    about a minute."""
+    from . import sherpa
+
+    api = Path(library) if library is not None else sherpa.library_path()
+    report = {"version": SMOKE_VERSION, "source": "hardware", "build": build_id(), "cpu": _cpu(),
+              "measured": time.time() if now is None else now, "stages": [], "passed": False, "sigill": False}
+    try:
+        report["runtime_sha256"] = runtime_pins(api)
+    except OSError as error:
+        report["error"] = f"the installed sherpa-onnx could not be read ({error})"
+    else:
+        for stage in SMOKE_STAGES:
+            status, output = runner(stage)
+            if status is None:
+                result = {"stage": stage, "status": None, "sigill": False, "passed": False, "error": output}
+            else:
+                result = judge_stage(stage, status, output, api.parent)
+            report["stages"].append(result)
+        report["sigill"] = any(stage["sigill"] for stage in report["stages"])
+        report["passed"] = all(stage["passed"] for stage in report["stages"])
+        try:
+            if runtime_pins(api) != report["runtime_sha256"]:
+                report["passed"] = False
+                report["error"] = "the installed sherpa-onnx changed during the test"
+        except OSError as error:
+            report["passed"] = False
+            report["error"] = f"the installed sherpa-onnx could not be read again ({error})"
+    if record:
+        if state_dir is None:
+            raise ValueError("recording a smoke verdict needs the mind folder")
+        _write_json(Path(state_dir) / SMOKE_STATE, report)
+        _record_smoke_speed(state_dir, report, now)
+    return report
+
+
+def _record_smoke_speed(state_dir, report, now=None):
+    """A passed smoke's Moonshine decode is a speed measurement too (one
+    thread, as the voice runs it): keep it, so the next choice need not
+    measure again."""
+    rtf = next((stage.get("rtf") for stage in report.get("stages", []) if stage.get("stage") == "moonshine"), None)
+    if report.get("passed") is not True or type(rtf) not in (int, float) or not 0 < rtf < 100:
+        return None
+    with suppress(OSError):
+        return record(state_dir, "asr", asr_key(report.get("build") or build_id(), "tiny"),
+                      {"rtf": rtf, "runs": [rtf]}, now)
+    return None
+
+
+def smoke_lines(report):
+    """Plain lines describing a smoke report, one per stage and one verdict."""
+    lines = []
+    for stage in report.get("stages", []):
+        verdict = "SIGILL" if stage.get("sigill") else "passed" if stage.get("passed") else "failed"
+        detail = f" ({stage['error']})" if stage.get("error") else ""
+        lines.append(f"{stage.get('stage')}: {verdict}{detail}")
+    if report.get("error"):
+        lines.append(report["error"])
+    lines.append("The speech smoke passed: Moonshine may be chosen automatically on this build."
+                 if report.get("passed") else "The speech smoke did not pass: Moonshine stays off unless forced.")
+    return lines
+
+
+def main(argv=None):
+    """`smoke [--record] [--json] [--mind DIR]`, and the internal `smoke-stage NAME`."""
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(prog="python3 -m mind.voice_engines",
+                                     description="The voice's engine checks on this laptop.")
+    commands = parser.add_subparsers(dest="command", required=True)
+    smoke_command = commands.add_parser("smoke", help="run the Ivy Bridge speech smoke here")
+    smoke_command.add_argument("--record", action="store_true",
+                               help="keep the verdict in the mind, so the automatic choice can use Moonshine")
+    smoke_command.add_argument("--mind", type=Path, help="the mind folder (default: the voice's own)")
+    smoke_command.add_argument("--json", action="store_true", help="print the report as JSON")
+    stage_command = commands.add_parser("smoke-stage", help=argparse.SUPPRESS)
+    stage_command.add_argument("stage", choices=SMOKE_STAGES)
+    args = parser.parse_args(argv)
+    if args.command == "smoke-stage":
+        smoke_stage(args.stage)
+        return 0
+    state_dir = args.mind
+    if state_dir is None and args.record:
+        from .profile import default_mind_dir
+
+        state_dir = default_mind_dir()
+    report = hardware_smoke(state_dir, record=args.record)
+    if args.json:
+        print(json.dumps(report, sort_keys=True))
+    else:
+        for line in smoke_lines(report):
+            print(line)
+        if args.record:
+            print(f"Kept in {Path(state_dir) / SMOKE_STATE}.")
+    sys.stdout.flush()
+    return 0 if report["passed"] else 1
 
 
 # Measuring ------------------------------------------------------------------------
@@ -393,6 +743,9 @@ PROBE_MAX_SECONDS = 10
 # Natural voices that made no sound in this process, by tts_key: RAM only, so
 # a restart or a new build tests again.
 _silent = {}
+# The same, for other processes (the mind, Setup): {"key", "reason", "pid"},
+# on a RAM filesystem, and believed only while that process lives.
+RUN_STATE = Path("/run/being-voice/tts.json")
 
 
 def silent_reason(build, engine):
@@ -400,8 +753,43 @@ def silent_reason(build, engine):
     return _silent.get(tts_key(build, engine))
 
 
+def _alive(pid):
+    if type(pid) is not int or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def reported_silent(build, engine, path=None):
+    """Why the voice organ (a live process) says the natural voice made no
+    sound for this build, or None."""
+    data = _read_json(RUN_STATE if path is None else path)
+    why = data.get("reason")
+    if data.get("key") != tts_key(build, engine) or not isinstance(why, str) or not why.strip():
+        return None
+    return why.strip()[:200] if _alive(data.get("pid")) else None
+
+
 def _keep_silent(build, engine, why):
-    _silent[tts_key(build, engine)] = why
+    record_key = tts_key(build, engine)
+    _silent[record_key] = why
+    with suppress(OSError):
+        _write_json(RUN_STATE, {"key": record_key, "reason": str(why)[:200], "pid": os.getpid()})
+
+
+def _clear_silent(build, engine):
+    """The natural voice spoke here: drop a report this process (or a dead one) left."""
+    data = _read_json(RUN_STATE)
+    if data.get("key") == tts_key(build, engine) and (data.get("pid") == os.getpid() or not _alive(data.get("pid"))):
+        with suppress(OSError):
+            RUN_STATE.unlink()
 
 
 def _peak(path):
@@ -485,7 +873,10 @@ def _reason(error):
 
 
 def _watch(engine, build):
-    """Keep a later clause failure of this voice for this build too."""
+    """The voice organ's engine: a voice that breaks later silences itself
+    (sticky), and that is kept for this build too."""
+    with suppress(AttributeError):
+        engine.sticky = True
     with suppress(AttributeError):
         engine.on_silent = lambda why: _keep_silent(build, engine, why)
 
@@ -602,6 +993,7 @@ def _sounding(piper, note, preference, build, owned, probe, timeout):
             if owned:
                 _give_back(piper, busy)
             return _flite(), silent_note(why, preference)
+        _clear_silent(build, piper)
     _watch(piper, build)
     return piper, note
 
@@ -629,8 +1021,10 @@ def _backing_off(kind, record_key, clock=time.monotonic):
 
 
 async def refresh_tts(current, preference=None, *, state_dir, build=None, voice_dir=None, engine=None,
-                      idle=system_idle, now=None, library=None):
+                      idle=None, now=None, library=None):
     """Measure the natural voice when due and the laptop is idle.
+
+    `idle` (cpu_quiet when None) is asked before each run, on a worker thread.
 
     Returns (engine, note) when the choice changes, (None, note) when the
     natural voice measured fast enough but made no sound (Flite stays), and
@@ -638,6 +1032,7 @@ async def refresh_tts(current, preference=None, *, state_dir, build=None, voice_
     """
     import asyncio
 
+    idle = cpu_quiet if idle is None else idle
     preference = load_preference(state_dir) if preference is None else preference
     if preference != "auto":
         return None
@@ -656,7 +1051,7 @@ async def refresh_tts(current, preference=None, *, state_dir, build=None, voice_
     build = build or build_id()
     record_key = tts_key(build, piper)
     if cached(state_dir, "tts", record_key, now) is None:
-        if _backing_off("tts", record_key) or not idle():
+        if _backing_off("tts", record_key) or not await asyncio.to_thread(idle):
             if piper is not current:
                 _unload(piper)
             return None
@@ -666,7 +1061,7 @@ async def refresh_tts(current, preference=None, *, state_dir, build=None, voice_
             # owner is waiting for queues behind one sentence at most, not three.
             factors = []
             for _ in range(RUNS):
-                if factors and not idle():
+                if factors and not await asyncio.to_thread(idle):
                     if piper is not current:
                         _unload(piper)
                     return None     # busy again: measure another time
@@ -688,6 +1083,7 @@ async def refresh_tts(current, preference=None, *, state_dir, build=None, voice_
         if not ok:
             _give_back(piper, busy)
             return None, silent_note(why, "auto")     # the voice logs it and keeps Flite
+        _clear_silent(build, piper)
     if chosen is not piper and piper is not current:
         _unload(piper)          # loaded only to be measured, and not chosen
     if getattr(chosen, "name", None) == getattr(current, "name", None):
@@ -705,7 +1101,8 @@ def tts_status(state_dir, *, build=None, voice_dir=None, engine=None, now=None, 
     installed = piper.available()
     build = build or build_id()
     found = cached(state_dir, "tts", tts_key(build, piper), now) if installed else None
-    silent = (silent_reason(build, piper) or getattr(piper, "silenced", None)) if installed else None
+    silent = (silent_reason(build, piper) or getattr(piper, "silenced", None)
+              or reported_silent(build, piper)) if installed else None
     preference = load_preference(state_dir)
     if silent:
         active = "flite"
@@ -786,34 +1183,43 @@ def choose_asr(wake, preference=None, *, state_dir, build=None, root=None, size=
 
 
 async def refresh_asr(current, wake, *, state_dir, build=None, root=None, size="tiny", library=None,
-                      idle=system_idle, now=None, factory=None, wake_word="Hey Pip"):
+                      idle=None, now=None, factory=None, wake_word="Hey Pip"):
     """Measure Moonshine when due and the laptop is idle (auto only).
 
     Returns (recognizer, note) when the voice should switch to Moonshine,
     otherwise None. Loading and measuring run in a worker thread; `wake` is
-    only wrapped there, never fed.
+    only wrapped there, never fed. `idle` (cpu_quiet when None) runs on a
+    worker thread too. A speed already kept for this build (the hardware
+    smoke records one) is not measured again: when it is within the limit
+    and the smoke now passes, the refresh switches to Moonshine, so a smoke
+    recorded while the voice runs is taken up without a restart.
     """
     import asyncio
 
     from . import asr_sherpa
+
+    idle = cpu_quiet if idle is None else idle
 
     if asr_setting() != "auto" or current is not wake:
         return None
     build = build or build_id()
     record_key = asr_key(build, size)
     root = Path(root) if root is not None else asr_sherpa.ROOT
-    if cached(state_dir, "asr", record_key, now) is not None or _backing_off("asr", record_key):
+    found = cached(state_dir, "asr", record_key, now)
+    if (found is not None and found["rtf"] > ASR_RTF_LIMIT) or _backing_off("asr", record_key):
         return None
-    # Nothing to measure with, or nothing installed: do not load the models every refresh.
-    if asr_sherpa.missing(root, size, library) or asr_sherpa.test_wav(root, size) is None or not idle():
+    # Nothing installed, or (with no speed kept) nothing to measure with: do not load the models every refresh.
+    if asr_sherpa.missing(root, size, library) or (found is None and asr_sherpa.test_wav(root, size) is None):
+        return None
+    if not await asyncio.to_thread(idle):
         return None
     # Never load Moonshine to measure it before the CPU is known to run it.
     if not (await asyncio.to_thread(smoke, state_dir, library=library))[0]:
         return None
     engine, note = await asyncio.to_thread(
         choose_asr, wake, "auto", state_dir=state_dir, build=build, root=root, size=size, library=library,
-        measure=True, now=now, factory=factory, wake_word=wake_word)
-    if engine is wake and cached(state_dir, "asr", record_key, now) is None:
+        measure=found is None, now=now, factory=factory, wake_word=wake_word)
+    if engine is wake and (found is not None or cached(state_dir, "asr", record_key, now) is None):
         _failed("asr", record_key)     # it would not load or measure; try again later, not every refresh
     return (engine, note) if engine is not wake else None
 
@@ -843,41 +1249,32 @@ def may_match(text):
     return bool(_NATURAL.search(text) or _ORIGINAL.search(text) or _AUTO.search(text) or _WHICH.search(text))
 
 
-# The voice organ speaks with Flite where this process expected the natural voice.
-FELL_BACK = "the voice organ reports the original voice"
-
-
 def _status(ctx):
     """tts_status, with the engine the voice organ reports it really speaks with.
 
-    The voice reports "flite" when the natural voice made no sound there
-    (another process), so Flite reported where the natural voice was expected
-    counts as a fall-back."""
+    Whether the natural voice made no sound comes from the voice organ's own
+    report (RUN_STATE), never from its speaking Flite alone: it also speaks
+    Flite while the natural voice loads, and when Flite is forced."""
     status = tts_status(ctx.state_dir)
     active = (ctx.voice or {}).get("tts")
     if active in ("piper", "flite"):
-        if active == "flite" and status["active"] == "piper" and not status["silent"]:
-            status["silent"] = FELL_BACK
         status["active"] = active
+        if active == "piper":
+            status["silent"] = None
     return status
 
 
 def _fell_back(status):
-    """Why the original voice speaks although the natural one was expected: "silent",
-    "unexplained" (the voice organ reports it, the reason is in its log), or None."""
-    if status["active"] == "piper" or not status["installed"] or status["preference"] == "flite" \
-            or not status.get("silent"):
-        return None
-    return "unexplained" if status["silent"] == FELL_BACK else "silent"
+    """True when the original voice speaks because the natural one made no sound,
+    and the owner did not choose the original voice."""
+    return bool(status["active"] != "piper" and status["installed"] and status["preference"] != "flite"
+                and status.get("silent"))
 
 
 def _which(status):
-    fell_back = _fell_back(status)
-    if fell_back == "silent":
+    if _fell_back(status):
         return ("[neutral] I'm using my original voice. My natural voice made no sound on this "
                 "laptop, so I switched.")
-    if fell_back == "unexplained":
-        return "[neutral] I'm using my original voice. My natural voice isn't working here right now."
     if status["active"] == "piper":
         line = f"[neutral] I'm using my natural voice, {status['label']}."
         if status["preference"] == "auto":
@@ -890,9 +1287,10 @@ def _which(status):
     if not status["installed"]:
         return line + " My natural voice isn't installed."
     if status["preference"] == "auto":
-        if status["rtf"] is None:
-            return line + " I haven't measured my natural voice here yet."
-        return line + " My natural voice measured too slow on this laptop."
+        if status["rtf"] is not None and status["rtf"] > TTS_RTF_LIMIT:
+            return line + " My natural voice measured too slow on this laptop."
+        # Still loading, or Flite forced at boot: not a promise either way.
+        return "[neutral] I'm using my original voice for now."
     return line
 
 
@@ -913,12 +1311,10 @@ async def handle(text, ctx):
         return Reply("[concern] My natural voice isn't installed, so I'll keep this one.")
     # The voice organ switches and keeps the choice in its settings.
     await ctx.send("voice.engine", tts=choice)
-    fell_back = _fell_back(status) if choice == "piper" else None
-    if fell_back:
-        # The choice is kept, but no promise is made: the voice keeps Flite while the natural one is silent.
-        return Reply("[concern] My natural voice " + ("made no sound on this laptop" if fell_back == "silent"
-                                                      else "isn't working here right now") +
-                     ", so I'll keep this one for now.")
+    if choice == "piper" and status["active"] != "piper" and status.get("silent"):
+        # The choice is kept, but no promise is made: the voice keeps Flite while
+        # the natural one is silent, whichever voice the owner chose before.
+        return Reply("[concern] My natural voice made no sound on this laptop, so I'll keep this one for now.")
     if choice == "piper":
         slow = status["rtf"] is not None and status["rtf"] > 0.5
         return Reply("[joy] Okay, I'll use my natural voice." +
@@ -926,3 +1322,7 @@ async def handle(text, ctx):
     if choice == "flite":
         return Reply("[neutral] Okay, I'll use my original voice.")
     return Reply("[neutral] Okay. I'll choose my voice by how fast it runs here.")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

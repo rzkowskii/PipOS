@@ -43,21 +43,17 @@ true facts about its body and its memory, says when it does not know,
 and stays the same individual from one wake to the next by keeping a
 record of its own life.
 
-> **Status: awake on real hardware, and still a work in progress.** On
-> 23 November 2026 PipOS booted for the first time on the real 2012
-> MacBook Pro, from a USB stick. Pip woke up, drew its face on the
-> laptop's GPU and heard its name, but could not make out the words after
-> it, so it never answered. One test image, Try 1, is on the
+> **Status: awake on real hardware.** PipOS first booted from USB on the
+> 2012 MacBook Pro on 23 November 2026. It drew its face on the laptop's
+> GPU and heard its name. Later cable diagnostics measured speech
+> recognition and natural speech output on the same laptop. Live speech
+> across the room, power and battery qualification, and installation to
+> the internal SSD are still open. [Current test evidence](STATUS.md)
+> identifies which results came from hardware and which came from QEMU.
+> One test image, Try 1, is on the
 > [Releases page](https://github.com/rzkowskii/PipOS/releases); Try 2 and
-> Try 3 were withdrawn over a voice licence.
-> Boots on 24 November found two separate faults: the microphone still
-> comes up too quiet, and Pip's spoken voice is garbled on the laptop's
-> own speakers, though the same sound is clear on another Mac. The newest
-> work, on the `Dev` branch, adds the tools to find and fix both. So far
-> it has been tested only on the development Mac. Pip does not live on
-> the laptop's own disk yet, and speed, heat and battery are still mostly
-> unmeasured. [What works today](#what-works-today) says exactly where the
-> line is, and the [changelog](CHANGELOG.md) says what changed.
+> Try 3 were withdrawn over a voice licence. The newest work is on the
+> `Dev` branch, and the [changelog](CHANGELOG.md) says what changed.
 
 **See Pip move:** the website at **<https://pipos.pages.dev/>** runs the
 face's own shader in your browser, replays Pip's first eight minutes of
@@ -81,11 +77,28 @@ on two CPU cores from 2012, it can feel alive anywhere.
 
 ![Six of Pip's expressions, as the face renders them](docs/expressions.png)
 
-Pip has no mouth and no head, only two shapes of light on black. Seventeen
-poses, spring physics, blinks, glances, breathing and a wake-up gesture
-carry everything it feels. The face is one shader drawn straight to the
-screen, and it never waits for the language model. If the model is slow,
-crashed or missing, Pip is still awake and still looking at you.
+Pip's default face is two shapes of light on black. Seventeen poses,
+spring physics, blinks, glances, breathing and a wake-up gesture carry
+its expression. The face is one shader drawn straight to the screen,
+and it never waits for the language model. Setup and voice can turn
+brows and a mouth on independently.
+
+The native audition includes all 89 Face Lab expressions, 26 effects,
+13 manual actions and nine scenes. `--full` turns on brows, mouth, eye details,
+emotes and mood colour. In Options → Look, you can enable each layer separately
+or choose one of the 11 eye colours.
+
+```sh
+face --audition love --full
+face --script jump-scare --full
+face --audition curiosity --blend joy --mix 0.5 --full
+face --sheet expressions.png --names all --full --source-pose
+```
+
+Use `--list-auditions`, `--list-emotes`, `--list-gestures` and `--list-colours`
+to find the names. `--emote hearts,sparkle` adds effects independently.
+`--say "Hello, Pip!"` previews mouth movement. Add `--frames DIR --seed 42`
+to export a scene on a fixed clock.
 
 Things you can say today:
 
@@ -103,11 +116,13 @@ Things you can say today:
 
 ## What works today
 
-The first rows are built and tested in a virtual laptop that emulates
-the target machine's Ivy Bridge CPU, and an earlier build of them booted
-on the real 2012 MacBook Pro on 23 November 2026. The work of 24 November
-(marked *new*) has so far been tested only on the development Mac. The
-newest of it, on the `Dev` branch, has not yet been built into an image.
+The virtual laptop emulates the target machine's Ivy Bridge CPU. An
+earlier build booted on the real 2012 MacBook Pro on 23 November 2026.
+The rows marked *new* describe work that followed that first boot.
+See the [current handover](STATUS.md#current-handover--26-november-2026)
+for its hardware and QEMU results.
+The newest of it, on the `Dev` branch, has not been built into a
+published image yet.
 
 | | State |
 |---|---|
@@ -121,25 +136,19 @@ newest of it, on the `Dev` branch, has not yet been built into an image.
 | **A workshop** *(new)* | "Open the terminal": a small, caged terminal beside the eyes where Pip writes and runs little programs when you say so. |
 | **Eyes that see** | Opt-in camera presence: Pip's gaze follows your face. Capture stops when the lid closes or you opt out. |
 | **Install from USB** | A *Try* mode that runs in RAM and leaves the laptop's disks byte-for-byte untouched, and an installer with a typed confirmation before anything is erased. |
-| **Tests** | About 2,500 Python and 261 Rust tests on the host, plus 23 suites that boot the image in QEMU: power cuts, rollbacks, reinstall, raw-disk forgetting. |
+| **Tests** | More than 3,000 host checks, plus QEMU suites for boot, power cuts, rollbacks, reinstall and raw-disk forgetting. |
 
 Not there yet, and said plainly:
 
-- **On the MacBook it cannot hear you well, and its voice is garbled.**
-  On the first boot Pip heard "Hey Pip", then could not make out the
-  words after it. Boots on 24 November found two separate faults. The
-  microphone still comes up too quiet, most likely with one of its two
-  channels dead, and the two other microphone set-ups in the boot menu
-  (**M** and **N**) have not been tried yet. Separately, Pip's spoken
-  voice is garbled on the laptop's own speakers, though the same sound is
-  clear on another Mac. You can type to Pip instead (Mission Control or
-  fn+F2, then 6). `pip-diag` is built to pin down both faults, but it has not run on
-  the laptop yet.
-- **Barely measured.** On the first boot the laptop read the prompt at
-  about 22.5 tokens a second. How fast Pip replies, how long it takes to
-  start speaking, heat and battery life have not been measured there
-  yet. Treat the other speed figures in the design as estimates until
-  they are.
+- **Live speech still needs qualification on the MacBook.** The first
+  boot heard "Hey Pip" but missed the words that followed. Later
+  diagnostics identified a working mic channel and tested recorded
+  commands through a diagnostic input. Speaking at one and two metres,
+  and measuring false wakes in a quiet room, remain open.
+- **Power and end-to-end timing need controlled runs.** Native
+  diagnostics measured individual speech and model stages. A cold boot
+  of the latest image, heat and battery behaviour across workloads, and
+  the delay from live speech to first audio still need qualifying.
 - **No Wi-Fi on the MacBook yet.** Linux finds the Broadcom radio, but
   its firmware is not packaged. Ethernet works.
 - **A small mind.** The current model is the smallest candidate
@@ -296,20 +305,13 @@ cargo build && scripts/run-sim.sh --fake
 target/debug/face --demo
 ```
 
-**Try it on the MacBook.** A test image for the 13-inch mid-2012 MacBook
-Pro (MacBookPro9,2), Try 1, is on the
-[Releases page](https://github.com/rzkowskii/PipOS/releases). Try 2 and
-Try 3 were withdrawn on 25 November because they carry a natural voice whose licence does not allow public distribution; they come back once that voice is
-replaced. Test images run from a USB stick and leave the Mac's own disk untouched unless you choose
-Install. Each release says what has and has not been checked, and
-[FIRST-BOOT.md](docs/FIRST-BOOT.md) walks through a boot. They are built
-from `main`, so the work on the `Dev` branch is not in them yet.
-
-**Boot the real OS in the virtual laptop.** Build an image first with
-`lab/build.sh`, as the
-[developer guide](docs/manual/DEVELOPER-GUIDE.md) describes. It is slow,
-because the CPU is emulated. Add `--sound` to use your microphone and
-speakers:
+**Boot the current source in the virtual laptop.** Build an image with
+`lab/build.sh`, as the [developer guide](docs/manual/DEVELOPER-GUIDE.md)
+describes. The [Releases page](https://github.com/rzkowskii/PipOS/releases)
+has the earlier Try 1 image. Try 2 and 3 were withdrawn over the licence
+for their bundled voice. QEMU emulates the CPU, so it runs slowly.
+Test images are built from `main`, so the work on the `Dev` branch is
+not in them yet. Add `--sound` to use your microphone and speakers:
 
 ```bash
 python3 lab/vm.py

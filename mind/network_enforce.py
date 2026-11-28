@@ -13,8 +13,9 @@ import time
 
 from .network_policy import (
     INTERNET, LOCAL_ONLY, MODES, PAIRED_LAN, POLICY_PATH,
-    NetworkPolicy, load_policy, save_policy, unique_object, validate_time_server,
+    NetworkPolicy, save_policy, unique_object, validate_time_server,
 )
+from .policy import network_policy as load_policy
 from .storage import atomic_write
 
 
@@ -118,7 +119,7 @@ def render_rules(mode, pair=None, time_server=None, cable=None):
                 address = ipaddress.ip_address(validate_time_server(time_server))
                 family = "ip" if address.version == 4 else "ip6"
                 outgoing += [f"{family} daddr {address} udp dport 123 accept"]
-            outgoing += ["udp dport 123 drop", "tcp dport 123 drop", "accept"]
+            outgoing += ["udp dport 123 counter name dropped drop", "tcp dport 123 counter name dropped drop", "accept"]
         if pair:
             appliance = ipaddress.IPv4Address(pair["address"])
             controller = ipaddress.IPv4Address(pair["controller"])
@@ -131,9 +132,15 @@ def render_rules(mode, pair=None, time_server=None, cable=None):
                     f"ip saddr {appliance} ip daddr {controller} tcp sport {ports} ct state established accept",
                 ]
 
+    counted_drop = "counter name dropped drop"
+    incoming.append(counted_drop)
+    if outgoing[-1] != "accept":
+        outgoing.append(counted_drop)
+
     return (
         "destroy table inet being_network\n"
         "table inet being_network {\n"
+        "  counter dropped { }\n"
         "  chain input {\n"
         "    type filter hook input priority filter; policy drop;\n"
         + "".join(f"    {rule}\n" for rule in incoming)
@@ -142,9 +149,28 @@ def render_rules(mode, pair=None, time_server=None, cable=None):
         "    type filter hook output priority filter; policy drop;\n"
         + "".join(f"    {rule}\n" for rule in outgoing)
         + "  }\n"
-        "  chain forward { type filter hook forward priority filter; policy drop; }\n"
+        "  chain forward {\n"
+        "    type filter hook forward priority filter; policy drop;\n"
+        f"    {counted_drop}\n"
+        "  }\n"
         "}\n"
     )
+
+
+def dropped_packets(run=subprocess.run):
+    """Only the aggregate since this policy table was loaded leaves nft."""
+    try:
+        result = run(["/usr/sbin/nft", "-j", "list", "counter", "inet", "being_network", "dropped"],
+                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=4, check=True)
+        entries = json.loads(result.stdout)["nftables"]
+        for entry in entries:
+            counter = entry.get("counter", {})
+            packets = counter.get("packets")
+            if (counter.get("name") == "dropped" and type(packets) is int and 0 <= packets < 2**64):
+                return packets
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return None
 
 
 def install_rules(mode, pair=None, time_server=None, cable=None):

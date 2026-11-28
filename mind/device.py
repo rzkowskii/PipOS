@@ -22,12 +22,14 @@ restarting, its version, and whether its last update worked.
 
 import asyncio
 import re
+import subprocess
 import time
 from pathlib import Path
 
-from . import action_log
+from . import action_log, update_slots
 from .keys import MENU_KEYS
 from .body_talk import Confirm, Reply, is_guest, said
+from .try_mode import SLOT_CONTINUITY_WARNING, continuity_warning_slot
 
 BUILD_ID = Path("/etc/being/build-id")
 SLOT_GOOD = Path("/run/being-slot-good")
@@ -64,6 +66,10 @@ SHUTDOWN = re.compile(
     r"|power\s+(?:off|down)|power\s+" + _YOU + r"\s+(?:off|down))" + _END, re.IGNORECASE)
 RESTART = re.compile(
     _LEAD + r"(?:restart(?:\s+" + _YOU + r")?|reboot(?:\s+" + _YOU + r")?|start\s+" + _YOU + r"\s+again)" + _END, re.IGNORECASE)
+PREVIOUS_SYSTEM = re.compile(
+    _LEAD + r"(?:go\s+back\s+to\s+how\s+you\s+were|restart\s+into\s+the\s+previous\s+system)" + _END,
+    re.IGNORECASE,
+)
 VERSION = re.compile(
     _LEAD + r"(?:what\s+version\s+(?:are\s+you|of\s+pipos\s+are\s+you(?:\s+running)?|are\s+you\s+running|is\s+this)"
     r"|which\s+version\s+(?:are\s+you|is\s+this|are\s+you\s+running)|what(?:['’]s|\s+is)\s+your\s+(?:version|build)(?:\s+number)?"
@@ -133,6 +139,8 @@ def classify(text, ctx=None):
         return ("poweroff", None)
     if RESTART.match(text):
         return ("reboot", None)
+    if PREVIOUS_SYSTEM.match(text):
+        return ("previous_system", None)
     if VERSION.match(text):
         return ("version", None)
     if UPDATE.match(text):
@@ -186,36 +194,52 @@ def uptime(path=UPTIME):
         return None
 
 
-def when_words(stamp, now):
-    days = int((now - stamp) // 86400)
-    if days <= 0:
-        return "today"
-    if days == 1:
-        return "yesterday"
-    return f"{days} days ago"
+def _recorded_update_line(slot, good, environment):
+    target = environment.get(update_slots.LAST_UPDATE)
+    if slot not in ("A", "B") or target not in ("A", "B") or environment.get("GOOD") != slot:
+        return None
+    if target == slot:
+        if good == slot:
+            return "[joy] Yes. I'm running the last update and passed my health check."
+        return None
+    if environment.get("ORDER", "").split() == [target, slot] and environment.get(f"{target}_OK") == "1":
+        tried = environment.get(f"{target}_TRY")
+        if tried == "0":
+            return "[neutral] The update is installed. I'll try it on my next restart."
+        if tried == "1" and environment.get(f"{target}_LEFT") == "0":
+            return "[concern] The update used its startup attempts. I'm running my previous system."
+        if tried == "1":
+            return "[neutral] I'm running my previous system. The update has a startup attempt left."
+    return "[neutral] I'm running a different system from the last update."
 
 
-def update_line(state_dir, *, cmdline=CMDLINE, slot_good=SLOT_GOOD, uptime_path=UPTIME, now=None):
+def update_line(state_dir, *, cmdline=CMDLINE, slot_good=SLOT_GOOD, slot_warning=SLOT_CONTINUITY_WARNING,
+                uptime_path=UPTIME, now=None, environment=None):
     now = time.time() if now is None else now
     if try_boot(cmdline):
         return "[neutral] I'm running from a Try stick, so there's no update to check. Install me first."
     slot = booted_slot(cmdline)
+    if slot is not None and continuity_warning_slot(slot_warning) == slot:
+        return "[concern] I stayed on my current system. A startup check for saved memory or my thinking model needs attention."
+    good = (_read(slot_good, 16) or "").strip()
+    if verdict := _recorded_update_line(slot, good, environment or {}):
+        return verdict
     installed = action_log.last(state_dir, ("update.install",))
     recent = installed is not None and now - installed["ts"] <= RECENT_UPDATE_S
-    when = f" The update went in {when_words(installed['ts'], now)}." if recent else ""
-    good = (_read(slot_good, 16) or "").strip()
     if good in ("A", "B") and (slot is None or good == slot):
         if recent:
-            return f"[joy] Yes. I started on the new system and passed my health check.{when}"
-        return "[neutral] I passed my health check on this start. I haven't installed an update lately."
+            return "[neutral] My current system passed its health check. I can't verify which slot got the last update."
+        return "[neutral] I passed my health check on this start. I don't have a record of the last update."
     up = uptime(uptime_path)
     if up is not None and up < HEALTH_DEADLINE_S:
         return "[neutral] I'm still checking myself after starting. Ask me again in a couple of minutes."
     if slot is None:
         return "[neutral] I can't tell: this start didn't come through my update system."
-    if recent:
+    if "being.trial=1" in (_read(cmdline) or "").split():
         return ("[concern] Not yet: my health check hasn't passed on this start. If it fails, "
                 "I'll go back to my old system by myself.")
+    if recent:
+        return "[concern] Not yet. My health check hasn't passed on this start. Say 'run a check-up' and I'll look."
     return "[concern] My health check hasn't passed on this start. Say 'run a check-up' and I'll look."
 
 
@@ -395,6 +419,32 @@ def _no_panel(ctx):
     return body.get("brightness_reason") == "no_control"
 
 
+async def previous_system(ctx):
+    if is_guest(ctx) or getattr(ctx, "speaker", None) != getattr(ctx, "owner", ""):
+        return Reply("[neutral] Only my owner can restart me into the previous system.")
+    if "being.installed=1" not in (_read(CMDLINE) or "").split():
+        return Reply("[neutral] A previous system is available only on an installed PipOS disk.")
+    try:
+        plan = await asyncio.to_thread(update_slots.rollback_plan)
+    except ValueError as error:
+        return Reply(f"[neutral] {error}")
+    except (OSError, subprocess.SubprocessError):
+        return Reply("[concern] I couldn't check my previous system just now.")
+
+    async def again():
+        try:
+            await asyncio.to_thread(update_slots.schedule_rollback, plan)
+        except ValueError as error:
+            return Reply(f"[neutral] {error}")
+        except (OSError, subprocess.SubprocessError):
+            return Reply("[concern] I couldn't schedule the previous system just now.")
+        return Reply("[neutral] I've scheduled one start on my previous system. Restarting now.",
+                     action="reboot", logged="reboot")
+
+    return Reply("[neutral] Shall I restart and try the previous system once? Say yes.",
+                 confirm=Confirm(again, strict=True, plain_yes=True))
+
+
 async def handle(text, ctx):
     found = classify(text, ctx)
     if found is None:
@@ -428,6 +478,8 @@ async def handle(text, ctx):
         async def again():
             return Reply("[neutral] Restarting. I'll be back in about a minute.", action="reboot", logged="reboot")
         return Reply("[neutral] Shall I restart? Say yes.", confirm=_strict(again))
+    if kind == "previous_system":
+        return await previous_system(ctx)
     if kind == "version":
         return Reply(version_line())
     if kind in ("last_backup", "back_up"):
@@ -436,4 +488,7 @@ async def handle(text, ctx):
         if kind == "last_backup":
             return Reply(last_backup_line(ctx.state_dir))
         return await back_up(ctx)
-    return Reply(update_line(ctx.state_dir))
+    environment = None
+    if "being.installed=1" in (_read(CMDLINE) or "").split():
+        environment = await asyncio.to_thread(update_slots.update_environment)
+    return Reply(update_line(ctx.state_dir, environment=environment))

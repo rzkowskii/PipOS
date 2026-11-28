@@ -56,7 +56,7 @@ class StagedMind(unittest.TestCase):
         claim.assert_not_called()
 
     @staticmethod
-    def boot_stub(directory, _ids):
+    def boot_stub(directory, _ids, **_options):
         boot = directory / "EFI" / "BOOT"
         boot.mkdir(parents=True)
         for name in ("bootx64.efi", "grub.cfg", "grubenv"):

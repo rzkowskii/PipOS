@@ -332,6 +332,20 @@ class Workshop(unittest.TestCase):
         units[:] = ["being-panel-terminal.service", "being-shell-1.service"]
         self.assertTrue(system.terminal_open(host)[0])
 
+    def test_the_clock_or_monitor_panel_is_not_the_terminal(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        units = []
+        host = FakeHost(root, programs={"systemctl"}, handlers={"systemctl": lambda argv: Result(
+            0, "".join(f"{unit} loaded active running x\n" for unit in units))})
+        for panel in ("being-panel-clock.service", "being-panel-monitor.service"):
+            units[:] = [panel]
+            opened, evidence = system.terminal_open(host)
+            self.assertFalse(opened, panel)
+            self.assertIn(panel, evidence)
+            self.assertNotIn("a shell without a panel", evidence)
+        units[:] = ["being-panel-clock.service", "being-panel-terminal.service"]
+        self.assertTrue(system.terminal_open(host)[0])
+
     def test_the_face_missing_while_the_menu_holds_the_screen(self):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         host = FakeHost(root, programs={"systemctl"},
@@ -349,11 +363,14 @@ class Body(unittest.TestCase):
                             ("duplex", "full")):
             host.made(f"/sys/class/net/enp1s0f0/{name}", value + "\n")
         host.made("/sys/class/net/enp1s0f0/device/vendor", "0x14e4\n")
+        driver = host.path("/sys/bus/pci/drivers/tg3")
+        driver.mkdir(parents=True, exist_ok=True)
+        host.path("/sys/class/net/enp1s0f0/device").joinpath("driver").symlink_to(driver)
         host.made("/sys/class/net/lo/type", "772\n")
         item = system.check_network(host)
         self.assertEqual(item["status"], "pass")
         self.assertEqual(item["value"]["wireless"], "not available on this build")
-        self.assertIn("enp1s0f0 up carrier=1 1000 Mb/s", item["evidence"])
+        self.assertIn("enp1s0f0 driver=tg3 up carrier=1 1000 Mb/s", item["evidence"])
 
     def test_battery_health(self):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -364,6 +381,162 @@ class Body(unittest.TestCase):
             host.made(f"{base}/{name}", value + "\n")
         item = system.check_battery(host)
         self.assertEqual((item["status"], item["value"]["health_percent"]), ("warn", 50))
+
+
+class Reading(unittest.TestCase):
+    """Host.read and the kernel's /proc/sys, which allocates a buffer the size of the read."""
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (self.root / "proc/sys/kernel/random").mkdir(parents=True)
+        (self.root / "proc/sys/kernel/osrelease").write_text("6.18.64\n")
+        (self.root / "proc/sys/kernel/random/boot_id").write_text("5f0c3a9e-0000-4000-8000-000000000001\n")
+
+    def kernel_open(self, asked):
+        """open() as the laptop's kernel does /proc/sys: a read over 2 MiB fails with ENOMEM."""
+        real = open
+
+        def fake(path, mode="r", *args, **kwargs):
+            handle = real(path, mode, *args, **kwargs)
+            if "/proc/sys/" not in str(path):
+                return handle
+            read = handle.read
+
+            def limited(size=-1):
+                asked.append(size)
+                if size < 0 or size > 2 * 1024 * 1024:
+                    raise OSError(12, "Cannot allocate memory")
+                return read(size)
+
+            handle.read = limited
+            return handle
+
+        return fake
+
+    def test_the_kernel_and_boot_id_are_read_where_4_mib_reads_fail(self):
+        asked = []
+        host = system.Host(self.root)
+        with patch.object(system, "open", self.kernel_open(asked), create=True):
+            item = system.check_build(host)
+            boot = system.boot_id(host)
+        self.assertEqual(item["value"]["kernel"], "6.18.64")
+        self.assertEqual(boot, "5f0c3a9e-0000-4000-8000-000000000001")
+        self.assertTrue(asked and max(asked) <= system.PROC_SYS_LIMIT)
+
+    def test_a_read_refused_for_its_size_is_tried_again_smaller(self):
+        (self.root / "proc/cmdline").write_text("being.try=1\n")
+        real = open
+        asked = []
+
+        def fake(path, mode="r", *args, **kwargs):
+            handle = real(path, mode, *args, **kwargs)
+            read = handle.read
+
+            def limited(size=-1):
+                asked.append(size)
+                if size > system.PROC_SYS_LIMIT:
+                    raise OSError(12, "Cannot allocate memory")
+                return read(size)
+
+            handle.read = limited
+            return handle
+
+        with patch.object(system, "open", fake, create=True):
+            self.assertEqual(system.Host(self.root).read("/proc/cmdline"), "being.try=1\n")
+            self.assertIsNone(system.Host(self.root).read("/proc/missing"))
+        self.assertEqual(asked, [system.READ_LIMIT, system.PROC_SYS_LIMIT])
+
+    @unittest.skipUnless(os.path.exists("/proc/sys/kernel/osrelease"), "needs a Linux /proc")
+    def test_the_real_proc_sys_reads(self):
+        import platform
+
+        host = system.Host()
+        self.assertEqual((host.read("/proc/sys/kernel/osrelease") or "").strip(), platform.release())
+        self.assertTrue(system.boot_id(host))
+
+
+class Watchdog(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def host(self, runtime, *, device=False, dmesg=""):
+        def systemctl(argv):
+            if "--property=RuntimeWatchdogUSec" in argv:
+                return Result(0, f"{runtime}\n")
+            return Result(0, "")
+
+        host = FakeHost(self.root, programs={"systemctl", "dmesg"},
+                        handlers={"systemctl": systemctl, "dmesg": lambda argv: Result(0, dmesg)})
+        if device:
+            host.made("/dev/watchdog0")
+            host.made("/sys/class/watchdog/watchdog0/identity", "Software Watchdog\n")
+        return host
+
+    def test_a_watchdog_set_with_no_device_warns(self):
+        # The laptop: RuntimeWatchdogUSec=30s, but the firmware disabled the iTCO watchdog.
+        item = system.check_watchdog(self.host("30s", dmesg="iTCO_wdt iTCO_wdt.0.auto: unable to reset NO_REBOOT "
+                                                           "flag, device disabled by hardware/BIOS\n"))
+        self.assertEqual(item["status"], "warn")
+        self.assertIn("every 30s, but there is no /dev/watchdog0", item["evidence"])
+        self.assertIn("NO_REBOOT", item["evidence"])
+        self.assertIn("CONFIG_SOFT_WATCHDOG", item["hint"])
+
+    def test_a_fed_watchdog_passes_and_none_asked_for_passes(self):
+        fed = system.check_watchdog(self.host("30s", device=True))
+        self.assertEqual(fed["status"], "pass")
+        self.assertIn("Software Watchdog", fed["evidence"])
+        self.assertEqual(system.check_watchdog(self.host("0"))["status"], "pass")
+        self.assertEqual(system.check_watchdog(FakeHost(self.root))["status"], "skip")
+
+
+class Devices(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.host = FakeHost(self.root)
+
+    def pci(self, address, vendor, device, driver=None):
+        base = f"/sys/bus/pci/devices/{address}"
+        self.host.made(f"{base}/vendor", f"0x{vendor:04x}\n")
+        self.host.made(f"{base}/device", f"0x{device:04x}\n")
+        if driver:
+            target = self.host.path(f"/sys/bus/pci/drivers/{driver}")
+            target.mkdir(parents=True, exist_ok=True)
+            self.host.path(base).joinpath("driver").symlink_to(target)
+
+    def usb(self, name, vendor, product, driver=None):
+        base = f"/sys/bus/usb/devices/{name}"
+        self.host.made(f"{base}/idVendor", f"{vendor:04x}\n")
+        self.host.made(f"{base}/idProduct", f"{product:04x}\n")
+        interface = self.host.path(f"/sys/bus/usb/devices/{name}:1.0")
+        interface.mkdir(parents=True)
+        if driver:
+            target = self.host.path(f"/sys/bus/usb/drivers/{driver}")
+            target.mkdir(parents=True, exist_ok=True)
+            interface.joinpath("driver").symlink_to(target)
+
+    def test_the_macbooks_unsupported_hardware_is_named_not_silently_missing(self):
+        self.pci("0000:02:00.0", 0x14E4, 0x16BC)
+        self.pci("0000:03:00.0", 0x11C1, 0x5901)
+        self.pci("0000:05:00.0", 0x8086, 0x1513)
+        self.pci("0000:01:00.0", 0x14E4, 0x4331, driver="b43-pci-bridge")
+        self.usb("1-1.8.3", 0x05AC, 0x821D)
+        self.usb("1-1.8.2", 0x05AC, 0x8242)
+        self.usb("1-1.8.1", 0x05AC, 0x0252, driver="usbhid")
+        item = system.check_devices(self.host)
+        self.assertEqual(item["status"], "pass")
+        for name in ("Bluetooth 05ac:821d", "SD card reader 14e4:16bc", "FireWire 11c1:5901",
+                     "Thunderbolt 8086:1513", "infrared receiver 05ac:8242"):
+            self.assertIn(name, item["evidence"])
+        self.assertIn("not supported on this build", item["evidence"])
+        self.assertIn("Wi-Fi (Broadcom BCM4331): driver b43-pci-bridge but no firmware on this build",
+                      item["evidence"])
+        self.assertNotIn("0252", item["evidence"])  # the keyboard is supported: not listed
+
+    def test_a_bound_driver_is_said_and_nothing_known_skips(self):
+        self.assertEqual(system.check_devices(self.host)["status"], "skip")
+        self.pci("0000:02:00.0", 0x14E4, 0x16BC, driver="sdhci-pci")
+        item = system.check_devices(self.host)
+        self.assertIn("SD card reader 14e4:16bc (driver sdhci-pci)", item["evidence"])
 
 
 if __name__ == "__main__":

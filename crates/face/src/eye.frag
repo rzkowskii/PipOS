@@ -25,6 +25,11 @@ uniform vec2 uOrigin;  // where this viewport starts in the window, in pixels
 // Privacy marks (render.rs: Marks): glint, guest ring, covered ears, network
 // dot; then SSH mark and the fixed marks' level on screen.
 uniform vec4 uMarks[2];
+#ifdef FACE_DECOR
+// Two vec4s per brow, four for the mouth, two for optional eye details.
+uniform vec4 uDecor[10];
+uniform vec4 uGlitch; // three signed offsets and a presence flag
+#endif
 
 // Distance to a segment.
 float sdSegment(vec2 p, vec2 a, vec2 b) {
@@ -119,20 +124,164 @@ float sdEye(vec2 p, vec4 a, vec4 b, vec4 c, vec3 shape, vec4 ellipse, out vec2 u
     return d;
 }
 
+#ifdef FACE_DECOR
+float stroke(float d, float px) {
+    return clamp(0.5 - d / px, 0.0, 1.0);
+}
+
+float decorCoverage(vec2 p, float px) {
+    if (abs(p.x) > min(1.38, uRes.x / uRes.y - 0.12) || abs(p.y) > 0.86) return 0.0;
+    float result = 0.0;
+    for (int i = 0; i < 2; i++) {
+        vec4 shape = uDecor[2 * i];
+        vec3 ink = uDecor[2 * i + 1].xyz; // curve, thickness, alpha
+        if (ink.z <= 0.0) continue;
+        vec2 eye = uE[i * 4].xy;
+        float width = max(0.05, shape.z);
+        float slope = 0.60 * shape.w;
+        float arc = 0.10 * ink.x;
+        float radius = 0.5 * max(0.02, ink.y);
+        float inward = i == 0 ? 1.0 : -1.0;
+        vec2 center = vec2(eye.x + inward * shape.y, eye.y + shape.x);
+        center.y = min(center.y, 0.85 - width * abs(slope) - max(arc, 0.0) - radius);
+        vec2 q = p - center;
+        if (abs(q.x) > width + radius + px || abs(q.y) > width * abs(slope) + abs(arc) + radius + px) continue;
+        float along = clamp(inward * q.x / width, -1.0, 1.0);
+        float y = slope * width * along + arc * (1.0 - along * along);
+        float d = length(vec2(q.x - inward * along * width, q.y - y)) - radius;
+        result = max(result, ink.z * stroke(d, px));
+    }
+
+    vec4 m = uDecor[4]; // x, half-width, y, corner height
+    vec4 curve = uDecor[5]; // skew, arc, opening, roundness
+    vec4 detail = uDecor[6]; // cat curve, wave, zigzag, tongue
+    vec3 ink = uDecor[7].xyz; // lower lip, alpha, wave phase
+    if (ink.y > 0.0 && abs(p.x - m.x) < m.y + 0.15 && p.y > -0.86 && p.y < -0.32) {
+        vec2 eyeCenter = 0.5 * (uE[0].xy + uE[4].xy);
+        float width = max(0.025, m.y);
+        float gap = min(0.26 * curve.z, 0.22);
+        float roundness = clamp(max(curve.w, gap / (2.0 * width) * 1.1 - 0.35), 0.0, 1.0);
+        float x = p.x - m.x - 0.20 * eyeCenter.x;
+        float along = clamp(x / width, -1.0, 1.0);
+        float profile = max(1.0 - along * along, 0.0);
+        float cat = 2.0 * abs(along) - 1.0;
+        float catDip = 0.07 * clamp(width / 0.2, 0.4, 1.4) * (1.0 - cat * cat);
+        float wave = detail.y * 0.022 * sin(along * 8.79645943 + ink.z) * pow(profile, 0.35);
+        float zig = detail.z * 0.014 * (2.0 * abs(mod(along * 4.0 + 1.0, 2.0) - 1.0) - 1.0) * pow(profile, 0.2);
+        float center = max(m.z + m.w + 0.20 * eyeCenter.y, -0.80 + gap + ink.x + max(curve.y, 0.0));
+        float upper = center + 0.5 * curve.x * along - mix(curve.y * profile, catDip, detail.x) + wave + zig;
+        float lower = upper - gap * pow(profile, mix(0.90, 0.50, roundness)) - ink.x * profile + 0.6 * wave - 2.0 * zig;
+        float end = x - along * width;
+        float d = length(vec2(end, p.y - upper));
+        if (gap + ink.x > 0.014) {
+            d = min(d, length(vec2(end, p.y - lower)));
+            if (abs(along) < 1.0 && p.y < upper && p.y > lower) {
+                result = max(result, 0.17 * ink.y);
+                if (detail.w > 0.03) {
+                    float height = max(0.015, gap * 0.44 * detail.w);
+                    float tongue = length(vec2(along / 0.53, (p.y - lower - 0.2 * height) / height));
+                    result = max(result, ink.y * 0.75 * stroke((tongue - 1.0) * height, px));
+                }
+            }
+        }
+        result = max(result, ink.y * stroke(d - 0.017, px));
+    }
+    return result;
+}
+
+float sdHeart(vec2 p) {
+    p.x = abs(p.x);
+    if (p.x + p.y > 1.0) return length(p - vec2(0.25, 0.75)) - 0.35355339;
+    vec2 a = p - vec2(0.0, 1.0);
+    vec2 b = p - 0.5 * max(p.x + p.y, 0.0);
+    return sqrt(min(dot(a, a), dot(b, b))) * sign(p.x - p.y);
+}
+
+float sdStar(vec2 p) {
+    // Fold onto the wedge from an outer tip to its nearest inner corner.
+    const float sector = 1.25663706;
+    float a = abs(mod(atan(p.x, p.y + 1e-6) + 0.5 * sector, sector) - 0.5 * sector);
+    p = length(p) * vec2(sin(a), cos(a));
+    vec2 tip = vec2(0.0, 1.0), valley = vec2(0.26450, 0.36406);
+    vec2 edge = valley - tip, q = p - tip;
+    return sdSegment(p, tip, valley) * sign(edge.x * q.y - edge.y * q.x);
+}
+
+float specialEye(vec2 q, float radius, vec4 shape, float phase) {
+    float d = 2.0;
+    float strength = max(max(shape.x, shape.y), max(shape.z, shape.w));
+    if (shape.x > 0.0) {
+        float size = radius * (1.0 + 0.05 * sin(phase));
+        d = min(d, sdHeart(q * (0.63 / size) + vec2(0.0, 0.49)) * size / 0.63 + 0.22 * (strength - shape.x));
+    }
+    if (shape.y > 0.0) {
+        vec2 p = abs(q);
+        d = min(d, sdSegment(p, vec2(0.0), vec2(0.63 * radius)) - 0.041 + 0.22 * (strength - shape.y));
+    }
+    if (shape.z > 0.0) {
+        float angle = atan(q.y, q.x + 1e-6) - phase;
+        float radial = length(q);
+        float turn = radius / 2.6;
+        float space = (radial / turn - angle / 6.28318531);
+        float spiral = abs(space - round(space)) * turn;
+        d = min(d, max(spiral - 0.025, radial - radius) + 0.22 * (strength - shape.z));
+    }
+    if (shape.w > 0.0) {
+        float angle = 0.18 * sin(phase);
+        vec2 p = mat2(cos(angle), -sin(angle), sin(angle), cos(angle)) * q;
+        float size = 1.07 * radius * (1.0 + 0.04 * sin(phase));
+        d = min(d, sdStar(p / size) * size + 0.22 * (strength - shape.w));
+    }
+    return d;
+}
+
+#endif
+
 void main() {
     vec2 p = (gl_FragCoord.xy - uOrigin - 0.5 * uRes) / (0.5 * uRes.y);
     float px = 1.0 / (0.5 * uRes.y);
+    vec2 eyePoint = p;
+#ifdef FACE_DECOR
+    if (uGlitch.w > 0.0 && uMarks[0].x + uMarks[0].y == 0.0) {
+        vec3 centers = vec3(-0.16, 0.015, 0.19);
+        vec3 widths = vec3(0.025, 0.041, 0.030);
+        vec3 bands = 1.0 - smoothstep(widths, widths + 0.004, abs(p.y - centers));
+        eyePoint.x += dot(uGlitch.xyz, bands);
+    }
+#endif
 
     vec3 lit = vec3(0.0); // the eyes themselves
     float cover = 0.0;    // how much of this pixel an eye covers
     float halo = 0.0;     // bloom from both eyes
+#ifdef FACE_DECOR
+    vec4 special = uDecor[8];
+    float morph = clamp(max(max(special.x, special.y), max(special.z, special.w)), 0.0, 1.0);
+#endif
     for (int i = 0; i < 2; i++) {
         vec4 eye = uE[i * 4];
-        if (any(greaterThan(abs(p - eye.xy), vBounds[i]))) {
+        vec2 bounds = vBounds[i];
+#ifdef FACE_DECOR
+        float radius = min(eye.z, 1.12 * eye.w);
+        if (morph > 0.0) bounds = max(bounds, vec2(1.20 * radius + uGlowR));
+#endif
+        if (any(greaterThan(abs(eyePoint - eye.xy), bounds))) {
             continue;
         }
         vec2 u;
-        float d = sdEye(p, eye, uE[i * 4 + 1], uE[i * 4 + 2], vShape[i].xyz, vEllipse[i], u);
+        vec4 lid = uE[i * 4 + 1], crease = uE[i * 4 + 2];
+        float d = sdEye(eyePoint, eye, lid, crease, vShape[i].xyz, vEllipse[i], u);
+#ifdef FACE_DECOR
+        vec4 details = uDecor[9]; // pupil, shine, wet lower edge, phase
+        vec2 q = eyePoint - eye.xy;
+        float aperture = lid.z + crease.x - crease.y - crease.w;
+        if (morph > 0.0) {
+            vec2 rotation = vShape[i].xy;
+            vec2 local = vec2(dot(q, rotation), dot(q, vec2(-rotation.y, rotation.x)));
+            float phase = (i == 0 ? details.w : -details.w);
+            float change = morph * smoothstep(0.10, 0.75, aperture);
+            d = mix(d, specialEye(local, radius, special, phase), change);
+        }
+#endif
         // Glow is a brightness on screen; squared, it scales linear light.
         float g = uE[i * 4 + 3].x;
         float g2 = g * g;
@@ -151,6 +300,24 @@ void main() {
         // way a dim light looks bluer, rather than greying into teal.
         vec3 rim = mix(uFill, uHalo, 0.5 * clamp(1.5 - 1.5 * g, 0.0, 1.0));
         vec3 colour = mix(rim, uCore, t);
+#ifdef FACE_DECOR
+        if (c > 0.0 && details.x + details.y + details.z > 0.0) {
+            if (details.x > 0.0 && aperture > 0.40) {
+                float pupil = stroke(length(q - vec2(0.04 * eye.x, 0.02)) - details.x * rmin, px);
+                colour *= 1.0 - 0.94 * pupil * smoothstep(0.40, 0.95, aperture);
+            }
+            if (details.y + details.z > 0.0) {
+                float shine = 0.0;
+                if (uMarks[0].x <= 0.0) {
+                    // Keep a capture glint recognizable while the camera may see.
+                    shine = stroke(length(q - eye.zw * vec2(-0.28, 0.32)) - 0.14 * rmin * details.y, px);
+                    shine = max(shine, 0.7 * stroke(length(q - eye.zw * vec2(0.30, -0.28)) - 0.08 * rmin * details.y, px));
+                }
+                float wet = 1.0 - smoothstep(-0.82, -0.20, q.y / eye.w);
+                colour = mix(colour, uCore, clamp(0.9 * shine * details.y + 0.7 * wet * details.z, 0.0, 1.0));
+            }
+        }
+#endif
         if (uMarks[0].x > 0.0) {
             // The camera may capture: a small glint up and to the left in
             // each eye, in the eye's own hottest colour (never white).
@@ -179,7 +346,14 @@ void main() {
     if (uMarks[0].z + uMarks[0].w + uMarks[1].x > 0.0) {
         marks = fixedMarks(p, px);
     }
-    if (cover == 0.0 && halo == 0.0) {
+    // Only the eyes receive the LED grid. The thin strokes keep their outline.
+    float decor = 0.0;
+#ifdef FACE_DECOR
+    if (uDecor[1].z + uDecor[3].z + uDecor[7].y > 0.0) {
+        decor = decorCoverage(p, px) * (1.0 - cover);
+    }
+#endif
+    if (cover == 0.0 && halo == 0.0 && decor == 0.0) {
         frag = vec4(marks, 1.0);
         return;
     }
@@ -192,7 +366,8 @@ void main() {
         }
     }
 
-    vec3 col = lit + uHalo * (halo * (1.0 - cover));
+    lit = max(lit, mix(uFill, uCore, 0.26) * (0.82 * decor * decor));
+    vec3 col = lit + uHalo * (halo * (1.0 - max(cover, decor)));
     // Encode for the screen (gamma 2), then roll highlights off softly so a
     // bright eye turns cyan-white without a hard clip.
     col = sqrt(col);

@@ -1,0 +1,304 @@
+--- a/ggml/src/ggml-cpu/tiled/tiled-kernel.h
++++ b/ggml/src/ggml-cpu/tiled/tiled-kernel.h
+@@ -14,6 +14,8 @@
+ 
+ #include <stddef.h>
+ #include <stdint.h>
++#include <cstdlib>
++#include <cstring>
+ 
+ #if defined(__AVX2__)
+ #include <immintrin.h>
+@@ -23,6 +25,39 @@
+ #define TILED_TILE_ROWS 256 // max window rows, ragged at edges
+ #define TILED_MICRO     16  // microtile edge (also the bsums code-sum granularity)
+ #define TILED_WS_SLOT   (512 * 1024) // per-thread workspace slot, a clean 512KB (multiple of 64B)
++
++// P-1 lab arm. Each worker in a process observes the same one-time setting.
++inline bool tiled_pipos_acc16() {
++#if defined(__AVX__) && !defined(__AVX2__) && defined(__SSSE3__) && defined(__SSE4_1__)
++    static const bool enabled = [] {
++        const char * value = std::getenv("GGML_PIPOS_TILED_ACC16");
++        return value != nullptr && std::strcmp(value, "1") == 0;
++    }();
++    return enabled;
++#else
++    return false;
++#endif
++}
++
++inline bool tiled_pipos_window128() {
++    static const bool enabled = [] {
++        const char * value = std::getenv("GGML_PIPOS_TILED_WINDOW128");
++        return tiled_pipos_acc16() && value != nullptr && std::strcmp(value, "1") == 0;
++    }();
++    return enabled;
++}
++
++inline bool tiled_pipos_trace() {
++#if defined(__AVX__) && !defined(__AVX2__) && defined(__SSSE3__) && defined(__SSE4_1__)
++    static const bool enabled = [] {
++        const char * value = std::getenv("GGML_PIPOS_TILED_TRACE");
++        return value != nullptr && std::strcmp(value, "1") == 0;
++    }();
++    return enabled;
++#else
++    return false;
++#endif
++}
+ 
+ // src0 tile: weight side, shared by all formats.
+ // scales/mins are sized for the max subblock count (SUBBLK=16);
+--- a/ggml/src/ggml-cpu/tiled/tiled-kernel.cpp
++++ b/ggml/src/ggml-cpu/tiled/tiled-kernel.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include "ggml.h"
+ 
++#include <cstdio>
+ #include <cstring>
+ 
+ #if defined(__AVX512VNNI__) || defined(__AVX2__) || defined(__AVX__)
+@@ -402,12 +403,24 @@
+ #endif // __AVX2__
+ 
+ #if defined(__AVX__) && !defined(__AVX2__)
+-template <int SUBBLK, bool HAS_MIN, int BIAS, int NK>
++template <int SUBBLK, bool HAS_MIN, int BIAS, int NK, bool ACC16 = false>
+ static void tiled_run_microtile_avx(const tiled_tile_src0 & src0, const tiled_tile_src1 & src1,
+                                     int i0, int j0, int num_k, int slab, float * buf, int buf_stride) {
+     constexpr int NB = TILED_TILE_K / SUBBLK;
+     constexpr int NS = SUBBLK / 16;
+     constexpr int GROUP = 4; // src1 columns per group: one acc32 per column
++
++    static_assert(!ACC16 || (SUBBLK == 32 && HAS_MIN && BIAS == 0));
++    if constexpr (SUBBLK == 32 && HAS_MIN && BIAS == 0) {
++        if (tiled_pipos_trace()) {
++            static const bool reported = [] {
++                std::fprintf(stderr, "pipos-tiled-prefill: kernel=%s\n",
++                             ACC16 ? "acc16-avx1" : "stock-avx1");
++                return true;
++            }();
++            GGML_UNUSED(reported);
++        }
++    }
+ 
+     // num_k/slab: the narrow path holds num_k slabs at row stride num_k*256 (num_k=1, slab=0 = standard)
+     // NK: 1 = standard single-slab (offsets 0, strides compile-time); 0 = runtime
+@@ -449,6 +462,25 @@
+                             (const __m128i *) &src1.bsums[(bs_off + s * NS + u) * bs_stride + j0 + g]));
+                     }
+                     s2 = _mm_add_epi32(s2, _mm_mullo_epi32(bsums_v, _mm_set1_epi32(mins_row[s])));
++                }
++                if constexpr (ACC16) {
++                    // Unsigned Q4_K/Q5_K weights are at most 31.
++                    // Each maddubs lane covers two products (abs <= 7936)
++                    // and each combined i16 lane covers four (abs <= 15872),
++                    // even for the full signed byte range. Widen before the
++                    // 6-bit scale and retain the original i32 accumulation.
++                    const int offset = s * SUBBLK;
++                    const __m128i a0 = _mm_loadu_si128((const __m128i *) &q0[offset]);
++                    const __m128i a1 = _mm_loadu_si128((const __m128i *) &q0[offset + 16]);
++                    for (int t = 0; t < GROUP; t++) {
++                        const __m128i b0 = _mm_loadu_si128((const __m128i *) &q1g[t][offset]);
++                        const __m128i b1 = _mm_loadu_si128((const __m128i *) &q1g[t][offset + 16]);
++                        const __m128i pair0 = _mm_maddubs_epi16(a0, b0);
++                        const __m128i pair1 = _mm_maddubs_epi16(a1, b1);
++                        const __m128i dot = _mm_madd_epi16(scales16, _mm_add_epi16(pair0, pair1));
++                        acc[t] = _mm_add_epi32(acc[t], dot);
++                    }
++                    continue;
+                 }
+                 for (int u = 0; u < NS; u++) {
+                     const __m128i a16 = _mm_loadu_si128((const __m128i *) &q0[s * SUBBLK + u * 16]);
+@@ -519,6 +551,16 @@
+         tiled_run_microtile_avx2<SUBBLK, HAS_MIN, BIAS, 0, ACTBIAS>(src0, src1, i0, j0, num_k, slab, buf, buf_stride);
+     }
+ #elif defined(__AVX__)
++    if constexpr (SUBBLK == 32 && HAS_MIN && BIAS == 0) {
++        if (tiled_pipos_acc16()) {
++            if (standard) {
++                tiled_run_microtile_avx<SUBBLK, HAS_MIN, BIAS, 1, true>(src0, src1, i0, j0, num_k, slab, buf, buf_stride);
++            } else {
++                tiled_run_microtile_avx<SUBBLK, HAS_MIN, BIAS, 0, true>(src0, src1, i0, j0, num_k, slab, buf, buf_stride);
++            }
++            return;
++        }
++    }
+     if (standard) {
+         tiled_run_microtile_avx<SUBBLK, HAS_MIN, BIAS, 1>(src0, src1, i0, j0, num_k, slab, buf, buf_stride);
+     } else {
+--- a/ggml/src/ggml-cpu/tiled/tiled.cpp
++++ b/ggml/src/ggml-cpu/tiled/tiled.cpp
+@@ -10,10 +10,52 @@
+ #include "ggml-common.h"
+ 
+ #include <cassert>
++#include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ 
+ #include <mutex>
++
++#include <type_traits>
++
++#if defined(__AVX__) && !defined(__AVX2__)
++#include <immintrin.h>
++#endif
++
++template <typename B>
++constexpr bool tiled_pipos_format = std::is_same_v<B, block_q4_K> || std::is_same_v<B, block_q5_K>;
++
++static void tiled_pipos_nibbles(const uint8_t * src, uint8_t * lo, uint8_t * hi) {
++#if defined(__AVX__) && !defined(__AVX2__)
++    if (tiled_pipos_acc16()) {
++        const __m128i mask = _mm_set1_epi8(15);
++        for (int offset = 0; offset < 32; offset += 16) {
++            const __m128i packed = _mm_loadu_si128((const __m128i *) (src + offset));
++            _mm_storeu_si128((__m128i *) (lo + offset), _mm_and_si128(packed, mask));
++            _mm_storeu_si128((__m128i *) (hi + offset), _mm_and_si128(_mm_srli_epi16(packed, 4), mask));
++        }
++        return;
++    }
++#endif
++    tiled_unpk_nib4(src, lo, hi);
++}
++
++template <int S>
++static void tiled_pipos_high_bit(uint8_t * dst, const uint8_t * src) {
++#if defined(__AVX__) && !defined(__AVX2__)
++    if (tiled_pipos_acc16()) {
++        const __m128i mask = _mm_set1_epi8(1);
++        for (int offset = 0; offset < 32; offset += 16) {
++            const __m128i bits = _mm_loadu_si128((const __m128i *) (src + offset));
++            const __m128i high = _mm_slli_epi16(_mm_and_si128(_mm_srli_epi16(bits, S), mask), 4);
++            const __m128i low = _mm_loadu_si128((const __m128i *) (dst + offset));
++            _mm_storeu_si128((__m128i *) (dst + offset), _mm_or_si128(low, high));
++        }
++        return;
++    }
++#endif
++    tiled_unpk_or<S, 4, 1>(dst, src);
++}
+ 
+ #define UNUSED GGML_UNUSED
+ 
+@@ -55,10 +97,10 @@
+ 
+             // extract the 4-bit codes (low 4 + high 4), same extraction as the reference kernels
+             uint8_t * q = &tile->q[q_off];
+-            tiled_unpk_nib4(x.qs + 0,  q + 0,   q + 32);
+-            tiled_unpk_nib4(x.qs + 32, q + 64,  q + 96);
+-            tiled_unpk_nib4(x.qs + 64, q + 128, q + 160);
+-            tiled_unpk_nib4(x.qs + 96, q + 192, q + 224);
++            tiled_pipos_nibbles(x.qs + 0,  q + 0,   q + 32);
++            tiled_pipos_nibbles(x.qs + 32, q + 64,  q + 96);
++            tiled_pipos_nibbles(x.qs + 64, q + 128, q + 160);
++            tiled_pipos_nibbles(x.qs + 96, q + 192, q + 224);
+         }
+     }
+ }
+@@ -102,18 +144,18 @@
+             // 64-element chunk j uses qh bits 2j (low 32) and 2j+1 (high 32); OR adds the 5th bit
+             // (no overlap with the 4-bit codes, identical to the reference ADD)
+             uint8_t * q = &tile->q[q_off];
+-            tiled_unpk_nib4(x.qs + 0,  q + 0,   q + 32);
+-            tiled_unpk_nib4(x.qs + 32, q + 64,  q + 96);
+-            tiled_unpk_nib4(x.qs + 64, q + 128, q + 160);
+-            tiled_unpk_nib4(x.qs + 96, q + 192, q + 224);
+-            tiled_unpk_or<0, 4, 1>(q + 0,   x.qh);
+-            tiled_unpk_or<1, 4, 1>(q + 32,  x.qh);
+-            tiled_unpk_or<2, 4, 1>(q + 64,  x.qh);
+-            tiled_unpk_or<3, 4, 1>(q + 96,  x.qh);
+-            tiled_unpk_or<4, 4, 1>(q + 128, x.qh);
+-            tiled_unpk_or<5, 4, 1>(q + 160, x.qh);
+-            tiled_unpk_or<6, 4, 1>(q + 192, x.qh);
+-            tiled_unpk_or<7, 4, 1>(q + 224, x.qh);
++            tiled_pipos_nibbles(x.qs + 0,  q + 0,   q + 32);
++            tiled_pipos_nibbles(x.qs + 32, q + 64,  q + 96);
++            tiled_pipos_nibbles(x.qs + 64, q + 128, q + 160);
++            tiled_pipos_nibbles(x.qs + 96, q + 192, q + 224);
++            tiled_pipos_high_bit<0>(q + 0,   x.qh);
++            tiled_pipos_high_bit<1>(q + 32,  x.qh);
++            tiled_pipos_high_bit<2>(q + 64,  x.qh);
++            tiled_pipos_high_bit<3>(q + 96,  x.qh);
++            tiled_pipos_high_bit<4>(q + 128, x.qh);
++            tiled_pipos_high_bit<5>(q + 160, x.qh);
++            tiled_pipos_high_bit<6>(q + 192, x.qh);
++            tiled_pipos_high_bit<7>(q + 224, x.qh);
+         }
+     }
+ }
+@@ -929,14 +971,15 @@
+     const int64_t src0_stride = nb01 / src0_bs;  // blocks between src0 rows
+     const int64_t src1_stride = (src1->type == vec_dot_type ? src1->nb[1] : row_size) / src1_bs;
+ 
+-    const int64_t TILE = 256;
++    const bool small_window = tiled_pipos_format<B> && tiled_pipos_window128();
++    const int64_t window = small_window ? 128 : TILED_TILE_ROWS;
+     const int64_t MICRO = 16;
+ 
+-    // 256-wide windows over the chunk. The iir1 window is additionally clamped at the
++    // Row windows over the chunk. The iir1 window is additionally clamped at the
+     // src1 batch (ne11) boundary: the tiles require a constant batch index (i12/i13)
+     // within a window, so advance by the clamped end, not a fixed 256.
+     for (int64_t iir1 = ir1_start; iir1 < ir1_end; ) {
+-        int64_t iir1_end = MIN(iir1 + TILE, ir1_end);
++        int64_t iir1_end = MIN(iir1 + window, ir1_end);
+         const int64_t bnd = (iir1 / ne11 + 1) * ne11;
+         if (bnd < iir1_end) {
+             iir1_end = bnd;
+@@ -965,12 +1008,20 @@
+             rows[r] = (const block_q8_K *) ((const char *) wdata + (iir1 + r) * src1_stride * src1_bs);
+         }
+ 
+-        for (int64_t iir0 = ir0_start; iir0 < ir0_end; iir0 += TILE) {
+-            int64_t iir0_end = MIN(iir0 + TILE, ir0_end);
++        for (int64_t iir0 = ir0_start; iir0 < ir0_end; iir0 += window) {
++            int64_t iir0_end = MIN(iir0 + window, ir0_end);
+             const int n_src0 = (int) (iir0_end - iir0);
+ 
+-            // result buffer zeroed once per macrotile
+-            memset(ws->acc, 0, (size_t)TILED_TILE_ROWS * TILED_TILE_ROWS * sizeof(float));
++            // Include padded lanes that the 16 x 16 kernels still touch.
++            if (small_window) {
++                const int rows_used = (n_src0 + TILED_MICRO - 1) / TILED_MICRO * TILED_MICRO;
++                const int cols_used = (n_src1 + TILED_MICRO - 1) / TILED_MICRO * TILED_MICRO;
++                for (int row = 0; row < rows_used; ++row) {
++                    memset(ws->acc + row * TILED_TILE_ROWS, 0, cols_used * sizeof(float));
++                }
++            } else {
++                memset(ws->acc, 0, (size_t)TILED_TILE_ROWS * TILED_TILE_ROWS * sizeof(float));
++            }
+ 
+             if (n_src1 <= TILED_MICRO) {
+                 // narrow path: if we have few enough rows, we're memory bound
+@@ -999,8 +1050,8 @@
+                 }
+             } else {
+                 // standard per-slab path: K is stepped in 256-element chunks
+-                for (int64_t ib = 0; ib < ne00; ib += TILE) {
+-                    const int kblk = (int) (ib / TILE);
++                for (int64_t ib = 0; ib < ne00; ib += TILED_TILE_K) {
++                    const int kblk = (int) (ib / TILED_TILE_K);
+                     tiled_unpack_src0((const B *) (src0_row + iir0 * nb01 + kblk * src0_bs), src0_stride, n_src0, &ws->src0, 1);
+                     tiled_repack_src0<SUBBLK>(&ws->src0, n_src0, 1, BIAS, ACTBIAS);
+                     tiled_unpack_src1_q8_K(rows, n_src1, &ws->src1, kblk, 1);
+@@ -1153,6 +1204,17 @@
+                                   int64_t cne1,
+                                   char * scratch) {
+     if (expert_rows == NULL) {
++        if constexpr (tiled_pipos_format<B>) {
++            if (tiled_pipos_trace()) {
++                static const bool reported = [] {
++                    const char * format = std::is_same_v<B, block_q4_K> ? "q4_k" : "q5_k";
++                    std::fprintf(stderr, "pipos-tiled-prefill: format=%s window=%d\n",
++                                 format, tiled_pipos_window128() ? 128 : TILED_TILE_ROWS);
++                    return true;
++                }();
++                GGML_UNUSED(reported);
++            }
++        }
+         ggml_compute_forward_mul_mat_tiled_driver<B, SUBBLK, HAS_MIN, BIAS, ACTBIAS>(params, dst);
+     } else {
+         ggml_compute_forward_mul_mat_id_tiled_one_expert<B, SUBBLK, HAS_MIN, BIAS, ACTBIAS>(params, dst, cur_a, cne1, expert_rows, scratch);

@@ -11,7 +11,8 @@ finished parts):
 
 * system facts: CPU, threads, memory, kernel, governor, turbo and caps, RAPL;
 * per model, a private llama-server started with the production flags
-  (being-cortex.service: two slots, 512-token batches) on a private port:
+  (being-cortex.service: two slots, batches of 64 and 7 tokens, flash
+  attention off, weights mapped from the file) on a private port:
   load time, cold prefill at 16, 32, 128 and 512 tokens, decode 64 tokens, a
   6-turn chat with prompt and cached tokens per turn, slot save and restore
   (cache_n after the restore), whether slot 0 keeps its cache while slot 1
@@ -66,6 +67,7 @@ import wave
 from pathlib import Path
 
 KIND = "pipos-bench-v1"
+PLUS_KIND = "pipos-bench-v2"
 SERVER = "/usr/bin/llama-server"
 PORT = 8091
 PREFILL_SIZES = (16, 32, 128, 512)
@@ -75,7 +77,14 @@ THREAD_SWEEP = tuple({"threads": threads, "threads_batch": batch} for threads in
 PRODUCTION = {"threads": 2, "threads_batch": 2}
 # being-cortex.service: two slots of 4096 tokens. The dream server: one of 2048.
 CONVERSATION_SERVER = {"ctx_size": 8192, "parallel": 2}
-DREAM_SERVER = {"ctx_size": 2048, "parallel": 1}
+# being-cortex.service's batches and attention, used unless a setting names
+# its own: a 64-token logical batch, a 7-token physical one, flash attention
+# off. The dream server keeps llama-server's own attention choice (None: not
+# set) and is measured at 512-token batches.
+CORTEX_BATCHES = {"batch": 64, "ubatch": 7, "flash_attn": "off"}
+DREAM_SERVER = {"ctx_size": 2048, "parallel": 1, "batch": 512, "ubatch": 512, "flash_attn": None}
+# --load-mode: this llama-server has no --mlock and no LLAMA_ARG_MLOCK.
+LOAD_MODE, LOCKED_LOAD_MODE = "mmap", "mmap+mlock"
 MODELS = Path("/models")
 BENCH_MODELS = MODELS / "bench"
 DREAM_MODEL = MODELS / "dream/dream.gguf"
@@ -94,6 +103,11 @@ PIPLOGS_STATE = Path("/run/being-usb-logs/folder")
 CPU = Path("/sys/devices/system/cpu")
 PSTATE = CPU / "intel_pstate"
 RAPL = Path("/sys/class/powercap/intel-rapl:0")
+ORGANS = ("being-brainstem.service", "being-cortex.service", "being-mind.service",
+          "being-voice.service", "being-face.service", "being-eyes.service",
+          "being-hands.service", "being-bodycare.service", "being-wifi.service")
+PLUS_MAX_IDLE = 600
+PLUS_MAX_OUTPUT = 256 * 1024
 
 
 # --- small helpers -----------------------------------------------------------
@@ -280,11 +294,20 @@ def server_command(model, setting, port, slot_dir, server=SERVER):
 
 
 def server_env(setting):
+    """llama-server's environment for one setting: being-cortex.service's
+    batches, attention and load mode unless the setting names its own."""
     env = dict(os.environ)
-    env.update(LLAMA_ARG_CTX_CHECKPOINTS="6", LLAMA_ARG_BATCH=str(setting.get("batch", 512)),
-               LLAMA_ARG_UBATCH=str(setting.get("ubatch", 512)))
-    if setting.get("mlock"):
-        env["LLAMA_ARG_MLOCK"] = "1"
+    env.pop("LLAMA_ARG_MLOCK", None)        # not an option of this server
+    shape = {**CORTEX_BATCHES, **{key: setting[key] for key in CORTEX_BATCHES if key in setting}}
+    allowed = plus_options(read("/proc/cmdline", "") or "")["server_environment"]
+    env.update(LLAMA_ARG_CTX_CHECKPOINTS="6", LLAMA_ARG_BATCH=str(shape["batch"]),
+               LLAMA_ARG_UBATCH=str(shape["ubatch"]),
+               LLAMA_ARG_LOAD_MODE=LOCKED_LOAD_MODE if setting.get("mlock") else LOAD_MODE)
+    env.update(allowed)
+    if shape["flash_attn"] is None:
+        env.pop("LLAMA_ARG_FLASH_ATTN", None)
+    else:
+        env["LLAMA_ARG_FLASH_ATTN"] = str(shape["flash_attn"])
     return env
 
 
@@ -783,6 +806,150 @@ def cmdline_options(cmdline):
     return options
 
 
+def plus_options(cmdline):
+    """Small, bounded bench+ controls; all other kernel words are ignored."""
+    options = {"idle_seconds": 0, "sample_seconds": 10, "server_environment": {}}
+    environment = options["server_environment"]
+    for word in (cmdline or "").split():
+        key, _, value = word.partition("=")
+        if key == "being.bench.idle" and value.isdigit():
+            options["idle_seconds"] = min(int(value), PLUS_MAX_IDLE)
+        elif key == "being.bench.sample" and value.isdigit():
+            options["sample_seconds"] = min(60, max(1, int(value)))
+        elif key == "being.bench.tiled" and value in ("0", "1"):
+            environment["GGML_CPU_TILED_MM"] = value
+        elif key == "being.bench.checkpoints" and value.isdigit() and 0 <= int(value) <= 8:
+            environment["LLAMA_ARG_CTX_CHECKPOINTS"] = value
+        elif key == "being.bench.threads" and value.isdigit() and 1 <= int(value) <= 4:
+            options["threads"] = int(value)
+        elif key == "being.bench.threads_batch" and value.isdigit() and 1 <= int(value) <= 4:
+            options["threads_batch"] = int(value)
+    return options
+
+
+def command_output(command, *, timeout=15):
+    """Bound a read-only diagnostic's time and retained stdout."""
+    try:
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {"error": type(error).__name__}
+    output = result.stdout[:PLUS_MAX_OUTPUT].decode("utf-8", "replace")
+    return {"exit": result.returncode, "output": output,
+            "truncated": len(result.stdout) > PLUS_MAX_OUTPUT}
+
+
+def bounded_file(path, limit=PLUS_MAX_OUTPUT):
+    """Read a diagnostic pseudo-file without allowing an unbounded report."""
+    try:
+        with open(path, "rb", buffering=0) as stream:
+            value = stream.read(limit + 1)
+    except OSError as error:
+        return {"error": type(error).__name__}
+    return {"output": value[:limit].decode("utf-8", "replace"), "truncated": len(value) > limit}
+
+
+def cpuidle_snapshot(root=Path("/")):
+    cpu = root / "sys/devices/system/cpu"
+    states = []
+    for state in sorted(cpu.glob("cpu[0-9]*/cpuidle/state[0-9]*")):
+        states.append({"cpu": state.parent.parent.name, "state": state.name,
+                       "name": read(state / "name"), "usage": _integer(read(state / "usage")),
+                       "time_us": _integer(read(state / "time"))})
+    return {"driver": read(cpu / "cpuidle/current_driver"), "states": states}
+
+
+def _integer(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def rapl_snapshot(root=Path("/")):
+    rows = []
+    for domain in sorted((root / "sys/class/powercap").glob("intel-rapl:*")):
+        rows.append({"domain": domain.name, "name": read(domain / "name"),
+                     "energy_uj": _integer(read(domain / "energy_uj")),
+                     "max_energy_range_uj": _integer(read(domain / "max_energy_range_uj"))})
+    return rows
+
+
+def unit_sample():
+    properties = "CPUUsageNSec,MemoryCurrent,MemoryPeak,MainPID,ActiveState,SubState"
+    rows = {}
+    for unit in ORGANS:
+        result = command_output(["/usr/bin/systemctl", "show", unit, f"--property={properties}"], timeout=5)
+        values = {}
+        if result.get("exit") == 0:
+            for line in result["output"].splitlines():
+                key, separator, value = line.partition("=")
+                if separator:
+                    values[key] = _integer(value) if key in ("CPUUsageNSec", "MemoryCurrent", "MemoryPeak", "MainPID") else value
+        else:
+            values["error"] = result.get("error") or f"exit {result.get('exit')}"
+        pid = values.get("MainPID")
+        status = read(f"/proc/{pid}/status", "") if pid else ""
+        rss = re.search(r"^VmRSS:\s*(\d+)\s+kB$", status or "", re.M)
+        values["MainRSSKiB"] = int(rss[1]) if rss else None
+        rows[unit] = values
+    return rows
+
+
+def unit_provenance(unit="being-cortex.service", *, retain=False):
+    result = command_output(["/usr/bin/systemctl", "cat", unit])
+    if result.get("exit") == 0:
+        result["unit_sha256"] = hashlib.sha256(result["output"].encode("utf-8")).hexdigest()
+        if not retain:
+            result.pop("output", None)
+    return result
+
+
+def file_evidence(pattern, root=Path("/"), *, contents=True):
+    rows = {}
+    for path in sorted(root.glob(pattern)):
+        value = read(path)
+        rows[str(path.relative_to(root))] = value if contents else bool(value is not None)
+    return rows
+
+
+def run_plus(args):
+    """Read-only bench+ evidence. Normal organs remain running throughout."""
+    system = system_facts()
+    options = plus_options(system.get("cmdline"))
+    provenance = {unit: unit_provenance(unit, retain=unit == "being-cortex.service") for unit in ORGANS}
+    data = {"kind": PLUS_KIND, "started": now(), "finished": None, "system": system,
+            "provenance": {"units": provenance, "cortex_unit": provenance["being-cortex.service"]},
+            "conditions": {"kernel_overrides": options}, "order": ["start", "idle", "end"],
+            "boot": {name: command_output(["/usr/bin/systemd-analyze", name])
+                     for name in ("time", "blame", "critical-chain")},
+            "vulnerabilities": file_evidence("sys/devices/system/cpu/vulnerabilities/*"),
+            "acpi_wakeup": bounded_file("/proc/acpi/wakeup"),
+            "codec": {"cards": bounded_file("/proc/asound/cards"),
+                      "card0_codec0": bounded_file("/proc/asound/card0/codec#0")},
+            "samples": []}
+    report = Report(output_folder(args.output), data)
+
+    def sample(label):
+        data["samples"].append({"label": label, "t_mono_s": round(time.monotonic(), 3),
+                                "units": unit_sample(), "cpuidle": cpuidle_snapshot(),
+                                "rapl": rapl_snapshot()})
+        report.save()
+
+    sample("start")
+    duration = options["idle_seconds"]
+    interval = options["sample_seconds"]
+    deadline = time.monotonic() + duration
+    while duration and time.monotonic() < deadline:
+        time.sleep(min(interval, max(0, deadline - time.monotonic())))
+        sample("idle")
+    sample("end")
+    data["finished"] = now()
+    report.save()
+    print(f"bench+: wrote {report.path}", flush=True)
+    return 0
+
+
 def run(args):
     caps = PowerCaps()
 
@@ -794,6 +961,7 @@ def run(args):
     data = {"kind": KIND, "started": now(), "system": system_facts(), "models": [], "finished": None}
     report = Report(output_folder(args.output), data)
     options = cmdline_options(data["system"]["cmdline"])
+    overrides = plus_options(data["system"]["cmdline"])
     soak_minutes = args.soak_minutes if args.soak_minutes is not None else options.get("soak_minutes", 0)
     quick = args.quick or options.get("quick")
     sizes = (16, 128) if quick else PREFILL_SIZES
@@ -812,6 +980,12 @@ def run(args):
         if not models_dir:
             signed = None
         models = load_models(models_dir, args.fallback_model, signed)
+        if overrides.get("threads") or overrides.get("threads_batch"):
+            for model in models:
+                for setting in model["settings"]:
+                    for key in ("threads", "threads_batch"):
+                        if key in overrides:
+                            setting[key] = overrides[key]
         if models and signed is None:
             # Not bench quants (none, or they failed): the shipped reflex.gguf.
             data["fallback_pack"] = pack_check("conversation", models[0]["path"])
@@ -907,7 +1081,9 @@ def main(argv=None):
     parser.add_argument("--soak-minutes", type=int, default=None, help="per cap; default from being.bench.soak=")
     parser.add_argument("--quick", action="store_true", help="two prefill sizes, no thread sweep")
     parser.add_argument("--no-speech", dest="speech", action="store_false")
-    return run(parser.parse_args(argv))
+    args = parser.parse_args(argv)
+    cmdline = read("/proc/cmdline", "") or ""
+    return run_plus(args) if "being.bench=2" in cmdline.split() else run(args)
 
 
 if __name__ == "__main__":

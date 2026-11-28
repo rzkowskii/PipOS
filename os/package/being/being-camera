@@ -14,8 +14,8 @@ MARKER = "camera.enabled"
 SERVICE = "being-eyes.service"
 
 
-def systemctl(*args, check=True):
-    return subprocess.run(["systemctl", *args, SERVICE], check=check, timeout=20).returncode
+def systemctl(*args, check=True, timeout=20):
+    return subprocess.run(["systemctl", *args, SERVICE], check=check, timeout=timeout).returncode
 
 
 def enabled(directory):
@@ -28,7 +28,7 @@ def enabled(directory):
     return True
 
 
-def configure(directory, action):
+def configure(directory, action, *, no_block=False):
     if action == "enable":
         if not enabled(directory):
             flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW
@@ -47,6 +47,10 @@ def configure(directory, action):
             pass
         else:
             os.fsync(directory)
+        if no_block:
+            systemctl("--no-block", "stop", timeout=2)
+            print("Camera permission disabled. Eyes stop requested.")
+            return
         systemctl("stop")
     allowed = enabled(directory)
     active = systemctl("is-active", "--quiet", check=False) == 0
@@ -56,7 +60,10 @@ def configure(directory, action):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("enable", "disable", "status"))
+    parser.add_argument("--no-block", action="store_true", help="queue Eyes cleanup after removing permission")
     args = parser.parse_args()
+    if args.no_block and args.action != "disable":
+        parser.error("--no-block applies only to disable")
     if os.geteuid() != 0:
         parser.error("camera permission is managed by the local owner as root")
     if not MIND.is_mount():
@@ -64,8 +71,8 @@ def main():
     try:
         directory = os.open(MIND, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            fcntl.flock(directory, fcntl.LOCK_EX)
-            configure(directory, args.action)
+            fcntl.flock(directory, fcntl.LOCK_EX | (fcntl.LOCK_NB if args.no_block else 0))
+            configure(directory, args.action, no_block=args.no_block)
         finally:
             os.close(directory)
     except (OSError, ValueError, subprocess.SubprocessError) as error:

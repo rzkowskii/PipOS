@@ -20,15 +20,21 @@ CABLE = {"interface": "enp1s0f0"}
 LOCAL_ONLY_TABLE = (
     "destroy table inet being_network\n"
     "table inet being_network {\n"
+    "  counter dropped { }\n"
     "  chain input {\n"
     "    type filter hook input priority filter; policy drop;\n"
     '    iifname "lo" accept\n'
+    "    counter name dropped drop\n"
     "  }\n"
     "  chain output {\n"
     "    type filter hook output priority filter; policy drop;\n"
     '    oifname "lo" accept\n'
+    "    counter name dropped drop\n"
     "  }\n"
-    "  chain forward { type filter hook forward priority filter; policy drop; }\n"
+    "  chain forward {\n"
+    "    type filter hook forward priority filter; policy drop;\n"
+    "    counter name dropped drop\n"
+    "  }\n"
     "}\n"
 )
 
@@ -68,8 +74,9 @@ class NetworkRulesTests(unittest.TestCase):
             with self.subTest(address=address):
                 rules = network.render_rules(INTERNET, time_server=address)
                 self.assertIn(f"{expected} udp dport 123 accept", rules)
-                self.assertLess(rules.index("dport 123 accept"), rules.index("udp dport 123 drop"))
-                self.assertIn("udp dport 123 drop\n    tcp dport 123 drop\n    accept", rules)
+                self.assertLess(rules.index("dport 123 accept"), rules.index("udp dport 123 counter name dropped drop"))
+                self.assertIn("udp dport 123 counter name dropped drop\n"
+                              "    tcp dport 123 counter name dropped drop\n    accept", rules)
 
     def test_apply_installs_only_its_own_table_in_one_nft_transaction(self):
         with patch.object(network.subprocess, "run") as invoke:
@@ -243,15 +250,15 @@ class NetworkTransitionTests(unittest.TestCase):
 
     def test_appliance_skill_requires_requested_web_and_applied_internet(self):
         # The appliance path is checked without accessing the local machine's /mind.
-        with (patch("mind.skills.load_policy", return_value=NetworkPolicy(INTERNET, True, True)),
+        with (patch("mind.network_policy.load_policy", return_value=NetworkPolicy(INTERNET, True, True)),
               patch.object(network, "runtime_state", return_value=network.OFFLINE),
               patch.object(Path, "read_text", side_effect=FileNotFoundError)):
             skills = Skills(Path("/mind"))
             self.assertFalse(skills._web_lookups_permitted())
-        with (patch("mind.skills.load_policy", return_value=NetworkPolicy(INTERNET, True, True)),
+        with (patch("mind.network_policy.load_policy", return_value=NetworkPolicy(INTERNET, True, True)),
               patch.object(network, "runtime_state", return_value={"mode": INTERNET})):
             self.assertTrue(skills._web_lookups_permitted())
-        with (patch("mind.skills.load_policy", return_value=NetworkPolicy(INTERNET, True)),
+        with (patch("mind.network_policy.load_policy", return_value=NetworkPolicy(INTERNET, True)),
               patch.object(network, "runtime_state", return_value={"mode": INTERNET})):
             self.assertFalse(skills._web_lookups_permitted())
 

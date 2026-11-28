@@ -11,8 +11,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -23,7 +25,8 @@ from pathlib import Path
 
 # Include staged model inputs, build recipes, organ sources and lab test inputs.
 SCOPES = ("Cargo.toml", "Cargo.lock", "crates", "config", "mind", "os", "sim", "lab", "scripts", "tests")
-OPTIONAL_SCOPES = (".cargo", "rust-toolchain", "rust-toolchain.toml", "out/models")
+OPTIONAL_SCOPES = (".cargo", "rust-toolchain", "rust-toolchain.toml", "out/models",
+                   "docs/manual/spoken-guide.json")
 FACTORY = ("esp", "system-a", "system-b", "models", "mind")
 TRY = ("try-esp", "try-system", "try-models")
 LAPTOP_TRY = (*TRY, "try-logs")  # the laptop stick adds the FAT32 PIPLOGS partition
@@ -86,6 +89,22 @@ def factory_slots(root):
     return {f"system-{key}": str(uuid.UUID(assignments[key])) for key in ("a", "b")}
 
 
+def pack_inputs(root):
+    """Files the image packager reads, without unrelated downloads or recordings."""
+    paths = set()
+    for descriptor in (root / "os/package/being/model-packs").glob("*/pack.json"):
+        for source in read_json(descriptor).get("sources", []):
+            name = source["file"]
+            parts = name.split("/")
+            if parts[0] not in ("models", "voice") or len(parts) < 2 or any(
+                part in ("", ".", "..") or "\\" in part for part in parts
+            ):
+                raise ValueError(f"Invalid pack source path in {descriptor}: {name}")
+            paths.add(f"out/{name}")
+            paths.add(f"out/{parts[0]}/DOWNLOADS.json")
+    return sorted(path for path in paths if os.path.lexists(root / path))
+
+
 def source_snapshot(root):
     files = {}
     for scope in (*SCOPES, *OPTIONAL_SCOPES):
@@ -96,6 +115,13 @@ def source_snapshot(root):
                 record = fingerprint(stream, info.st_size)
                 record["execute_bits"] = info.st_mode & 0o111
                 files[path.relative_to(root).as_posix()] = record
+    for name in pack_inputs(root):
+        # out/models is already part of the general candidate scope.
+        if name not in files:
+            with regular(root / name) as (stream, info):
+                record = fingerprint(stream, info.st_size)
+                record["execute_bits"] = info.st_mode & 0o111
+                files[name] = record
     encoded = json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
     result = {"kind": "beingos-source-v1", "files": files, "sha256": hashlib.sha256(encoded).hexdigest()}
     # The appliance always loads this path, irrespective of the manifest name.
@@ -224,20 +250,66 @@ def artifact_records(paths, directory, factory_ids):
     return records
 
 
+def check_ordinary_root(files, role):
+    """The ordinary laptop lane does not ship cable or lab access."""
+    from lab.candidate_parity import laptop_violations
+
+    forbidden = laptop_violations(files)
+    if "cable development" in forbidden.values():
+        raise ValueError(f"{role} contains cable development files")
+    if forbidden:
+        raise ValueError(f"{role} contains lab-only files: /{next(iter(forbidden))}")
+    if "usr/share/being/variant" not in files:
+        raise ValueError(f"{role} root filesystem has no variant marker")
+
+
+def require_non_cable(paths, records=None):
+    roles = [role for role in LAPTOP_IMAGES if role in paths]
+    if not roles:
+        return
+    from lab.hardware_image import copy_partition, entries_for
+
+    tool = shutil.which("7zz") or shutil.which("7z")
+    if not tool:
+        raise ValueError("7-Zip is required to verify laptop media contain no cable development link")
+    inspected = set()
+    with tempfile.TemporaryDirectory(prefix="pipos-candidate-root-") as scratch:
+        root = Path(scratch) / "root.squashfs"
+        for role in roles:
+            if records is None:
+                with regular(paths[role]) as (stream, info):
+                    layout = disk_record(stream, info.st_size, role)
+            else:
+                layout = records[role]
+            for part in layout["partitions"]:
+                payload = part.get("rootfs")
+                if payload is None or payload["sha256"] in inspected:
+                    continue
+                # List compressed filesystem metadata only. No guest file,
+                # including the SSH host key, is unpacked.
+                extent = {"Path": part["name"], "Offset": part["first_lba"] * SECTOR, "Size": payload["bytes"]}
+                if copy_partition(paths[role], extent, root) != payload["sha256"]:
+                    raise ValueError(f"{role} changed while checking its root filesystem")
+                files = {item["Path"] for item in entries_for(tool, "SquashFS", root)}
+                check_ordinary_root(files, role)
+                inspected.add(payload["sha256"])
+
+
 # The source-id (lab/source_id.py): only files that go into an image count.
 IMAGE_SCOPES = ("Cargo.toml", "Cargo.lock", "crates", "config", "mind", "os", "sim")
 # The few lab files that shape an image: the build recipe (lab/build.sh edits
 # the laptop .config), the model packager post-image.sh runs, and the bench
 # script being.mk installs from the source tree (its rsync skips /lab).
 OPTIONAL_IMAGE_SCOPES = ("rust-toolchain", "rust-toolchain.toml", ".cargo", "out/models/reflex.gguf",
-                         "out/models/manifest.json", "out/firmware-overlay",
-                         "lab/build.sh", "lab/candidate-build.sh", "lab/package_model.py", "lab/bench_guest.py")
+                         "out/models/manifest.json", "out/firmware-overlay", "out/stock-speech",
+                         "lab/build.sh", "lab/candidate-build.sh", "lab/package_model.py", "lab/bench_guest.py",
+                         "docs/manual/spoken-guide.json")
 
 
 def image_source_files(root):
     root = Path(root)
     files = {}
-    for scope in (*IMAGE_SCOPES, *OPTIONAL_IMAGE_SCOPES):
+    for scope in (*IMAGE_SCOPES, *OPTIONAL_IMAGE_SCOPES, *pack_inputs(root)):
         path = root / scope
         if not os.path.lexists(path):
             if scope in IMAGE_SCOPES:
@@ -318,6 +390,7 @@ def main(argv=None):
                     raise ValueError(f"invalid or duplicate extra artifact: {extra}")
                 paths[role] = Path(filename)
             records = artifact_records(paths, args.output.parent, factory_slots(root))
+            require_non_cable(paths, records)
             check_source(root, source)
             candidate = {"kind": "beingos-candidate-v1", "source": source, "artifacts": records,
                          "source_id": image_source_id(root)}
@@ -335,10 +408,11 @@ def main(argv=None):
             actual = artifact_records(paths, args.manifest.parent, factory_slots(root))
             if actual != expected:
                 raise ValueError("candidate artifact changed: " + ", ".join(role for role in paths if actual[role] != expected[role]))
+            require_non_cable(paths, actual)
             check_source(root, data["source"])
             if "model_audit" in data:
                 bind_model_audit(data["source"], actual, data["model_audit"])
-    except (OSError, ValueError, KeyError, TypeError, struct.error) as error:
+    except (OSError, ValueError, KeyError, TypeError, struct.error, subprocess.SubprocessError) as error:
         print(f"{args.command} failed: {error}", file=sys.stderr)
         return 1
     print(f"{args.command} complete", flush=True)

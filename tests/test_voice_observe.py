@@ -9,7 +9,7 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from mind import mic_channel, voice as voice_module, voice_engines as ve
 from mind.asr_sherpa import SherpaRecognizer
@@ -106,6 +106,27 @@ class Heard(unittest.IsolatedAsyncioTestCase):
         self.assertIn("guest mode on: transcript text stays out of the log", logs.output[0])
         await voice.handle({"t": "app.privacy", "guest": False})
         self.assertTrue(voice.text_logged())
+
+    async def test_appliance_voice_waits_for_privacy_and_respects_the_guest_latch(self):
+        voice = Harness(transcripts=True, guest_latch=True).voice
+        voice.sync_capture = AsyncMock()
+        self.assertFalse(voice.capture_wanted())
+        self.assertFalse(voice.text_logged())
+
+        with patch("mind.voice.guest_active", return_value=False) as latched:
+            await voice.handle({"t": "app.privacy", "guest": False})
+            voice.sync_capture.assert_awaited_once()
+            self.assertTrue(voice.capture_wanted())
+            self.assertTrue(voice.text_logged())
+
+            latched.return_value = True
+            self.assertFalse(voice.text_logged())
+            voice.connection_lost()
+            self.assertFalse(voice.capture_wanted())
+            self.assertFalse(voice.text_logged())
+            await voice.handle({"t": "app.privacy", "guest": True})
+            self.assertEqual(voice.sync_capture.await_count, 2)
+            self.assertFalse(voice.text_logged())
 
     async def test_the_end_of_a_dictation_reports_its_voiced_part(self):
         output = await self.final(False)
@@ -328,13 +349,14 @@ class Pressure(unittest.TestCase):
             psi = write(folder, "cpu", "some avg10=3.20 avg60=1.00 avg300=0.50 total=12345\n"
                                        "full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
             self.assertEqual(ve.cpu_pressure(psi), 3.2)
-            self.assertTrue(ve.cpu_quiet(path=psi))
-            self.assertFalse(ve.cpu_quiet(threshold=2.0, path=psi))
+            # window=0: the voice's own CPU use is checked in test_voice_hearing.
+            self.assertTrue(ve.cpu_quiet(path=psi, window=0))
+            self.assertFalse(ve.cpu_quiet(threshold=2.0, path=psi, window=0))
             self.assertIsNone(ve.cpu_pressure(write(folder, "bad", "some avg10=lots\n")))
             with patch("os.getloadavg", return_value=(0.2, 0, 0)):
-                self.assertTrue(ve.cpu_quiet(path=Path(folder) / "none"))
+                self.assertTrue(ve.cpu_quiet(path=Path(folder) / "none", window=0))
             with patch("os.getloadavg", return_value=(3.0, 0, 0)):
-                self.assertFalse(ve.cpu_quiet(path=Path(folder) / "none"))
+                self.assertFalse(ve.cpu_quiet(path=Path(folder) / "none", window=0))
 
 
 class FakePiper:

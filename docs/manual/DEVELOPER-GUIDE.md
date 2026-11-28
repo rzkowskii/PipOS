@@ -90,11 +90,12 @@ lab/build.sh                            # build out/images/beingos.img (first bu
 | `lab/build.sh try-image` / `try-screen` | `beingos-try.img` / `beingos-try-screen.img`: USB Try, serial or on-panel menu |
 | `lab/build.sh laptop` | `beingos-laptop.img`: no getty, no root login, no SSH, no lab body |
 | `BEING_LAPTOP_MAINTENANCE=1 lab/build.sh laptop` | `beingos-laptop-maintenance.img`: adds paired-Mac SSH |
-| `lab/build.sh laptop-try` | `beingos-laptop-try.img`: the stick for the real MacBook, with an on-panel GRUB and a `PIPLOGS` partition. With `BEING_TRY_BENCH=1`, a `-bench` stick where every entry runs bench mode |
+| `lab/build.sh laptop-try` | `beingos-laptop-try.img`: the stick for the real MacBook, with an on-panel GRUB and a `PIPLOGS` partition. `BEING_TRY_BENCH=1` gives the `-bench` stick with the model benchmark as the default and a separate read-only boot and idle entry. |
 | `BEING_LAPTOP_CABLE=1 lab/build.sh laptop-try` | `beingos-laptop-cable-try.img`, in its own tree `/work/output/laptop-cable`: the development-only cable stick (below). Run `lab/build.sh cable-key PUBKEY HOSTKEY` once first |
 | `lab/make-iso.sh [DIR]` | `out/iso/pipos-macbook.iso`: the same stick as one hybrid ISO ([ISO.md](../ISO.md)). Refuses the cable build |
 | `lab/build.sh bundle` / `installed-bundle` | Signed RAUC updates for the factory or installed channel |
 | `lab/build.sh release-key DIR` / `release-cert FILE` / `laptop-bundle KEY` | The owner's passphrase-protected release key (made on the Mac, outside the repository), its certificate in the builder, and laptop updates signed with it |
+| `lab/build.sh laptop-rotation-bundle OLD_KEY OLD_CERT VERSION` | Signed bridge to the replacement release certificate. [Rotation procedure](../HARDWARE.md#rotate-the-laptop-release-key) |
 | `lab/build.sh candidate NAME [--laptop]` | Frozen, sealed release candidate in `out/candidates/NAME/`; `--laptop` adds the laptop disk and Try stick from the same snapshot, with a rootfs parity report |
 
 The build details:
@@ -176,7 +177,7 @@ The model is chosen by benchmark, not by taste:
 |---|---|
 | `lab/model_audition.py`, `lab/turn_latency.py`, `lab/voice_latency_qemu.py` | Replies and latency |
 | `lab/quant_candidates.py` | Quantisation candidates for a model |
-| `lab/bench_guest.py`, `lab/bench_report.py`, `lab/try_timings.py` | Bench mode (`being.bench=1`) and Try boot timings, read from a `PIPLOGS` folder |
+| `lab/bench_guest.py`, `lab/bench_report.py`, `lab/try_timings.py` | Measure models and speech with `being.bench=1`. Collect boot, service and hardware evidence with `being.bench=2`. Reports go to `PIPLOGS` when available. |
 | `lab/sherpa_avx_smoke.py` | That the speech engine runs without AVX2 |
 | `lab/decision_eval.py` (fixtures in `decision_fixtures.py`) | Recall routing decisions |
 | `lab/dream_recall_eval.py` (scored on `dream_recall_holdout.py`) | Recall across an overnight pass |
@@ -229,8 +230,9 @@ short:
    `ssh pip systemctl status being-mind being-voice`. `lab/cable.sh pull-logs` brings `/run/being-diag` and the
    boot's `PIPLOGS` folder back to `out/hardware-logs/cable-DATE/`.
 
-Every boot entry adds `being.cable=1 being.voice_debug=1`, so the
-journal holds what the voice heard and the mind's route words. Pip takes
+Every boot entry adds `being.cable=1 being.voice_debug=1`. The local journal
+holds voice transcripts and the mind's route words in owner mode. The
+`PIPLOGS` export redacts those words. Pip takes
 `169.254.77.1` and `fe80::77:1` on its first wired port and accepts root
 SSH with that one key from link-local addresses only. `being.cable=0` on
 the GRUB command line turns off the link, SSH and the writable copy of the

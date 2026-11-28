@@ -302,7 +302,7 @@ class Cortex:
         return tuple(tokens)
 
     async def _prime_cache(self, prompt):
-        await self._cancellable_request(
+        return await self._cancellable_request(
             "POST", "/completion",
             {"prompt": prompt, "n_predict": 0, "cache_prompt": True, "id_slot": self.slot_id},
         )
@@ -375,7 +375,7 @@ class Cortex:
         await self._prime_cache(list(prefix))
         return prefix
 
-    async def prefill(self, messages, *, prefix=None, max_new_tokens=None):
+    async def prefill(self, messages, *, prefix=None, max_new_tokens=None, evidence=False):
         """Have the model read a prompt without answering, so the read is cached.
 
         This is "thinking while listening": on a slow CPU, reading costs about as
@@ -390,7 +390,9 @@ class Cortex:
         For a bounded read, supply the verified token prefix already primed in
         the slot and the allowed number of new tokens.
 
-        llama-server only. Returns True if something was read.
+        llama-server only. By default returns True for compatibility. With
+        ``evidence=True``, returns verified attempted/primed token counts when
+        the server reports timings; otherwise ``primed_n`` is None.
         """
         if not self.llama or not messages:
             return False
@@ -408,7 +410,16 @@ class Cortex:
             if tokens[:count] != prefix or not 0 < len(tokens) - count <= max_new_tokens:
                 return False
             prompt = list(tokens)
-        return await self._prime_cache(prompt)
+        attempted = len(prompt) - len(prefix) if bounded else None
+        response = await self._prime_cache(prompt)
+        timings = response.get("timings") if isinstance(response, dict) else None
+        prompt_n = timings.get("prompt_n") if isinstance(timings, dict) else None
+        cache_n = timings.get("cache_n") if isinstance(timings, dict) else None
+        verified = (bounded and type(prompt_n) is int and prompt_n == attempted
+                    and type(cache_n) is int and cache_n >= len(prefix))
+        result = {"attempted_n": attempted, "primed_n": prompt_n if verified else None,
+                  "cache_n": cache_n if type(cache_n) is int else None}
+        return result if evidence else True
 
     async def slot(self, action, filename=SLOT_FILE):
         """Save, restore or erase the conversation slot's cached state

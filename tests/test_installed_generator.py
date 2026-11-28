@@ -26,6 +26,10 @@ def installed_args(slot="A"):
     return f"{args} " + " ".join(f"being.{field}={guid}" for field, guid in GUIDS.items())
 
 
+def encrypted_args(slot="A"):
+    return installed_args(slot) + " being.mind_crypt=1"
+
+
 class InstalledGeneratorTests(unittest.TestCase):
     def generate(self, args):
         work = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
@@ -41,8 +45,11 @@ class InstalledGeneratorTests(unittest.TestCase):
                           'test "$1" = --path || exit 1\n'
                           'case "$2 $3" in\n'
                           '  "--suffix=device /dev/disk/by-partuuid/"*) printf "target-%s.device\\n" "${3##*/}" ;;\n'
+                          '  "--suffix=device /dev/mapper/pipos-mind") printf "mapper-pipos-mind.device\\n" ;;\n'
                           '  "--template=systemd-fsck@.service /dev/disk/by-partuuid/' + GUIDS["mind"] + '") '
                           'printf "systemd-fsck@target.service\\n" ;;\n'
+                          '  "--template=systemd-fsck@.service /dev/mapper/pipos-mind") '
+                          'printf "systemd-fsck@mapper-pipos-mind.service\\n" ;;\n'
                           '  "--template=systemd-fsck@.service /dev/disk/by-partuuid/' + GUIDS["esp"] + '") '
                           'printf "systemd-fsck@esp.service\\n" ;;\n'
                           '  *) exit 1 ;;\n'
@@ -56,7 +63,7 @@ class InstalledGeneratorTests(unittest.TestCase):
         return outputs[1], result.stderr
 
     def test_factory_and_try_modes_keep_their_own_generators(self):
-        for args in ("root=PARTUUID=lab rauc.slot=A", "being.try=1", f"{installed_args()} being.try=1"):
+        for args in ("root=PARTUUID=lab rauc.slot=A", "being.try=1", f"{encrypted_args()} being.try=1"):
             with self.subTest(args=args):
                 early, stderr = self.generate(args)
                 self.assertEqual(list(early.iterdir()), [])
@@ -107,6 +114,37 @@ class InstalledGeneratorTests(unittest.TestCase):
                 self.assertIn(f"ExecStart=/usr/bin/rauc --conf={rauc} ", service)
                 self.assertIn("RequiresMountsFor=/bootstate /mind /models", service)
 
+    def test_optional_mind_crypt_requires_private_unlock_before_mapper_fsck_and_mount(self):
+        early, stderr = self.generate(encrypted_args())
+        self.assertFalse(stderr)
+        unlock = (early / "being-mind-crypt.service").read_text()
+        self.assertIn("Requires=being-installed-bind.service\nWants=systemd-udev-settle.service", unlock)
+        self.assertIn("After=being-installed-bind.service systemd-udev-settle.service", unlock)
+        self.assertIn("BEING_CONSOLE_PRIVATE=1", unlock)
+        self.assertIn("ExecStart=/usr/bin/being-console /usr/bin/python3 -m mind.mind_encryption unlock " + GUIDS["mind"], unlock)
+        self.assertIn("ExecStop=/usr/sbin/cryptsetup close pipos-mind", unlock)
+        self.assertIn("TimeoutStartSec=infinity", unlock)
+        timeout = early / "mapper-pipos-mind.device.d" / "being-mind-crypt.conf"
+        self.assertIn("JobRunningTimeoutSec=infinity", timeout.read_text())
+        self.assertIn("What=/dev/mapper/pipos-mind\nWhere=/mind\nType=ext4", (early / "mind.mount").read_text())
+        self.assertIn("Requires=being-mind-crypt.service\nAfter=being-mind-crypt.service", (early / "systemd-fsck@mapper-pipos-mind.service.d" / "being-mind-crypt.conf").read_text())
+        self.assertIn("being-mind-crypt.service", (early / "mind.mount").read_text())
+
+    def test_safe_graphics_unlock_remains_on_the_physical_terminal(self):
+        early, stderr = self.generate(encrypted_args() + " nomodeset")
+        self.assertFalse(stderr)
+        unlock = (early / "being-mind-crypt.service").read_text()
+        self.assertIn("ExecStart=/usr/bin/python3 -m mind.mind_encryption unlock " + GUIDS["mind"], unlock)
+        self.assertIn("TTYPath=/dev/tty1", unlock)
+        self.assertNotIn("ttyS0", unlock)
+
+    def test_mind_crypt_flag_rejects_invalid_or_duplicate_values(self):
+        for args in (installed_args() + " being.mind_crypt=0", encrypted_args() + " being.mind_crypt=1"):
+            with self.subTest(args=args):
+                early, stderr = self.generate(args)
+                self.assertIn("invalid installed boot identity", stderr)
+                self.assertEqual((early / "mind.mount").readlink(), Path("/dev/null"))
+
     def test_bad_or_ambiguous_ids_never_fall_back_to_factory_mounts(self):
         valid = installed_args()
         for args in (valid.replace("being.installed=1", "being.installed"),
@@ -141,6 +179,9 @@ class InstalledGeneratorTests(unittest.TestCase):
         script = UPDATE_READY.read_text().replace("/proc/cmdline", shlex.quote(str(cmdline)))
         script = script.replace("/run/being-slot-good", shlex.quote(str(ready)))
         script = script.replace("/usr/bin/python3 -m mind.install_binding", 'test "$MOCK_INSTALLED_TOPOLOGY" = valid')
+        # An installed boot takes its update checkpoint last, once everything else has passed.
+        marker = work / "checkpoint"
+        script = script.replace("/usr/bin/python3 -m mind.update_checkpoint", f"echo taken >> {shlex.quote(str(marker))}")
         for args, config, topology, allowed in ((installed_args(), INSTALLED_CONFIG, "valid", True),
                                                 (installed_args(), INSTALLED_CONFIG, "invalid", False),
                                                 (installed_args(), "/etc/rauc/system.conf", "valid", False),
@@ -148,10 +189,12 @@ class InstalledGeneratorTests(unittest.TestCase):
                                                 ("rauc.slot=A", "/etc/rauc/system.conf", "unused", True)):
             with self.subTest(args=args, config=config):
                 cmdline.write_text(args + "\n")
+                marker.unlink(missing_ok=True)
                 env = dict(os.environ, RAUC_SYSTEM_CONFIG=config, MOCK_INSTALLED_TOPOLOGY=topology)
                 result = subprocess.run(["/bin/sh", "-c", script], env=env,
                                         text=True, capture_output=True, timeout=5)
                 self.assertEqual(result.returncode, 0 if allowed else 1, result.stderr)
+                self.assertEqual(marker.exists(), allowed and "being.installed=1" in args, args)
 
 
 class InstalledBindingTests(unittest.TestCase):

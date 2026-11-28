@@ -104,7 +104,7 @@ class RealCortex(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("lost my thought", spoken)
             self.assertNotIn("[", spoken)
             self.assertNotIn("think>", spoken)
-            self.assertIn(self.bus.of("mind.emotion")[0]["name"], EMOTIONS)
+            self.assertIn(self.bus.of("say.request")[0]["face_cue"], EMOTIONS)
 
     async def test_reading_ahead_is_reused_by_the_reply(self):
         # These API calls bypass Mind's scheduling. Wait for its background

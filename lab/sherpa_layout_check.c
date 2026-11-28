@@ -22,6 +22,11 @@
 #define F(T, m) printf("field %s.%s %zu\n", #T, #m, offsetof(SherpaOnnx##T, m))
 
 int main(void) {
+  S(SpeakerEmbeddingExtractorConfig);
+  F(SpeakerEmbeddingExtractorConfig, model);
+  F(SpeakerEmbeddingExtractorConfig, num_threads);
+  F(SpeakerEmbeddingExtractorConfig, debug);
+  F(SpeakerEmbeddingExtractorConfig, provider);
   S(SileroVadModelConfig);
   F(SileroVadModelConfig, model); F(SileroVadModelConfig, threshold);
   F(SileroVadModelConfig, min_silence_duration);

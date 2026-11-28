@@ -10,12 +10,13 @@ from functools import cache
 from pathlib import Path
 from unittest.mock import patch
 
+from lab.source_id import stamp_verified_install
 from lab.vm import LAB_OUTPUT, ROOT, VM, eyes, machine_args, png
 
 SCREEN_IMAGE = Path(os.environ.get("BEING_SCREEN_IMAGE", ROOT / "out/images/beingos-try-screen.img")).resolve()
 SHOTS = LAB_OUTPUT
-# Sparse, so it costs nothing: large enough for the installer's model reserve
-# (24 GiB) plus every staged pack, as on the MacBook's 256 GB SSD.
+# Sparse and large enough for the installer to reserve replacement space for
+# all staged model packs, as on the MacBook's 256 GB SSD.
 TARGET_BYTES = 64 << 30
 CONSOLE_FONT = ROOT / "os/package/being/being-console-font.h"
 # being-console's geometry (os/package/being/being-console-draw.h and measure()
@@ -402,6 +403,7 @@ class LocalScreen(unittest.TestCase):
         self.assertTrue(self.vm.wait_off(90))
         self.vm.stop()
 
+        stamp_verified_install(SCREEN_IMAGE, target)
         self.vm = VM(image=target)
         self.addCleanup(self.vm.destroy)
         self.vm.start()
@@ -466,6 +468,7 @@ class LocalScreen(unittest.TestCase):
         self.assertTrue(self.vm.wait_off(90))
         self.vm.stop()
 
+        stamp_verified_install(SCREEN_IMAGE, target)
         self.vm = VM(image=target)
         self.addCleanup(self.vm.destroy)
         self.vm.start()

@@ -2,9 +2,37 @@
 
 import hashlib
 import os
+import re
+import shutil
 import stat
 import sys
 from pathlib import Path
+
+
+def stamp_source_id(root, source_id):
+    output = root / "etc/being/source-id"
+    if not source_id:
+        output.unlink(missing_ok=True)
+    elif re.fullmatch(r"[0-9a-f]{64}", source_id):
+        output.write_text(source_id + "\n", encoding="ascii")
+    else:
+        raise SystemExit("post-build: invalid BEING_SOURCE_ID")
+
+
+def install_speech_verdict(root, verdict):
+    from mind.voice_engines import SMOKE_VERDICTS, sherpa_smoke_passed
+
+    output = root / SMOKE_VERDICTS[0].relative_to("/")
+    output.unlink(missing_ok=True)
+    library = root / "usr/lib/libsherpa-onnx-c-api.so"
+    if not verdict.is_file() or not library.is_file():
+        return
+    passed, reason = sherpa_smoke_passed(paths=(verdict,), library=library)
+    if passed:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(verdict, output)
+    else:
+        print(f"post-build: Ivy Bridge speech verdict was not installed ({reason})", file=sys.stderr)
 
 
 def build_id(root):
@@ -28,4 +56,10 @@ def build_id(root):
 
 
 if __name__ == '__main__':
-    build_id(Path(sys.argv[1]))
+    target = Path(sys.argv[1])
+    board_path = Path(__file__).resolve()
+    sys.path.insert(0, str(board_path.parents[3]))
+    verdict = board_path.parents[2] / "package/sherpa-onnx/ivybridge-smoke.json"
+    stamp_source_id(target, os.environ.get("BEING_SOURCE_ID"))
+    install_speech_verdict(target, verdict)
+    build_id(target)

@@ -135,7 +135,10 @@ class AudioInitUnit(unittest.TestCase):
     def test_runs_once_before_the_voice_and_never_requires_the_mind(self):
         unit = UNIT.read_text()
         self.assertIn("Type=oneshot", unit)
-        self.assertIn("Before=being-voice.service", unit)
+        self.assertIn("Before=being-ears.service being-voice.service", unit)
+        before = next(line for line in unit.splitlines() if line.startswith("Before=")).split("=", 1)[1].split()
+        self.assertIn("being-ears.service", before)
+        self.assertIn("being-voice.service", before)
         self.assertIn("After=alsa-restore.service alsa-state.service sound.target", unit)
         self.assertIn("After=local-fs.target", unit)
         self.assertNotIn("Requires", unit)

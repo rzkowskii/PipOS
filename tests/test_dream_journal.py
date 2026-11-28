@@ -14,6 +14,7 @@ from mind import dream_journal
 from mind.dream_store import DreamStore
 from mind.memory import Memory
 from mind.profile import Profile, save_profile
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 
 class DreamJournalTests(unittest.TestCase):

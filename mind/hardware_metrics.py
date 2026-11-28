@@ -13,6 +13,12 @@ import time
 SCHEMA_VERSION = 1
 MAX_SECONDS = 300
 MAX_INTERVAL = 60
+# A window reads the battery's own files at its first and last sample and at
+# most this often in between. On the MacBookPro9,2 every battery attribute
+# refreshes through the embedded controller (about 126 interrupts and 55-64
+# ms each, measured 25 November 2026): read every second, a window would make
+# the very load and package power it is there to measure.
+BATTERY_EVERY = 15
 SERVICES = (
     "being-brainstem.service", "being-face.service", "being-mind.service",
     "being-voice.service", "being-cortex.service", "being-wifi.service",
@@ -272,11 +278,18 @@ def thermal_info(sys_root):
 
 
 def thermal_throttle_info(sys_root):
+    """The kernel's thermal throttle counters per CPU: core events, and the
+    package's (the same package counter repeats on every CPU of it). These,
+    not scaling_cur_freq, say whether heat slowed the CPU: on the laptop
+    scaling_cur_freq read 1.2 GHz while the model decoded at full speed."""
     result = {}
     for path in sorted((sys_root / "devices/system/cpu").glob("cpu[0-9]*/thermal_throttle"))[:32]:
         events = measure(path / "core_throttle_count")
         if events is not None and re.fullmatch(r"cpu[0-9]{1,4}", path.parent.name):
             result[path.parent.name] = {"core_events": events}
+            package = measure(path / "package_throttle_count")
+            if package is not None:
+                result[path.parent.name]["package_events"] = package
     return result
 
 
@@ -293,7 +306,35 @@ def cpu_frequency(sys_root):
     return result
 
 
-def power_info(sys_root):
+def charge_percent(path, status=None):
+    """How full the battery is against what it holds when full today.
+
+    Charge (or energy) now over full comes first: the MacBookPro9,2's ACPI
+    Smart Battery driver reports ``capacity`` against the design capacity,
+    so a full pack worn to 80% read 80 (measured 25 November 2026: status
+    Full, capacity 80, charge_now 4593000, charge_full 4629000). ``capacity``
+    is the fallback. A pack that says Full within 3 points of full is 100.
+    """
+    for kind in ("charge", "energy"):
+        now, full = measure(path / f"{kind}_now"), measure(path / f"{kind}_full", lower=1)
+        if now is not None and full is not None:
+            ratio = min(100.0, now * 100 / full)
+            return 100 if status == "Full" and ratio >= 97 else round(ratio)
+    return measure(path / "capacity", upper=100)
+
+
+def battery_watts(power_uw, current_ua=None, voltage_uv=None):
+    if power_uw is not None and abs(power_uw) <= 500_000_000:
+        return round(abs(power_uw) / 1_000_000, 3)
+    if (current_ua is not None and abs(current_ua) <= 100_000_000
+            and voltage_uv is not None and 0 < voltage_uv <= 100_000_000):
+        return round(abs(current_ua) * voltage_uv / 1_000_000_000_000, 3)
+    return None
+
+
+def power_info(sys_root, *, batteries=True):
+    """RAPL package energy, the mains adapters and (unless ``batteries`` is
+    false) the batteries' own figures, which are the expensive part."""
     packages = {}
     powercap = sys_root / "class/powercap"
     for path in list(powercap.glob("intel-rapl:[0-9]*")) + list(powercap.glob("intel-rapl/intel-rapl:[0-9]*")):
@@ -301,26 +342,24 @@ def power_info(sys_root):
         energy = measure(path / "energy_uj")
         if name and energy is not None:
             packages[name] = {"energy_uj": energy, "range_uj": measure(path / "max_energy_range_uj", lower=1)}
+    read_batteries = batteries
     batteries = []
     mains = set()
     for path in sorted((sys_root / "class/power_supply").glob("*"))[:16]:
         kind = read_field(path / "type", 64)
         if kind == "Mains":
             mains.add(measure(path / "online", upper=1))
-        if (kind != "Battery" or read_field(path / "scope", 64) == "Device"
+        if (not read_batteries or kind != "Battery" or read_field(path / "scope", 64) == "Device"
                 or measure(path / "present", upper=1) == 0):
             continue
-        watts = measure(path / "power_now", lower=-500_000_000, upper=500_000_000, divisor=1_000_000)
-        if watts is not None:
-            watts = abs(watts)
-        else:
+        power = measure(path / "power_now", lower=-500_000_000, upper=500_000_000)
+        watts = battery_watts(power)
+        if watts is None:
             current = measure(path / "current_now", lower=-100_000_000, upper=100_000_000)
-            voltage = measure(path / "voltage_now")
-            if current is not None and voltage is not None:
-                watts = round(abs(current) * voltage / 1_000_000_000_000, 3)
+            watts = battery_watts(None, current, measure(path / "voltage_now"))
         status = read_field(path / "status", 64)
         battery = {
-            "charge_percent": measure(path / "capacity", upper=100),
+            "charge_percent": charge_percent(path, status),
             "status": status if status in {"Charging", "Discharging", "Full", "Not charging"} else None,
             "watts": watts,
         }
@@ -335,7 +374,7 @@ def power_info(sys_root):
             battery["cycles"] = cycles
         batteries.append(battery)
     return {"mains_online": True if 1 in mains else False if mains == {0} else None,
-            "batteries": batteries, "packages": packages}
+            "batteries": batteries, "batteries_read": read_batteries, "packages": packages}
 
 
 def wifi_station_signal(interface):
@@ -422,7 +461,7 @@ def disk_counters(proc):
     return disks
 
 
-def snapshot(root, elapsed):
+def snapshot(root, elapsed, *, battery=True):
     proc = root / "proc"
     sys_root = root / "sys"
     return {
@@ -434,7 +473,7 @@ def snapshot(root, elapsed):
         "cpu_frequency": cpu_frequency(sys_root),
         "lid_closed": lid_closed(proc),
         "backlights": backlight_info(sys_root),
-        "power": power_info(sys_root),
+        "power": power_info(sys_root, batteries=battery),
         "network": network_info(proc, sys_root),
         "disk": disk_counters(proc),
     }
@@ -475,8 +514,10 @@ def summarize(samples):
                     if "temperature_c" in sensor]
     cpu_temperatures = [sensor["temperature_c"] for sample in samples for sensor in sample["thermal"]
                         if sensor["driver"] == "coretemp" and "temperature_c" in sensor]
-    throttle_deltas = per_device_deltas(samples, "thermal_throttle", ("core_events",))
+    throttle_deltas = per_device_deltas(samples, "thermal_throttle", ("core_events", "package_events"))
     throttle_events = [delta["core_events"] for delta in throttle_deltas.values() if delta["core_events"] is not None]
+    package_throttle = [delta["package_events"] for delta in throttle_deltas.values()
+                        if delta["package_events"] is not None]
     fans = [sensor["fan_rpm"] for sample in samples for sensor in sample["thermal"] if "fan_rpm" in sensor]
     packages = [sample["power"]["packages"] for sample in samples]
     elapsed = samples[-1]["elapsed_seconds"] - samples[0]["elapsed_seconds"]
@@ -501,6 +542,7 @@ def summarize(samples):
         "cpu_temperature_max_c": max(cpu_temperatures, default=None),
         # Logical CPUs can report the same hardware event. Do not sum them.
         "cpu_core_throttle_max_events": max(throttle_events, default=None),
+        "cpu_package_throttle_max_events": max(package_throttle, default=None),
         "fan_max_rpm": max(fans, default=None),
         "package_power_mean_watts": (round(sum(package_energy) / (1_000_000 * elapsed), 3)
                                      if elapsed and package_energy and None not in package_energy else None),
@@ -521,13 +563,18 @@ def collect(seconds, interval, *, root=Path("/"), clock=time.monotonic, sleep=ti
     captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     start = clock()
     samples = [snapshot(root, 0.0)]
+    battery_at = 0.0
     for offset in range(interval, seconds + interval, interval):
         remaining = start + min(offset, seconds) - clock()
         if remaining > 0:
             sleep(remaining)
         elapsed = clock() - start
-        samples.append(snapshot(root, round(elapsed, 3)))
-        if elapsed >= seconds:
+        last = elapsed >= seconds
+        battery = last or elapsed - battery_at >= BATTERY_EVERY
+        if battery:
+            battery_at = elapsed
+        samples.append(snapshot(root, round(elapsed, 3), battery=battery))
+        if last:
             break
     return {
         "schema_version": SCHEMA_VERSION,

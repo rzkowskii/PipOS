@@ -2,11 +2,15 @@
 
 import json
 import time
+from datetime import datetime, timezone
 from unittest.mock import patch
 
+from mind import care_routes, continuity, core_profile
 from mind.cortex import SLOT_FILE
+from mind.initiative import InitiativePolicy, QuietHours, save_policy as save_initiative
 from mind.retention import POLICY_FILE, MemoryPolicy, save_policy
 from tests.test_mind import MindCase, said
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 
 DAY = 24 * 60 * 60
@@ -57,6 +61,62 @@ class ExplicitOnlyForgetting(RetentionCase):
 
 
 class RetentionConversation(RetentionCase):
+    async def test_owner_can_resume_a_saved_thread_after_restart_and_then_close_it(self):
+        source = self.memory.log("heard", "I'm planning a new stained glass window", "Richard")
+        self.assertIn("keep that thread open", await self.say("Pick this up later"))
+        await self.restart()
+        self.assertIn("stained glass window", await self.say("What were we working on?"))
+        self.assertIn(source, self.mind.highlights)
+        self.assertIn("closed the thread", await self.say("Close the thread"))
+        self.assertNotIn(source, self.mind.highlights)
+        self.assertIn("isn't an open thread", await self.say("What were we working on?"))
+
+    async def test_due_thread_waits_for_addressed_greeting_outside_quiet_hours(self):
+        now = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+        self.mind.skills.zone = timezone.utc
+        self.mind._newborn = False
+        end = now.timestamp() - DAY
+        with patch.object(self.memory, "now", return_value=end - 2 * DAY):
+            self.memory.log("heard", "Tomorrow I have a dentist appointment", "Richard",
+                            event_start=end - DAY, event_end=end)
+            continuity.bookmark(self.memory, "Richard")
+        with (patch.object(self.mind, "_clock_doubt", return_value=None),
+              patch.object(self.mind.skills, "now", return_value=now)):
+            save_initiative(self.root, InitiativePolicy(greetings=True, quiet_hours=QuietHours("11:00", "13:00")))
+            self.assertNotIn("dentist", await self.say("Hi Pip"))
+            save_initiative(self.root, InitiativePolicy(greetings=True))
+
+            self.bus.sent.clear()
+            self.bus.push("state.changed", state="attending")
+            self.bus.push("hear.final", text="Hello", speaker="Richard", followup=True)
+            await self.bus.wait("mind.reply_done")
+            self.assertNotIn("dentist", said(self.bus))
+
+            answer = await self.say("Hi Pip")
+            self.assertIn("dentist appointment", answer)
+            self.assertIn("How did it go?", answer)
+            self.assertNotIn("dentist", await self.say("Hi Pip"))
+
+    async def test_generated_core_is_a_reply_dependency_and_is_hidden_from_guests(self):
+        fact = self.memory.remember(OWNER_FACT, "Richard")
+        core_profile.publish(self.memory, "Richard")
+        await self.restart()
+
+        await self.say("Would a wooden bookshelf fit in my room?")
+        self.assertIn("Orchidmarker", self.latest_prompt())
+        episode, meta = self.memory.db.execute(
+            "SELECT id, meta FROM episodes WHERE kind = 'said' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertIn(fact, json.loads(meta)["recalled"])
+
+        await self.say("Start guest mode")
+        self.assertNotIn("Orchidmarker", self.mind.system)
+        await self.say("End guest mode")
+        self.memory.forget((fact,))
+        self.assertNotIn("Orchidmarker", self.mind.system)
+        self.assertEqual(self.memory.db.execute("SELECT text FROM episodes WHERE id = ?", (episode,)).fetchone(),
+                         ("[forgotten]",))
+
     async def test_default_persistent_mode_recalls_ordinary_history_after_restart(self):
         await self.seed_owner()
 
@@ -297,6 +357,50 @@ class GuestConversation(RetentionCase):
         saved = [name for action, name in self.cortex_server.slot_calls[slot_boundary:] if action == "action=save"]
         self.assertEqual([name for name in saved if name != "identity.slot"], [])
         self.assert_not_persisted("Kiteguest", "Badgeguest")
+
+    async def test_boot_local_guest_latch_survives_mind_restart_with_an_empty_guest_archive(self):
+        runtime = self.root / "run"
+        runtime.mkdir()
+        marker = runtime / "guest"
+        request = runtime / "settings-page"
+        request.write_text("care\n")
+        with patch.object(care_routes, "GUEST", marker), patch.object(care_routes, "REQUEST", request):
+            self.guest_latch = True
+            await self.restart()
+            await self.seed_owner()
+            await self.say("Start guest mode")
+            self.assertTrue(marker.is_file())
+            self.assertFalse(request.exists())
+            await self.say(GUEST_HISTORY)
+            await self.say(f"Remember that {GUEST_FACT}")
+
+            await self.restart()
+
+            topics = [event["t"] for event in self.bus.sent]
+            self.assertLess(topics.index("app.privacy"), topics.index("mind.ready"))
+            self.assertTrue(self.bus.of("app.privacy")[0]["guest"])
+            self.assertTrue(self.mind.apps.guest)
+            self.assertTrue(marker.is_file())
+            self.assertNotIn(OWNER_CORE, self.mind.system)
+            self.assertNotIn("Orchidmarker", await self.say("What do you remember about my orchid?"))
+            self.assertNotIn("Kiteguest", await self.say("What did I say about the amber kite?"))
+            self.assertNotIn("Badgeguest", await self.say("What do you remember about my guest badge?"))
+            await self.say("Remember that this session is called Afterrestartguest")
+            self.assert_not_persisted("Kiteguest", "Badgeguest", "Afterrestartguest")
+
+            await self.say("End guest mode")
+            self.assertFalse(marker.exists())
+            self.assertFalse(self.bus.of("app.privacy")[-1]["guest"])
+            self.assertIn("Orchidmarker", await self.say("What do you remember about my orchid?"))
+
+    async def test_broken_guest_latch_keeps_owner_archive_closed(self):
+        marker = self.root / "guest"
+        marker.symlink_to(self.root / "missing")
+        self.guest_latch = True
+        with patch.object(care_routes, "GUEST", marker):
+            await self.restart()
+            self.assertTrue(self.mind.apps.guest)
+            self.assertNotIn(OWNER_CORE, self.mind.system)
 
     async def test_guest_shortcut_discards_unpunctuated_attached_transcript(self):
         await self.seed_owner()

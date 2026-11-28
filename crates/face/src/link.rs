@@ -3,8 +3,13 @@
 
 use crate::anim::{Anim, Drives};
 use crate::keys::LevelBar;
+use crate::look::Prefs;
+use crate::options::Options;
 use crate::overlay::Captions;
+use crate::widgets::Readings;
+use crate::quick_menu::{Menu, Position, Selection};
 use bus::{Client, Event};
+use sdl2::keyboard::Keycode;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -14,10 +19,13 @@ const SUBS: &[&str] = &[
     "state.changed",
     "face.*",
     "say.level",
+    "say.stop",
+    "say.done",
     "say.request",
     "stem.beat",
     "body.lid",
     "body.state",
+    "body.plug",
     "body.drives",
     "camera.policy",
     "life.woke",
@@ -29,15 +37,26 @@ const SUBS: &[&str] = &[
     "hear.missed",
     "mind.cancel",
     "mind.reply_done",
+    "mind.route",
+    "app.privacy",
     // What the brightness, volume and keyboard-light keys (or the owner's
     // words) really set, for the level bar (numbers only).
     "body.brightness",
     "body.kbd_light",
     "voice.volume_state",
+    "screen.prefs",
+    "screen.quick_menu",
+    "screen.online",
+    "screen.night",
+    "app.refused",
 ];
 const RETRY: Duration = Duration::from_millis(700);
+const MENU_DISMISSED: &str = "shell.quick_menu.dismissed";
 /// With no heartbeat for this long, the face looks unwell.
 const QUIET: Duration = Duration::from_secs(3);
+// Body samples arrive on change and at least every five seconds.
+const READINGS_MAX_AGE: Duration = Duration::from_secs(15);
+const ONLINE_MAX_AGE: Duration = Duration::from_secs(3);
 /// A full-screen face that has had no lid reading for this long since it
 /// started stops waiting for one: a broken brainstem shows a sick face, not a
 /// black panel.
@@ -60,7 +79,19 @@ pub struct Side {
     pub captions: Captions,
     /// The brightness, volume or keyboard light just set, for a moment.
     pub level: LevelBar,
+    pub look: Option<Prefs>,
+    readings: Option<(Readings, Instant)>,
+    online: Option<Online>,
+    night: Option<(u64, Instant)>,
+    pub menu: Menu,
+    pub options: Options,
     birth: BirthGate,
+}
+
+struct Online {
+    at: Instant,
+    lookup: bool,
+    weather: Option<String>,
 }
 
 /// The birth ceremony plays once: on a fresh first wake, once per face
@@ -69,6 +100,15 @@ pub struct Side {
 pub struct BirthGate {
     played: bool,
     marker: Option<PathBuf>,
+}
+
+impl Side {
+    fn widget_readings(&self, now: Instant) -> Option<Readings> {
+        let (values, sampled) = self.readings?;
+        now.checked_duration_since(sampled)
+            .filter(|age| *age <= READINGS_MAX_AGE)
+            .map(|_| values)
+    }
 }
 
 impl BirthGate {
@@ -194,6 +234,7 @@ pub struct Link {
     /// Show the calm waiting look, not dazed, until a brainstem first
     /// answers (the appliance, where the face starts before everything).
     loading: bool,
+    reported_look: Option<Prefs>,
     pub side: Side,
 }
 
@@ -213,6 +254,7 @@ impl Link {
             started: now,
             answered: false,
             loading: lid_grace.is_some(),
+            reported_look: None,
             side: Side::default(),
         }
     }
@@ -220,6 +262,68 @@ impl Link {
     /// The brainstem has been silent long enough to look unwell.
     pub fn quiet(&self) -> bool {
         self.last_beat.elapsed() > QUIET
+    }
+
+    pub fn widget_readings(&self, now: Instant) -> Option<Readings> {
+        if self.client.is_none() || self.quiet() {
+            return None;
+        }
+        self.side.widget_readings(now)
+    }
+
+    pub fn menu_action(&mut self, id: &str) {
+        self.ui_action(Event::new("ui.action").with("id", id));
+    }
+
+    pub fn ui_action(&mut self, action: Event) {
+        let mut action = action.with("via", "key");
+        if let Some(seq) = self.lid_seq {
+            action = action.with("lid_seq", seq);
+        }
+        self.send(action);
+    }
+
+    pub fn night_notice(&self, now: Instant) -> Option<u64> {
+        let (stages, arrived) = self.side.night?;
+        (self.client.is_some() && !self.quiet() && !self.side.menu.guest()
+            && now.duration_since(arrived) < Duration::from_secs(8))
+            .then_some(stages)
+    }
+
+    pub fn toggle_menu(&mut self) {
+        self.side.options.set_open(false);
+        let was_open = self.side.menu.open();
+        self.side.menu.set_open(!was_open);
+        if was_open {
+            self.menu_action(MENU_DISMISSED);
+        }
+    }
+
+    fn online(&self, now: Instant) -> Option<&Online> {
+        self.side.online.as_ref().filter(|online| {
+            self.client.is_some() && !self.quiet() && !self.side.menu.guest()
+                && now.checked_duration_since(online.at).is_some_and(|age| age <= ONLINE_MAX_AGE)
+        })
+    }
+
+    pub fn lookup_available(&self, now: Instant) -> bool {
+        self.online(now).is_some_and(|online| online.lookup)
+    }
+
+    pub fn online_weather(&self, now: Instant) -> Option<&str> {
+        let online = self.online(now)?;
+        Some(online.weather.as_deref().unwrap_or("Weather · Ask for the weather"))
+    }
+
+    pub fn menu_key(&mut self, key: Keycode, repeat: bool, options: bool, now: Instant) -> Option<Selection> {
+        let online = self.lookup_available(now);
+        self.side.menu.set_online(online);
+        let was_open = self.side.menu.open();
+        let selection = self.side.menu.key(key, repeat, options, now);
+        if was_open && !self.side.menu.open() {
+            self.menu_action(MENU_DISMISSED);
+        }
+        selection
     }
 
     /// A key while the panel is dark and the brainstem is quiet: light the
@@ -241,6 +345,10 @@ impl Link {
         if self.client.is_none() && now >= self.next_try {
             self.next_try = now + RETRY;
             self.client = Client::connect(&self.path, "face", SUBS).ok();
+            self.reported_look = None;
+            self.side.readings = None;
+            self.side.online = None;
+            self.side.camera = false;
             self.lid_seq = None;
             self.pending_panel_ready = None;
             if self.client.is_some() {
@@ -255,11 +363,16 @@ impl Link {
                         self.last_beat = now;
                         self.answered = true;
                         if ev.topic == "body.lid" {
+                            self.side.night = None;
+                            self.side.online = None;
+                            let lid = ev.bool("closed");
+                            if lid != Some(false) {
+                                self.side.camera = false;
+                            }
                             let seq = ev.data.get("seq").and_then(|seq| seq.as_u64());
                             let snapshot = ev.bool("snapshot").unwrap_or(false);
                             if snapshot || seq.is_none() || seq != self.lid_seq {
                                 self.lid_seq = seq;
-                                let lid = ev.bool("closed");
                                 let show_face = ev.bool("show_face").unwrap_or(false);
                                 if !self.lid_wait.reading(lid, show_face) {
                                     // Still no lid reading; the face stays up
@@ -274,6 +387,12 @@ impl Link {
                                 }
                                 self.pending_panel_ready = if visible { seq } else { None };
                             }
+                        } else if ev.topic == "screen.night" {
+                            let seq = ev.data.get("lid_seq").and_then(|seq| seq.as_u64());
+                            let stages = ev.data.get("stages").and_then(|stages| stages.as_u64());
+                            if seq.is_some() && seq == self.lid_seq && !anim.panel_blank() && !self.side.menu.guest() {
+                                self.side.night = stages.filter(|n| (1..=12).contains(n)).map(|n| (n, now));
+                            }
                         } else {
                             apply(&ev, anim, &mut self.side);
                         }
@@ -287,7 +406,12 @@ impl Link {
             }
         }
         if closed {
+            anim.end_reply();
             self.client = None;
+            self.side.camera = false;
+            self.side.online = None;
+            self.side.night = None;
+            self.side.readings = None;
         }
         let lost = now.duration_since(self.last_beat) > QUIET;
         anim.set_link_lost(lost);
@@ -321,8 +445,23 @@ impl Link {
         if let Some(client) = &mut self.client {
             if client.send(&ev).is_err() {
                 self.client = None;
+                self.side.camera = false;
             }
         }
+    }
+
+    pub fn report_look(&mut self, look: Prefs) {
+        if self.client.is_some() && self.reported_look != Some(look) {
+            self.send(look.applied());
+            if self.client.is_some() {
+                self.reported_look = Some(look);
+            }
+        }
+    }
+
+    /// A new lid sequence still needs a frame before the backlight comes up.
+    pub fn pending_panel_wake(&self) -> bool {
+        self.pending_panel_ready.is_some()
     }
 
     /// The first lit frame is in the display buffer, so the brainstem may now
@@ -362,6 +501,59 @@ fn apply(ev: &Event, anim: &mut Anim, side: &mut Side) {
     side.captions.event(ev);
     side.level.event(ev, Instant::now());
     match ev.topic.as_str() {
+        "screen.prefs" => {
+            let look = Prefs::requested(ev);
+            if side.look.is_none_or(|old| look.revision >= old.revision) {
+                side.look = Some(look);
+            }
+        }
+        "app.privacy" => {
+            if let Some(guest) = ev.bool("guest") {
+                side.night = None;
+                side.online = None;
+                side.menu.privacy(guest);
+                side.options.set_open(false);
+            }
+        }
+        "screen.online" => {
+            side.online = (ev.bool("allowed") == Some(true) && !side.menu.guest()).then(|| Online {
+                at: Instant::now(),
+                lookup: ev.bool("lookup") == Some(true),
+                weather: ev.str("weather").filter(|value| {
+                    !value.is_empty() && value.chars().count() <= 72
+                        && value.chars().all(|ch| !ch.is_control())
+                }).map(str::to_owned),
+            });
+        }
+        "organ.down" if ev.str("name") == Some("mind") => side.online = None,
+        "screen.quick_menu" => {
+            if let Some(position) = ev.str("position").and_then(Position::parse) {
+                side.menu.position = position;
+            }
+            if let Some(open) = ev.bool("open") {
+                if open {
+                    side.options.set_open(false);
+                }
+                side.menu.set_open(open);
+            }
+            if let Some(open) = ev.bool("options") {
+                if open {
+                    side.menu.set_open(false);
+                }
+                side.options.set_open(open && !side.menu.guest());
+            }
+            if let Some(phrases) = ev.data.get("options_help").and_then(serde_json::Value::as_array) {
+                side.options.set_help(phrases.iter().filter_map(serde_json::Value::as_str).take(48).map(str::to_owned).collect());
+            }
+            if let Some(status) = ev.str("options_status") {
+                side.options.set_status(Some(status.to_owned()));
+            }
+        }
+        "app.refused" => {
+            if let Some(app) = ev.str("app") {
+                side.menu.refused(app);
+            }
+        }
         "body.drives" => anim.set_drives(Drives {
             energy: drive(ev, "energy"),
             arousal: drive(ev, "arousal"),
@@ -376,7 +568,14 @@ fn apply(ev: &Event, anim: &mut Anim, side: &mut Side) {
         }
         "state.changed" => {
             if let Some(state) = ev.str("state") {
-                anim.set_state(state, ev.bool("muted").unwrap_or(false), ev.bool("unwell").unwrap_or(false));
+                let age = if state == "thinking" && matches!(ev.str("prev"), Some("listening" | "attending")) {
+                    ev.data.get("speech_end_mono_ms").and_then(|end| end.as_u64())
+                        .and_then(|end| bus::monotonic_millis()?.checked_sub(end))
+                } else {
+                    None
+                };
+                anim.set_state_at_speech_age(state, ev.bool("muted").unwrap_or(false),
+                                             ev.bool("unwell").unwrap_or(false), age);
             }
         }
         "face.express" => {
@@ -384,7 +583,17 @@ fn apply(ev: &Event, anim: &mut Anim, side: &mut Side) {
                 anim.express(name, ev.f64("hold").unwrap_or(2.5));
             }
         }
-        "body.state" => anim.set_low_battery(ev.bool("battery_low") == Some(true)),
+        "body.state" => {
+            anim.set_low_battery(ev.bool("battery_low") == Some(true));
+            anim.set_breath_effort(drive(ev, "effort"));
+            side.readings = Some((Readings::from_body(ev), Instant::now()));
+        }
+        "body.plug" if ev.str("kind") == Some("storage") && ev.bool("attached") == Some(true)
+            && !anim.panel_blank() && !anim.asleep() && !anim.muted() =>
+        {
+            let x = if ev.str("place") == Some("left") { -0.7 } else { 0.0 };
+            anim.glance(x, -0.55, 0.5);
+        }
         "face.gaze" if ev.bool("present") == Some(false) => anim.clear_gaze(),
         "face.gaze" => {
             let x = ev.f64("x").unwrap_or(0.0) as f32;
@@ -395,8 +604,15 @@ fn apply(ev: &Event, anim: &mut Anim, side: &mut Side) {
                 anim.set_gaze(x, y);
             }
         }
-        "say.level" => anim.set_level(ev.f64("v").unwrap_or(0.0) as f32),
-        "hear.missed" => anim.missed(),
+        "say.level" => anim.speech_level(ev.f64("v").unwrap_or(0.0) as f32, ev.str("face_cue")),
+        "say.stop" => anim.end_reply(),
+        "say.done" if ev.bool("final") == Some(true) => anim.end_reply(),
+        "hear.missed" => {
+            anim.missed();
+            if ev.str("reason") == Some("unclear") {
+                anim.unclear_hearing();
+            }
+        }
         "mind.cancel" => anim.end_reply(),
         "mind.reply_done" if ev.bool("spoke") == Some(false) => anim.end_reply(),
         _ => {}
@@ -406,6 +622,72 @@ fn apply(ev: &Event, anim: &mut Anim, side: &mut Side) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_escape_and_toggle_report_menu_dismissal_with_the_lid_sequence() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+
+        let path = std::env::temp_dir().join(format!("face-menu-{}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut link = Link::new(path.clone(), None);
+        link.client = Some(Client::connect(&path, "face", &[]).unwrap());
+        let (stream, _) = listener.accept().unwrap();
+        std::fs::remove_file(path).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut event = || {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            Event::parse(&line).unwrap()
+        };
+        assert_eq!(event().topic, "hello");
+        link.lid_seq = Some(12);
+
+        for key in [Keycode::Escape, Keycode::F6] {
+            link.toggle_menu();
+            assert!(link.side.menu.open());
+            if key == Keycode::Escape {
+                link.menu_key(key, false, false, Instant::now());
+            } else {
+                link.toggle_menu();
+            }
+            assert!(!link.side.menu.open());
+            let receipt = event();
+            assert_eq!(receipt.topic, "ui.action");
+            assert_eq!(receipt.str("id"), Some(MENU_DISMISSED));
+            assert_eq!(receipt.str("via"), Some("key"));
+            assert_eq!(receipt.data["lid_seq"].as_u64(), Some(12));
+        }
+    }
+
+    #[test]
+    fn widget_readings_expire_independently_of_link_traffic() {
+        let mut link = Link::new(PathBuf::new(), None);
+        let mut anim = Anim::new(7);
+        apply(&Event::new("body.state").with("hour", 9u32).with("minute", 2u32),
+              &mut anim, &mut link.side);
+        let sampled = link.side.readings.unwrap().1;
+        assert!(link.side.widget_readings(sampled + Duration::from_secs(14)).is_some());
+        assert!(link.side.widget_readings(sampled + Duration::from_secs(16)).is_none());
+        assert!(link.widget_readings(sampled).is_none(), "no reading without a connection");
+        link.poll(&mut anim);
+        assert!(link.side.readings.is_none(), "a new connection attempt clears the previous generation");
+    }
+
+    #[test]
+    fn app_refusal_keeps_the_workshop_behind_the_quick_menu() {
+        let mut anim = Anim::new(7);
+        let mut side = Side::default();
+        side.menu.set_open(true);
+        let now = Instant::now();
+        assert!(side.menu.key(sdl2::keyboard::Keycode::Return, false, false, now).is_some());
+        apply(&Event::new("app.refused").with("app", "memory"), &mut anim, &mut side);
+        assert!(matches!(side.menu.style_key(false).handoff, crate::quick_menu::Handoff::Waiting { .. }));
+        apply(&Event::new("app.refused").with("app", "terminal"), &mut anim, &mut side);
+        assert_eq!(side.menu.style_key(false).handoff, crate::quick_menu::Handoff::Refused);
+        assert!(side.menu.open());
+    }
 
     #[test]
     fn cancel_drops_the_reply_expression_and_keeps_the_timeout_cue() {

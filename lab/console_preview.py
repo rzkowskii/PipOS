@@ -53,7 +53,9 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "os/package/being"
 FONT_HEADER = PACKAGE / "being-console-font.h"
 SOURCES = [PACKAGE / name for name in ("being-console.c", "being-console-gl.h", "being-console-font.h",
-                                         "being-console-draw.h", "being-console-panel.h")]
+                                     "being-console-draw.h", "being-console-panel.h",
+                                     "being-console-awakening.h", "being-console-awakening-gl.h",
+                                     "being-console-hardware.h")]
 
 # Cell faces: (name, cell width, cell height, pixel size, baseline, cursor band).
 # Keep in step with being-console-draw.h and CONSOLE_FACES in test_local_screen.

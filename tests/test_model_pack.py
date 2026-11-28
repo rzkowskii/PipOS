@@ -4,14 +4,75 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from lab.package_model import DEFAULT_PACK, stage
-from mind.model_pack import ENVELOPE, WEIGHTS, main, metadata_bytes, openssl
+from lab import alba_retrain
+from lab.package_model import DEFAULT_PACK, produce, stage
+from mind import library_pack
+from mind.model_pack import ENVELOPE, FORMAT_V2, WEIGHTS, main, metadata_bytes, openssl
+
+
+class AlbaRetrainInput(unittest.TestCase):
+    def test_espeak_data_target_uses_only_the_verified_archive(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "espeak.zip"
+            scratch = root / "scratch"
+            scratch.mkdir()
+            upstream = f"espeak-ng-{alba_retrain.ESPEAK_REVISION}/CMakeLists.txt"
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr(upstream, "# pinned fixture\n")
+            data = source.read_bytes()
+            pin = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            with (patch.object(alba_retrain, "ESPEAK_SOURCE", pin),
+                  patch.object(alba_retrain.shutil, "which", return_value="cmake"),
+                  patch("lab.candidate_tests.batch", return_value="passed") as execute):
+                self.assertEqual(alba_retrain.build_espeak_data(source, scratch), scratch / "build/espeak-ng-data")
+                self.assertEqual((scratch / upstream).read_text(), "# pinned fixture\n")
+                self.assertEqual(execute.call_count, 2)
+                build_command = execute.call_args.args[0]
+                self.assertEqual(build_command[-4:], ["--target", "data", "--parallel", "4"])
+                execute.reset_mock()
+                source.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+                with self.assertRaisesRegex(ValueError, "pinned source digest"):
+                    alba_retrain.build_espeak_data(source, scratch)
+                execute.assert_not_called()
+
+    def test_staged_descriptor_reproduces_the_archive_and_rejects_wrong_voice_bytes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            prepared, data = root / "prepared", root / "espeak-ng-data"
+            prepared.mkdir()
+            data.mkdir()
+            name, voice = "en_GB-alba-medium.onnx", b"pinned voice"
+            (prepared / name).write_bytes(voice)
+            (data / "en_dict").write_bytes(b"dictionary")
+            notice = root / "NOTICES.md"
+            notice.write_text("Fixture attribution\n", encoding="utf-8")
+            pins = {name: (len(voice), hashlib.sha256(voice).hexdigest())}
+            with (patch.object(alba_retrain, "ALBA_RETRAIN_FILES", pins),
+                  patch.object(alba_retrain, "REQUIRED_DATA", {"en_dict"}),
+                  patch.object(alba_retrain, "NOTICE", notice)):
+                output = root / "staged"
+                pack = alba_retrain.stage(prepared, data, output)
+                self.assertEqual(pack, json.loads((output / "pack.json").read_text()))
+                self.assertEqual(set(produce(output, pack)), {name, "NOTICES.md", "espeak-ng-data/en_dict"})
+                alternate = root / "alternate"
+                self.assertEqual(alba_retrain.stage(prepared, data, alternate), pack)
+
+                (prepared / name).write_bytes(b"wrong voice!")
+                rejected = root / "rejected"
+                with self.assertRaisesRegex(ValueError, "differs from the pinned retrain"):
+                    alba_retrain.stage(prepared, data, rejected)
+                self.assertFalse(rejected.exists())
 
 
 def keypair(directory, label):
@@ -111,6 +172,18 @@ class ModelPack(unittest.TestCase):
         (self.source / WEIGHTS).symlink_to(self.pack / WEIGHTS)
         self.assertIn("regular file", self.invoke(models=self.source, ok=False))
 
+    def test_absent_or_corrupt_legacy_donors_never_reach_the_writer(self):
+        absent = self.pack / "absent.cms"
+        corrupt = self.pack / "corrupt.cms"
+        envelope = (self.pack / ENVELOPE).read_bytes()
+        corrupt.write_bytes(envelope[:-1] + bytes((envelope[-1] ^ 1,)))
+        with patch("mind.model_pack.provision") as writer:
+            self.assertIn(str(absent), self.invoke("provision", models=self.source, donor=absent, ok=False))
+            self.assertIn("cryptographic operation failed",
+                          self.invoke("provision", models=self.source, donor=corrupt, ok=False))
+        writer.assert_not_called()
+        self.assertFalse((self.source / ENVELOPE).exists())
+
     def test_packager_refuses_different_model_or_license_before_signing(self):
         (self.source / WEIGHTS).write_bytes(b"A" + self.weights[1:])
         output = self.pack.parent / "wrong"
@@ -127,3 +200,82 @@ class ModelPack(unittest.TestCase):
         self.assertEqual((info["license"], info["role"], info["model"]), ("Apache-2.0", "conversation", "Qwen/Qwen3.5-0.8B"))
         self.assertIn("ExecCondition=/usr/bin/python3 /usr/lib/being/mind/model_pack.py verify",
                       (DEFAULT_PACK.parent / "30-model-pack.conf").read_text().splitlines())
+
+
+class LibraryImportCapacity(unittest.TestCase):
+    def test_read_only_check_and_insufficient_space_never_remount(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "donor/library/oewn"
+            source.mkdir(parents=True)
+            (source / "pack.json").write_bytes(b"manifest")
+            models = root / "models"
+            models.mkdir()
+            pack = {"format": FORMAT_V2, "files": [
+                {"path": "dictionary.sqlite3", "bytes": 4097, "sha256": "a" * 64},
+                {"path": "LICENSE", "bytes": 80, "sha256": "b" * 64},
+            ]}
+            space = SimpleNamespace(f_flag=os.ST_RDONLY, f_frsize=4096, f_blocks=40,
+                                    f_bfree=20, f_bavail=20, f_favail=8)
+            with (patch.object(library_pack.os, "geteuid", return_value=0),
+                  patch.object(library_pack.os, "statvfs", return_value=space),
+                  patch.object(library_pack, "_models_bound", return_value=True),
+                  patch.object(library_pack, "_remount") as remount,
+                  patch("mind.model_pack.verify_envelope", return_value=(b"signed", pack))):
+                report = library_pack._import_pack(source, "library", models=models, check=True)
+                self.assertTrue(report["fits"])
+                self.assertEqual(report["estimated_required_bytes"], 9 * 4096)
+                self.assertEqual(report["estimated_remaining_bytes"], 11 * 4096)
+                self.assertFalse(report["estimated_room_for_current_contents_replacement"])
+                for field, count in (("f_bavail", 8), ("f_favail", 7)):
+                    with self.subTest(field=field), patch.object(space, field, count):
+                        with self.assertRaisesRegex(ValueError, "insufficient models partition space"):
+                            library_pack._import_pack(source, "library", models=models)
+                remount.assert_not_called()
+            self.assertEqual(list(models.iterdir()), [])
+
+    def test_retry_reclaims_stage_and_a_bad_copy_never_publishes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "donor/library/oewn"
+            source.mkdir(parents=True)
+            (source / "pack.json").write_bytes(b"manifest")
+            (source / "dictionary.sqlite3").write_bytes(b"dictionary")
+            (source / "beingos-library.cms").write_bytes(b"signed")
+            models = root / "models"
+            stage_dir = models / library_pack.IMPORT_STAGE
+            stage_dir.mkdir(parents=True)
+            (stage_dir / "incomplete").write_bytes(b"old bytes")
+
+            pack = {"format": FORMAT_V2, "files": [{"path": "dictionary.sqlite3", "bytes": 10,
+                                                   "sha256": "a" * 64}]}
+            space = SimpleNamespace(f_flag=os.ST_RDONLY, f_frsize=4096, f_blocks=40,
+                                    f_bfree=2, f_bavail=2, f_favail=8)
+
+            def statvfs(_path):
+                free = 2 if (stage_dir / "incomplete").exists() else 12
+                return SimpleNamespace(**{**vars(space), "f_bfree": free, "f_bavail": free})
+
+            def verify(base, *_args, **_kwargs):
+                if base == stage_dir:
+                    self.assertFalse((stage_dir / "incomplete").exists())
+                    self.assertEqual((stage_dir / "library/oewn/dictionary.sqlite3").read_bytes(), b"dictionary")
+                    raise ValueError("copied bytes do not match")
+                return b"signed", pack
+
+            with (patch.object(library_pack.os, "geteuid", return_value=0),
+                  patch.object(library_pack.os, "statvfs", side_effect=statvfs),
+                  patch.object(library_pack, "_models_bound", return_value=True),
+                  patch.object(library_pack, "_staging_exists", return_value=True),
+                  patch.object(library_pack, "_remount") as remount,
+                  patch("mind.model_pack.verify_envelope", side_effect=verify)):
+                report = library_pack._import_pack(source, "library", models=models, check=True)
+                self.assertTrue(report["unfinished_stage"])
+                self.assertFalse(report["fits"])
+                self.assertTrue((stage_dir / "incomplete").exists())
+                remount.assert_not_called()
+                with self.assertRaisesRegex(ValueError, "copied bytes do not match"):
+                    library_pack._import_pack(source, "library", models=models)
+                self.assertEqual([call.args for call in remount.call_args_list], [(True, models), (False, models)])
+            self.assertFalse(stage_dir.exists())
+            self.assertFalse((models / "library/oewn").exists())

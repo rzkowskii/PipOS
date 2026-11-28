@@ -127,10 +127,11 @@ class Organs(TrustCase):
         voice = model_pack.root("tts", self.models)
         voice.mkdir(parents=True)
         (voice / "en_GB-alba-medium.onnx").write_bytes(b"x")
+        (voice / "en_GB-alba-medium.onnx.json").write_text("{}")
         (voice / "tokens.txt").write_text("a 1\n")
         (voice / "espeak-ng-data").mkdir()
         loaded = []
-        engine = PiperEngine(voice, library=False, loader=None)
+        engine = PiperEngine(voice, library=False, loader=None, phonemizer_library=False)
         engine._loader = engine._load
         with patch.object(model_pack, "verify", self.verifier(ValueError("signature does not verify"))), \
                 patch.object(sherpa, "OfflineTts", side_effect=lambda *a, **k: loaded.append(a)), \

@@ -1,8 +1,11 @@
 """Inspect Linux block devices before offering an installation target."""
 
+import binascii
 import os
 import re
 import stat
+import struct
+import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -277,6 +280,9 @@ APPLE_BOOT_TYPE = "426f6f74-0000-11aa-aa11-00306543ecac"
 CORE_STORAGE_TYPE = "53746f72-6167-11aa-aa11-00306543ecac"
 MACOS_TYPES = frozenset((APFS_TYPE, HFS_TYPE, APPLE_BOOT_TYPE, CORE_STORAGE_TYPE))
 BEING_NAMES = ("esp", "system-a", "system-b", "models", "mind")
+ESP_TYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+LINUX_TYPE = "0fc63daf-8483-4772-8e79-3d69d8477de4"
+BEING_TYPES = (ESP_TYPE,) + (LINUX_TYPE,) * (len(BEING_NAMES) - 1)
 GPT_ENTRY_LIMIT = 256
 
 
@@ -290,33 +296,84 @@ def _read_at(fd, size, offset):
     return data
 
 
-def gpt_partitions(fd, sector):
-    """(type, name, first_lba, last_lba) for each used GPT entry, or None without a GPT."""
-    import struct
-    import uuid
-
-    header = _read_at(fd, 92, sector)
-    if len(header) < 92 or header[:8] != b"EFI PART":
+def _gpt_copy(fd, sector, header_lba, alternate_lba):
+    header = bytearray(_read_at(fd, sector, header_lba * sector))
+    if header[:8] != b"EFI PART":
         return None
-    entries_lba, count, size = struct.unpack_from("<QII", header, 72)
-    if not 128 <= size <= 4096 or count > GPT_ENTRY_LIMIT or size % 8:
-        return None
+    if len(header) != sector:
+        raise ValueError("Incomplete GPT header.")
+    revision, header_size, crc = struct.unpack_from("<III", header, 8)
+    if revision != 0x10000 or not 92 <= header_size <= sector:
+        raise ValueError("Unsupported GPT header.")
+    struct.pack_into("<I", header, 16, 0)
+    if binascii.crc32(header[:header_size]) != crc:
+        raise ValueError("Invalid GPT header checksum.")
+    own, alternate, first_usable, last_usable = struct.unpack_from("<QQQQ", header, 24)
+    last_lba = max(header_lba, alternate_lba)
+    if ((own, alternate) != (header_lba, alternate_lba)
+            or not 2 <= first_usable <= last_usable < last_lba):
+        raise ValueError("Invalid GPT header bounds.")
+    entries_lba, count, size, table_crc = struct.unpack_from("<QIII", header, 72)
+    if not 128 <= size <= 4096 or not 1 <= count <= GPT_ENTRY_LIMIT or size % 8:
+        raise ValueError("Unsupported GPT entry layout.")
+    end_lba = entries_lba + (count * size + sector - 1) // sector
+    if header_lba == 1:
+        table_fits = 2 <= entries_lba < end_lba <= first_usable
+    else:
+        table_fits = last_usable < entries_lba < end_lba <= header_lba
+    if not table_fits:
+        raise ValueError("Invalid GPT entry table bounds.")
     table = _read_at(fd, count * size, entries_lba * sector)
+    if len(table) != count * size or binascii.crc32(table) != table_crc:
+        raise ValueError("Invalid GPT entry table checksum.")
     found = []
-    for index in range(len(table) // size):
+    for index in range(count):
         entry = table[index * size:(index + 1) * size]
         if not any(entry[:16]):
             continue
         kind = str(uuid.UUID(bytes_le=bytes(entry[:16])))
         first, last = struct.unpack_from("<QQ", entry, 32)
+        if not first_usable <= first <= last <= last_usable:
+            raise ValueError("Invalid GPT partition bounds.")
         name = entry[56:128].decode("utf-16le", "replace").split("\0", 1)[0]
         found.append((kind, name, first, last))
-    return found
+    ranges = sorted((first, last) for _, _, first, last in found)
+    if any(last >= following for (_, last), (following, _) in zip(ranges, ranges[1:])):
+        raise ValueError("Overlapping GPT partitions.")
+    return (header[56:72], first_usable, last_usable, table, found)
 
 
-def filesystem_signature(fd, offset):
+def gpt_partitions(fd, sector, capacity=None):
+    """Read a usable GPT copy and reject conflicting valid copies."""
+    if capacity is None:
+        capacity = os.lseek(fd, 0, os.SEEK_END)
+    last_lba = capacity // sector - 1
+    if capacity % sector or last_lba <= 1:
+        return None
+    copies = []
+    damaged = False
+    for own, alternate in ((1, last_lba), (last_lba, 1)):
+        try:
+            copy = _gpt_copy(fd, sector, own, alternate)
+        except ValueError:
+            damaged = True
+            continue
+        if copy is not None:
+            copies.append(copy)
+    if copies:
+        if len(copies) == 2 and copies[0][:-1] != copies[1][:-1]:
+            raise ValueError("The primary and backup GPT disagree.")
+        return copies[0][-1]
+    mbr = _read_at(fd, 512, 0)
+    protective = mbr[510:512] == b"\x55\xaa" and any(mbr[index] == 0xee for index in (450, 466, 482, 498))
+    if damaged or protective:
+        raise ValueError("The disk has no readable GPT.")
+    return None
+
+
+def filesystem_signature(fd, offset, length=1536):
     """apfs, hfs or None, from the first bytes of a partition."""
-    head = _read_at(fd, 1536, offset)
+    head = _read_at(fd, min(length, 1536), offset)
     if head[32:36] == b"NXSB":
         return "apfs"
     if head[1024:1026] in (b"H+", b"HX"):
@@ -324,37 +381,38 @@ def filesystem_signature(fd, offset):
     return None
 
 
-def disk_contents(device, sector=512):
-    """What an install would erase, read without changing anything.
-
-    Returns {"macos": bool, "being": bool, "partitions": int, "readable": bool}.
-    A disk that cannot be read is reported as unreadable, never as empty.
-    """
+def inspect_target(fd, sector, capacity):
+    """Return the disk summary and the validated archive extent, if any."""
     result = {"macos": False, "being": False, "partitions": 0, "readable": False}
+    mind_range = None
     try:
-        fd = os.open(device, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except OSError:
-        return result
-    try:
-        sizes = (sector,) + tuple(size for size in (512, 4096) if size != sector)
-        parts = None
-        for size in sizes:
-            parts = gpt_partitions(fd, size)
-            if parts is not None:
-                sector = size
-                break
-        result["readable"] = True
-        if not parts:
-            return result
+        parts = gpt_partitions(fd, sector, capacity) or ()
         result["partitions"] = len(parts)
-        names = tuple(name for _, name, _, _ in parts)
-        result["being"] = names[:len(BEING_NAMES)] == BEING_NAMES
-        for kind, _, first, _ in parts:
-            if kind in MACOS_TYPES or filesystem_signature(fd, first * sector):
+        pipos = parts[:len(BEING_NAMES)]
+        result["being"] = tuple(name for _, name, _, _ in pipos) == BEING_NAMES
+        for kind, _, first, last in parts:
+            if kind in MACOS_TYPES or filesystem_signature(fd, first * sector, (last - first + 1) * sector):
                 result["macos"] = True
                 break
+        if (result["being"] and tuple(kind for kind, *_ in pipos) == BEING_TYPES
+                and sum(name == "mind" for _, name, _, _ in parts) == 1):
+            _, _, first, last = pipos[-1]
+            mind_range = (first * sector, (last - first + 1) * sector)
+        result["readable"] = True
     except (OSError, ValueError):
-        result["readable"] = False
-    finally:
-        os.close(fd)
-    return result
+        pass
+    return result, mind_range
+
+
+def disk_contents(device, sector=512):
+    """Inspect the selected disk without changing its contents."""
+    try:
+        fd = os.open(device, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            capacity = os.lseek(fd, 0, os.SEEK_END)
+            result, _ = inspect_target(fd, sector, capacity)
+            return result
+        finally:
+            os.close(fd)
+    except OSError:
+        return {"macos": False, "being": False, "partitions": 0, "readable": False}

@@ -6,10 +6,75 @@
 
 use serde_json::{json, Value};
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 const FILE: &str = "life.json";
+const CLOCK_FLOOR: u64 = 1_767_225_600; // mind/clock_epoch.py
+const MAX_CLOCK: u64 = 4_133_980_799;
+
+pub fn saved_clock_floor(dir: &Path) -> u64 {
+    let mut value = String::new();
+    let result = File::open(dir.join("clock-floor")).and_then(|file| file.take(16).read_to_string(&mut value));
+    if result.is_ok() {
+        if let Ok(stamp) = value.trim().parse::<u64>() {
+            if (CLOCK_FLOOR..=MAX_CLOCK).contains(&stamp) {
+                return stamp;
+            }
+        }
+    }
+    CLOCK_FLOOR
+}
+
+pub fn wall_timestamp(floor: u64) -> u64 {
+    let floor = floor.max(CLOCK_FLOOR);
+    let now = unix_now();
+    if now > MAX_CLOCK { floor } else { now.max(floor) }
+}
+
+/// At most one periodic disk write. A slow disk must not hold up the hub.
+#[derive(Default)]
+pub struct HeartbeatWrite(Option<JoinHandle<io::Result<()>>>);
+
+impl HeartbeatWrite {
+    pub fn start(&mut self, wake: &Life, now: u64) -> io::Result<()> {
+        let wake = wake.clone();
+        self.spawn(move || wake.mark_alive(now))
+    }
+
+    fn spawn(&mut self, write: impl FnOnce() -> io::Result<()> + Send + 'static) -> io::Result<()> {
+        if self.0.is_none() {
+            self.0 = Some(thread::Builder::new().name("life-heartbeat".into()).spawn(write)?);
+        }
+        Ok(())
+    }
+
+    pub fn completed(&mut self) -> Option<io::Result<()>> {
+        if !self.0.as_ref().is_some_and(JoinHandle::is_finished) {
+            return None;
+        }
+        self.0.take().map(|task| task.join().unwrap_or_else(|_| Err(io::Error::other("life heartbeat panicked"))))
+    }
+
+    /// The hub uses this only while exiting. An overdue write stays owned by
+    /// this process until it exits, and the life lock still guards the stop.
+    pub fn drain(&mut self, budget: Duration) -> bool {
+        let deadline = Instant::now() + budget;
+        while self.0.is_some() {
+            if self.completed().is_some() {
+                return true;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            thread::sleep(left.min(Duration::from_millis(5)));
+        }
+        true
+    }
+}
 
 /// What is true of this wake. Worked out once, when it wakes.
 #[derive(Clone, Debug, PartialEq)]
@@ -34,10 +99,34 @@ pub struct Life {
     /// shrink how long it has been awake.
     pub woke_boot_clock: Option<f64>,
     dir: PathBuf,
+    boot: String,
+    writer: String,
 }
 
 fn bad(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+fn lock_record(dir: &Path) -> io::Result<File> {
+    // Restore takes the same directory lock while publishing. A heartbeat
+    // can retry later when the lock is busy instead of delaying the organs.
+    let directory = File::open(dir)?;
+    directory.try_lock().map_err(io::Error::from)?;
+    if dir.join(".being-restore-in-progress").try_exists()? {
+        return Err(bad("The life record is waiting for a restore to finish"));
+    }
+    Ok(directory)
+}
+
+fn start_writer(record: &mut Value, boot: &str, wakes: u64, writer: &str, now: u64) {
+    record["liveness"] = json!({"boot": boot, "wakes": wakes, "writer": writer});
+    record["alive_at"] = json!(now);
+    record["ended"] = Value::Null;
+}
+
+fn liveness_matches_wake(record: &Value) -> bool {
+    record["boot"].is_string() && record["wakes"].is_u64()
+        && record["boot"] == record["liveness"]["boot"] && record["wakes"] == record["liveness"]["wakes"]
 }
 
 fn write_whole(dir: &Path, record: &Value) -> io::Result<()> {
@@ -83,9 +172,7 @@ impl Life {
     /// Wake, with the boot clock read now (`boot_clock`, seconds since the
     /// machine started, sleep included).
     pub fn wake_at(dir: &Path, now: u64, boot_clock: Option<f64>, boot: &str, body: &str) -> io::Result<Life> {
-        if dir.join(".being-restore-in-progress").try_exists()? {
-            return Err(bad("The life record is waiting for a restore to finish"));
-        }
+        let _lock = lock_record(dir)?;
         let record = read(dir)?;
         let first = record.is_none();
         let mut record = match record {
@@ -95,9 +182,16 @@ impl Life {
         let id = record["id"].as_str().unwrap_or_default().to_string();
         let born = record["born"].as_u64().unwrap_or(now);
         let was_awake = record.get("awake_since").is_some_and(|v| !v.is_null());
+        let writer = new_id()?;
 
         if !first && was_awake && record.get("boot").and_then(Value::as_str) == Some(boot) {
             // Same boot: only the brainstem restarted. The facts of this wake stand.
+            let wakes = record["wakes"].as_u64().unwrap_or(1);
+            let woke_at = record["awake_since"].as_u64().unwrap_or(now);
+            record["wakes"] = json!(wakes);
+            record["awake_since"] = json!(woke_at);
+            start_writer(&mut record, boot, wakes, &writer, now);
+            write_whole(dir, &record)?;
             let this = &record["this_wake"];
             // The boot clock of this wake was written when it began. A record
             // without one (an older brainstem) counts from the wall clock.
@@ -106,14 +200,16 @@ impl Life {
                 woke_boot_clock,
                 id,
                 born,
-                wakes: record["wakes"].as_u64().unwrap_or(1),
-                woke_at: record["awake_since"].as_u64().unwrap_or(now),
+                wakes,
+                woke_at,
                 first: this["first"].as_bool().unwrap_or(false),
                 lost_power: this["lost_power"].as_bool().unwrap_or(false),
                 new_body: this["new_body"].as_bool().unwrap_or(false),
                 body: body.to_string(),
                 slept: this["slept"].as_u64(),
                 dir: dir.to_path_buf(),
+                boot: boot.to_string(),
+                writer,
             });
         }
 
@@ -125,13 +221,19 @@ impl Life {
             record.get("last_sleep").and_then(Value::as_u64).map(|t| now.saturating_sub(t))
         };
         let wakes = record["wakes"].as_u64().unwrap_or(0) + 1;
+        // Old slots preserve unknown keys in life.json. Count a heartbeat as
+        // evidence only when it belongs to the wake we just found on disk.
+        let previous_alive_at = if liveness_matches_wake(&record) { record["alive_at"].as_u64() } else { None };
+        let previous_ended = if was_awake { Some("abrupt") } else if slept.is_some() { Some("clean") } else { None };
 
         record["wakes"] = json!(wakes);
         record["body"] = json!(body);
         record["boot"] = json!(boot);
         record["awake_since"] = json!(now);
         record["awake_since_boot_clock"] = json!(boot_clock);
-        record["this_wake"] = json!({ "first": first, "lost_power": lost_power, "new_body": new_body, "slept": slept });
+        start_writer(&mut record, boot, wakes, &writer, now);
+        record["this_wake"] = json!({ "first": first, "lost_power": lost_power, "new_body": new_body, "slept": slept,
+                                      "previous_ended": previous_ended, "previous_alive_at": previous_alive_at });
         write_whole(dir, &record)?;
 
         Ok(Life {
@@ -146,15 +248,40 @@ impl Life {
             slept,
             woke_boot_clock: boot_clock,
             dir: dir.to_path_buf(),
+            boot: boot.to_string(),
+            writer,
         })
+    }
+
+    fn active_record(&self) -> io::Result<Value> {
+        let record = read(&self.dir)?.ok_or_else(|| bad(format!("{FILE} has gone")))?;
+        if record["id"].as_str() != Some(self.id.as_str()) || record["born"].as_u64() != Some(self.born)
+            || record["boot"].as_str() != Some(self.boot.as_str()) || record["wakes"].as_u64() != Some(self.wakes)
+            || record["awake_since"].as_u64() != Some(self.woke_at)
+            || !liveness_matches_wake(&record)
+            || record["liveness"]["writer"].as_str() != Some(self.writer.as_str())
+        {
+            return Err(bad("The life record belongs to a different wake or writer"));
+        }
+        Ok(record)
+    }
+
+    pub fn mark_alive(&self, now: u64) -> io::Result<()> {
+        let _lock = lock_record(&self.dir)?;
+        let mut record = self.active_record()?;
+        record["alive_at"] = json!(now);
+        write_whole(&self.dir, &record)
     }
 
     /// Go to sleep properly. After this, the next wake knows it was not a power cut.
     pub fn sleep(&self, now: u64) -> io::Result<()> {
-        let mut record = read(&self.dir)?.ok_or_else(|| bad(format!("{FILE} has gone")))?;
+        let _lock = lock_record(&self.dir)?;
+        let mut record = self.active_record()?;
         record["awake_since"] = Value::Null;
         record["awake_since_boot_clock"] = Value::Null;
         record["last_sleep"] = json!(now);
+        record["alive_at"] = json!(now);
+        record["ended"] = json!("clean");
         write_whole(&self.dir, &record)
     }
 
@@ -178,12 +305,12 @@ impl Life {
     /// A few true words about itself, for the senses line.
     #[cfg(test)]
     pub fn senses(&self, now: u64) -> String {
-        self.senses_at(now, None)
+        self.senses_at(now, None, true)
     }
 
     /// The same, counting time awake on the boot clock when both ends of it
     /// are known.
-    pub fn senses_at(&self, now: u64, boot_clock: Option<f64>) -> String {
+    pub fn senses_at(&self, now: u64, boot_clock: Option<f64>, trusted_clock: bool) -> String {
         let awake = match (boot_clock, self.woke_boot_clock) {
             (Some(clock), Some(woke)) if clock >= woke => (clock - woke) as u64,
             _ => now.saturating_sub(self.woke_at),
@@ -202,7 +329,7 @@ impl Life {
             }
         }
         let days = now.saturating_sub(self.born) / 86_400;
-        if !self.first {
+        if !self.first && trusted_clock {
             parts.push(match days {
                 0 => "born today".to_string(),
                 1 => "1 day old".to_string(),
@@ -354,6 +481,128 @@ mod tests {
     }
 
     #[test]
+    fn a_blocked_heartbeat_never_blocks_polling_or_starts_a_second_writer() {
+        let (started, running) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let mut heartbeat = HeartbeatWrite::default();
+        heartbeat.spawn(move || {
+            started.send(()).unwrap();
+            blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+            Ok(())
+        }).unwrap();
+        running.recv_timeout(Duration::from_secs(2)).unwrap();
+        let original = heartbeat.0.as_ref().unwrap().thread().id();
+        assert!(heartbeat.completed().is_none());
+        assert!(!heartbeat.drain(Duration::ZERO));
+        heartbeat.spawn(|| panic!("the worker is already busy")).unwrap();
+        assert_eq!(heartbeat.0.as_ref().unwrap().thread().id(), original);
+        release.send(()).unwrap();
+        assert!(heartbeat.drain(Duration::from_secs(2)));
+        assert!(heartbeat.0.is_none());
+    }
+
+    #[test]
+    fn a_delayed_heartbeat_cannot_overwrite_a_restarted_or_closed_wake() {
+        let d = dir("heartbeat-after-close");
+        let wake = Life::wake(&d, T0, "boot", "body").unwrap();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let mut heartbeat = HeartbeatWrite::default();
+        heartbeat.spawn(move || {
+            blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+            wake.mark_alive(T0 + 300)
+        }).unwrap();
+
+        let resumed = Life::wake(&d, T0 + 320, "boot", "body").unwrap();
+        resumed.sleep(T0 + 400).unwrap();
+        release.send(()).unwrap();
+        assert!(heartbeat.drain(Duration::from_secs(2)));
+        let record = read(&d).unwrap().unwrap();
+        assert_eq!(record["alive_at"], T0 + 400);
+        assert_eq!(record["ended"], "clean");
+    }
+
+    #[test]
+    fn heartbeat_and_end_evidence_follow_the_wake_and_its_current_writer() {
+        let d = dir("liveness");
+        let first = Life::wake(&d, T0, "boot-1", "body").unwrap();
+        first.mark_alive(T0 + 300).unwrap();
+        let current = Life::wake(&d, T0 + 400, "boot-1", "body").unwrap();
+        assert_eq!(current.wakes, first.wakes);
+        assert_eq!(current.woke_at, first.woke_at);
+        assert!(first.mark_alive(T0 + 500).is_err());
+        assert!(first.sleep(T0 + 500).is_err());
+        assert_eq!(read(&d).unwrap().unwrap()["alive_at"], T0 + 400);
+        current.mark_alive(T0 + 700).unwrap();
+
+        let next = Life::wake(&d, T0 + 1000, "boot-2", "body").unwrap();
+        assert!(next.lost_power);
+        let record = read(&d).unwrap().unwrap();
+        assert_eq!(record["this_wake"]["previous_ended"], "abrupt");
+        assert_eq!(record["this_wake"]["previous_alive_at"], T0 + 700);
+        assert!(record["ended"].is_null());
+        assert!(current.mark_alive(T0 + 1050).is_err());
+        let resumed = Life::wake(&d, T0 + 1080, "boot-2", "body").unwrap();
+        assert_eq!(resumed.wakes, next.wakes);
+        let after_restart = read(&d).unwrap().unwrap();
+        assert_eq!(after_restart["this_wake"], record["this_wake"]);
+        assert!(next.sleep(T0 + 1100).is_err());
+        resumed.sleep(T0 + 1100).unwrap();
+        assert_eq!(read(&d).unwrap().unwrap()["ended"], "clean");
+        assert!(resumed.mark_alive(T0 + 1200).is_err());
+
+        Life::wake(&d, T0 + 1300, "boot-3", "body").unwrap();
+        let record = read(&d).unwrap().unwrap();
+        assert_eq!(record["this_wake"]["previous_ended"], "clean");
+        assert_eq!(record["this_wake"]["previous_alive_at"], T0 + 1100);
+        assert_eq!(record["alive_at"], T0 + 1300);
+    }
+
+    #[test]
+    fn restore_locks_and_identity_changes_keep_stale_actions_from_the_record() {
+        let d = dir("liveness-restore");
+        let wake = Life::wake(&d, T0, "boot-1", "body").unwrap();
+        let path = d.join(FILE);
+        let before = fs::read(&path).unwrap();
+        let directory = File::open(&d).unwrap();
+        directory.try_lock().unwrap();
+        assert_eq!(wake.mark_alive(T0 + 300).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(wake.sleep(T0 + 300).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        drop(directory);
+        let marker = d.join(".being-restore-in-progress");
+        fs::write(&marker, "pending").unwrap();
+        assert!(wake.mark_alive(T0 + 300).is_err());
+        assert!(wake.sleep(T0 + 300).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::remove_file(marker).unwrap();
+
+        let mut replacement = read(&d).unwrap().unwrap();
+        replacement["id"] = json!("bad0bad0bad0bad0bad0bad0bad0bad0");
+        write_whole(&d, &replacement).unwrap();
+        assert!(wake.mark_alive(T0 + 300).is_err());
+        assert!(wake.sleep(T0 + 300).is_err());
+        assert_eq!(read(&d).unwrap().unwrap(), replacement);
+    }
+
+    #[test]
+    fn old_slots_do_not_lend_stale_heartbeat_evidence_to_a_new_wake() {
+        let d = dir("liveness-rollback");
+        let initial = Life::wake(&d, T0, "boot-1", "body").unwrap();
+        initial.sleep(T0 + 300).unwrap();
+        let mut old_slot = read(&d).unwrap().unwrap();
+        old_slot["boot"] = json!("boot-2");
+        old_slot["wakes"] = json!(2);
+        old_slot["awake_since"] = json!(T0 + 500);
+        write_whole(&d, &old_slot).unwrap();
+
+        let current = Life::wake(&d, T0 + 900, "boot-3", "body").unwrap();
+        assert_eq!(current.wakes, 3);
+        let record = read(&d).unwrap().unwrap();
+        assert_eq!(record["this_wake"]["previous_ended"], "abrupt");
+        assert!(record["this_wake"]["previous_alive_at"].is_null());
+        assert_eq!(record["alive_at"], T0 + 900);
+    }
+
+    #[test]
     fn waking_in_other_hardware_is_noticed_once() {
         let d = dir("body");
         Life::wake(&d, T0, "boot-1", "QEMU / lab").unwrap().sleep(T0 + 10).unwrap();
@@ -392,13 +641,13 @@ mod tests {
         Life::wake_at(&d, T0, Some(5.0), "boot-1", "b").unwrap().sleep(T0 + 5).unwrap();
         let a = Life::wake_at(&d, T0 + 100, Some(12.0), "boot-2", "b").unwrap();
         // The wall clock is corrected by a day; the boot clock moved 10 minutes.
-        assert!(a.senses_at(T0 + 100 + 86_400, Some(612.0)).starts_with("awake 10 min"));
+        assert!(a.senses_at(T0 + 100 + 86_400, Some(612.0), true).starts_with("awake 10 min"));
         // The brainstem restarts within the boot: the same wake, the same clock.
         let b = Life::wake_at(&d, T0 + 90_000, Some(700.0), "boot-2", "b").unwrap();
         assert_eq!(b.woke_boot_clock, Some(12.0));
-        assert!(b.senses_at(T0 + 90_000, Some(3612.0)).starts_with("awake 1 hour"));
+        assert!(b.senses_at(T0 + 90_000, Some(3612.0), true).starts_with("awake 1 hour"));
         // Without a boot clock it falls back to the wall clock.
-        assert!(b.senses_at(T0 + 100 + 300, None).starts_with("awake 5 min"));
-        assert!(b.senses_at(T0 + 100 + 300, Some(1.0)).starts_with("awake 5 min"), "a clock that went back is not trusted");
+        assert!(b.senses_at(T0 + 100 + 300, None, true).starts_with("awake 5 min"));
+        assert!(b.senses_at(T0 + 100 + 300, Some(1.0), true).starts_with("awake 5 min"), "a clock that went back is not trusted");
     }
 }

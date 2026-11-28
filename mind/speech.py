@@ -4,15 +4,38 @@ the emotion tag, cut the text into clauses the voice can start on early."""
 import re
 
 EMOTIONS = ("neutral", "joy", "curiosity", "surprise", "skepticism", "concern", "sleepy")
+SENTENCE_CHARS = 160
+
+
+# A few explicit admissions can change the tone within a reply. The
+# leading model tag still supplies the general tone. Require an unquoted
+# statement from Pip, rather than matching words anywhere in the text.
+_CLAUSE_CONCERN = re.compile(
+    r"^(?:i (?:couldn't|could not|can't|cannot) (?:find|open|finish|save|remember)\b"
+    r"|one(?: of them)? (?:is|was) missing[.!?]?$)", re.I,
+)
+
+
+def clause_cue(text, emotion):
+    if _CLAUSE_CONCERN.search(text.strip().replace("’", "'")):
+        return "concern"
+    return emotion if emotion in EMOTIONS else "neutral"
+
+
+def reply_grammar(emotions=EMOTIONS, sentences=None):
+    choices = "emotion ::= " + " | ".join(f'"{emotion}"' for emotion in emotions) + "\n"
+    if sentences is None:
+        return ('root ::= "[" emotion "] " [A-Za-z0-9"\'] text\n'
+                + choices + "text ::= [^\\x00]*\n")
+    tail = ' (" " sentence)?' if sentences == 2 else ""
+    return ('root ::= "[" emotion "] " sentence' + tail + "\n" + choices
+            + f"sentence ::= [A-Za-z0-9\"'] part{{0,{SENTENCE_CHARS}}} [.!?] [\"']?\n"
+            + 'part ::= [^\\x00\\n\\r()\\[\\]{}<>*_#`~|.!?] | "." [0-9]\n')
 
 # llama.cpp grammar: one emotion tag, then words. The first character after the
 # tag must start a word, because a small model left free will give the tag and
 # stop, leaving nothing to say.
-GRAMMAR = (
-    'root ::= "[" emotion "] " [A-Za-z0-9"\'] text\n'
-    "emotion ::= " + " | ".join(f'"{e}"' for e in EMOTIONS) + "\n"
-    "text ::= [^\\x00]*\n"
-)
+GRAMMAR = reply_grammar()
 
 # The tighter reply shape (task 4.6): the tag, then one or two sentences of
 # bounded length that end in . ! or ?, with no new lines, brackets or markup.
@@ -20,13 +43,7 @@ GRAMMAR = (
 # The default since the audition of 24 November 2026 (config/being.json):
 # it never lowered the complete-reply rate, and it ended long answers at a
 # sentence where the open shape was cut off mid-word.
-SENTENCE_CHARS = 160
-STRICT_GRAMMAR = (
-    'root ::= "[" emotion "] " sentence (" " sentence)?\n'
-    "emotion ::= " + " | ".join(f'"{e}"' for e in EMOTIONS) + "\n"
-    f"sentence ::= [A-Za-z0-9\"'] part{{0,{SENTENCE_CHARS}}} [.!?] [\"']?\n"
-    "part ::= [^\\x00\\n\\r()\\[\\]{}<>*_#`~|.!?] | \".\" [0-9]\n"
-)
+STRICT_GRAMMAR = reply_grammar(sentences=2)
 
 # Assistant boilerplate a small model falls back on. A reply that opens with
 # it is not said and is asked for again, like a parrot. Only the opening

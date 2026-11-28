@@ -1,0 +1,24 @@
+#!/bin/sh
+# Opt-in native display cache. The normal RAM cache remains available.
+set -efu
+umask 077
+directory=/mind/display-cache
+environment=/run/being/mesa-native.env
+rm -f "$environment"
+
+# Refuse the unmounted directory, RAM /mind, and a read-only trial/archive.
+awk '$5 == "/mind" && $6 ~ /(^|,)rw(,|$)/ && $0 ~ / - ext4 / { found=1 }
+     END { exit !found }' /proc/self/mountinfo || exit 0
+[ ! -e /mind/.being-restore-in-progress ] || exit 0
+[ ! -L "$directory" ] || exit 0
+if [ ! -d "$directory" ]; then
+    mkdir -m 700 "$directory" || exit 0
+fi
+[ "$(stat -c '%u:%a' "$directory" 2>/dev/null)" = "0:700" ] || exit 0
+if [ ! -d /run/being ]; then
+    mkdir -m 755 /run/being || exit 0
+fi
+temporary=$(mktemp /run/being/mesa-native.XXXXXX)
+trap 'rm -f "$temporary"' EXIT HUP INT TERM
+printf 'MESA_SHADER_CACHE_DIR=%s\n' "$directory" > "$temporary"
+mv -f "$temporary" "$environment"

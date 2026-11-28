@@ -1,6 +1,6 @@
 """ctypes bindings for the three parts of the sherpa-onnx C API the voice uses.
 
-Only these are bound: Silero voice activity detection, the offline recognizer
+The voice binds Silero voice activity detection, the offline recognizer
 (Moonshine v2: an encoder plus a merged decoder) and offline TTS (VITS, which
 is how Piper voices run). The library is loaded lazily, on first use; when it
 is missing or is a release whose struct layout was not checked, `Unavailable`
@@ -16,8 +16,10 @@ decode in a worker thread does not stall the event loop.
 """
 
 import ctypes as c
+import math
 import os
 import threading
+import weakref
 from array import array
 from pathlib import Path
 
@@ -177,6 +179,10 @@ GenerationConfig = _struct("GenerationConfig", [
     ("tokens_num_sentences", _I),
 ])
 
+SpeakerEmbeddingExtractorConfig = _struct("SpeakerEmbeddingExtractorConfig", [
+    ("model", _P), ("num_threads", _I), ("debug", _I), ("provider", _P),
+])
+
 # Every struct above, by its C name without the SherpaOnnx prefix. The layout
 # test walks this table.
 STRUCTS = {cls.__name__: cls for cls in (
@@ -191,7 +197,7 @@ STRUCTS = {cls.__name__: cls for cls in (
     OfflineRecognizerResult, OfflineTtsVitsModelConfig, OfflineTtsMatchaModelConfig,
     OfflineTtsKokoroModelConfig, OfflineTtsKittenModelConfig, OfflineTtsZipvoiceModelConfig,
     OfflineTtsPocketModelConfig, OfflineTtsSupertonicModelConfig, OfflineTtsModelConfig, OfflineTtsConfig,
-    GeneratedAudio, GenerationConfig,
+    GeneratedAudio, GenerationConfig, SpeakerEmbeddingExtractorConfig,
 )}
 
 _V = c.c_void_p
@@ -442,18 +448,37 @@ class OfflineRecognizer:
 
 
 class OfflineTts:
-    """A resident VITS (Piper) voice."""
+    """A resident VITS (Piper) voice.
 
-    def __init__(self, model, tokens, data_dir, *, threads=1, library=None):
+    sherpa-onnx 2.0 and later have no espeak-ng: `phonemizer` (a
+    mind.phonemize.Phonemizer) turns each text into Piper phonemes, which are
+    passed as GenerationConfig.phoneme_codepoints. Without one, the text is
+    passed as it is, which only a voice with a lexicon can read.
+    """
+
+    def __init__(self, model, tokens, data_dir, *, threads=1, library=None, phonemizer=None,
+                 noise_scale=0.667, noise_scale_w=0.8, length_scale=1.0):
+        """Load a Piper/VITS voice with its model-wide synthesis controls.
+
+        The defaults are the production values used before these keywords were
+        exposed.  They are constructor settings in sherpa's checked VITS ABI;
+        callers that need a different arm must create a separate voice rather
+        than mutate the resident production handle.
+        """
+        controls = (noise_scale, noise_scale_w, length_scale)
+        if any(type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= 4
+               for value in controls):
+            raise ValueError("Piper controls must be finite numbers from zero through four")
         self.lib = load(library)
+        self.phonemizer = phonemizer
         config = OfflineTtsConfig()
         vits = config.model.vits
         vits.model = _path(model)
         vits.tokens = _path(tokens)
         vits.data_dir = _path(data_dir)
-        vits.noise_scale = 0.667
-        vits.noise_scale_w = 0.8
-        vits.length_scale = 1.0
+        vits.noise_scale = float(noise_scale)
+        vits.noise_scale_w = float(noise_scale_w)
+        vits.length_scale = float(length_scale)
         config.model.num_threads = threads
         config.model.provider = b"cpu"
         config.max_num_sentences = 1
@@ -462,6 +487,11 @@ class OfflineTts:
         self.handle = self.lib.SherpaOnnxCreateOfflineTts(c.pointer(config))
         if not self.handle:
             raise Unavailable(f"the voice {Path(model).name} would not load")
+        # A voice nobody closes (one loaded by a choice that was cancelled
+        # meanwhile) still gives its tens of megabytes back when it is dropped.
+        # Nothing can be generating then: generation holds the object.
+        self._release = weakref.finalize(self, self.lib.SherpaOnnxDestroyOfflineTts, self.handle)
+        self._release.atexit = False
         self.sample_rate = int(self.lib.SherpaOnnxOfflineTtsSampleRate(self.handle))
 
     def _generate(self, text, length_scale):
@@ -472,8 +502,14 @@ class OfflineTts:
         # VITS turns speed into length_scale = 1 / speed.
         options.speed = 1 / length_scale
         options.sid = 0
+        keep = None
+        if self.phonemizer is not None:
+            # The phoneme arrays must outlive the call; the text is then unused.
+            keep = self.phonemizer.fill(options, text)
+            text = ""
         audio = self.lib.SherpaOnnxOfflineTtsGenerateWithConfig(
             self.handle, text.encode("utf-8"), c.pointer(options), None, None)
+        del keep
         if not audio:
             raise RuntimeError("the voice produced no audio")
         return audio
@@ -501,5 +537,5 @@ class OfflineTts:
 
     def close(self):
         if self.handle:
-            self.lib.SherpaOnnxDestroyOfflineTts(self.handle)
+            self._release()     # destroys the voice once, and never again when dropped
             self.handle = None

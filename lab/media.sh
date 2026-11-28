@@ -6,7 +6,7 @@
 #   lab/media.sh --check    exit 1 if the gallery is out of date (for scripts/check)
 #
 # What it makes:
-#   docs/media/expressions.png   every expression, from `face --sheet`
+#   docs/media/expressions.png   the standard expression sheet from `face --sheet`
 #   docs/media/tour.mp4          a 30 s scripted tour (`face --script tour`), if ffmpeg is installed
 #   docs/media/tour-poster.png   one frame of the tour (always)
 #   docs/media/try-menu.png      the Try menu as the laptop draws it (lab/console_preview.py), if
@@ -29,9 +29,10 @@ esac
 sources() {
     cd "$ROOT"
     find crates/face crates/bus os/package/being -type f \
-        \( -name '*.rs' -o -name '*.frag' -o -name '*.vert' -o -name '*.c' -o -name '*.h' -o -name Cargo.toml \) |
+        \( -name '*.rs' -o -name '*.frag' -o -name '*.vert' -o -name '*.c' -o -name '*.h' -o -name Cargo.toml \
+           -o -path 'crates/face/expressions.json' -o -path 'crates/face/concept-expressions.json' \) |
         LC_ALL=C sort | xargs shasum -a 256
-    shasum -a 256 mind/local_menu.py mind/console_ui.py lab/console_preview.py lab/media.sh
+    shasum -a 256 mind/local_menu.py mind/console_ui.py mind/installer.py lab/console_preview.py lab/media.sh
 }
 
 current=$(sources | shasum -a 256 | cut -d' ' -f1)
@@ -63,7 +64,7 @@ echo "media: expression sheet"
 mv "$work/expressions.png" "$MEDIA/expressions.png"
 
 echo "media: 30 s tour"
-"$face" --script tour --frames "$work/tour" --fps 30 --size 1280x800 --exit-after 30
+"$face" --script tour --frames "$work/tour" --seed 1 --fps 30 --size 1280x800 --exit-after 30
 frames=("$work"/tour/frame-*.png)
 if [ ! -e "${frames[0]}" ]; then
     echo "media: the face wrote no tour frames" >&2

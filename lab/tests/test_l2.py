@@ -19,6 +19,7 @@ from lab.vm import IMAGE, ROOT, VM
 BOOT = 300
 MODEL_LOAD = 1200
 REPLY = 1500
+CONTEXT_ENV = ". /run/being-context/paths.env"
 
 
 def wake(vm):
@@ -204,11 +205,8 @@ class Forgetting(unittest.TestCase):
                 self.fail("the mind did not notice that the model stopped")
             self.assertIn("can't think right now", vm.converse("I call my orchid Velvetbox.", 25))
             self.assertEqual(vm.converse("Remember that the bike is called Zanzibarine", 300), "Okay. I'll remember that.")
-            status, output = vm.run(
-                "systemctl stop being-mind && python3 -c 'import json; from pathlib import Path; "
-                "p = Path(\"/mind/context.json\"); data = json.loads(p.read_text()); "
-                "data[\"saved\"] = 0; p.write_text(json.dumps(data))'"
-            )
+            # The next boot restores archive rows with a fresh working cache.
+            status, output = vm.run("systemctl stop being-mind")
             self.assertEqual(status, 0, output)
             sleep(vm)
 
@@ -230,35 +228,6 @@ class Forgetting(unittest.TestCase):
         finally:
             vm.destroy()
 
-    def test_what_it_forgets_is_gone_from_the_disk(self):
-        vm = VM()
-        try:
-            vm.start()
-            wake(vm)
-            # One thing to keep, as proof the search below can find things.
-            self.assertEqual(vm.converse("Remember that my bike is called Zanzibarine", 300), "Okay. I'll remember that.")
-            # One thing to forget.
-            self.assertEqual(vm.converse("Remember that the safe word is Quixotically", 300), "Okay. I'll remember that.")
-            # Talk about it with the model, so it is also in the live
-            # conversation, the saved context and the model's cache.
-            reply = vm.converse("Tell me about the safe word.", REPLY)
-            self.assertTrue(reply)
-            self.assertNotIn("lost my thought", reply)
-            self.assertNotIn("can't think right now", reply)
-            context = vm.run("cat /mind/context.json")[1]
-            self.assertIn("Quixotically", context, "the fact should have been recalled into the conversation")
-
-            self.assertEqual(vm.converse("Forget that", 300), "Okay. That's forgotten.")
-            self.assertEqual(
-                vm.converse("What do you remember about the safe word?", 300), "I don't remember anything about that."
-            )
-            sleep(vm)
-
-            self.assertTrue(vm.disk_contains(b"zanzibarin"), "the scan cannot find even what was kept")
-            self.assertFalse(vm.disk_contains(b"quixot"), "the forgotten words are still on the disk")
-        finally:
-            vm.destroy()
-
 
 @unittest.skipUnless(IMAGE.exists(), "no image: run lab/build.sh first")
 class Compaction(unittest.TestCase):
@@ -272,7 +241,7 @@ class Compaction(unittest.TestCase):
         return output
 
     def context(self):
-        return json.loads(self.sh("cat /mind/context.json"))
+        return json.loads(self.sh(f'{CONTEXT_ENV} && cat "$BEING_CONTEXT_DIR/context.json"'))
 
     def wait_guest(self, command, timeout=35):
         deadline = time.monotonic() + timeout
@@ -288,6 +257,10 @@ class Compaction(unittest.TestCase):
             'pid=$(systemctl show -p MainPID --value being-mind) && test "$pid" -gt 0 && '
             'journalctl -b -u being-mind _PID="$pid" --no-pager -o cat | grep -q "cortex is answering"'
         )
+
+    def restart_conversation_organs(self):
+        self.sh("systemctl stop being-mind being-cortex && systemctl start being-cortex being-mind", timeout=90)
+        self.wait_mind_ready()
 
     def boot(self, *, install_fixture=False):
         self.vm.start()
@@ -330,7 +303,7 @@ ExecStart=/usr/bin/python3 /mind/.compaction-cortex.py
         self.assertEqual(self.vm.converse("Tell me about the sea.", 25), "I hear you.")
         return self.sh("cat /run/compaction-prompt")
 
-    def test_archive_highlights_survive_reboot_correction_and_forgetting(self):
+    def test_highlights_resume_within_boot_and_archival_edits_survive_poweroff(self):
         omitted = "My telescope is called Heliograin."
         original = "My mandolin is called Zaframoon."
         corrected = "My mandolin is called Sablewillow"
@@ -363,15 +336,13 @@ ExecStart=/usr/bin/python3 /mind/.compaction-cortex.py
         self.vm.say("Good night")
         self.vm.wait_state("asleep", 30)
         self.wait_guest("journalctl -b -u being-mind --no-pager -o cat | grep -q 'compacted 8 messages with 3 archive sources'")
-        self.wait_guest("grep -Eq '\"highlights\": \\[[0-9]' /mind/context.json")
+        self.wait_guest(f'''{CONTEXT_ENV} && grep -Eq '"highlights": \\[[0-9]' "$BEING_CONTEXT_DIR/context.json"''')
         compacted = self.context()
         self.assertEqual(set(compacted["highlights"]), selected)
         self.assertEqual(len(compacted["messages"]), 8)
         self.assertNotIn(original, json.dumps(compacted))
         print("  first boot compacted four exchanges into three archive links", flush=True)
-        sleep(self.vm)
-
-        self.boot()
+        self.restart_conversation_organs()
         self.assertEqual(self.context()["highlights"], compacted["highlights"])
         prompt = self.prompt()
         self.assertIn(original, prompt)
@@ -379,27 +350,24 @@ ExecStart=/usr/bin/python3 /mind/.compaction-cortex.py
         self.assertIn(omitted, self.vm.converse("What did I say about the telescope?", 25))
         self.assertIn(original, self.vm.converse(recall, 25))
         self.assertEqual(self.vm.converse(f"That's wrong, {corrected}", 25), "Got it. I've changed that.")
-        print("  second boot restored the highlights and found the omitted archive entry", flush=True)
-        sleep(self.vm)
-
-        self.boot()
+        print("  restarted Mind and cortex restored the highlights and found the omitted archive entry", flush=True)
+        self.restart_conversation_organs()
         self.assertIn(source, self.context()["highlights"])
         prompt = self.prompt()
         self.assertIn(corrected, prompt)
         self.assertNotIn(original, prompt)
         self.assertIn(corrected, self.vm.converse(recall, 25))
         self.assertEqual(self.vm.converse("Forget that", 25), "Okay. That's forgotten.")
-        print("  third boot restored the corrected source before forgetting it", flush=True)
+        print("  another organ restart restored the corrected source before forgetting it", flush=True)
         sleep(self.vm)
 
         self.boot()
+        self.assertNotIn(original, self.prompt())
         self.assertNotIn(source, self.context()["highlights"])
-        prompt = self.prompt()
-        self.assertNotIn(original, prompt)
-        self.assertNotIn(corrected, prompt)
+        self.assertNotIn(corrected, self.sh("cat /run/compaction-prompt"))
         self.assertEqual(self.vm.converse(recall, 25), "I don't remember anything about that.")
         self.assertIn("Beryltrident", self.vm.converse("What do you remember about my bicycle?", 25))
-        print("  fourth boot reported the target forgotten and recalled the control", flush=True)
+        print("  cold boot recalled the retained archive control and started with fresh working state", flush=True)
         sleep(self.vm)
 
         self.assertTrue(self.vm.disk_contains(b"beryltrident"), "retained fact is the scan control")

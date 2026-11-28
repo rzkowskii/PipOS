@@ -131,8 +131,10 @@ class BenchGuest(unittest.TestCase):
             self.assertIn(flag, command)
         env = bench_guest.server_env({"mlock": True})
         self.assertEqual((env["LLAMA_ARG_BATCH"], env["LLAMA_ARG_UBATCH"], env["LLAMA_ARG_CTX_CHECKPOINTS"]),
-                         ("512", "512", "6"))
-        self.assertEqual(env["LLAMA_ARG_MLOCK"], "1")
+                         ("64", "7", "6"))
+        self.assertEqual(env["LLAMA_ARG_FLASH_ATTN"], "off")
+        self.assertEqual(env["LLAMA_ARG_LOAD_MODE"], "mmap+mlock")
+        self.assertNotIn("LLAMA_ARG_MLOCK", env)
 
     def test_a_failing_model_is_recorded_and_the_run_still_finishes(self):
         self.server.write_text("#!/bin/sh\nexit 3\n")

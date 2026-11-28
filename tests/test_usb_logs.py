@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import re
@@ -223,6 +224,20 @@ class Reports(FakeMachine):
     def test_report_survives_an_empty_root(self):
         self.assertIn("===== kernel =====", usb_logs.hardware_report(self.root))
 
+    def test_report_records_cortex_package_identity_and_missing_units(self):
+        import hashlib
+
+        source_id = "a" * 64
+        unit = "usr/lib/systemd/system/being-cortex.service"
+        content = "[Service]\nEnvironment=LLAMA_ARG_BATCH=64 LLAMA_ARG_UBATCH=7\n"
+        self.write("etc/being/source-id", source_id + "\n")
+        self.write(unit, content)
+        text = usb_logs.hardware_report(self.root)
+        self.assertIn('"source_id": "' + source_id + '"', text)
+        self.assertIn(hashlib.sha256(content.encode()).hexdigest(), text)
+        self.assertIn('"usr/lib/systemd/system/being-model-check.service": null', text)
+        self.assertNotIn("LLAMA_ARG_BATCH", text)
+
     def codec_machine(self, dump_coef="-1"):
         if not (self.root / "proc/cpuinfo").exists():
             self.macbook()
@@ -305,7 +320,7 @@ class Reports(FakeMachine):
             self.assertIn("Voice debug:    off", usb_logs.summary(self.root))
             self.write("etc/being/env", "# workbench\nBEING_TTS=piper\nexport BEING_VOICE_DEBUG='1'\n")
             text = usb_logs.summary(self.root)
-            self.assertIn("Voice debug:    ON: what the voice heard is written in journal.txt (from /etc/being/env)",
+            self.assertIn("Voice debug:    ON: transcript text is enabled in the local journal (from /etc/being/env)",
                           text)
             self.write("etc/being/env", "BEING_VOICE_DEBUG=1\nBEING_VOICE_DEBUG=0\n")
             self.assertIn("Voice debug:    off", usb_logs.summary(self.root), "the last assignment wins")
@@ -477,6 +492,24 @@ class Privacy(FakeMachine):
         self.assertIn("11:22:33:xx:xx:xx", text)
         self.assertNotIn(canary, " ".join(sum(journal.notable.values(), [])))
 
+    def test_export_hides_voice_debug_text_and_overlong_line_tails(self):
+        canary = "violet-canary-7731"
+        journal = usb_logs.Journal(self.root / "journal.txt", self.root / "cursor")
+        for message in (f'heard: "{canary}" (engine x, confidence 0.9)',
+                        f'final transcript text: {canary!r}', f'partial transcript text: {canary!r}',
+                        f'n-best transcripts: {[canary]!r}',
+                        f'route {{"route":"model","text":"{canary}"}}'):
+            line = f"being-voice[9]: {message}\n".encode()
+            journal.feed(line[:len(line) // 2], free=10**9)
+            journal.feed(line[len(line) // 2:], free=10**9)
+        journal.feed(b"being-voice[9]: n-best transcripts: " + b"x" * 4096, free=10**9)
+        journal.feed(f"{canary}\nclean line\n".encode(), free=10**9)
+        journal.stop()
+        text = (self.root / "journal.txt").read_text()
+        self.assertNotIn(canary, text)
+        self.assertIn("(engine x, confidence 0.9)", text)
+        self.assertIn("clean line", text)
+
     def test_owner_can_switch_try_diagnostics_off_and_on(self):
         folder = self.root / "stick/boot-0001-x"
         folder.mkdir(parents=True)
@@ -508,6 +541,26 @@ class Privacy(FakeMachine):
 
 
 class JournalCopy(FakeMachine):
+    def test_keeps_the_microphone_privacy_event_in_the_boot_summary(self):
+        journal = usb_logs.Journal(self.root / "journal.txt", self.root / "cursor")
+        journal.scan(b"[ 42.00] brainstem: microphone capture stayed open after policy closed; ")
+        journal.scan(b"stopping ears and voice until reboot\n")
+        text = usb_logs.summary(self.root, notable=journal.notable)
+        self.assertIn("Microphone privacy events", text)
+        self.assertIn("[ 42.00] brainstem: microphone capture stayed open after policy closed", text)
+
+    def test_keeps_the_bounded_boot_display_handoff(self):
+        journal = usb_logs.Journal(self.root / "journal.txt", self.root / "cursor")
+        journal.scan(
+            b"[ 0.421] kernel: simple-framebuffer simple-framebuffer.0: [drm] Registered 1 planes\n"
+            b"[ 2.130] kernel: fb0: switching to inteldrmfb from EFI VGA\n"
+            b"[ 4.812] being-face[99]: face: first frame presented 0.183 s after face start\n"
+        )
+        self.assertEqual(len(journal.notable["boot_display"]), 3)
+        report = usb_logs.summary(self.root, notable=journal.notable)
+        self.assertIn("--- Boot display handoff (first 3) ---", report)
+        journal.stream.close()
+
     def test_copies_scans_and_stops_at_the_cap(self):
         journal = usb_logs.Journal(self.root / "journal.txt", self.root / "cursor", cap=64)
         journal.feed(b"[ 1.0] kernel: b43-phy0 ERROR: Firmware file not found\n", free=10**9)
@@ -826,27 +879,30 @@ class AudioInit(unittest.TestCase):
         out, calls = self.run_script(BEING_AUDIO_STATE_DIR=str(writable))
         self.assertTrue(any(str(writable / "asound.state") in line for line in calls if "alsactl" in line))
 
-    def test_measures_the_mic_on_try_boots_only(self):
-        _, calls = self.run_script()
-        tests = [line for line in calls if "mic-test" in line]
-        self.assertEqual(len(tests), 1)
-        self.assertIn(f"mic-test --card 0 --out {self.root / 'run/mic-level.json'}", tests[0])
-        self.log.unlink()
+    def test_never_opens_the_microphone_at_boot_and_defers_the_measurement(self):
+        # being-audio-init sits in front of the ears and voice, so it never
+        # opens capture. An ordinary Try boot records a skip; a boot asking
+        # for being.mic_test=1 is measured later by being-audio-measure.
+        out, calls = self.run_script()
+        self.assertFalse([line for line in calls if "mic-test" in line])
+        self.assertIn("use a microphone diagnostic boot entry", out)
+        self.assertEqual(json.loads((self.root / "run/mic-level.json").read_text())["status"], "skipped")
+        out, calls = self.run_script(cmdline="root=PARTUUID=x ro quiet being.try=1 being.mic_test=1\n")
+        self.assertFalse([line for line in calls if "mic-test" in line])
+        self.assertIn("microphone measurement deferred until after the voice starts", out)
         _, calls = self.run_script(cmdline="root=PARTUUID=x ro quiet\n")
         self.assertFalse([line for line in calls if "mic-test" in line])
 
-    def test_keeps_the_card_controls_and_skips_the_mic_test_on_the_loopback_cable(self):
+    def test_keeps_the_card_controls_on_the_loopback_cable_and_the_measurement_skips_it(self):
         proc = self.root / "proc-asound"
         (proc / "card0").mkdir(parents=True)
         (proc / "card0/id").write_text("Loopback\n")
         out, calls = self.run_script(BEING_AUDIO_PROC=str(proc))
-        self.assertIn("Loopback cable; no microphone to measure", out)
         self.assertFalse([line for line in calls if "mic-test" in line])
         self.assertTrue((self.root / "run/contents").exists())
-        (proc / "card0/id").write_text("PCH\n")
-        self.log.unlink(missing_ok=True)
-        _, calls = self.run_script(BEING_AUDIO_PROC=str(proc))
-        self.assertEqual(len([line for line in calls if "mic-test" in line]), 1)
+        # The deferred measurement is where the loopback cable is recognised.
+        measure = (REPO / "os/package/being/being-audio-measure").read_text()
+        self.assertIn('!= Loopback ] || { skip "card $CARD is the lab loopback cable"', measure)
 
     def test_no_card_or_keep_leaves_everything_and_succeeds(self):
         out, calls = self.run_script(FAKE_NO_CARD="1")
@@ -858,7 +914,7 @@ class AudioInit(unittest.TestCase):
 
     def test_unit_runs_before_the_voice_and_is_installed(self):
         unit = (REPO / "os/package/being/being-audio-init.service").read_text()
-        self.assertIn("Before=being-voice.service", unit)
+        self.assertIn("Before=being-ears.service being-voice.service", unit)
         self.assertIn("After=alsa-restore.service alsa-state.service sound.target", unit)
         self.assertIn("Type=oneshot", unit)
         self.assertIn("ExecStart=/usr/libexec/being/being-audio-init", unit)
@@ -917,6 +973,15 @@ class MicLevel(FakeMachine):
         self.assertIn("at 7 s after power-on", line)
         self.assertIn("ONE SIDE much weaker", line)
 
+    def test_boot_reports_keep_the_latch_state_without_marker_contents(self):
+        self.assertRegex(usb_logs.summary(self.root), r"Mic latch:\s+off")
+        self.write(str(usb_logs.MIC_POLICY_LATCH), "fixture marker body")
+        summary = usb_logs.summary(self.root)
+        hardware = usb_logs.hardware_report(self.root)
+        self.assertRegex(summary, r"Mic latch:\s+active until reboot")
+        self.assertIn("microphone safety", hardware)
+        self.assertNotIn("fixture marker body", summary + hardware)
+
     def test_mic_test_stays_away_while_pip_listens_or_the_device_is_busy(self):
         never = lambda *_: self.fail("recorded while the voice was listening")
         result = usb_logs.mic_test(0, recorder=never, listening=lambda: True, root=self.root)
@@ -968,8 +1033,9 @@ class MixerSummary(Reports):
         self.write("run/being-audio/scontents", MBP92_SCONTENTS)
         lines = usb_logs.summary(self.root, boot="#2").splitlines()
         self.assertTrue(lines[3].startswith("Mic level:      peak -18.5 dBFS, rms -47.2 dBFS"), lines[3])
-        self.assertTrue(lines[4].startswith("Mixer:          Master 88%"), lines[4])
-        self.assertTrue(lines[5].startswith("Machine:"))
+        self.assertEqual(lines[4], "Mic latch:      off")
+        self.assertTrue(lines[5].startswith("Mixer:          Master 88%"), lines[5])
+        self.assertTrue(lines[6].startswith("Machine:"))
         given = usb_logs.summary(self.root, mixer="").splitlines()
         self.assertIn("Mixer:          not read", "\n".join(given))
 

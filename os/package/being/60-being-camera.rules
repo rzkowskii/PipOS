@@ -1,0 +1,2 @@
+# Boot or USB re-enumeration starts with the MacBook's mapped camera closed.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="05ac", ATTR{idProduct}=="8509", PROGRAM=="/bin/cat /sys/class/dmi/id/product_name", RESULT=="MacBookPro9,2", ATTR{authorized}="0"

@@ -7,7 +7,7 @@
 > [docs/DECISIONS.md](docs/DECISIONS.md), status is in [STATUS.md](STATUS.md)
 > and the work ahead is in [docs/IMPROVEMENT-PLAN.md](docs/IMPROVEMENT-PLAN.md).
 > Two things below are out of date: the dream model default is now
-> **Qwen3-1.7B Q4_0** (a 4B only as an optional arm; §7 and §8 say 4B), and
+> **Qwen3-1.7B**, shipped as Q4_K_M (a 4B only as an optional arm; §7 and §8 say 4B), and
 > the CPU is recorded as an **i5-3210M**, to be confirmed on the first boot.
 
 *Design and phased plan, written 2026-11-20 and budgeted for the 13-inch MacBookPro9,2. Building started the same day. The OS image now exists and runs in a virtual laptop on a development Mac; [README.md](README.md) says where it stands and [docs/LAB.md](docs/LAB.md) how. Nothing has been installed or measured on the real laptop yet. "BeingOS" is a working title.*

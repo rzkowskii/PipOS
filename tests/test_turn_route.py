@@ -31,7 +31,7 @@ class RouteLines(MindCase):
         self.bus.push("hear.final", text=text, speaker="Richard")
         await self.bus.wait("mind.reply_done", replies + 1, timeout=10.0)
         self.bus.push("say.done", final=True)
-        await asyncio.sleep(0)
+        await asyncio.wait_for(asyncio.shield(self.mind._turn), 3)
 
     def routes(self):
         return [json.loads(line.removeprefix("route ")) for line in self.lines if line.startswith("route ")]
@@ -49,6 +49,12 @@ class RouteLines(MindCase):
         logged = "\n".join(self.lines)
         for words in ("planted", "beans", "17 times"):
             self.assertNotIn(words, logged)
+        self.assertEqual([event["via"] for event in self.bus.of("mind.route")],
+                         ["code", "code", "code", "code", "model", "code"])
+        self.assertEqual(self.mind.route_snapshot(), {
+            "status": "ok", "enabled": True, "counts": {"code": 5, "model": 1, "waiting": 0, "unavailable": 0},
+            "rows": ["workshop.close", "model", "greeting", "everyday.calc", "command.time", "workshop.open"],
+        })
 
     async def test_voice_debug_adds_the_words(self):
         self.mind.__dict__["_voice_debug"] = True
@@ -58,16 +64,25 @@ class RouteLines(MindCase):
 
     async def test_guest_mode_says_nothing_about_the_turn_even_in_voice_debug(self):
         self.mind.__dict__["_voice_debug"] = True
+        await self.say("open the monitor")
+        self.assertEqual(self.mind.route_snapshot()["rows"], ["workshop.open"])
+        before = self.bus.of("mind.route")
         await self.say("start guest mode")
+        self.assertEqual(self.mind.route_snapshot(), {"status": "ok", "enabled": False, "counts": {}, "rows": []})
         self.assertEqual(self.routes()[-1]["route"], "command.guest_start")
         await self.say("I planted beans today")
         await self.say("what time is it")
         self.assertEqual(self.routes()[-2:], [{"route": "private"}, {"route": "private"}])
         self.assertNotIn("beans", "\n".join(self.lines))
+        self.assertEqual(self.bus.of("mind.route"), before)
+        await self.say("end guest mode")
+        self.assertEqual(self.mind.route_snapshot()["rows"], [])
+        self.assertEqual(sum(self.mind.route_snapshot()["counts"].values()), 0)
 
     async def test_model_waiting_only_when_the_cache_clear_failed(self):
         """Out of private mode the slot must be cleared first: a clear that
         works leaves an ordinary model turn, and only a failed one waits."""
+        await self.warmed()
         answers = []
 
         async def erase():

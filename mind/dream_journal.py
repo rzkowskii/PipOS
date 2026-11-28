@@ -62,9 +62,6 @@ def dream_report(db, owner, *, now=None, zone=None, enabled=True, window_hours=1
     its own words is said: only the owner's own words that code checked.
     """
     now = time.time() if now is None else now
-    if not enabled:
-        return ("I didn't dream. Dreaming is switched off; you can turn it on in Setup, "
-                "under Senses and memory."), ()
     entries = [entry for entry in journal(db, owner, limit=20) if now - entry.published_at <= window_hours * 3600]
     checked = checked_quotes(db, owner, now=now, window_hours=window_hours)
     if not entries and checked:
@@ -78,6 +75,9 @@ def dream_report(db, owner, *, now=None, zone=None, enabled=True, window_hours=1
             # It did dream; it just kept nothing. Never claim it did not.
             return ("I dreamt last night, but nothing from our conversations stood out enough to keep, "
                     "so I have nothing to tell you."), ()
+        if not enabled:
+            return ("I didn't dream. Dreaming is switched off; you can turn it on in Setup, "
+                    "under Senses and memory."), ()
         return ("I didn't dream last night, so I have nothing to tell you. "
                 "I only dream with my lid closed while I'm plugged in."), ()
     first = entries[0]

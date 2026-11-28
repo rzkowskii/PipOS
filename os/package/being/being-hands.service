@@ -37,6 +37,7 @@ MemoryMax=128M
 # only the cortex on loopback for code, and writes only /workshop and its
 # runtime directories.
 NoNewPrivileges=yes
+LimitCORE=0
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/workshop

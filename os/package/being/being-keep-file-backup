@@ -1,0 +1,3 @@
+#!/bin/sh
+export PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1
+exec /usr/bin/python3 -m mind.keep_file_backup "$@"

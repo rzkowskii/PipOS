@@ -3,26 +3,49 @@ Description=Being: cortex (language model)
 ConditionPathExists=!/mind/.being-restore-in-progress
 StartLimitIntervalSec=0
 RequiresMountsFor=/models /mind
+Requires=being-context-storage.service
+After=being-context-storage.service
+# On a Try boot the model pack is trusted before its full hash, which this
+# unit then runs at idle priority (mind/model_pack.py); elsewhere it is skipped.
+Wants=being-model-check.service
 
 [Service]
 # Outside the sandbox (+): the sandbox below makes /mind read-only.
 ExecStartPre=+/bin/mkdir -p /mind/cortex
+EnvironmentFile=/run/being-context/paths.env
 # Start with one inference worker per physical core. Prompt processing and
 # generation can be measured independently with a runtime service drop-in.
 Environment=BEING_CORTEX_THREADS=2 BEING_CORTEX_PROMPT_THREADS=2
 # Qwen's recurrent context checkpoints are copied into each saved slot file.
 Environment=LLAMA_ARG_CTX_CHECKPOINTS=6
-# A 512-token logical batch: a cancelled request releases the slot at the
-# next batch boundary, so smaller batches stop sooner (7.3 s to 1.75 s in the
-# lab). The physical batch matches it.
-Environment=LLAMA_ARG_BATCH=512 LLAMA_ARG_UBATCH=512
+# Batches and attention for this 2-core AVX laptop, measured on the
+# MacBookPro9,2 on 25 Nov 2026 with a second server beside the cortex:
+# - A 64-token logical batch. A cancelled request releases the slot only at
+#   the next batch boundary: a cancelled cold read held it 1.8-1.9 s at 64
+#   against 13.9-17.7 s at 512 (the 1.75 s once noted here was a lab figure).
+# - A 7-token physical batch. Prompts of 12 tokens and more paid a fixed cost
+#   of about 0.65 s (11 tokens 433 ms, 12 tokens 1106 ms); at 7 the median
+#   time to the first token of a turn fell from 1.41 s to 0.96 s with decode
+#   unchanged. Cold reads are 11% slower (26.9 against 30.3 tokens/s), which
+#   shows after a compaction.
+# - Flash attention off: 14.0 against 13.0 tokens/s decoding at a depth of
+#   2000 tokens, in two runs. Measure it again if the KV cache is quantized.
+# Together: 14.9 tokens/s short, 14.0 at depth, a 0.94 s median first token
+# and a 1.9 s cancel.
+Environment=LLAMA_ARG_BATCH=64 LLAMA_ARG_UBATCH=7 LLAMA_ARG_FLASH_ATTN=off
 # Past replies are rendered exactly as they were generated, empty thinking
 # block included, so the next turn reads only the new words.
 Environment=LLAMA_ARG_CHAT_TEMPLATE_FILE=/usr/share/being/chat-template.jinja
-# Lock the weights in memory. Off by default; a drop-in sets it to 1 when the
-# bench shows page-outs. LimitMEMLOCK lets the switch work when it is on.
-Environment=LLAMA_ARG_MLOCK=0
+# How the weights are loaded (--load-mode; the packaged llama-server has no
+# --mlock and no LLAMA_ARG_MLOCK). Mapped from the file, not locked; a drop-in
+# sets LLAMA_ARG_LOAD_MODE=mmap+mlock when the bench shows page-outs, and
+# LimitMEMLOCK lets that lock work.
+Environment=LLAMA_ARG_LOAD_MODE=mmap
 LimitMEMLOCK=infinity
+# Same-origin browser requests only (there is no web UI). The organs' own
+# requests carry no Origin header and still pass; any other origin was
+# allowed before ("CORS allows all origins" in the server's log).
+Environment=LLAMA_ARG_CORS_ORIGINS=localhost
 # Two slots of 4096 tokens each: slot 0 is the conversation, slot 1 the
 # workshop's code writing (mind/hands.py), so writing a script never evicts
 # the conversation's cache. The mind pins every request to slot 0.
@@ -35,7 +58,7 @@ ExecStart=/usr/bin/llama-server \
     --threads ${BEING_CORTEX_THREADS} --threads-batch ${BEING_CORTEX_PROMPT_THREADS} \
     --cache-ram 0 --no-cache-idle-slots \
     --reasoning-budget 0 \
-    --slot-save-path /mind/cortex \
+    --slot-save-path ${BEING_SLOT_DIR} \
     --no-webui
 Restart=always
 RestartSec=1
@@ -43,15 +66,24 @@ RestartSec=1
 # CPUWeight=1000, the dream model and the workshop at 20.
 Nice=5
 CPUWeight=100
+# Short of memory, the kernel ends the model server before the organs (the
+# brainstem, the voice, the face and the mind); Restart=always loads it again.
+OOMScoreAdjust=300
 # The model server reads /models, writes only its saved slots, and is
 # reachable only on loopback: it has no authentication, so nothing but the
 # organs on this machine may talk to it, and it may talk to nothing else.
 # IPAddressDeny needs cgroup BPF and RestrictAddressFamilies needs libseccomp
 # (both in the next image; linux.config, the defconfigs).
 NoNewPrivileges=yes
+LimitCORE=0
 CapabilityBoundingSet=CAP_IPC_LOCK
 ProtectSystem=strict
-ReadWritePaths=-/mind/cortex
+# Keep the archive and working context text out of the model namespace.
+# The cache and the pack verifier use the one bound Cortex subtree.
+TemporaryFileSystem=/mind:ro,mode=0755
+BindPaths=/mind/cortex
+ReadWritePaths=-/mind/cortex -/run/being-context/slots
+InaccessiblePaths=-/mind/cortex/being.slot -/mind/cortex/identity.slot -/mind/cortex/identity-slot.json
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

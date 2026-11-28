@@ -4,7 +4,7 @@ The stick (out/images/beingos-laptop-cable-try.img, from `BEING_LAPTOP_CABLE=1
 lab/build.sh laptop-try`, docs/LAB.md) boots over virtual USB beside a blank
 internal disk, as on the MacBook. QEMU's user network stands in for the
 Ethernet cable: it is given the link-local network itself
-(net=169.254.0.0/16, host=169.254.162.20, the Mac's self-assigned address),
+(net=169.254.0.0/16, host=169.254.10.10, a self-assigned Mac-side address),
 so a forwarded connection reaches Pip from a link-local address, as the Mac
 does. libslirp accepts that network and a forward to 169.254.77.1:22 (checked
 with QEMU 11.1 and no guest); Pip's address is static, and slirp learns its
@@ -41,10 +41,11 @@ import time
 import unittest
 from unittest.mock import patch
 
+from lab import source_id
 from lab.tests.test_laptop_smoke import (
     LAB_DISPLAY, TARGET_BYTES, TARGET_MODEL, boot_folders, gpt_partitions, log_volume, try_menu_lines,
 )
-from lab.vm import ROOT, VM, machine_args
+from lab.vm import LAB_OUTPUT, ROOT, VM, eyes, machine_args, png
 
 IMAGE = Path(os.environ.get(
     "BEING_LAPTOP_CABLE_TRY_IMAGE", ROOT / "out/images/beingos-laptop-cable-try.img")).resolve()
@@ -53,7 +54,7 @@ HOST_KEY = Path(os.environ.get(
     "BEING_CABLE_HOST_KEY", Path.home() / ".config/pipos-cable/ssh_host_ed25519_key.pub")).expanduser()
 PATIENCE = float(os.environ.get("BEING_LAPTOP_PATIENCE", "1") or 1)
 
-MAC = "169.254.162.20"
+MAC = "169.254.10.10"
 PIP4, PIP6 = "169.254.77.1", "fe80::77:1"
 # The cable: the link-local network, nothing beyond it (restrict=on), no
 # IPv6 router advertisements from slirp.
@@ -371,7 +372,28 @@ ssh -F /dev/null -i "$d/id" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHost
     # -- the boot itself -------------------------------------------------
 
     def test_the_organs_and_the_cable_units_are_active(self):
-        self.wait_active((*ORGANS, *UNITS))
+        self.wait_active((*ORGANS, *UNITS, "being-health-watch.service"))
+
+    def test_packaged_speech_runtime_on_ivy_bridge(self):
+        self.sh("test -s /usr/lib/libpiper_phonemize_core.so")
+        output = self.sh("cd / && PYTHONPATH=/usr/lib/being python3 -m mind.voice_engines smoke --json", timeout=960)
+        report = json.loads(output)
+        print("Packaged speech smoke: " + json.dumps(report, sort_keys=True), flush=True)
+        self.assertTrue(report["cpu"]["avx"], report)
+        self.assertFalse(report["cpu"]["avx2"], report)
+        self.assertFalse(report["cpu"]["fma"], report)
+        self.assertFalse(report["sigill"], report)
+        self.assertTrue(report["passed"], report)
+        self.assertEqual([stage["stage"] for stage in report["stages"]], ["vad", "moonshine", "piper"])
+        self.assertGreater(report["stages"][-1]["audio_seconds"], 0)
+
+    def test_image_embeds_its_source_and_speech_verdict(self):
+        expected = source_id.image_id(IMAGE)
+        self.assertIsNotNone(expected)
+        self.assertEqual(self.sh("cat /etc/being/source-id").strip(), expected)
+        self.sh("cd / && PYTHONPATH=/usr/lib/being python3 -c " + shlex.quote(
+            "from mind.voice_engines import sherpa_smoke_passed; "
+            "passed, reason = sherpa_smoke_passed(); assert passed, reason"))
 
     def test_the_code_is_a_writable_workbench_copy(self):
         mounts = self.sh("cat /proc/self/mountinfo").splitlines()
@@ -446,27 +468,362 @@ ssh -F /dev/null -i "$d/id" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHost
             time.sleep(2)
         self.fail("the face never took the screen from the Try menu")
 
+    def test_persisted_look_reaches_a_restarted_face(self):
+        self.wait_active(ORGANS)
+        self.leave_the_try_menu()
+        self.sh("systemctl stop being-face", timeout=90)
+        script = """\
+import json
+import socket
+import subprocess
+from pathlib import Path
+
+from mind.look import Store
+
+store = Store(Path("/mind"))
+start = store.read()
+assert (start.glow, start.brows, start.mouth) == ("cyan", False, False), start
+store.set("glow", "blue")
+store.set("mouth", True)
+requested = store.set("size", "small")
+with socket.socket(socket.AF_UNIX) as bus:
+    bus.settimeout(90)
+    bus.connect("/run/being/bus.sock")
+    bus.sendall(b'{"t":"hello","name":"appearance-lab","sub":["screen.prefs_state"],"ack":true}\\n')
+    stream = bus.makefile()
+    assert json.loads(stream.readline())["t"] == "hello.ok"
+    subprocess.run(("systemctl", "start", "being-face"), check=True, timeout=60)
+    event = json.loads(stream.readline())
+    assert event["t"] == "screen.prefs_state", event
+    assert event["revision"] == requested.revision, event
+    print(json.dumps(event))
+"""
+        output = self.sh(
+            "cd / && PYTHONPATH=/usr/lib/being python3 -c " + shlex.quote(script),
+            timeout=240,
+        )
+        reported = json.loads(output)
+        self.assertEqual((reported["glow"], reported["brows"], reported["mouth"], reported["size"]),
+                         ("blue", False, True, "small"))
+
     def test_pip_diag_hears_the_terminal_phrase(self):
         # The whole path on Pip: the phrase rendered by Flite, fed to the
         # running voice through the diagnostic microphone (BEING_DIAG_MIC),
         # wake and dictation by PocketSphinx with the grammar's second pass,
         # the voice's `heard:` line, the mind's `route` line, and the
         # terminal on the panel.
-        self.wait_active(ORGANS)
+        self.wait_active((*ORGANS, "being-hands.service"))
         self.leave_the_try_menu()
+        self.close_terminal()
         patience = min(20, max(3, round(3 * PATIENCE)))
-        result = self.machine.ssh(f"pip-diag hear --phrase {shlex.quote(HEAR_PHRASE)} --voice {HEAR_VOICE} "
-                                  f"--patience {patience} --json", timeout=900)
+        # The unscaled kal16 fixture sits on a wake threshold. Round L
+        # and the Mac replay both heard the phrase at a -12 dBFS peak.
+        normalize = (
+            "from pathlib import Path; import sys; "
+            "from mind.diag_audio import at_level, write_wav; "
+            "from mind.diag_speech import load_16k; "
+            "write_wav(Path(sys.argv[2]), [at_level(load_16k(Path(sys.argv[1])), -12)], 16000)"
+        )
+        command = (
+            "set -eu; trial=$(mktemp -d /run/pip-hear-flite.XXXXXX); "
+            'watcher=; cleanup() { '
+            'if [ -n "$watcher" ]; then kill "$watcher" 2>/dev/null || true; '
+            'wait "$watcher" 2>/dev/null || true; fi; rm -rf "$trial"; }; '
+            "trap cleanup EXIT; "
+            f'flite -voice {HEAR_VOICE} -t {shlex.quote(HEAR_PHRASE)} -o "$trial/raw.wav"; '
+            f'cd /; PYTHONPATH=/usr/lib/being python3 -c {shlex.quote(normalize)} "$trial/raw.wav" "$trial/test.wav"; '
+            # Watch the frame while it is visible. The diagnostic may restore
+            # Voice and tear the panel down before the SSH command returns.
+            '(n=0; while [ "$n" -lt 2400 ]; do '
+            'owner=$(ls -nd /run/being-panel/terminal.frame 2>/dev/null | awk \'NR == 1 {print $3}\'); '
+            'if [ -n "$owner" ]; then '
+            'printf "%s\\n" "$owner" > "$trial/owner"; exit; fi; '
+            'n=$((n + 1)); sleep .25; done) & watcher=$!; '
+            "status=0; "
+            'pip-diag hear "$trial/test.wav" --asr pocketsphinx --expect-route workshop.open '
+            f"--patience {patience} --json || status=$?; "
+            'owner=$(cat "$trial/owner" 2>/dev/null || printf null); '
+            'printf \'{"id":"lab.terminal.owner","value":%s}\\n\' "$owner"; exit "$status"'
+        )
+        result = self.machine.ssh(command, timeout=900)
         self.assertIn(result.returncode, (0, 1), f"pip-diag could not run:\n{result.stdout}\n{result.stderr}")
         checks = {check["id"]: check for check in (json.loads(line) for line in result.stdout.splitlines()
                                                     if line.strip().startswith("{")) if "id" in check}
-        for name in ("hear.connect", "hear.heard.phrase", "hear.route.phrase", "hear.terminal.phrase"):
+        for name in ("hear.connect", "hear.heard.file", "hear.route.file", "hear.terminal.file"):
             self.assertEqual(checks.get(name, {}).get("status"), "pass", f"{name}:\n{result.stdout[-3000:]}")
-        self.assertEqual(checks["hear.heard.phrase"]["value"]["text"], "open a terminal")
-        self.assertEqual(checks["hear.route.phrase"]["value"]["route"], "workshop.open")
+        self.assertEqual(checks["hear.heard.file"]["value"]["text"], "open a terminal")
+        self.assertEqual(checks["hear.route.file"]["value"]["route"], "workshop.open")
         self.assertEqual(result.returncode, 0, result.stdout[-3000:])
-        self.assertEqual(self.sh("ls -n /run/being-panel/terminal.frame | awk '{print $3}'").strip(),
-                         self.sh("id -u being-panel").strip(), "the renderer does not own its frame")
+        self.assertEqual(checks["lab.terminal.owner"]["value"], int(self.sh("id -u being-panel")),
+                         "the renderer does not own its frame while visible")
+
+    def close_terminal(self):
+        # The cable cases share a boot. Wait for hands to acknowledge the
+        # close before using a new voice command to test opening the panel.
+        script = """\
+import json, socket
+with socket.socket(socket.AF_UNIX) as bus:
+    bus.settimeout(30)
+    bus.connect('/run/being/bus.sock')
+    bus.sendall(b'{"t":"hello","name":"cable-terminal-reset","sub":["app.state","app.refused"]}\\n'
+                b'{"t":"app.close","app":"terminal","req":"cable-terminal-reset"}\\n')
+    for line in bus.makefile():
+        event = json.loads(line)
+        if event.get('req') == 'cable-terminal-reset':
+            assert event.get('view') == 'closed' or event.get('reason') == 'no_session', event
+            break
+    else:
+        raise RuntimeError('hands did not acknowledge closing the terminal')
+"""
+        self.sh(f"python3 -c {shlex.quote(script)} && test ! -e /run/being-panel/terminal.frame", timeout=60)
+
+    def test_pip_diag_hears_the_terminal_phrase_with_moonshine(self):
+        self.wait_active((*ORGANS, "being-hands.service"))
+        self.leave_the_try_menu()
+        self.close_terminal()
+        self.addCleanup(self.close_terminal)
+
+        # The native Round L corpus heard this Alba render at -30 dBFS over
+        # a -64 dBFS floor in both passes. The QEMU speech smoke measured
+        # roughly eleven times the native Moonshine RTF, so force the engine
+        # for this run and allow twelve times the native diagnostic waits.
+        patience = min(20, max(3, round(12 * PATIENCE)))
+        command = (f"pip-diag hear --phrase {shlex.quote(HEAR_PHRASE)} --voice piper --level realistic "
+                   f"--asr moonshine --expect-route workshop.open --patience {patience} --json")
+        try:
+            result = self.machine.ssh(command, timeout=900)
+        except subprocess.TimeoutExpired as error:
+            self.fail(f"{command} exceeded {error.timeout}s:\n{(error.stdout or '')[-5000:]}\n"
+                      f"{(error.stderr or '')[-3000:]}")
+        evidence = f"{command} exited {result.returncode}:\n{result.stdout[-5000:]}\n{result.stderr[-3000:]}"
+        self.assertEqual(result.returncode, 0, evidence)
+        checks = {check["id"]: check for check in (json.loads(line) for line in result.stdout.splitlines()
+                                                    if line.strip().startswith("{")) if "id" in check}
+        for name in ("hear.connect", "hear.asr", "hear.heard.phrase-realistic", "hear.route.phrase-realistic",
+                     "hear.terminal.phrase-realistic"):
+            self.assertEqual(checks.get(name, {}).get("status"), "pass", f"{name}:\n{evidence}")
+        heard = checks["hear.heard.phrase-realistic"]["value"]
+        self.assertEqual((heard["engine"], heard["wer"]), ("moonshine", 0.0), evidence)
+        self.assertEqual(checks["hear.route.phrase-realistic"]["value"]["route"], "workshop.open", evidence)
+        self.assertIs(checks["hear.terminal.phrase-realistic"]["value"], True, evidence)
+        self.sh("cd / && PYTHONPATH=/usr/lib/being python3 -c " + shlex.quote(
+            "from mind.diag_system import Host, panel_state; "
+            "frame = panel_state(Host()); assert frame and frame['visible'], frame"))
+
+    def test_quick_menu_opens_options_and_saves_keyboard_edits(self):
+        self.wait_active((*ORGANS, "being-hands.service"))
+        self.leave_the_try_menu()
+        self.close_terminal()
+
+        def guest_python(source):
+            return self.sh("cd / && PYTHONPATH=/usr/lib/being python3 -c " + shlex.quote(source), timeout=120)
+
+        read_look = "import json; from mind.look import Store; print(json.dumps(Store('/mind').read().payload()))"
+        before = json.loads(guest_python(read_look))
+        fixture = {"glow": "cyan", "menu_position": "center", "clock_widget_position": "bottom-left"}
+
+        def apply_fields(fields):
+            source = f"""\
+import json, socket
+from mind.look import Store
+
+store = Store('/mind')
+with socket.socket(socket.AF_UNIX) as bus:
+    bus.settimeout(60)
+    bus.connect('/run/being/bus.sock')
+    bus.sendall(b'{{"t":"hello","name":"options-lab","sub":["screen.prefs_state"],"ack":true}}\\n')
+    receipts = bus.makefile()
+    assert json.loads(receipts.readline())["t"] == "hello.ok"
+    previous = requested = store.read()
+    for field, value in {fields!r}.items():
+        requested = store.set(field, value)
+    if requested.revision != previous.revision:
+        for line in receipts:
+            event = json.loads(line)
+            if event.get("revision") == requested.revision:
+                assert all(event.get(field) == value for field, value in {fields!r}.items()), event
+                break
+        else:
+            raise RuntimeError("face did not report its applied preferences")
+"""
+            guest_python(source)
+
+        self.addCleanup(apply_fields, {key: before[key] for key in fixture})
+        apply_fields(fixture)
+        face_pid = self.main_pid("being-face.service")
+
+        def press(key):
+            self.machine.vm.qmp("send-key", keys=[{"type": "qcode", "data": key}], **{"hold-time": 120})
+            time.sleep(patient(0.3))
+
+        def wait_for_screen(label, *, docked, options=False):
+            deadline = time.monotonic() + patient(75)
+            while True:
+                frame = self.machine.vm.screen()
+                width, height, rgb = frame
+                strip = rgb[:width * (height // 4) * 3]
+                left, right, _ = eyes(width, height // 4, strip)
+                in_strip = all(box and box[2] - box[0] >= 35 for box in (left, right))
+                # Menu is at the top of the dock. Only the Options glass card
+                # should cover this much of the middle of the display.
+                samples = [rgb[(y * width + x) * 3:(y * width + x) * 3 + 3]
+                           for y in range(height // 2, height * 3 // 4, 23)
+                           for x in range(width * 2 // 5, width * 3 // 5, 23)]
+                glass = sum(4 < red < green < blue < 90 for red, green, blue in samples)
+                card_visible = glass > len(samples) // 2
+                if in_strip == docked and card_visible == options:
+                    if docked or all(eyes(width, height, rgb)[:2]):
+                        return
+                if time.monotonic() >= deadline:
+                    LAB_OUTPUT.mkdir(parents=True, exist_ok=True)
+                    (LAB_OUTPUT / f"quick-menu-options-{label}.png").write_bytes(png(*frame))
+                    self.fail(f"Options acceptance did not reach {label}")
+                time.sleep(0.5)
+
+        def wait_for_saved(field, value):
+            deadline = time.monotonic() + patient(30)
+            while True:
+                active = json.loads(guest_python(read_look))
+                if active[field] == value:
+                    return
+                if time.monotonic() >= deadline:
+                    self.fail(f"Options did not save {field} as {value!r}: {active[field]!r}")
+                time.sleep(0.5)
+
+        wait_for_screen("desktop", docked=False)
+        press("f6")
+        wait_for_screen("quick-menu", docked=True)
+        press("end")
+        press("ret")
+        wait_for_screen("open", docked=True, options=True)
+        self.assertEqual(self.main_pid("being-face.service"), face_pid)
+        self.sh("test \"$(systemctl is-active being-local-screen.service)\" = inactive")
+
+        press("right")
+        wait_for_saved("glow", "blue")
+        press("tab")
+        for _ in range(3):
+            press("down")
+        press("right")
+        wait_for_saved("clock_widget_position", "bottom-right")
+        press("esc")
+        wait_for_screen("closed", docked=False)
+        self.assertEqual(self.main_pid("being-face.service"), face_pid)
+
+    def test_quick_menu_opens_the_lists_panel_with_the_keyboard(self):
+        self.wait_active((*ORGANS, "being-hands.service"))
+        self.leave_the_try_menu()
+        seed = (
+            "from mind.lists import Lists; "
+            "assert Lists('/mind').add('acceptance', ['keyboard acceptance item']) == "
+            "(['keyboard acceptance item'], [])"
+        )
+        self.sh("cd / && PYTHONPATH=/usr/lib/being python3 -c " + shlex.quote(seed))
+
+        def press(key):
+            self.machine.vm.qmp("send-key", keys=[{"type": "qcode", "data": key}], **{"hold-time": 120})
+
+        def wait_for_eyes(label, *, docked):
+            end = time.monotonic() + patient(90)
+            while time.monotonic() < end:
+                frame = self.machine.vm.screen()
+                width, height, rgb = frame
+                top = height // 4
+                left, right, fraction = eyes(width, height, rgb)
+                strip_left, strip_right, _ = eyes(width, top, rgb[:width * top * 3])
+                in_strip = all(box and box[2] - box[0] >= 35 for box in (strip_left, strip_right))
+                if left and right and (in_strip if docked else fraction > 0.95 and not in_strip):
+                    return
+                time.sleep(0.5)
+            LAB_OUTPUT.mkdir(parents=True, exist_ok=True)
+            (LAB_OUTPUT / f"quick-menu-{label}.png").write_bytes(png(*frame))
+            self.fail(f"The {label} eyes never appeared before the Quick Menu key sequence")
+
+        # The service becomes active several seconds before SDL displays a
+        # frame or accepts keys. The menu state is visible in the real eye dock.
+        wait_for_eyes("desktop", docked=False)
+        source = (
+            "import asyncio; from mind.app_organizer import fetch; "
+            "page = asyncio.run(fetch('/run/being/organizer.sock', 'lists', 0, 0)); "
+            "assert page['status'] == 'ok' and 'keyboard acceptance item' in page['rows'], page"
+        )
+        self.sh("cd / && PYTHONPATH=/usr/lib/being python3 -c " + shlex.quote(source))
+        press("f6")
+        wait_for_eyes("dock", docked=True)
+        for key in ("down", "down", "down", "down", "ret"):
+            press(key)
+            time.sleep(0.5)
+        frame = (
+            "from mind.diag_system import Host, panel_state; "
+            "frame = panel_state(Host(), 'lists'); "
+            "assert frame and frame['visible'] and frame['title'] == 'Lists', frame"
+        )
+        command = "cd / && PYTHONPATH=/usr/lib/being python3 -c " + shlex.quote(frame)
+        deadline = time.monotonic() + patient(45)
+        while time.monotonic() < deadline:
+            if self.machine.ssh(command, timeout=20).returncode == 0:
+                break
+            time.sleep(1)
+        else:
+            LAB_OUTPUT.mkdir(parents=True, exist_ok=True)
+            (LAB_OUTPUT / "quick-menu-lists-failure.png").write_bytes(png(*self.machine.vm.screen()))
+            try:
+                journal = self.machine.ssh(
+                    "journalctl -b -u being-mind.service -u being-hands.service "
+                    "-u being-panel-lists.service -n 60 -o cat --no-pager",
+                    timeout=15,
+                )
+                evidence = journal.stdout + journal.stderr
+            except subprocess.TimeoutExpired:
+                evidence = "Timed out collecting the Mind, Hands and Lists renderer journal."
+            self.fail(f"keyboard Quick Menu did not display a Lists frame:\n{evidence}")
+
+        # Hash pixels only, excluding the header heartbeat. A content round
+        # trip must change the frame and then reproduce the original pixels.
+        pixels = (
+            "from pathlib import Path; import hashlib, struct; "
+            "path = Path('/run/being-panel/lists.frame'); "
+            "frame = path.read_bytes(); "
+            "seq, = struct.unpack_from('<Q', frame, 16); "
+            "flags, = struct.unpack_from('<I', frame, 32); "
+            "assert frame[:4] == b'BPN1' and not seq & 1 and flags & 1 and len(frame) > 128; "
+            "header = path.open('rb'); prefix = header.read(24); header.close(); "
+            "assert prefix == frame[:24]; "
+            "print(hashlib.sha256(frame[128:]).hexdigest())"
+        )
+        digest_command = "python3 -c " + shlex.quote(pixels)
+
+        def await_pixels(predicate, failure):
+            deadline = time.monotonic() + patient(30)
+            while time.monotonic() < deadline:
+                result = self.machine.ssh(digest_command, timeout=15)
+                digest = result.stdout.strip()
+                if result.returncode == 0 and re.fullmatch(r"[a-f0-9]{64}", digest) and predicate(digest):
+                    return digest
+                time.sleep(0.5)
+            self.fail(failure)
+
+        def replace_item(before, after):
+            program = (
+                "from mind.lists import Lists; book = Lists('/mind'); "
+                f"assert book.remove('acceptance', {before!r}) == {before!r}; "
+                f"assert book.add('acceptance', [{after!r}]) == ([{after!r}], [])"
+            )
+            self.sh("cd / && PYTHONPATH=/usr/lib/being python3 -c " + shlex.quote(program))
+
+        original = await_pixels(lambda _: True, "Lists published no complete pixel frame")
+        alternate = "changed panel acceptance item"
+        replace_item("keyboard acceptance item", alternate)
+        await_pixels(lambda digest: digest != original, "The visible Lists frame ignored a changed item")
+        replace_item(alternate, "keyboard acceptance item")
+        await_pixels(lambda digest: digest == original, "Lists did not redraw the restored item")
+        self.machine.vm.qmp("send-key", keys=[{"type": "qcode", "data": "esc"}])
+        deadline = time.monotonic() + patient(45)
+        while time.monotonic() < deadline:
+            if self.machine.ssh("test ! -e /run/being-panel/lists.frame", timeout=20).returncode == 0:
+                return
+            time.sleep(1)
+        self.fail("Escape did not close the Lists panel")
 
     def test_z_power_off_leaves_the_internal_disk_untouched(self):
         # Last (tests run in name order): the boot ends here.

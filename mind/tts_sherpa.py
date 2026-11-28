@@ -2,28 +2,41 @@
 
 The voice is loaded once, on its own single worker thread, and stays loaded:
 reloading a 64 MB voice for every clause would cost an estimated 0.3-1 s each
-time. Synthesis runs on one ONNX Runtime thread on that worker, so the event
-loop, the face and the language model keep their cores.
+time. Clauses are synthesized one at a time on that worker, with
+`threads_setting()` ONNX Runtime threads (two by default): on the laptop's
+two-core Ivy Bridge two threads measured a real-time factor of 0.142 against
+0.23 with one (0.164 with four, which share cores through hyper-threading),
+and slowed the language model's decoding no more than one thread did, while
+keeping the voice busy for about half as long.
+BEING_PIPER_THREADS (1 to 8) overrides the default.
 
 `synthesize(text, wav, rate)` writes a 16-bit mono WAV with
 `length_scale = 1 / rate`. Every failure raises, so the voice organ can say
 that clause with Flite instead.
 
-A voice that once fails a clause, or makes no sound, is silenced for the rest
-of the process: it says so in one log line, reports its name as "flite", and
-hands the voice organ Flite's command for every later clause, so Pip never goes
-quiet and never claims the natural voice while speaking with the original one.
+The voice organ's engine is "sticky" (mind/voice_engines.py sets it): a
+clause it cannot say is said by Flite, and the voice is then asked to say one
+short word (REPROBE_TEXT). Only when that fails too, or the worker is still
+stuck on a clause that ran out of time, or STUCK_LIMIT clauses in a row ran out
+of time, is the voice silenced for the rest of the process: it says so in one
+log line, reports its name as "flite", and hands the voice organ Flite's
+command for every later clause, so Pip never goes quiet and never claims the
+natural voice while speaking with the original one. One odd clause (only
+punctuation, say) or one slow clause while the laptop is busy never silences
+it. Any other user (Setup's preview, pip-diag, the bench) is not sticky: a
+failure raises and nothing is printed or kept.
 """
 
 import asyncio
 import json
+import os
 import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import sherpa
+from . import phonemize, sherpa
 
 VOICES = Path("/models/voice/piper")
 DEFAULT_VOICE = VOICES / "default"
@@ -35,6 +48,43 @@ MAX_TEXT = 600
 # characters, so this always leaves Flite time to say it).
 CLAUSE_BASE_S = 8.0
 CLAUSE_CHARS_PER_S = 20
+# After a clause fails, the voice must still say this to stay in use.
+REPROBE_TEXT = "Hello."
+# Clauses in a row that may run out of time before the voice is silenced.
+STUCK_LIMIT = 3
+# ONNX Runtime threads for synthesis (see the module notes), never more than
+# the CPUs this process may run on.
+DEFAULT_THREADS = 2
+MAX_THREADS = 8
+THREADS_ENV = "BEING_PIPER_THREADS"
+
+
+def available_cpus():
+    """The CPUs this process may run on."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1)
+
+
+def threads_setting(environ=None, cpus=None):
+    """Synthesis threads: BEING_PIPER_THREADS when it is a whole number from 1 to
+    MAX_THREADS, else DEFAULT_THREADS, at most the CPUs available."""
+    environ = os.environ if environ is None else environ
+    cpus = available_cpus() if cpus is None else max(1, int(cpus))
+    default = min(DEFAULT_THREADS, cpus)
+    raw = (environ.get(THREADS_ENV) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if not 1 <= value <= MAX_THREADS:
+        print(f"voice: {THREADS_ENV}={raw!r} is not a whole number from 1 to {MAX_THREADS}; "
+              f"using {default}", file=sys.stderr, flush=True)
+        return default
+    return value
 
 
 def length_scale(rate):
@@ -56,6 +106,12 @@ def reason(error):
     return (text or type(error).__name__)[:200]
 
 
+def sayable(text):
+    """True when a clause has a letter or digit in it: "..." or "?!" has nothing
+    a voice can say, so a voice that gives no audio for it is not broken."""
+    return any(ch.isalnum() for ch in str(text))
+
+
 def spoken(text):
     """Tidy a clause for the voice: one line, no leading dash, bounded length."""
     text = " ".join(str(text).split()).lstrip("-").strip()
@@ -67,10 +123,14 @@ def spoken(text):
 class PiperEngine:
     supports_segment_times = False
 
-    def __init__(self, voice_dir=DEFAULT_VOICE, *, library=None, threads=1, loader=None):
+    def __init__(self, voice_dir=DEFAULT_VOICE, *, library=None, threads=None, loader=None,
+                 phonemizer_library=None):
         self.voice_dir = Path(voice_dir)
         self.library = library
-        self.threads = threads
+        # sherpa-onnx 2.x needs Piper's phonemizer (mind/phonemize.py) beside it.
+        self.phonemizer_library = phonemizer_library
+        # ONNX Runtime threads; None means the setting (two by default).
+        self.threads = threads_setting() if threads is None else max(1, int(threads))
         self._loader = loader or self._load
         self._tts = None
         self._lock = threading.Lock()
@@ -83,8 +143,17 @@ class PiperEngine:
         self.on_silent = None
         # Set while voice_engines probes the voice: its own note says what happened.
         self.quiet = False
-        # False for a measuring tool (pip-diag), which tries every sentence and reports each failure.
-        self.sticky = True
+        # True only for the voice organ's engine (voice_engines sets it): a voice
+        # that is really broken is then silenced for the process, with one log
+        # line. Any other user sees each failure raised and nothing printed.
+        self.sticky = False
+        # The clause that last ran out of time, while the worker may still be on it.
+        self._late = None
+        self._timeouts = 0
+        # WAV paths of clauses that ran out of time: Flite said them and the
+        # voice organ may already have removed their folder, so the worker's
+        # late failure on one says nothing about the voice.
+        self._abandoned = set()
 
     @property
     def name(self):
@@ -108,6 +177,8 @@ class PiperEngine:
         absent = []
         if files["model"] is None:
             absent.append(str(self.voice_dir / "*.onnx"))
+        elif not files["card"].is_file():
+            absent.append(str(files["card"]))
         if not files["tokens"].is_file():
             absent.append(str(files["tokens"]))
         if not files["data"].is_dir():
@@ -116,6 +187,11 @@ class PiperEngine:
                    else sherpa.library_path() if self.library is None else None)
         if library is not None and not library.is_file():
             absent.append(str(library))
+        phonemizer = self.phonemizer_library
+        phonemizer = (Path(phonemizer) if isinstance(phonemizer, (str, Path))
+                      else phonemize.library_path() if phonemizer is None else None)
+        if phonemizer is not None and not phonemizer.is_file():
+            absent.append(str(phonemizer))
         return absent
 
     def available(self):
@@ -157,8 +233,9 @@ class PiperEngine:
             print(f"voice: the natural voice's model pack did not verify ({reason}); using Flite",
                   file=sys.stderr, flush=True)
             raise sherpa.Unavailable(f"its model pack did not verify ({reason})")
+        phonemizer = phonemize.for_voice(files["data"], files["card"], library=self.phonemizer_library)
         return sherpa.OfflineTts(files["model"], files["tokens"], files["data"], threads=self.threads,
-                                 library=self.library)
+                                 library=self.library, phonemizer=phonemizer)
 
     def resident(self):
         """The loaded voice, loading it on first use. Blocking."""
@@ -190,30 +267,84 @@ class PiperEngine:
         """Write `wav` and return its length in seconds. Raises on any failure.
 
         Text with nothing to say, or a rate out of range, is the caller's
-        mistake and raises ValueError without silencing the voice. Any other
-        failure silences it for the rest of the process."""
+        mistake and raises ValueError without silencing the voice. For a
+        sticky engine, any other failure of a clause with words in it asks the
+        voice to say REPROBE_TEXT, and silences it for the rest of the process
+        only if that fails too."""
         said, scale = spoken(text), length_scale(rate)
         if self._silent_error is not None:
             raise self._silent_error
         try:
-            tts = self.resident()
-            seconds = tts.write(said, Path(wav), length_scale=scale)
-            if not seconds or seconds <= 0:
-                raise RuntimeError("the natural voice produced no audio")
-        except Exception as error:
-            self.silence(error)
+            return self._write(said, wav, scale)
+        except ValueError:
+            # A clause the phonemizer finds nothing to say in ("...", "?!", the
+            # "." left after an emoji): skip it, and keep the natural voice.
             raise
+        except Exception as error:
+            if str(wav) in self._abandoned:
+                # Nobody waits for this clause any more (Flite said it), and its
+                # folder may be gone: a write that fails now is not a broken voice.
+                raise
+            if self.sticky and not self.quiet and sayable(said) and not self._still_speaks(wav):
+                self.silence(error)
+            raise
+        finally:
+            self._abandoned.discard(str(wav))
+
+    def _write(self, said, wav, scale):
+        seconds = self.resident().write(said, Path(wav), length_scale=scale)
+        if type(seconds) not in (int, float) or seconds <= 0:
+            raise RuntimeError("the natural voice produced no audio")
         return seconds
 
-    async def _synthesize(self, text, wav, rate=1.0):
-        loop = asyncio.get_running_loop()
-        job = loop.run_in_executor(self.executor(), self.synthesize_blocking, text, wav, rate)
+    def _still_speaks(self, wav):
+        """Does the voice still say REPROBE_TEXT? Blocking, on the caller's
+        (the worker's) thread, next to the clause's own file."""
+        probe = Path(wav).with_name(Path(wav).name + ".reprobe.wav")
         try:
-            return await asyncio.wait_for(job, clause_timeout(text))
+            self._write(REPROBE_TEXT, probe, 1.0)
+            return True
+        except Exception:
+            return False
+        finally:
+            try:
+                probe.unlink()
+            except OSError:
+                pass
+
+    async def _synthesize(self, text, wav, rate=1.0):
+        late = self._late
+        if late is not None:
+            if not late.done():
+                # The worker is still on a clause that ran out of time: it is stuck.
+                stuck = TimeoutError("it is still on a clause that ran out of time")
+                if self.sticky:
+                    self.silence(stuck)
+                raise stuck
+            self._late = None
+        loop = asyncio.get_running_loop()
+        limit = clause_timeout(text)
+        job = asyncio.ensure_future(loop.run_in_executor(self.executor(), self.synthesize_blocking, text, wav, rate))
+        try:
+            seconds = await asyncio.wait_for(asyncio.shield(job), limit)
+        except asyncio.CancelledError:
+            job.cancel()        # a clause still queued is dropped; one running ends on its own
+            raise
         except TimeoutError as error:
             # The worker may still finish this clause; nothing waits for it.
-            self.silence(TimeoutError(f"a clause took more than {clause_timeout(text):.0f} s"))
-            raise self._silent_error from error
+            # One slow clause on a busy laptop is said by Flite and no more.
+            if not job.done():
+                self._abandoned.add(str(wav))
+            self._late = job
+            job.add_done_callback(_ignore_result)
+            self._timeouts += 1
+            late = TimeoutError(f"a clause took more than {limit:.0f} s")
+            if self.sticky and self._timeouts >= STUCK_LIMIT:
+                self.silence(TimeoutError(f"{self._timeouts} clauses in a row took too long; the last, "
+                                          f"more than {limit:.0f} s"))
+            raise late from error
+        self._timeouts = 0
+        return seconds
 
     @property
     def synthesize(self):
@@ -259,3 +390,10 @@ class PiperEngine:
             if self._tts is not None:
                 self._tts.close()
                 self._tts = None
+
+
+def _ignore_result(job):
+    """A clause nobody waits for any more: read its outcome so asyncio does not
+    report it as never retrieved."""
+    if not job.cancelled():
+        job.exception()

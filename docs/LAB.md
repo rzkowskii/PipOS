@@ -137,7 +137,9 @@ What the laptop image leaves out, compared with the lab image:
 
 The hardware body is unchanged: i915 with crocus (llvmpipe stays as the
 fallback), HDA Cirrus audio, pocketsphinx and flite, b43/bcma and tg3,
-applesmc, ACPI lid/battery, UVC camera and the iTCO watchdog. Both laptop
+applesmc, ACPI lid and battery, and the UVC camera. The MacBookPro9,2
+firmware disables its iTCO watchdog, so the laptop kernel supplies softdog.
+Both laptop
 commands fail if the resolved configuration enables the lab body, root
 login or a getty, or if the built tree still holds lab-only files or a
 serial console in GRUB.
@@ -156,6 +158,54 @@ on Try's RAM-only `/mind`), so a maintenance Try stick cannot be reached
 over SSH. For a Try stick on the bench, use the cable development build
 below.
 
+### Try-only maintenance image
+
+`BEING_LAPTOP_DIAGNOSTIC=1 lab/build.sh laptop-try` creates
+`out/images/beingos-laptop-diagnostic-try.img` using a separate build tree.
+It keeps PIPLOGS and the boot and idle benchmark. The local console on
+tty2 has a root login. Install and Restore are unavailable on this image.
+
+The package audit requires perf, turbostat, STREAM, llama-bench, fio,
+smartctl, dmidecode, hdparm, cyclictest, rdmsr, v4l2-ctl, edid-decode,
+arecord and alsabat. Turbostat uses the same pinned Linux source as the
+kernel. STREAM uses the author's pinned OpenMP build. For WP-A4, run
+`PYTHONPATH=/usr/lib/being python3 -m lab.memory_bandwidth NEW-EVIDENCE.json`
+on tty2 of the native MacBookPro9,2 diagnostic Try boot. It records three
+runs at one, two, and four workers, checks the reported worker counts and
+the author's cache and timer rules, and records DIMM labels and speeds,
+cache sizes, and CPU 0's turbo ratio register. It requires AC with charging
+settled and the two cortex units and boot bench inactive. Older diagnostic
+media carried a serial STREAM binary.
+
+For WP-A5, run `PYTHONPATH=/usr/lib/being python3 -m lab.thread_sweep MODEL NEW-EVIDENCE.jsonl`
+on the same diagnostic Try boot. Use a K-quant model
+from the diagnostic media, with AC connected, charging settled, and both
+cortex units and the boot bench inactive. The sweep varies one to four
+threads, inherited process affinity, default versus zero polling, and
+the tiled matmul switch. Each randomized block includes a repeated
+reference for A/A. Compare prefill at 32 tokens and generation at 64
+tokens using the paired intervals in the report. The 120-minute default
+deadline leaves partial evidence if the full sweep cannot finish. Only
+an evidence file ending in a `complete` record supports comparisons.
+
+The WP-E10 diagnostic kernel exposes the read-only fs-verity measurement
+ioctl. To check one signed model-pack asset, run
+`PYTHONPATH=/usr/lib/being python3 -m lab.model_verity ROLE ASSET NEW-EVIDENCE.json --certificate CERT`
+with the trusted certificate for that system and the exact role-relative
+asset name. The tool verifies the CMS envelope and the asset's signed
+SHA-256 before measuring verity on the same open file. Current images
+without provisioned verity return `unavailable` with exit status 2.
+Production enforcement still needs a provisioned filesystem and an
+authenticated expected verity digest.
+
+`lab.model_verity_provision` can generate that reference digest through a
+pinned fsverity-utils executable in its read-only `baseline` mode. It also has
+an explicit diagnostic enablement path for a selected, separately mounted
+disposable ext4 filesystem. That path binds the signed system descriptor,
+single-link asset, expected device, private marker and independently retained
+baseline digest before making the asset immutable. The active model filesystem
+and system files are excluded.
+
 ### Cable development build
 
 A development-only Try stick that the Mac reaches over a plain Ethernet
@@ -166,8 +216,8 @@ cable, with no router, no DHCP and no pairing. It is the laptop image
 reconfiguration and patch-loader interfaces and ALSA debug messages, so
 `pip-diag codec --model` and `--coef` can try codec fixups live. (`pip-diag`
 itself is on every image; without that fragment those two options report a
-skip.) Every entry of its GRUB menu adds `being.cable=1 being.voice_debug=1`;
-there are still six entries.
+skip.) Every entry of its seven-entry GRUB menu adds
+`being.cable=1 being.voice_debug=1`.
 
 Make the two keys once, on the Mac and outside this repository. The login
 key may have a passphrase. The host key may not: sshd on the stick reads it
@@ -192,10 +242,15 @@ in its own tree, `/work/output/laptop-cable` (a cold build takes about an
 hour; three package jobs avoid running out of memory):
 
 ```bash
+mkdir -p out/images
+chmod 700 out/images
 BEING_LAPTOP_CABLE=1 BEING_LAPTOP_PACKAGE_JOBS=3 lab/build.sh laptop-try
+chmod 600 out/images/beingos-laptop-cable-try.img
 ```
 
-The result is `out/images/beingos-laptop-cable-try.img`. `BEING_LAPTOP_CABLE=1`
+The image carries the development stick's private SSH host key. Keep
+both the original and any local archive in an owner-only directory.
+`BEING_LAPTOP_CABLE=1`
 is refused together with `BEING_LAPTOP_MAINTENANCE=1` or
 `BEINGOS_REQUIRE_RELEASE_KEY=1`, and post-build refuses the cable files in
 every other image.
@@ -265,7 +320,11 @@ user network, given the link-local network, stands in for the cable. It
 logs in as root and checks the addresses, the firewall, the refused keys,
 passwords and networks, the units, the writable workbench and an edited
 module taking effect after a restart, `pip-diag quick`, and that power-off
-leaves the internal disk untouched. A second boot, from a copy of the
+leaves the internal disk untouched. It also checks the embedded source ID,
+verifies that the packaged speech verdict matches the runtime and runs
+VAD, Moonshine and Piper in isolated subprocesses on the emulated Ivy
+Bridge CPU. The Piper stage synthesizes a WAV using the packaged
+phonemizer. A second boot, from a copy of the
 stick with `being.cable=0` in every entry, checks that nothing answers.
 Both variables shown are the defaults. `BEING_CABLE_HOST_KEY` names the
 host key's `.pub` file (by default
@@ -296,6 +355,13 @@ It uses `out/images/beingos.img` (or `BEING_FACTORY_IMAGE`) and skips when
 `say` or `ffmpeg` is missing, or when the image was not built from this
 tree (`BEING_ALLOW_STALE=1` runs it on an older image anyway). It is one
 of the candidate suites (`voice_terminal`).
+
+The full showcase follows the spoken sequence in the workshop design.
+`python3 -m lab.workshop_showcase` prints the cues. Pass a captured bus
+JSONL trace to check the same recipe job from writing through pause,
+resume and explicit run, then the terminal view changes and bundled
+shelf install. Capture and retain the matching panel and speech evidence
+with the trace. [Workshop sequence](design/voice-apps.md#1-what-the-owner-sees-and-says)
 
 The b43 firmware is owner-sourced. When
 `out/firmware-overlay/usr/lib/firmware/b43/` exists (staged with
@@ -1006,9 +1072,10 @@ built image is never modified.
 |---|---|
 | `test_l0` | Boots through UEFI and GRUB from a SATA disk; the CPU has AVX but not AVX2; clean power-off; the power button |
 | `test_l1` | Power-on leads to eyes and nothing else; the face moves; a crashed face returns; a missing brainstem shows on the face |
-| `test_l2` | A real model answers on the emulated CPU. Memory survives cold boots, a power cut, and a simulated body change. Compacted highlights, corrections, and forgetting are checked across four boots, including a scan of the raw virtual disk. |
+| `test_l2` | A real model answers on the emulated CPU. Memory survives cold boots, a power cut, and a simulated body change. Highlights resume after Mind and cortex restart in the same boot. Corrections and forgetting survive a cold boot and a raw virtual-disk scan. |
+| `test_privacy` | A canary reaches the archive, FTS, a reminder, boot-local context, live slot token IDs and an encrypted snapshot. Forgetting reaches those stores and an authenticated restore of the old snapshot. The corpus and diagnostics export omit the forgotten words. Guest mode and mute survive Mind and Brainstem restarts. |
 | `test_l3` | Both systems are read-only; invalid update media is rejected; a bad signed update rolls back; a healthy update is confirmed; both watchdogs work; the confirmed slot survives an interrupted update; committed facts survive 20 abrupt power cuts |
-| `test_l4` | A wake phrase opens attention, partial transcripts precede final text, local synthesis plays through a virtual speaker, mute closes input, and Esc stops playback |
+| `test_l4` | A wake phrase opens attention, partial transcripts precede final text, local synthesis plays through a virtual speaker, mute closes input, and Esc stops playback. A restarted Voice keeps guest transcripts out of its journal with voice debugging enabled. |
 | `test_l5` | Closing the lid blanks the face and stops audio, the face wakes without the cortex, and the Linux lid reader handles initial state, switch events and device loss |
 | `test_l6` | Opt-in gaze reaches the rendered face, lid close reaps the detector, reopening restores it, and opt-out stops the service and releases gaze |
 
@@ -1285,6 +1352,41 @@ shipped median end-to-transcript at 340 ms. A more aggressive cutoff
 saved 60 ms but split a 330 ms hesitation. The staged build retains the
 shipping cutoff. Endpoint replay (`out/l4-endpoint-replay.json`).
 
+For a native, content-free endpoint trial, add
+`being.endpoint_evidence=1` to one Try boot and select the recognizer with
+`being.asr=pocketsphinx` or `being.asr=moonshine`. The voice logs one bounded
+numeric `endpoint evidence` record per completed dictation: engine, outcome,
+one-breath flag, measured/voiced duration, last clearly voiced frame to final,
+and recognizer endpoint to final. It logs no samples or words and is ignored on
+an installed boot. `lab/try_timings.py` reports medians and final/missed/room
+counts by engine. Run the same 20-turn script, including deliberately paused
+cases, in separate forced-engine boots; a missing or cut-off trial stays in the
+denominator rather than becoming a zero timing. This evidence does not promote
+either engine or change either endpoint threshold.
+
+For WP-A6/WP-D3, `lab/prefill_floor.py --plan` emits the deterministic,
+balanced acquisition order for matched control/candidate runs at prompt deltas
+4, 8, 12, 16, 24 and 32. Fill a `pipos-prefill-floor-native` schema-1 document
+with the plan seed, exact model SHA-256/server build/settings for both variants,
+and rows containing `repeat`, `order`, `delta`, shared `slot` and `prefix_n`,
+plus each side's raw `prompt_n`, `cache_n`, `prompt_ms` and optional prompt
+rate. `--report` rejects a delta that was not wholly new, unequal cache reuse,
+rate/timing disagreement, duplicate cells, wrong seeded order, different model
+bytes/builds, or fewer than ten complete paired curves. It reports every raw
+curve, but uses an intercept only when both six-point arms have R-squared at
+least 0.90, then bootstraps the paired mean with the recorded seed. A candidate
+is accepted only when both orders have at least four accepted linear curves
+and the 95% lower bound saves at least 150 ms. The report changes no unit or
+runtime setting.
+
+The separate listening scaffold comparison uses `listening_scaffold: true`
+and `prefill: false` in the build's Mind configuration. It can prepare a
+verified, small prefix for a non-empty, normalized body note while listening.
+The timing report counts reuse only when the first successful reply proves
+that its cache covered those prepared tokens. Keep cue wording and body
+conditions matched across the arms, including turns where no note was due.
+The comparison uses the existing reply grammar.
+
 In the alternating Ivy Bridge guest replay, the median longest gap fell
 from 860 to 490 ms. Median input end to first PCM was 1.39 s for the
 baseline and 1.32 s for the candidate. An earlier grouped run also
@@ -1532,6 +1634,36 @@ while the runner waited for playback. That budget includes boot, model
 installation, and prefill. The run gives no time-to-audio measurement for
 Liquid. QEMU comparison and server trace (`out/model-audition/voice-qemu-comparison.json`).
 
+#### Persona release evaluation
+
+Run `lab.persona_eval` on the Mac Studio with a separate judge GGUF and
+its recorded SHA-256. Run it from the previously accepted source and then
+the sealed candidate's source. Use the same evaluator, probes, llama-server
+binary and judge for both. When the accepted source predates this evaluator,
+copy its four protocol files (`lab/persona_eval.py`, `lab/persona_metrics.py`,
+`lab/persona_probes.py` and `lab/model_audition.py`) into a disposable copy of
+that source before collecting the baseline. Keep reports outside the frozen
+source paths.
+
+```bash
+python3 -m lab.persona_eval --server "$PIPOS_PERSONA_SERVER" \
+  --model out/models/reflex.gguf --judge "$PIPOS_PERSONA_JUDGE" \
+  --judge-sha256 "$PIPOS_PERSONA_JUDGE_SHA256" --output "$PIPOS_PERSONA_REPORT"
+```
+
+The evaluation covers ten multi-turn conversations, four personalities and
+two fixed seeds. Each conversation starts with its own empty archive. The
+report records the raw model attempts, the spoken replies and their cue.
+Per-personality measurements cover invented memories, grounding, character,
+emotion fit, tags, sentence shape, completion and boilerplate. The judge and
+candidate use separate disposable loopback servers.
+
+Pass the accepted report as `--persona-baseline` to the full candidate
+gate. If the persona sources or model bytes changed, also pass the candidate
+report as `--persona-result`. The gate verifies both reports and fails on a
+regression in any personality. It records the hashes of the evidence it used.
+
+
 ### Audition speech recognition and synthesis on Ivy Bridge
 
 First run the compatibility check of the voice's own engines on the released sherpa-onnx v2.0.3 Linux x64 C API with its ONNX Runtime 1.28.2 library. It boots a disposable overlay of the Ivy Bridge image under QEMU `-cpu IvyBridge` (AVX, no AVX2, FMA or BMI), checks the guest's CPU flags, and runs each engine in its own Python process through the same ctypes bindings the voice uses (`mind/sherpa.py`): Silero VAD over the Moonshine test recording, a Moonshine v2 tiny decode of its `test_wavs/0.wav` (24 kHz, given at its own rate), and one sentence in the Piper voice. A stage killed by SIGILL is named in the report. The assets are the local downloads in `out/voice`, checked against the pinned hashes; nothing is fetched. `--fetch-only` only verifies them, and `--prepare-only DIR` stages and checks the media without booting a VM. QEMU's speed says nothing about the laptop's, so timings are recorded as emulated. [Asset revisions, sizes, and hashes](../lab/sherpa_avx_assets.json), [Runtime release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/v2.0.3).
@@ -1539,10 +1671,10 @@ First run the compatibility check of the voice's own engines on the released she
 ```bash
 python3 -m lab.sherpa_avx_smoke --fetch-only
 python3 -m lab.sherpa_avx_smoke --prepare-only /tmp/sherpa-media
-python3 -m lab.sherpa_avx_smoke
+python3 -m lab.sherpa_avx_smoke --image out/images/beingos.img --runtime PATH_TO_TARGET_USR_LIB
 ```
 
-The report goes to `out/sherpa-avx/ivybridge-smoke.json`. This v2.0.3 run is pending: it needs a lab image built from the current source. An earlier check of the v2.0.2 archive with a public English Zipformer 20M checkpoint initialized both its FP32 and INT8 exports and returned the same transcript for a 6.625-second clip in QEMU 11.1.1; that recogniser has since been dropped for Moonshine.
+Use a current lab image with the Piper phonemizer and the installed libraries from the image being qualified. The full report goes to `out/sherpa-avx/ivybridge-smoke.json`. The board packaging step installs the checked-in `os/package/sherpa-onnx/ivybridge-smoke.json` only if both library hashes match the final root tree. The v7 cable guest checks its installed libraries directly. QEMU establishes instruction-set compatibility. Automatic recognition still measures speed on the target.
 
 For the MacBook comparison, start with the packaged PocketSphinx 5.0.4 and Flite 2.2 SLT at the shipped rate, with first-pause trimming off. Change one stage per comparison. Pair runs in alternating order across a cold service start and warm turns. Keep the other stages, ALSA configuration, room and playback level fixed. Start with a local time or recall question to isolate speech processing, then use the same warm Qwen reply settings for conversational turns. Record the exact package, weights, CPU flags, thread count, cache state, and power source.
 
@@ -1660,6 +1792,125 @@ the radio active. These hardware measurements set the release budgets.
 [Wi-Fi design](../DESIGN-AND-PLAN.md#network-and-maintenance),
 [Optimisation design](../DESIGN-AND-PLAN.md#optimisation-order-and-acceptance).
 
+## Spoken library audition
+
+`python3 -m lab.library_audition lab/fixtures/library-audition-2026-11.jsonl`
+compares the shipped lookup functions with independent labels. The fixture
+includes 100 distinct titles from the 1 November 2026 Wikimedia snapshot,
+50 dictionary headwords labelled from the first defined sense in the pinned
+Open English WordNet 2025 WN-LMF release, and 50 manual questions across 23
+entries. It includes 23 persona negatives and six explicit lookup misses.
+Simple labels use the canonical title from the source dump. Dictionary and
+manual labels use SHA-256 of the selected answer fields separated by NUL
+bytes. The fixture contains no recognizer output.
+
+For the spoken comparison, pass `--spoken-transcripts RESULTS.json` with
+an object containing `schema: 1`, `corpus_sha256`, `recognizer`, and
+`transcripts`. The last field maps fixture IDs to raw recognizer output.
+Include an empty string if the recognizer returned no words. The report
+distinguishes complete coverage from matching every case, and only emits
+counts and IDs. Optional pack lookups require signed, enabled packs.
+
+The separate `lab/library_soundalike.py` experiment compares exact lookup
+with an ask-only phonetic suggestion after a true miss. Its input binds
+each observation to supplied audio bytes and identifies the externally
+reported recognizer and model. The prototype needs 100 labelled titles
+and 20 no-match cases from the same recognizer/model. The candidate needs
+at least ten percentage points of improvement and zero additional wrong
+offers. It never opens an article from a candidate match.
+
+Use `pip-diag workload` to see library outcomes during normal turns. It counts
+exact hits, ambiguity, disabled packs, unavailable packs and misses without
+recording the lookup term in those counts.
+
+## WP-E9 disposable vector arena
+
+`lab/vector_arena.py` packs synthetic JSONL vectors and creates one binary
+query. Keep inputs and outputs in a private lab scratch directory outside
+`/mind`. The first source line contains `format` set to
+`pipos-vector-arena-source-v1`, `dimension`, the `YYYY-MM` `shard`, a
+`model` and `recipe` string, and the upstream `source_sha256`. Each row
+then supplies `kind` (`episode` or `fact`), `id`, `scale`, the hex
+`bits` and `q8` arrays in little-endian dimension order, and a Boolean
+`tombstone`. Order rows by kind (episode first) and ID. A tombstone retains its
+identity with zero scale, bits and vector. A query JSON object uses
+`dimension`, `scale`, `bits`, and `q8`.
+
+The `pack` and `query` commands take source and new output paths. `inspect`
+reports the header, dimensions, shard and payload digest of an arena.
+Compile `lab/pipvec_scan.c` for x86-64 Linux with SSE4.1 and POPCNT and
+link OpenSSL's libcrypto. Pass the arena, query, shortlist size, shard, and
+the expected model, recipe, bound source, payload and query SHA-256 values
+in that order. The scanner sorts the Hamming shortlist by scaled integer
+dot product. It reports mapping and digest, validation and shortlist, and
+re-ranking time separately. Results are approximate because the shortlist
+can omit better vectors. The live archive and deletion path do not use
+this format. The byte erasure and retrieval and timing gates need a
+separate synthetic qualification before any appliance integration.
+
+## WP-E16 output head and expressiveness
+
+The head experiment replays synthetic continuations on the unrestricted
+Qwen3.5-0.8B CPU path. The collector reads the graph's final normalized
+activation and the full pre-sampler top 20 at the same decode position. It
+also exports the dequantized tied Q6_K head. The current geometry is 248,320
+rows by 1,024. One witness needs about 1.04 GB of scratch space.
+
+- Build the isolated `lab/head-witness-build` CMake target `head_witness`
+  with `PIPOS_LLAMA_SOURCE` set to the reviewed Stage 2 llama.cpp v1.0.0 tree.
+- The case file uses three tab-separated columns per line. Supply an
+  opaque ID, space-separated complete prompt token IDs and space-separated
+  continuation IDs. You can prepare a case file from a synthetic Stage 2
+  shadow evaluation using `python3 -m lab.stage2_witness_cases`. It uses an
+  existing loopback server for template and tokenizer calls. It verifies
+  recorded token IDs against reply text and counts any text-derived replays
+  separately.
+- `python3 -m lab.head_witness COLLECTOR MODEL CASES NEW_OUTPUT` uses the
+  expected SHA-256 values for the executable, model, and case file. An
+  optional `--d5-ids` file adds a fixed-list control. The resulting
+  `manifest.json` binds the original packed head and the witness files.
+- `python3 -m lab.head_proxy_audition MANIFEST` ranks proxy shortlists at
+  2,000 and 4,000 rows and reports the observed true-top-20 recall. Use the
+  independent held-out case, reviewed collector and approved model digests
+  to evaluate the 99.9% criterion. The group-scaled 2-bit representation
+  accounts for 79,462,400 bytes. This is a reference implementation for
+  recall. A paired native benchmark must determine kernel cost and whether
+  the Stage 2 fixed list is sufficient.
+
+The [Face motion audition](../crates/face/AUDITION-E16.md) has four
+synthetic arms that vary cadence and blend independently. The Piper audition
+uses `python3 -m lab.piper_mood_audition NEW_SHARE` on the signed production
+voice. Give the rater the share directory and keep the adjacent
+`NEW_SHARE.key.json` until ratings are final. Treat each clip as one
+stochastic sample for preference. The experiments need owner ratings and
+native timing before they can inform live settings.
+
+## Compose blind audition preparation
+
+Compose remains gated. With the shipped dream model already running on its
+loopback endpoint, prepare the synthetic ten-letter audition without reading
+the mind or starting any service:
+
+```sh
+python3 lab/compose_audition.py generate --out out/compose-audition
+```
+
+The command takes exactly five capped samples per case. Give only
+`compose-blind.json` to the rater; keep `compose-key.json` separate. Enter an
+integer rating from 1 to 5 in every blind entry, then reproduce the design's
+kill criterion:
+
+```sh
+python3 lab/compose_audition.py score \
+  --ratings out/compose-audition/compose-blind.json \
+  --key out/compose-audition/compose-key.json \
+  --out out/compose-audition/compose-score.json
+```
+
+Five or more of ten ratings at 3 or above passes the audition gate. A lower
+score leaves Compose waiting for a writer pack. This tool does not promote
+Compose, queue work, start Build, or read private data.
+
 ## Where things are
 
 ```
@@ -1673,6 +1924,121 @@ lab/
   build.sh                drives the builder
   vm.py                   the virtual laptop and the test harness
   tests/                  one suite per milestone
+```
+
+### Approved HTTPS releases
+
+The optional **F2 → U → Download approved update** path is available on a
+confirmed installed system in Internet mode. Provision one root-owned,
+non-group/other-writable `update-source.json` through installed maintenance
+or the signed image overlay. The paths are `/mind/network/update-source.json`
+and `/etc/being/update-source.json`. The installed policy takes precedence.
+The file has exactly five fields:
+
+| Field | Value |
+| --- | --- |
+| `version` | Integer `1` |
+| `url` | Direct HTTPS release address on port 443 |
+| `bytes` | Exact signed bundle byte count |
+| `sha256` | Lowercase SHA-256 of the complete signed bundle |
+| `redirect_hosts` | List of exact approved HTTPS redirect hostnames, empty for a direct address |
+
+The owner first confirms the transfer. The downloader validates DNS addresses,
+TLS, redirect hosts, byte count and SHA-256. The private staging directory
+reserves archive space. A foreground turn, connectivity revocation or user
+cancellation ends the transfer and discards the partial file. Care next
+verifies the installed RAUC channel and signature, then requests a separate
+install confirmation. RAUC receives the exact shown manifest hash. If the
+client stops waiting during installation, the bundle stays reachable until
+RAUC confirms it is idle. Opening Update again reclaims the stage after that
+confirmation. The approved source file is absent on ordinary media by default.
+
+### Synthetic decade recall
+
+`python3 -m lab.bench_recall_floors --decade decision` replays 10,000 synthetic
+episodes across 3,650 simulated days through the production archive writes and
+the archive maintenance jobs named in the report. Smaller and larger profiles
+use the same labeled truth, including corrections, event dates, forgetting and
+should-abstain requests. Larger profiles require `--allow-large` after the
+10,000-row decision. All generated archives are temporary. Reports distinguish
+new SQLite connections with warm page caches from a native cold-cache study.
+Host file allocation growth is reported separately from physical disk writes.
+
+`python3 -m lab.bench_recall_cascade` compares fact-only, episode-only and
+facts-first paths against the existing synthetic acceptance sets. It measures
+paired host timings and binds each result to its source episode. It exercises
+told and event dates, personal abstention and already-indexed forgetting. The
+report leaves the native recall-performance and promotion gates open.
+
+`python3 -m lab.bench_recall_r3` compares the shipped content-word input
+with a candidate that adds independently verified, recurrent claims and
+terms from live digest children. It uses fixed synthetic cases and reports
+both abstention groups, logical removal after real index backfill, and
+the input model and source digests. This cosine-only comparison leaves
+production retrieval and the WP-C6 native latency gate open.
+
+### Archive integrity fault evidence
+
+`lab/archive_integrity.py` compares explicit, disposable `mind.db` copies for
+WP-E10.  It runs SQLite's full integrity check with time and row budgets,
+reports per-UTC-day keyed digests without printing memory text, and compares
+the structural deletion-ledger prefix. Use standalone copies made after a
+successful checkpoint. The tool rejects live `/mind` paths, final symlinks,
+and adjacent SQLite sidecars. It pins regular files read-only and caps input
+size, candidates, values, schema objects, rows and elapsed time. An incomplete
+or damaged candidate causes a failing exit status with its JSON result. The
+ephemeral digest key stays in memory. For backup recovery, use a disposable
+database from the authenticated restore path and keep its receipt as separate
+provenance.
+
+The installed product can opt into the full check with root-owned, private
+`/mind/archive-integrity.enabled` containing `1` and a newline. The normal
+nightly quick check still runs. The optional job needs a believed night,
+closed lid, AC and Bodycare permission. It reads the live WAL snapshot and
+stops for wake activity. Its limit is five minutes, and it records only the
+day and verdict. Care Health shows the last result. A damaged result stays
+visible through interrupted retries. Daily row hashes and archive encryption
+remain separate work packages.
+
+`python3 -m lab.verify_rotating_backups` can authenticate two selected
+encrypted sets against one independently retained current deletion checkpoint.
+It applies the current proof and restore policy to each disposable copy and
+checks the prepared databases, including any eligible lists and Keep catalog.
+The pair report describes logical verification. Physical media independence
+requires separate evidence, and a session-only policy can correctly yield
+an empty history.
+
+`python3 -m lab.export_backup_jsonl` writes a portable plaintext export of
+retained memory and lists from the same prepared copy. It requires an explicit
+new absolute path on a filesystem with owner-only permissions, hard links and
+directory syncing. The export carries no credentials, logs or retained jobs.
+It is an interchange file and cannot be used by the PipOS restore command.
+
+`python3 -m lab.archive_day_chain` anchors a checkpointed disposable archive
+under a separately retained key. It uses keyed row commitments and an ordered
+UTC-day chain to report the days affected by a change. To verify forgetting
+across two copies, also supply the encrypted current deletion proof, the age
+identity, the detached life and checkpoint record, and the independently
+retained current deletion digest. Expected fact removals and episode tombstones
+can then be distinguished from other content changes. A ledger extension
+provided only by the candidate copy cannot pass. The verifier runs outside the
+normal appliance archive and night shift.
+
+### Stage 2 shortlist isolation
+
+The two-slot driver accepts the pinned `67534958fb385cac` Stage 2 kit and
+checks its recorded binary, model and shortlist hashes. It starts isolated full,
+shadow and active servers on private Unix sockets with 4,096 tokens per slot.
+The synthetic prompts use distinct off-list token witnesses and verify complete
+prompt cache reuse after alternating. A token grammar delays the witness until
+the middle of each response so earlier output cannot replenish its dynamic
+row. The overlap cases require both slots to report processing with the primary
+witness landing during the peer's output. Shadow traces account for the server's
+one or two sampling attempts per predicted token. Normal answer quality and native
+speed need the separate held-out and performance trials.
+
+```sh
+python3 -m lab.shortlist_slots --kit /path/to/pipos-avx1-stage2
 ```
 
 ## Things the lab has already caught
@@ -1689,7 +2055,7 @@ lab/
 - **Deleting a memory left its text on the disk.** SQLite scrubs its own file,
   but the write-ahead log's freed blocks kept the words. The mind partition is
   mounted with `discard`. The test overlays use 4 KiB clusters so QEMU can
-  discard individual ext4 blocks. `test_l2` scans the raw disk to check.
+  discard individual ext4 blocks. `test_l2` and `test_privacy` scan the raw disk.
 - **Model replies could preserve part of a forgotten fact.** The mind now
   tracks which facts were provided to the model and scrubs replies and
   summaries linked to those facts when asked to forget. Older episode logs

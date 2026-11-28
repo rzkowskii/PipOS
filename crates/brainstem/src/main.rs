@@ -3,8 +3,15 @@
 
 mod battery;
 mod body;
+mod body_work;
 mod brightness;
 mod camera;
+mod camera_look;
+#[cfg(target_os = "linux")]
+mod camera_usb;
+mod ears;
+#[cfg(target_os = "linux")]
+mod device_plug;
 mod kbd_light;
 mod life;
 #[cfg(target_os = "linux")]
@@ -65,14 +72,26 @@ fn is_mount_point(path: &Path) -> bool {
     std::fs::metadata(parent).is_ok_and(|up| up.dev() != here.dev())
 }
 
+/// The installed service and the QEMU appliance share the boot-local latch.
+fn guest_latched(appliance_body: bool) -> bool {
+    if !appliance_body {
+        return false;
+    }
+    let path = Path::new("/run/being/guest");
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
 /// Topics only the brainstem may send. Orders to the voice and the mind are
 /// the brainstem's alone, so no organ can mute, stop or cancel another.
 const RESERVED: &[&str] = &[
-    "organ.*", "stem.*", "state.*", "body.*", "face.*", "camera.policy",
+    "organ.*", "stem.*", "state.*", "body.*", "face.*", "camera.policy", "ears.*",
     "voice.mute", "say.stop", "mind.cancel", "hello.ok",
 ];
 /// Reserved topics one organ may send all the same: the topic and the organ.
-const RESERVED_EXCEPT: &[(&str, &str)] = &[("body.care", "bodycare")];
+const RESERVED_EXCEPT: &[(&str, &str)] = &[("body.care", "bodycare"), ("ears.capture", "ears")];
 /// Lines queued for one organ before it is judged stuck and dropped.
 const QUEUE: usize = 512;
 /// Inputs queued for the hub before readers wait (each organ's reader blocks
@@ -83,6 +102,8 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 /// After a failed accept (out of descriptors, say), wait before the next.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(200);
 const TICK_INTERVAL: Duration = Duration::from_millis(100);
+const LIFE_HEARTBEAT_SECONDS: f64 = 300.0;
+const LIFE_HEARTBEAT_DRAIN: Duration = Duration::from_secs(1);
 
 enum Input {
     Joined(u64, SyncSender<String>, UnixStream, Option<String>),
@@ -133,22 +154,78 @@ fn allowed_from(topic: &str, from: &str, hardware_body: bool) -> bool {
     if topic_matches("see.*", topic) && from != "eyes" {
         return false;
     }
+    // Which clauses of a reply really played decides what Pip remembers
+    // saying (mind/played.py), so only the voice may report it, everywhere.
+    if topic == "say.played" && from != "voice" {
+        return false;
+    }
     match topic {
-        "mind.progress" | "mind.shutdown_ready" | "mind.announce" | "mind.clock" | "mind.dream_committed"
-        | "mind.dreaming" => from == "mind",
+        "mind.progress" | "mind.shutdown_ready" | "mind.announce" | "mind.announce_cancel"
+        | "mind.clock" | "mind.dream_committed"
+        | "mind.dreaming" | "mind.route" | "app.privacy" => from == "mind",
+        "camera.look" | "camera.look_cancel" => from == "mind",
+        "camera.look_result" => from == "eyes",
         // "Brighter" and "dimmer" are the owner's, through the mind, and so
         // are the brightness and keyboard-light keys (the face presses them,
         // the mind decides the step).
         "being.brightness" | "being.kbd_light" => from == "mind",
+        "screen.prefs" | "screen.quick_menu" | "screen.night" | "screen.online" => from == "mind",
+        "screen.prefs_state" | "ui.action" => from == "face",
+        "app.calc_display" | "app.lookup_query" => from == "mind",
         // The owner's "louder" or "no chirps" reaches the voice through the
         // mind; the voice answers with what it really set. "Which voice"
         // and "how well can you hear me" ask the voice the same way.
-        "voice.volume" | "voice.chirps" | "voice.level_request" | "voice.engine" => from == "mind",
+        "voice.volume" | "voice.chirps" | "voice.level_request" | "voice.engine"
+        | "voice.prepare" | "voice.clear_prepared" => from == "mind",
+        "voice.install_status" => from == "face",
         // Measured levels, numbers only, from the voice alone.
         "voice.volume_state" | "voice.level" => from == "voice",
         topic if topic_matches("voice.*", topic) => false,
+        "ears.capture" => from == "ears",
+        topic if topic_matches("ears.*", topic) => false,
         _ => true,
     }
+}
+
+/// The install screen can request only fixed, current status lines. It cannot
+/// send arbitrary speech or affect the machine's conversation state.
+fn install_status_event(
+    ev: &Event, unit: Option<&str>, enforce_units: bool, lid_open: bool, seq: u64,
+) -> Option<Event> {
+    if (enforce_units && unit != Some("being-local-screen.service"))
+        || !lid_open || ev.data.get("lid_seq").and_then(Value::as_u64) != Some(seq)
+    {
+        return None;
+    }
+    let stage = ev.str("stage")?;
+    if !matches!(stage, "prepare" | "write" | "verify" | "commit" | "complete" | "stopped") {
+        return None;
+    }
+    let issued = ev.data.get("issued")?.as_f64()?;
+    Some(Event::new("voice.install_status").with("stage", stage).with("issued", issued).with("lid_seq", seq))
+}
+
+#[cfg(test)]
+#[test]
+fn install_status_is_fixed_and_lid_bound_to_the_local_screen() {
+    let topic = "voice.install_status";
+    let status = Event::new(topic)
+        .with("stage", "write").with("issued", 123.5).with("lid_seq", 9_u64)
+        .with("text", "private disk label");
+    let local = Some("being-local-screen.service");
+    for hardware in [true, false] {
+        assert!(allowed_from(topic, "face", hardware));
+        assert!(!allowed_from(topic, "mind", hardware));
+        assert!(!allowed_from(topic, "voice", hardware));
+    }
+    assert!(install_status_event(&status, Some("being-face.service"), true, true, 9).is_none());
+    assert!(install_status_event(&status, None, true, true, 9).is_none());
+    assert!(install_status_event(&status, local, true, false, 9).is_none());
+    assert!(install_status_event(&status, local, true, true, 8).is_none());
+    let forwarded = install_status_event(&status, local, true, true, 9).unwrap();
+    assert_eq!(forwarded.str("stage"), Some("write"));
+    assert_eq!(forwarded.data.len(), 3);
+    assert!(install_status_event(&status.with("stage", "private disk label"), local, true, true, 9).is_none());
 }
 
 /// On the laptop the mind's `key.mute` must say `on: true`. Letting the
@@ -201,22 +278,129 @@ struct Hub {
     started: Instant,
 }
 
+/// Sanitised, observe-only resource advice from the authenticated Bodycare
+/// connection. This is a readout, not an actuator or a retained request.
+#[derive(Default)]
+struct BudgetReadout {
+    producer: Option<u64>,
+    event: Option<Event>,
+    expires_at: f64,
+}
+
+impl BudgetReadout {
+    fn profile_for_state(profile: &str, state: machine::State, lid_closed: bool) -> bool {
+        match state {
+            machine::State::Asleep => lid_closed && matches!(profile, "deep_sleep" | "dreaming"),
+            machine::State::Thinking => profile == "deep_thought",
+            machine::State::Attending | machine::State::Listening | machine::State::Speaking => profile == "active_conversation",
+            machine::State::Waking | machine::State::Idle | machine::State::Drowsy => profile == "idle_awareness",
+        }
+    }
+
+    fn observe(&mut self, producer: u64, source: &Event, state: machine::State, state_epoch: u64, lid_closed: bool, now: f64) -> Option<Event> {
+        let profile = source.str("resource_profile")?;
+        let pressure = source.data.get("resource_pressure")?;
+        let priority = source.str("resource_priority")?;
+        let echoed_epoch = source.data.get("resource_state_epoch").and_then(Value::as_u64)?;
+        let ttl = source.data.get("resource_ttl_ms").and_then(Value::as_u64)?;
+        if source.bool("resource_observe_only") != Some(true)
+            || source.bool("performance_eligible") != Some(false)
+            || !Self::profile_for_state(profile, state, lid_closed)
+            || echoed_epoch != state_epoch
+            || !(pressure.is_null() || pressure.as_str().is_some_and(|value| matches!(value, "nominal" | "warm" | "hot" | "critical")))
+            || !matches!(priority, "thermal" | "power_source" | "power_unknown" | "lid" | "cognitive")
+            || !(1..=12_000).contains(&ttl)
+        {
+            return None;
+        }
+        let event = Event::new("stem.budget")
+            .with("profile", profile)
+            .with("pressure", pressure.clone())
+            .with("priority", priority)
+            .with("state", state.name())
+            .with("epoch", state_epoch)
+            .with("ttl_ms", ttl)
+            .with("active", true)
+            .with("observe_only", true);
+        self.producer = Some(producer);
+        self.expires_at = now + ttl as f64 / 1_000.0;
+        self.event = Some(event.clone());
+        Some(event)
+    }
+
+    fn snapshot(&self, state: machine::State, state_epoch: u64, now: f64) -> Option<Event> {
+        let event = self.event.as_ref()?;
+        let remaining = ((self.expires_at - now) * 1_000.0).floor() as u64;
+        let same_epoch = event.data.get("epoch").and_then(Value::as_u64) == Some(state_epoch);
+        (remaining > 0 && same_epoch && event.str("state") == Some(state.name()))
+            .then(|| event.clone().with("ttl_ms", remaining).with("active", true).with("snapshot", true))
+    }
+
+    fn revoke(&mut self, reason: &'static str, state_epoch: u64) -> Option<Event> {
+        self.producer.take()?;
+        self.event = None;
+        self.expires_at = 0.0;
+        Some(Event::new("stem.budget").with("active", false).with("reason", reason).with("epoch", state_epoch).with("observe_only", true))
+    }
+
+    fn expire(&mut self, now: f64, state_epoch: u64) -> Option<Event> {
+        (self.event.is_some() && now >= self.expires_at).then(|| self.revoke("expired", state_epoch)).flatten()
+    }
+
+    fn state_changed(&mut self, state_epoch: u64) -> Option<Event> {
+        self.revoke("state_changed", state_epoch)
+    }
+
+    fn disconnected(&mut self, id: u64, state_epoch: u64) -> Option<Event> {
+        (self.producer == Some(id)).then(|| self.revoke("producer_lost", state_epoch)).flatten()
+    }
+
+    fn replacing(&mut self, id: u64, state_epoch: u64) -> Option<Event> {
+        (self.producer.is_some() && self.producer != Some(id)).then(|| self.revoke("producer_replaced", state_epoch)).flatten()
+    }
+
+    fn lid_revoked(&mut self, lid_closed: bool, state_epoch: u64) -> Option<Event> {
+        let needs_closed_lid = self.event.as_ref().and_then(|event| event.str("profile"))
+            .is_some_and(|profile| matches!(profile, "deep_sleep" | "dreaming"));
+        (needs_closed_lid && !lid_closed).then(|| self.revoke("lid_changed", state_epoch)).flatten()
+    }
+}
+
 impl Hub {
     fn name_of(&self, id: u64) -> &str {
         self.peers.get(&id).and_then(|p| p.name.as_deref()).unwrap_or("?")
     }
 
+    fn active(&self, name: &str) -> Option<u64> {
+        self.peers.iter().filter_map(|(&id, peer)| (peer.name.as_deref() == Some(name)).then_some(id)).max()
+    }
+
+    fn direct(&self, id: u64, ev: &Event) -> Option<u64> {
+        let peer = self.peers.get(&id)?;
+        if !peer.subs.iter().any(|sub| topic_matches(sub, &ev.topic)) { return None; }
+        peer.tx.try_send(ev.to_line()).err().map(|_| id)
+    }
+
     /// Deliver to every subscriber except the sender. Returns organs that could
     /// not take it and must be dropped.
-    fn route(&self, ev: &Event, from: Option<u64>) -> Vec<u64> {
-        if self.log && !matches!(ev.topic.as_str(), "say.level" | "stem.beat" | "face.gaze" | "body.presence") {
+    fn route(&self, ev: &Event, from: Option<u64>, guest: bool) -> Vec<u64> {
+        let voice_private = matches!(ev.topic.as_str(), "voice.prepare" | "voice.clear_prepared");
+        let local_speech = ev.topic == "say.request" && ev.bool("private") == Some(true);
+        let guest_speech = guest && ev.data.contains_key("text");
+        if self.log && !voice_private && !local_speech && !guest_speech && !matches!(ev.topic.as_str(), "say.level" | "stem.beat" | "face.gaze" | "body.presence"
+            | "app.calc_display" | "app.lookup_query" | "screen.online") {
             let who = from.map(|id| self.name_of(id)).unwrap_or("brainstem");
             eprint!("[{:9.3}] {who:>9}  {}", self.started.elapsed().as_secs_f64(), ev.to_line());
         }
         let line = ev.to_line();
         let mut stuck = Vec::new();
         for (&id, peer) in &self.peers {
-            if Some(id) == from || !peer.subs.iter().any(|s| topic_matches(s, &ev.topic)) {
+            if Some(id) == from
+                || (voice_private && (peer.name.as_deref() != Some("voice")
+                    || peer.unit.as_deref() != Some("being-voice.service")))
+                || (local_speech && !matches!(peer.name.as_deref(), Some("voice" | "face")))
+                || !peer.subs.iter().any(|s| topic_matches(s, &ev.topic))
+            {
                 continue;
             }
             if peer.tx.try_send(line.clone()).is_err() {
@@ -347,15 +531,52 @@ fn blocked_by_lid(topic: &str) -> bool {
         || topic_matches("see.*", topic)
         || matches!(
             topic,
-            "say.request" | "say.started" | "say.level" | "say.done"
-                | "mind.emotion" | "mind.reply_done" | "mind.announce" | "being.sleep"
+            "say.request" | "say.started" | "say.level" | "say.done" | "say.played"
+                | "mind.emotion" | "mind.reply_done" | "mind.announce" | "mind.announce_cancel" | "being.sleep"
+                | "app.calc_display" | "app.lookup_query"
+                | "screen.quick_menu" | "screen.night" | "screen.online" | "ui.action"
         )
+}
+
+fn can_request_look(machine: &machine::Machine, body: &body::Body) -> bool {
+    machine.state() == machine::State::Thinking && !machine.muted() && !body.lid_blocked()
+}
+
+fn look_grant(camera: &camera::Camera, machine: &machine::Machine, body: &body::Body) -> Option<camera_look::Grant> {
+    if !can_request_look(machine, body) { return None; }
+    let (eyes, camera_seq) = camera.granted_peer()?;
+    Some(camera_look::Grant { eyes, lid_seq: body.lid_seq(), camera_seq })
+}
+
+/// A journal line for a turn the machine ended because `organ` left or came
+/// back (machine.rs `organ_left_turn`), or None if it ended none.
+fn turn_ended_note(organ: &str, outs: &[Event]) -> Option<String> {
+    let reason = outs.iter().find(|e| e.topic == "mind.cancel")?.str("reason")?;
+    let how = match reason.strip_prefix(organ)? {
+        "_restarted" => "came back as a new connection",
+        "_lost" => "went away",
+        _ => return None,
+    };
+    Some(format!("the {organ} {how} mid-turn, so that turn is over and the ears are open"))
 }
 
 /// True if the kernel command line asks for the boot messages to stay visible.
 fn verbose_boot(cmdline: &str) -> bool {
     cmdline.split_whitespace().any(|word| word == "being.verbose=1")
 }
+
+fn stop_audio_for_privacy() -> std::io::Result<std::process::Child> {
+    std::process::Command::new("/usr/bin/systemctl")
+        .args(["--no-block", "stop", "being-ears.service", "being-voice.service"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+}
+
+const AUDIO_STOP_ATTEMPTS: u8 = 3;
+const AUDIO_STOP_RETRY_SECONDS: f64 = 2.0;
+const AUDIO_STOP_TIMEOUT_SECONDS: f64 = 5.0;
 
 fn main() {
     let mut path = bus::socket_path();
@@ -406,6 +627,11 @@ fn main() {
             "--poweroff-cmd" => poweroff_cmd = Some(args.next().unwrap_or_else(|| die("--poweroff-cmd needs a command"))),
             "--log" => log = true,
             "--probe-hardware" => probe = true,
+            #[cfg(target_os = "linux")]
+            "--close-camera" => {
+                camera_usb::close_mapped(Path::new("/")).unwrap_or_else(|e| die(&format!("close camera: {e}")));
+                return;
+            }
             "--sysfs-root" => sysfs_root = PathBuf::from(args.next().unwrap_or_else(|| die("--sysfs-root needs a path"))),
             "-h" | "--help" => {
                 println!("{HELP}");
@@ -482,7 +708,10 @@ fn main() {
     let boot = life::boot_id();
     let body_name = life::body();
     let mut life: Option<life::Life> = None;
+    let mut life_clock_floor = 0;
     let mut life_next_try = 0.0f64;
+    let mut life_next_heartbeat = 0.0f64;
+    let mut life_heartbeat = life::HeartbeatWrite::default();
     let mut life_complained = false;
 
     // Names are checked against units only on the appliance (see peer.rs).
@@ -491,6 +720,11 @@ fn main() {
 
     let started = Instant::now();
     let mut hub = Hub { peers: HashMap::new(), log, started };
+    let mut screen_prefs = None;
+    // Owner-only preparation waits for an explicit privacy report from Mind.
+    let mut caption_privacy = guest_latched(appliance_body)
+        .then(|| Event::new("app.privacy").with("guest", true));
+    let mut budget = BudgetReadout::default();
     let state_file = state_file.unwrap_or_else(|| stem_state::default_path(&path));
     let saved = stem_state::load(&state_file, &boot);
     let mut machine = match &saved {
@@ -506,8 +740,19 @@ fn main() {
         }
         None => machine::Machine::new(cfg, 0.0),
     };
-    let mut camera = camera::Camera::default();
     let hardware_body = cfg!(target_os = "linux") && appliance_body && !lab_body;
+    let mut ears = ears::Ears::for_body(hardware_body, Path::new("/"));
+    let mut audio_stop: Option<(std::process::Child, f64)> = None;
+    let mut audio_stop_attempts = 0;
+    let mut next_audio_stop = 0.0;
+    if ears.tripped() {
+        for event in machine.set_privacy_fault(true, 0.0) {
+            // No peers exist yet; snapshots carry this state when they join.
+            let _ = event;
+        }
+    }
+    let mut camera = camera::Camera::for_body(hardware_body, Path::new("/"));
+    let mut look = camera_look::Look::default();
     let mut body = if hardware_body { body::Body::physical(0.0) } else { body::Body::new(0.0) };
     let (thresholds, threshold_notes) = battery::Thresholds::from_env(|name| std::env::var(name).ok());
     for note in threshold_notes {
@@ -530,6 +775,8 @@ fn main() {
     machine.set_env(body.lid(), body.dark(), body.night(), 0.0);
     #[cfg(target_os = "linux")]
     let mut hardware = hardware_body.then(|| (linux_body::Lid::new(), linux_body::Backlight::new()));
+    #[cfg(target_os = "linux")]
+    let storage = hardware_body.then(|| device_plug::watch(PathBuf::from("/")).ok()).flatten();
     // Battery, temperature and light are slow to read on real hardware, so
     // they arrive from a thread of their own and the hub never waits on them.
     #[cfg(target_os = "linux")]
@@ -584,8 +831,11 @@ fn main() {
                 eprintln!("brainstem: could not put the keyboard light back: {e}");
             }
             // Going to sleep properly: the next wake will know it was not a power cut.
-            if let Some(life) = &life {
-                if let Err(e) = life.sleep(life::unix_now()) {
+            if !life_heartbeat.drain(LIFE_HEARTBEAT_DRAIN) {
+                eprintln!("brainstem: periodic life write still pending at shutdown");
+            }
+            if let Some(wake) = &life {
+                if let Err(e) = wake.sleep(life::wall_timestamp(life_clock_floor)) {
                     eprintln!("brainstem: could not record going to sleep: {e}");
                 }
             }
@@ -595,6 +845,7 @@ fn main() {
         }
         // Events to send, each with the organ it came from (None: the brainstem).
         let mut pending: Vec<(Event, Option<u64>)> = Vec::new();
+        let mut directed: Vec<camera_look::Delivery> = Vec::new();
         let mut gone: Vec<u64> = Vec::new();
         let tick = matches!(&input, Input::Tick);
         #[cfg(target_os = "linux")]
@@ -626,6 +877,9 @@ fn main() {
                             .unwrap_or_default();
                         // A restarted organ replaces its old self.
                         gone.extend(hub.peers.iter().filter(|(&i, p)| i != id && p.name.as_deref() == Some(&name)).map(|(&i, _)| i));
+                        if name == "bodycare" {
+                            pending.extend(budget.replacing(id, machine.state_epoch()).map(|event| (event, None)));
+                        }
                         if let Some(peer) = hub.peers.get_mut(&id) {
                             pending.extend(camera.identified(id, &name, body.lid_seq()).into_iter().map(|e| (e, None)));
                             // Tell the newcomer where things stand before anything else.
@@ -633,10 +887,25 @@ fn main() {
                                 body.lid_event().with("snapshot", true),
                                 machine.snapshot(),
                                 camera.policy(),
+                                ears.policy(),
                                 body.senses(),
                                 body.snapshot(),
                             ];
+                            snaps.extend(ears.latch_event().map(|event| event.with("snapshot", true)));
                             snaps.extend(life.as_ref().map(|l| l.event()));
+                            snaps.extend(screen_prefs.clone());
+                            if guest_latched(appliance_body) {
+                                snaps.push(Event::new("app.privacy").with("guest", true));
+                            } else {
+                                snaps.extend(caption_privacy.clone());
+                            }
+                            snaps.extend(budget.snapshot(machine.state(), machine.state_epoch(), now));
+                            // mind.ready goes out once per mind connection; a
+                            // voice that starts after it (every cold boot, any
+                            // voice restart) would otherwise wait for it.
+                            if name != "mind" {
+                                snaps.extend(machine.ready_snapshot());
+                            }
                             for snap in snaps {
                                 if subs.iter().any(|s| topic_matches(s, &snap.topic)) {
                                     let _ = peer.tx.try_send(snap.to_line());
@@ -649,8 +918,12 @@ fn main() {
                             peer.name = Some(name.clone());
                             peer.subs = subs;
                         }
-                        let up = Event::new("organ.up").with("name", name);
-                        pending.extend(machine.on_event(&up, now).into_iter().map(|e| (e, None)));
+                        let up = Event::new("organ.up").with("name", name.as_str());
+                        let outs = machine.on_event(&up, now);
+                        if let Some(note) = turn_ended_note(&name, &outs) {
+                            eprintln!("brainstem: {note}");
+                        }
+                        pending.extend(outs.into_iter().map(|e| (e, None)));
                         pending.insert(0, (up, Some(id)));
                     }
                 } else if let Some(from) = hub.peers.get(&id).and_then(|p| p.name.clone()) {
@@ -675,16 +948,93 @@ fn main() {
                             "sim.body" if hardware_body => {}
                             "key.touch" if !from_face => {}
                             "camera.request" => camera.request(id, &ev),
+                            "body.care" if from == "bodycare" && hub.active("bodycare") == Some(id) => {
+                                if ev.data.get("resource_profile").is_none_or(Value::is_null) {
+                                    pending.extend(budget.revoke("unavailable", machine.state_epoch()).map(|event| (event, None)));
+                                } else {
+                                    match budget.observe(
+                                        id,
+                                        &ev,
+                                        machine.state(),
+                                        machine.state_epoch(),
+                                        body.lid_confirmed_closed(),
+                                        now,
+                                    ) {
+                                        Some(readout) => pending.push((readout, None)),
+                                        None => pending.extend(budget.revoke("rejected", machine.state_epoch()).map(|event| (event, None))),
+                                    }
+                                }
+                                pending.push((ev, Some(id)));
+                            }
+                            "camera.look" if from == "mind" && hub.active("mind") == Some(id) => {
+                                directed.extend(look.begin(id, &ev, seq, look_grant(&camera, &machine, &body), now));
+                            }
+                            "camera.look_cancel" if from == "mind" && hub.active("mind") == Some(id) => { directed.extend(look.cancel(id, &ev)); }
+                            "camera.look_result" => { directed.extend(look.complete(id, &ev, look_grant(&camera, &machine, &body), now)); }
                             "see.presence" if !body.lid_blocked() => {
                                 pending.extend(camera.observe(id, &ev, seq, now).into_iter().map(|e| (e, None)));
                             }
                             topic if topic_matches("see.*", topic) || topic_matches("camera.*", topic) => {}
                             "mind.clock" => {
                                 body.set_utc_offset(ev.data.get("utc_offset").and_then(Value::as_i64));
+                                if let Some(trusted) = ev.bool("trusted") {
+                                    body.set_clock_trusted(trusted);
+                                    if let Some(dir) = &mind_dir {
+                                        life_clock_floor = life::saved_clock_floor(dir);
+                                    }
+                                }
                             }
                             "mind.shutdown_ready" => body.mind_saved(),
                             "being.brightness" => pending.push((brightness.request(&ev), None)),
                             "being.kbd_light" => pending.push((kbd_light.request(&ev), None)),
+                            "screen.prefs" => {
+                                screen_prefs = Some(ev.clone());
+                                pending.push((ev, Some(id)));
+                            }
+                            "voice.install_status" => {
+                                let unit = hub.peers.get(&id).and_then(|p| p.unit.as_deref());
+                                if let Some(status) = install_status_event(&ev, unit, enforce_units, !body.lid_blocked(), seq) {
+                                    pending.push((status, Some(id)));
+                                }
+                            }
+                            "voice.prepare" => {
+                                let mine = hub.peers.get(&id).and_then(|p| p.unit.as_deref())
+                                    == Some("being-mind.service");
+                                if mine && body.lid_confirmed_closed() && machine.state() == machine::State::Asleep
+                                    && ev.data.get("lid_seq").and_then(Value::as_u64) == Some(seq)
+                                    && ev.data.get("clauses").and_then(Value::as_array).is_some_and(|clauses| {
+                                        (1..=8).contains(&clauses.len()) && clauses.iter().all(|clause| {
+                                            clause.as_str().is_some_and(|text| !text.is_empty()
+                                                && text.chars().count() <= 180 && !text.chars().any(char::is_control))
+                                        })
+                                    })
+                                    && caption_privacy.as_ref().and_then(|event| event.bool("guest")) == Some(false)
+                                    && !guest_latched(appliance_body)
+                                {
+                                    let prepared = Event::new("voice.prepare").with("lid_seq", seq)
+                                        .with("clauses", ev.data["clauses"].clone());
+                                    pending.push((prepared, Some(id)));
+                                }
+                            }
+                            "voice.clear_prepared" => {
+                                if hub.peers.get(&id).and_then(|p| p.unit.as_deref()) == Some("being-mind.service") {
+                                    pending.push((Event::new("voice.clear_prepared"), Some(id)));
+                                }
+                            }
+                            "app.privacy" if hub.active("mind") == Some(id) => {
+                                if let Some(guest) = ev.bool("guest") {
+                                    let privacy = Event::new("app.privacy")
+                                        .with("guest", guest || guest_latched(appliance_body));
+                                    caption_privacy = Some(privacy.clone());
+                                    pending.push((privacy, Some(id)));
+                                }
+                            }
+                            "app.privacy" => {}
+                            "mind.route" => {
+                                if let Some(via @ ("code" | "model" | "waiting" | "unavailable")) = ev.str("via") {
+                                    pending.push((Event::new("mind.route").with("via", via), Some(id)));
+                                }
+                            }
                             "mind.dream_committed" => {
                                 if body.lid_confirmed_closed()
                                     && machine.state() == machine::State::Asleep
@@ -694,6 +1044,19 @@ fn main() {
                                 }
                             }
                             "say.done" if ev.data.contains_key("announcement") && from != "voice" => {}
+                            "say.level" if ev.data.contains_key("face_cue")
+                                && !(from == "voice" && hub.active("voice") == Some(id)) => {}
+                            // A playback receipt from a voice connection that has been replaced.
+                            "say.played" if hub.active("voice") != Some(id) => {}
+                            "say.request" if ev.bool("private") == Some(true) && from != "mind" => {}
+                            "say.request" if ev.data.contains_key("camera_seq")
+                                && !(from == "mind" && hub.active("mind") == Some(id)
+                                    && ev.bool("private") == Some(true)
+                                    && ev.data.get("lid_seq").and_then(Value::as_u64) == Some(seq)
+                                    && !body.lid_blocked() && !machine.muted()
+                                    && matches!(machine.state(), machine::State::Thinking | machine::State::Speaking)
+                                    && camera.granted_peer().is_some_and(|(_, current)|
+                                        ev.data.get("camera_seq").and_then(Value::as_u64) == Some(current))) => {}
                             topic if blocked_by_lid(topic)
                                 && (body.lid_blocked()
                                     || ev.data.get("lid_seq").is_some_and(|value| value.as_u64() != Some(seq))) => {}
@@ -712,6 +1075,7 @@ fn main() {
             }
             Input::Gone(id) => gone.push(id),
             Input::Tick => {
+                pending.extend(budget.expire(now, machine.state_epoch()).map(|event| (event, None)));
                 #[cfg(target_os = "linux")]
                 if let Some((lid, _)) = &mut hardware {
                     for reading in lid.poll() {
@@ -728,6 +1092,10 @@ fn main() {
                         eprintln!("brainstem: {line}");
                     }
                 }
+                #[cfg(target_os = "linux")]
+                if let Some(storage) = &storage {
+                    pending.extend(storage.try_iter().map(|event| (event, None)));
+                }
                 // Wake into the life record as soon as the mind partition is there.
                 if let (None, Some(dir)) = (&life, &mind_dir) {
                     if now >= life_next_try {
@@ -735,7 +1103,9 @@ fn main() {
                         let result = if mind_is_a_mount && !is_mount_point(dir) {
                             Err(std::io::Error::other(format!("{} is not mounted", dir.display())))
                         } else {
-                            life::Life::wake_at(dir, life::unix_now(), life::boot_clock(), &boot, &body_name)
+                            life_clock_floor = life::saved_clock_floor(dir);
+                            life::Life::wake_at(dir, life::wall_timestamp(life_clock_floor),
+                                               life::boot_clock(), &boot, &body_name)
                         };
                         match result {
                             Ok(woke) => {
@@ -748,6 +1118,7 @@ fn main() {
                                     if woke.new_body { ", in a new body" } else { "" },
                                 );
                                 pending.push((woke.event(), None));
+                                life_next_heartbeat = now + LIFE_HEARTBEAT_SECONDS;
                                 life = Some(woke);
                             }
                             Err(e) => {
@@ -763,8 +1134,27 @@ fn main() {
                         }
                     }
                 }
-                if let Some(life) = &life {
-                    body.note = life.senses_at(life::unix_now(), life::boot_clock());
+                if let Some(Err(error)) = life_heartbeat.completed() {
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        life_next_heartbeat = now + 2.0;
+                    } else {
+                        eprintln!("brainstem: could not record the life heartbeat: {error}");
+                        if error.kind() == std::io::ErrorKind::InvalidData {
+                            life = None;
+                            mind_dir = None;
+                            body.note.clear();
+                        }
+                    }
+                }
+                if let Some(wake) = &life {
+                    let wall = life::wall_timestamp(life_clock_floor);
+                    body.note = wake.senses_at(wall, life::boot_clock(), body.clock_trusted());
+                    if now >= life_next_heartbeat {
+                        life_next_heartbeat = now + LIFE_HEARTBEAT_SECONDS;
+                        if let Err(error) = life_heartbeat.start(wake, wall) {
+                            eprintln!("brainstem: could not start the life heartbeat: {error}");
+                        }
+                    }
                 }
                 let mut outs = machine.set_env(body.lid(), body.dark(), body.night(), now);
                 outs.extend(machine.on_tick(now));
@@ -805,6 +1195,42 @@ fn main() {
 
         pending.extend(camera.update(machine.state(), body.lid_blocked(), body.lid_seq(), now)
             .into_iter().map(|e| (e, None)));
+        directed.extend(look.reconcile(machine.state() == machine::State::Thinking,
+            look_grant(&camera, &machine, &body), now));
+        pending.extend(ears.update(machine.state(), machine.muted(), body.lid_blocked())
+            .into_iter().map(|e| (e, None)));
+        if tick {
+            if let Some(event) = ears.tick(now) {
+                eprintln!("brainstem: microphone capture stayed open after policy closed; stopping ears and voice until reboot");
+                pending.extend(machine.set_privacy_fault(true, now).into_iter().map(|e| (e, None)));
+                pending.push((event, None));
+            }
+            if let Some((child, deadline)) = &mut audio_stop {
+                if let Ok(Some(status)) = child.try_wait() {
+                    if status.success() {
+                        audio_stop_attempts = AUDIO_STOP_ATTEMPTS;
+                    } else {
+                        eprintln!("brainstem: microphone safety latch: systemctl failed with {status}; remaining unwell");
+                    }
+                    audio_stop = None;
+                } else if now >= *deadline {
+                    eprintln!("brainstem: microphone safety latch: systemctl did not finish");
+                    let _ = child.kill();
+                    // Keep the child until try_wait reaps it.
+                    *deadline = f64::INFINITY;
+                }
+            }
+            if ears.tripped() && audio_stop.is_none()
+                && audio_stop_attempts < AUDIO_STOP_ATTEMPTS && now >= next_audio_stop
+            {
+                audio_stop_attempts += 1;
+                next_audio_stop = now + AUDIO_STOP_RETRY_SECONDS;
+                match stop_audio_for_privacy() {
+                    Ok(child) => audio_stop = Some((child, now + AUDIO_STOP_TIMEOUT_SECONDS)),
+                    Err(error) => eprintln!("brainstem: microphone safety latch: could not launch systemctl: {error}"),
+                }
+            }
+        }
 
         // The keyboard light goes out with the panel and comes back with it.
         #[cfg(target_os = "linux")]
@@ -834,17 +1260,33 @@ fn main() {
 
         // Send, and keep going until organs lost along the way are accounted for.
         loop {
+            pending.extend(budget.lid_revoked(body.lid_confirmed_closed(), machine.state_epoch()).map(|event| (event, None)));
+            if machine.state() != last_state {
+                pending.extend(budget.state_changed(machine.state_epoch()).map(|event| (event, None)));
+                eprintln!("brainstem: {} -> {}", last_state.name(), machine.state().name());
+                last_state = machine.state();
+            }
+            let guest = hub.log && (caption_privacy.as_ref().and_then(|event| event.bool("guest")) == Some(true)
+                || guest_latched(appliance_body));
             for (ev, from) in pending.drain(..) {
-                gone.extend(hub.route(&ev, from));
+                gone.extend(hub.route(&ev, from, guest));
+            }
+            for (id, ev) in directed.drain(..) {
+                if let Some(stuck) = hub.direct(id, &ev) { gone.push(stuck); }
             }
             let Some(id) = gone.pop() else { break };
             if let Some(peer) = hub.peers.remove(&id) {
+                pending.extend(budget.disconnected(id, machine.state_epoch()).map(|event| (event, None)));
+                directed.extend(look.disconnected(id));
                 pending.extend(camera.disconnected(id, body.lid_seq()).into_iter().map(|e| (e, None)));
                 if let Some(name) = peer.name.clone() {
                     // Only report it down if no newer connection took the name.
                     if !hub.peers.values().any(|p| p.name.as_deref() == Some(&name)) {
-                        let down = Event::new("organ.down").with("name", name);
+                        let down = Event::new("organ.down").with("name", name.as_str());
                         let outs = machine.on_event(&down, now);
+                        if let Some(note) = turn_ended_note(&name, &outs) {
+                            eprintln!("brainstem: {note}");
+                        }
                         pending.push((down, None));
                         pending.extend(outs.into_iter().map(|e| (e, None)));
                     }
@@ -854,10 +1296,6 @@ fn main() {
             }
         }
 
-        if machine.state() != last_state {
-            eprintln!("brainstem: {} -> {}", last_state.name(), machine.state().name());
-            last_state = machine.state();
-        }
         // Write down what a restart would need, whenever it changes.
         let now_saved = stem_state::Saved { resume: machine.persist(), lid_seq: body.lid_seq() };
         if last_saved != Some(now_saved) {
@@ -1011,6 +1449,35 @@ mod tick_tests {
 
 #[cfg(test)]
 #[test]
+fn quick_menu_routes_use_the_correct_organs_and_the_lid_gate() {
+    for hardware in [false, true] {
+        assert!(allowed_from("ui.action", "face", hardware));
+        assert!(allowed_from("screen.quick_menu", "mind", hardware));
+        for organ in ["hands", "voice", "eyes", "keyboard", "rogue"] {
+            assert!(!allowed_from("ui.action", organ, hardware));
+            assert!(!allowed_from("screen.quick_menu", organ, hardware));
+        }
+        assert!(!allowed_from("ui.action", "mind", hardware));
+        assert!(!allowed_from("screen.quick_menu", "face", hardware));
+    }
+    assert!(blocked_by_lid("ui.action") && blocked_by_lid("screen.quick_menu"));
+}
+
+#[cfg(test)]
+#[test]
+fn only_the_voice_reports_which_clauses_played() {
+    // What Pip remembers saying rests on these receipts (mind/played.py).
+    for hardware in [true, false] {
+        assert!(allowed_from("say.played", "voice", hardware));
+        for organ in ["mind", "face", "keyboard", "console", "hands", "eyes", "bodycare", "rogue"] {
+            assert!(!allowed_from("say.played", organ, hardware), "{organ} may not report playback");
+        }
+    }
+    assert!(blocked_by_lid("say.played"), "a receipt from an earlier lid reading is dropped");
+}
+
+#[cfg(test)]
+#[test]
 fn the_top_row_keys_come_from_the_face_and_reach_the_mind() {
     // Every top-row key the face sends (crates/face/src/keys.rs) is the
     // face's alone on the laptop, like the keys before them, and is routed
@@ -1023,4 +1490,20 @@ fn the_top_row_keys_come_from_the_face_and_reach_the_mind() {
         assert!(allowed_from(topic, "console", false), "the lab's console stands in");
         assert!(!blocked_by_lid(topic), "{topic}");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn a_turn_ended_by_an_organ_restart_is_written_down() {
+    let cancel = |reason: &str| vec![Event::new("mind.cancel").with("reason", reason), Event::new("state.changed")];
+    assert_eq!(
+        turn_ended_note("voice", &cancel("voice_restarted")).as_deref(),
+        Some("the voice came back as a new connection mid-turn, so that turn is over and the ears are open")
+    );
+    assert!(turn_ended_note("mind", &cancel("mind_lost")).unwrap().contains("the mind went away"));
+    // Only its own reason: a timeout or another organ's cancel says nothing here.
+    assert_eq!(turn_ended_note("voice", &cancel("think_timeout")), None);
+    assert_eq!(turn_ended_note("voice", &cancel("mind_restarted")), None);
+    assert_eq!(turn_ended_note("voice", &[Event::new("mind.cancel")]), None);
+    assert_eq!(turn_ended_note("voice", &[]), None);
 }

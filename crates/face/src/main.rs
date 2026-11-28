@@ -4,20 +4,32 @@
 //! (SDL_VIDEODRIVER=kmsdrm). On a development Mac it runs in a window.
 
 mod anim;
+mod audition;
+mod chrome;
+mod colour;
+mod decor;
 mod dpms;
+mod emote;
 mod eye;
 mod keys;
 mod link;
+mod look;
+mod options;
 mod overlay;
 mod pace;
 mod panel;
+mod pointer_probe;
+mod quick_menu;
 mod render;
 mod status;
 mod text;
+mod viseme;
+mod widgets;
 
 use bus::Event;
+use eye::ExprId;
 use sdl2::event::{Event as SdlEvent, WindowEvent};
-use sdl2::keyboard::Keycode;
+use sdl2::keyboard::{Keycode, Mod};
 use sdl2::mouse::MouseButton;
 use sdl2::video::GLProfile;
 use std::path::{Path, PathBuf};
@@ -27,7 +39,7 @@ const HELP: &str = "\
 face: the being's eyes
 
   face                         connect to the brainstem and show its state
-  face --demo                  cycle through expressions and a dreaming preview
+  face --demo                  cycle through expressions (all poses with --full)
   face --standalone            idle on its own, no brainstem needed
   face --fullscreen            cover the screen (always the case on the laptop)
   face --size 1280x800         window size
@@ -35,31 +47,52 @@ face: the being's eyes
                                software renderer, otherwise 1)
   face --bus PATH              bus socket (default: see docs/PROTOCOL.md)
   face --list                  print the expression names
+  face --list-auditions        print the additional Face Lab expression names
   face --snapshot FILE.png [--expr NAME] [--size WxH]    render one still image
-  face --sheet FILE.png [--names a,b,c] [--size WxH]     render a sheet of stills
+  face --sheet FILE.png [--names a,b,c|all] [--size WxH] render a sheet of stills
                                (each tile is WxH if given, else 640x400)
 
 For tests: --hidden shows no window, --exit-after SECS quits by itself, and
 --record FILE.png saves what the face looked like at the moment it quit.
 
 For reviewing motion off-screen:
+  face --audition NAME [--intensity 0..1.5] [--gesture NAME]
+                               play an expression and an optional gesture
+  face --blend NAME [--mix 0..1]           blend with the audition expression
+  face --list-gestures                     list all Face Lab actions
+  face --list-emotes                       list all effects
+  face --emote NAME[,NAME...]              add effects to a preview
+  face --say TEXT                          preview silent mouth articulation
+  face --source-pose                       use the Face Lab's authored eye geometry
+  face --follow-cursor                    track the pointer in a visual preview
+  face --pointer-probe --standalone --fullscreen --exit-after SECS
+                               bounded KMS SDL pointer evidence (max 60 s)
   face --script NAME           play a scripted scene instead of the brainstem:
                                tour (wake, attention, thought, speech, emotions,
-                               idle life, a yawn, sleep), drowse (a long quiet
-                               spell: heavy lids and a yawn, then company) or
-                               birth (the first power-on)
+                               idle life, a yawn, sleep), drowse, birth, or a
+                               Face Lab scene: wake-up, jump-scare, heartbreak,
+                               plot-twist, meltdown, flirt, boot-up, bad-news,
+                               cold-night, motion-arm-a, motion-arm-b,
+                               motion-arm-c, motion-arm-d
   face --frames DIR [--fps N]  run on a fixed clock with no window and save
                                every frame as DIR/frame-00000.png (default 30
-                               fps); pair with --demo or --script, --size and
+                               fps); pair with --audition, --demo or --script, --size and
                                --exit-after, which then counts scene seconds
                                (default: the end of the scene).
                                ffmpeg -framerate 30 -i DIR/frame-%05d.png out.mp4
   face --marks glint,ring,ears,network,ssh   show privacy marks (stills, frames)
+  face --brows --mouth --details --effects   enable individual face layers
+  face --full                  enable all five optional face layers
+  face --style NAME            eyes, eyes+brows, eyes+mouth, expressive, full
+  face --layers LIST           choose brows,mouth,details,effects,colour
+  face --mood-colour           use expression-specific eye colours
+  face --colour NAME           choose a fixed eye colour
+  face --list-colours          list available eye colours
   face --seed N                the same idle life every run (blinks, glances and
                                gestures), for reproducible frame dumps
 
-Keys: Esc interrupts it, M mutes it, F1 shows captions and health (off by default and
-never logged), F2 opens appliance setup, F9 recovers a face with no lid reading, F10
+Keys: Esc interrupts it, M mutes it, F1 shows captions (off by default and
+never logged), Shift+F1 shows health, F2 opens appliance setup, F6 or Command+Space opens the Quick Menu, F9 recovers a face with no lid reading, F10
 mutes it, and Q closes the window. On the laptop the top row does what is printed on it
 (hold fn for F1 to F12): brightness, Mission Control (as F2), Launchpad (the terminal),
 keyboard light, play/pause (listen, or stop a reply), volume and speaker mute; a bar
@@ -84,6 +117,20 @@ struct Args {
     demo: bool,
     standalone: bool,
     list: bool,
+    list_auditions: bool,
+    list_gestures: bool,
+    list_emotes: bool,
+    list_colours: bool,
+    audition: Option<ExprId>,
+    blend: Option<ExprId>,
+    mix: f32,
+    speech: Option<viseme::Visemes>,
+    source_pose: bool,
+    follow_cursor: bool,
+    pointer_probe: bool,
+    manual_emotes: [bool; emote::CHANNELS],
+    intensity: f32,
+    gesture: Option<String>,
     snapshot: Option<PathBuf>,
     sheet: Option<PathBuf>,
     expr: String,
@@ -98,9 +145,33 @@ struct Args {
     seed: Option<u32>,
     /// Privacy marks forced on, for reviewing stills and frames.
     marks: Option<render::Marks>,
+    preview_brows: bool,
+    preview_mouth: bool,
+    preview_details: bool,
+    effects: bool,
+    full: bool,
+    override_layers: bool,
+    mood_colour: bool,
+    palette: Option<colour::Palette>,
 }
 
-fn parse_args() -> Result<Args, String> {
+impl Args {
+    fn select_layers(&mut self, [brows, mouth, details, effects, colour]: [bool; 5]) {
+        self.preview_brows = brows;
+        self.preview_mouth = mouth;
+        self.preview_details = details;
+        self.effects = effects;
+        self.full = brows && mouth && details && effects && colour;
+        self.mood_colour = colour && !self.full;
+        self.override_layers = true;
+    }
+
+    fn demo_catalogue(&self) -> &'static [ExprId] {
+        if self.full { ExprId::ALL } else { ExprId::PUBLIC }
+    }
+}
+
+fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut a = Args {
         bus: bus::socket_path(),
         fullscreen: false,
@@ -109,6 +180,20 @@ fn parse_args() -> Result<Args, String> {
         demo: false,
         standalone: false,
         list: false,
+        list_auditions: false,
+        list_gestures: false,
+        list_emotes: false,
+        list_colours: false,
+        audition: None,
+        blend: None,
+        mix: 0.5,
+        speech: None,
+        source_pose: false,
+        follow_cursor: false,
+        pointer_probe: false,
+        manual_emotes: [false; emote::CHANNELS],
+        intensity: 1.0,
+        gesture: None,
         snapshot: None,
         sheet: None,
         expr: "neutral".to_string(),
@@ -122,8 +207,17 @@ fn parse_args() -> Result<Args, String> {
         fps: 30.0,
         seed: None,
         marks: None,
+        preview_brows: false,
+        preview_mouth: false,
+        preview_details: false,
+        effects: false,
+        full: false,
+        override_layers: false,
+        mood_colour: false,
+        palette: None,
     };
-    let mut it = std::env::args().skip(1);
+    let mut intensity_given = false;
+    let mut mix_given = false;
     while let Some(arg) = it.next() {
         let mut value = |name: &str| it.next().ok_or(format!("{name} needs a value"));
         match arg.as_str() {
@@ -132,7 +226,98 @@ fn parse_args() -> Result<Args, String> {
             "--demo" => a.demo = true,
             "--standalone" => a.standalone = true,
             "--list" => a.list = true,
+            "--list-auditions" => a.list_auditions = true,
+            "--list-gestures" => a.list_gestures = true,
+            "--list-emotes" => a.list_emotes = true,
+            "--list-colours" | "--list-colors" => a.list_colours = true,
+            "--audition" => {
+                let name = value("--audition")?;
+                a.audition = Some(ExprId::from_name(&name).ok_or_else(|| format!("no expression called {name}"))?);
+            }
+            "--blend" => {
+                let name = value("--blend")?;
+                a.blend = Some(ExprId::from_name(&name).ok_or_else(|| format!("no expression called {name}"))?);
+            }
+            "--mix" => {
+                a.mix = value("--mix")?.parse().map_err(|_| "--mix wants a number")?;
+                if !(0.0..=1.0).contains(&a.mix) {
+                    return Err("--mix must be between 0 and 1".to_string());
+                }
+                mix_given = true;
+            }
+            "--source-pose" => a.source_pose = true,
+            "--follow-cursor" => a.follow_cursor = true,
+            "--pointer-probe" => a.pointer_probe = true,
+            "--say" => {
+                let text = value("--say")?;
+                if text.trim().is_empty() || text.chars().count() > 280 {
+                    return Err("--say wants 1 to 280 characters".to_string());
+                }
+                a.speech = Some(viseme::Visemes::new(&text));
+                a.preview_mouth = true;
+            }
+            "--emote" => {
+                let names = value("--emote")?;
+                for name in names.split(',').map(str::trim) {
+                    let channel = emote::channel(name).ok_or_else(|| format!("unknown emote {name:?}"))?;
+                    a.manual_emotes[channel] = true;
+                }
+                a.effects = true;
+            }
+            "--colour" | "--color" => {
+                let name = value("--colour")?;
+                a.palette = Some(colour::Palette::from_name(&name)
+                    .ok_or_else(|| format!("--colour wants one of {}", colour::Palette::NAMES.join(", ")))?);
+            }
+            "--mood-colour" | "--mood-color" => a.mood_colour = true,
+            "--intensity" => {
+                a.intensity = value("--intensity")?.parse().map_err(|_| "--intensity wants a number")?;
+                if !(0.0..=1.5).contains(&a.intensity) {
+                    return Err("--intensity must be between 0 and 1.5".to_string());
+                }
+                intensity_given = true;
+            }
+            "--gesture" => {
+                let name = value("--gesture")?;
+                if audition::Gesture::from_name(&name).is_none() {
+                    return Err(format!("--gesture wants one of {}", audition::Gesture::NAMES.join(", ")));
+                }
+                a.gesture = Some(name);
+            }
             "--hidden" => a.hidden = true,
+            "--brows" => a.preview_brows = true,
+            "--mouth" => a.preview_mouth = true,
+            "--details" => a.preview_details = true,
+            "--effects" => a.effects = true,
+            "--full" => a.select_layers([true; 5]),
+            "--style" => {
+                let style = value("--style")?;
+                let layers = match style.as_str() {
+                    "eyes" => [false; 5],
+                    "eyes+brows" => [true, false, false, false, false],
+                    "eyes+mouth" => [false, true, false, false, false],
+                    "expressive" => [true, true, false, false, false],
+                    "full" => [true; 5],
+                    _ => return Err("--style wants eyes, eyes+brows, eyes+mouth, expressive, or full".to_string()),
+                };
+                a.select_layers(layers);
+            }
+            "--layers" => {
+                let list = value("--layers")?;
+                let mut layers = [false; 5];
+                for name in list.split(',').map(str::trim) {
+                    let index = match name {
+                        "brows" => 0,
+                        "mouth" => 1,
+                        "details" | "eye_details" => 2,
+                        "effects" => 3,
+                        "colour" | "color" | "tint" => 4,
+                        _ => return Err(format!("unknown face layer {name:?}")),
+                    };
+                    layers[index] = true;
+                }
+                a.select_layers(layers);
+            }
             "--scale" => {
                 let n: i32 = value("--scale")?.parse().map_err(|_| "--scale wants a whole number")?;
                 if !(1..=8).contains(&n) {
@@ -143,12 +328,16 @@ fn parse_args() -> Result<Args, String> {
             "--record" => a.record = Some(PathBuf::from(value("--record")?)),
             "--exit-after" => {
                 let secs: f64 = value("--exit-after")?.parse().map_err(|_| "--exit-after wants seconds")?;
+                if !secs.is_finite() || secs < 0.0 {
+                    return Err("--exit-after wants finite, non-negative seconds".to_string());
+                }
                 a.exit_after = Some(secs);
             }
             "--script" => {
                 let name = value("--script")?;
-                if !SCRIPTS.contains(&name.as_str()) {
-                    return Err(format!("--script wants one of {}", SCRIPTS.join(", ")));
+                if !SCRIPTS.contains(&name.as_str()) && !audition::SCENES.contains(&name.as_str()) {
+                    let names = [SCRIPTS, audition::SCENES].concat();
+                    return Err(format!("--script wants one of {}", names.join(", ")));
                 }
                 a.script = Some(name);
             }
@@ -184,6 +373,49 @@ fn parse_args() -> Result<Args, String> {
             other => return Err(format!("unknown option {other}\n\n{HELP}")),
         }
     }
+    a.mood_colour |= a.full && a.palette.is_none();
+    a.effects |= a.manual_emotes.iter().any(|on| *on);
+    a.preview_mouth |= a.speech.is_some();
+    if mix_given && a.blend.is_none() {
+        return Err("--mix requires --blend".to_string());
+    }
+    if a.speech.is_some() && (a.sheet.is_some() || a.snapshot.is_some()) {
+        return Err("--say needs an animated preview".to_string());
+    }
+    let explicit_exit = a.exit_after.is_some();
+    if a.pointer_probe {
+        if !a.fullscreen || !a.standalone {
+            return Err("--pointer-probe requires --fullscreen and --standalone".to_string());
+        }
+        if !explicit_exit || !a.exit_after.is_some_and(|secs| secs > 0.0 && secs <= 60.0) {
+            return Err("--pointer-probe requires --exit-after greater than zero and at most 60 seconds".to_string());
+        }
+        if a.hidden || a.frames.is_some() || a.snapshot.is_some() || a.sheet.is_some() {
+            return Err("--pointer-probe requires a visible live face".to_string());
+        }
+    }
+    if a.audition.is_some() {
+        if a.demo || a.script.is_some() || a.sheet.is_some() || a.snapshot.is_some() {
+            return Err("--audition wants its own scene".to_string());
+        }
+        a.exit_after.get_or_insert(AUDITION_END);
+    } else if intensity_given || a.gesture.is_some() || a.blend.is_some() {
+        return Err("--intensity, --gesture and --blend require --audition".to_string());
+    }
+    if a.gesture.as_deref().and_then(audition::Gesture::from_name) == Some(audition::Gesture::StartleBurst) {
+        a.effects = true;
+    }
+    if let Some(duration) = a.script.as_deref().and_then(audition::duration) {
+        a.exit_after.get_or_insert(duration);
+    }
+    if !explicit_exit {
+        if let Some(speech) = &a.speech {
+            let start = if a.audition.is_some() { AUDITION_START } else { 0.45 };
+            a.exit_after = Some(a.exit_after.unwrap_or(0.0).max(start + speech.duration() + 0.3));
+        } else if a.manual_emotes.iter().any(|on| *on) && a.audition.is_none() && a.script.is_none() && !a.demo {
+            a.exit_after = Some(AUDITION_END);
+        }
+    }
     // Saved frames never end on their own; stop a scene at its natural end
     // rather than filling the disk.
     if a.frames.is_some() && a.exit_after.is_none() {
@@ -191,8 +423,8 @@ fn parse_args() -> Result<Args, String> {
             Some("tour") => 38.0,
             Some("drowse") => 16.0,
             Some("birth") => 9.0,
-            _ if a.demo => 2.5 + 2.4 * eye::NAMES.len() as f64,
-            _ => return Err("--frames needs --script, --demo or --exit-after".to_string()),
+            _ if a.demo => 2.5 + 2.4 * a.demo_catalogue().len() as f64,
+            _ => return Err("--frames needs --audition, --script, --demo or --exit-after".to_string()),
         });
     }
     Ok(a)
@@ -248,11 +480,22 @@ fn make_window(
 }
 
 fn run() -> Result<(), String> {
-    let args = parse_args()?;
-    if args.list {
-        for name in eye::NAMES {
-            println!("{name}");
+    let process_started = Instant::now();
+    let args = parse_args(std::env::args().skip(1))?;
+    if args.list || args.list_auditions {
+        for id in if args.list_auditions { ExprId::AUDITIONS } else { ExprId::PUBLIC } {
+            println!("{}", id.name());
         }
+        return Ok(());
+    }
+    for names in [
+        args.list_gestures.then_some(audition::Gesture::NAMES),
+        args.list_emotes.then_some(&emote::NAMES[..]),
+        args.list_colours.then_some(colour::Palette::NAMES),
+    ].into_iter().flatten() {
+        println!("{}", names.join("\n"));
+    }
+    if args.list_gestures || args.list_emotes || args.list_colours {
         return Ok(());
     }
     let offscreen = args.snapshot.is_some() || args.sheet.is_some();
@@ -268,15 +511,28 @@ fn run() -> Result<(), String> {
     let sdl = sdl2::init()?;
     let video = sdl.video()?;
     let (window, _ctx) = make_window(&video, &args, offscreen || args.hidden || args.frames.is_some())?;
+    let text_input = video.text_input();
+    text_input.stop();
     let gl = unsafe { glow::Context::from_loader_function(|s| video.gl_get_proc_address(s) as *const _) };
     let mut renderer = unsafe { render::Renderer::new(&gl)? };
+    let effects_enabled = args.effects || (!args.override_layers
+        && std::env::var("BEING_FACE_EFFECTS").as_deref() == Ok("1"));
+    if effects_enabled {
+        unsafe { renderer.enable_emotes(&gl)? };
+    }
     let mut look = render::Look::default();
+    let mut decor = decor::Decor::default();
+    let mut mood = colour::Mood::default();
+    look.accent_emotes = effects_enabled;
 
     if let Some(marks) = args.marks {
         look.marks = marks;
     }
     if offscreen {
-        return stills(&gl, &renderer, &look, &args);
+        if args.preview_brows || args.preview_mouth || args.preview_details || effects_enabled {
+            unsafe { renderer.enable_decor(&gl)? };
+        }
+        return stills(&gl, &renderer, &look, &args, effects_enabled);
     }
 
     // A software renderer (a virtual machine, or a GPU with no driver) cannot
@@ -303,27 +559,67 @@ fn run() -> Result<(), String> {
         sdl.mouse().show_cursor(false);
     }
     let mut events = sdl.event_pump()?;
+    let mut pointer_probe = args.pointer_probe.then(pointer_probe::Probe::default);
     let local_setup = cfg!(target_os = "linux") && std::env::var("BEING_LOCAL_SETUP").as_deref() == Ok("1");
     let mut setup_start = Launcher::default();
     let appliance = cfg!(target_os = "linux") && args.fullscreen && !hidden;
+    if appliance && std::env::var("MESA_SHADER_CACHE_DIR").as_deref() == Ok("/mind/display-cache") {
+        eprintln!("face: installed shader cache selected");
+    }
+    let cmdline = appliance.then(|| std::fs::read_to_string("/proc/cmdline").ok()).flatten();
+    let idle_trial = cmdline.as_deref().and_then(pace::idle_trial);
+    if let Some(rate) = idle_trial {
+        eprintln!("face: idle pacing experiment {rate} Hz");
+    }
+    let skip_idle_swaps = !software && !args.standalone && !args.demo && args.script.is_none()
+        && args.audition.is_none() && !args.follow_cursor && video.current_video_driver().eq_ignore_ascii_case("kmsdrm")
+        && cmdline.as_deref().is_some_and(|line| pace::try_switch(line, "being.face_present_on_change"));
+    if skip_idle_swaps {
+        eprintln!("face: present-on-change experiment on the Try panel");
+    }
 
     let seed = args.seed.unwrap_or_else(|| {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(1)
     });
     let mut anim = anim::Anim::new(seed);
-    let solo = args.demo || args.standalone || args.script.is_some();
+    if cmdline.as_deref().is_some_and(|line| pace::try_switch(line, "being.face_reply_ladder")) {
+        anim.enable_reply_ladder();
+        eprintln!("face: speech-end reply ladder experiment");
+    }
+    if cmdline.as_deref().is_some_and(|line| line.split_ascii_whitespace().any(|word| word == "being.body_breath=1")) {
+        anim.enable_effort_breathing();
+        eprintln!("face: body effort breathing experiment");
+    }
+    let concept_scene = args.script.as_deref().is_some_and(|name| audition::SCENES.contains(&name));
+    let manual_effects = args.manual_emotes.iter().any(|on| *on);
+    let direct_preview = manual_effects || args.speech.is_some() || args.follow_cursor;
+    if args.audition.is_some() || concept_scene || direct_preview || args.source_pose || (args.demo && args.full) {
+        anim.enable_concept_preview(args.manual_emotes, args.source_pose);
+    }
+    let offline_scene = args.demo || args.script.is_some() || args.audition.is_some() || direct_preview;
+    let solo = args.standalone || offline_scene;
     // The appliance starts dark until the brainstem reports the lid, but not
     // for long: with no lid reading it shows itself (dazed if the brainstem
     // is gone) rather than leave a black panel.
     let lid_grace = args.fullscreen.then_some(link::LID_GRACE);
     let mut link = if solo { None } else { Some(link::Link::new(args.bus.clone(), lid_grace)) };
+    let look_path = (!solo && appliance).then(|| {
+        std::env::var_os("BEING_MIND").map_or_else(|| PathBuf::from("/mind"), PathBuf::from).join("look.json")
+    });
+    // The mount is ordered before the face on the appliance. Read the
+    // durable look before the first frame, without waiting for the mind/bus.
+    let mut prefs = look_path.as_ref()
+        .map(|path| look::Prefs::startup(path, Path::new(look::MIRROR))).unwrap_or_default();
+    prefs.palette(&mut look);
+    let mut next_look_check = Instant::now();
     if let Some(link) = &mut link {
         link.side = link::Side::new(appliance.then(|| PathBuf::from(BIRTH_MARKER)));
+        link.side.captions.set_enabled(prefs.captions);
     }
     if solo {
         anim.set_state("idle", false, false);
-        if args.demo || args.script.is_some() {
-            anim.set_lid(Some(false), false, false);
+        if offline_scene {
+            anim.set_lid(Some(false), false, concept_scene || (direct_preview && args.audition.is_none()));
         }
     } else if args.fullscreen {
         anim.set_lid(None, false, true);
@@ -338,17 +634,29 @@ fn run() -> Result<(), String> {
     let mut power = dpms::Power::new(drm);
     let mut connectors = dpms::Connectors::default();
     let watch = if appliance { status::Watch::start(PathBuf::from("/")) } else { status::Watch::none() };
-    let mut panel = Some(panel::Panel::new(
+    let mut panel = (!offline_scene).then(|| panel::Panel::new(
         std::env::var_os("BEING_PANEL_DIR").map_or_else(|| PathBuf::from(panel::DIR), PathBuf::from),
     ));
     let mut keys = panel::KeySender::new(std::env::var_os("BEING_HANDS_KEYS").map_or_else(|| PathBuf::from(panel::KEYS), PathBuf::from));
     let mut panel_tex: Option<render::Texture> = None;
+    let mut lookup_texture = false;
+    let mut menu_tex: Option<render::Texture> = None;
+    let mut menu_painted = None;
+    let mut options_tex: Option<render::Texture> = None;
+    let mut options_painted = None;
     // The picture changed while hidden, so the texture is out of date.
     let mut panel_behind = false;
     let mut panel_amount = 0f32;
     let mut panel_focus = false;
+    let mut previous_job = None;
+    let mut widget_tiles = widgets::Tiles::default();
+    let mut caption_tex: Option<render::Texture> = None;
+    let mut caption_style = None;
+    let mut saved_captions = prefs.captions;
+    let mut health_open = false;
     let mut overlay_tex: Option<render::Texture> = None;
     let mut overlay_drawn: Option<Instant> = None;
+    let mut night_notice: Option<(u64, render::Texture)> = None;
     // The level bar shown after a brightness, volume or keyboard-light change.
     let mut level_tex: Option<render::Texture> = None;
     // The text in level_tex, and how strongly it is drawn.
@@ -374,8 +682,13 @@ fn run() -> Result<(), String> {
     let mut demo_index = 0usize;
     let started = Instant::now();
     let mut last = started;
-    let mut pose = eye::preset("asleep").unwrap();
+    let mut pose = ExprId::Asleep.pose();
     let mut blank_presented = false;
+    let mut displayed_idle = None;
+    // A first swap can be black while the physical lid reading is pending.
+    // Time the later visible frame separately, including GL setup above.
+    let mut first_presented = false;
+    let mut first_visible = false;
     let mut deadline: Option<Instant> = None;
     let mut frame_no = 0u64;
     let mut clock = 0f64;
@@ -390,6 +703,9 @@ fn run() -> Result<(), String> {
             break 'run;
         }
         for event in events.poll_iter() {
+            if matches!(&event, SdlEvent::Window { .. }) {
+                displayed_idle = None;
+            }
             match event {
                 SdlEvent::Quit { .. } => break 'run,
                 SdlEvent::Window { win_event: WindowEvent::DisplayChanged(display), .. } => {
@@ -403,6 +719,60 @@ fn run() -> Result<(), String> {
                         continue;
                     }
                     let Some(key) = keycode else { continue };
+                    let command_space = key == Keycode::Space && keymod.intersects(Mod::LGUIMOD | Mod::RGUIMOD);
+                    if key == Keycode::F6 || command_space {
+                        if !repeat && !anim.panel_blank() && !anim.asleep() && prefs.menu_position != "off"
+                            && !watch.get().guest
+                        {
+                            if let Some(link) = link.as_mut().filter(|link| !link.quiet()) {
+                                link.toggle_menu();
+                            }
+                        }
+                        continue;
+                    }
+                    if let Some(link) = link.as_mut().filter(|link| link.side.options.open()) {
+                        if ![Keycode::F1, Keycode::F2, Keycode::F9, Keycode::F10].contains(&key) {
+                            let return_to_menu = key == Keycode::Escape && !repeat && link.side.options.opened_from_menu();
+                            if let Some(change) = link.side.options.key(key, repeat, prefs, keymod) {
+                                link.side.options.set_status(None);
+                                link.ui_action(Event::new("ui.action").with("id", "shell.options.set")
+                                    .with("field", change.field).with("value", change.value));
+                            }
+                            if return_to_menu && !anim.panel_blank() && !anim.asleep()
+                                && prefs.menu_position != "off" && !watch.get().guest && !link.quiet()
+                            {
+                                link.side.menu.set_open(true);
+                            }
+                            continue;
+                        }
+                    }
+                    if let Some(link) = link.as_mut().filter(|link| link.side.menu.open()) {
+                        if ![Keycode::F1, Keycode::F2, Keycode::F9, Keycode::F10].contains(&key) {
+                            match link.menu_key(key, repeat, true, frame_start) {
+                                Some(quick_menu::Selection::App(id)) => {
+                                    link.menu_action(id);
+                                    panel_focus = false;
+                                }
+                                Some(selection @ (quick_menu::Selection::Options | quick_menu::Selection::Help
+                                    | quick_menu::Selection::Setting(_))) => {
+                                    link.side.options.open_from_menu();
+                                    match selection {
+                                        quick_menu::Selection::Help => link.side.options.show_help(),
+                                        quick_menu::Selection::Setting(field) => link.side.options.focus_setting(field),
+                                        _ => {}
+                                    }
+                                    link.menu_action("shell.options.open");
+                                    panel_focus = false;
+                                }
+                                Some(quick_menu::Selection::Care) => {
+                                    link.menu_action("shell.care.open");
+                                    panel_focus = false;
+                                }
+                                None => {}
+                            }
+                            continue;
+                        }
+                    }
                     // Typing into an open, focused app panel goes to hands.
                     // Esc, F1, F2, F9 and F10 keep their meaning; M is a letter.
                     let reserved = [Keycode::Escape, Keycode::F1, Keycode::F2, Keycode::F9, Keycode::F10].contains(&key);
@@ -425,10 +795,12 @@ fn run() -> Result<(), String> {
                             link.send(Event::new("key.interrupt"));
                         }
                     } else if key == Keycode::F1 {
-                        if let Some(link) = &mut link {
+                        if keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) {
+                            health_open = !health_open;
+                            overlay_drawn = None;
+                        } else if let Some(link) = &mut link {
                             link.side.captions.toggle();
                         }
-                        overlay_drawn = None;
                     } else if key == Keycode::M || key == Keycode::F10 {
                         if let Some(link) = &mut link {
                             link.send(Event::new("key.mute"));
@@ -448,20 +820,39 @@ fn run() -> Result<(), String> {
                         }
                     }
                 }
+                SdlEvent::TextInput { text, .. } => {
+                    if let Some(link) = link.as_mut().filter(|link| link.side.menu.searching()) {
+                        link.side.menu.input(&text);
+                    }
+                }
+                SdlEvent::MouseMotion { x, y, which, .. } if (args.follow_cursor || pointer_probe.is_some()) && which != u32::MAX => {
+                    if let Some(probe) = &mut pointer_probe { probe.motion(x, y); }
+                    if args.follow_cursor {
+                        let (w, h) = window.size();
+                        if w > 0 && h > 0 {
+                            anim.set_gaze(2.0 * x as f32 / w as f32 - 1.0, 1.0 - 2.0 * y as f32 / h as f32);
+                        }
+                    }
+                }
+                SdlEvent::Window { win_event: WindowEvent::Leave, .. } if args.follow_cursor => anim.clear_gaze(),
                 // SDL may synthesize a mouse event from the same touch, or
                 // a touch from a mouse click. Ignore the synthetic copies.
                 SdlEvent::MouseButtonDown { mouse_btn: MouseButton::Left, which, .. } if which != u32::MAX => {
-                    if let Some(link) = &mut link {
+                    if let Some(probe) = &mut pointer_probe { probe.mouse_click(); }
+                    if offline_scene && !recording {
+                        audition::Gesture::Poke.perform(&mut anim);
+                    } else if let Some(link) = &mut link {
                         link.send(Event::new("key.touch"));
-                        if asks_attention(&anim, panel_focus) {
+                        if !link.side.menu.open() && !link.side.options.open() && asks_attention(&anim, panel_focus) {
                             link.send(Event::new("key.attend"));
                         }
                     }
                 }
                 SdlEvent::FingerDown { touch_id, .. } if touch_id != -1 => {
+                    if let Some(probe) = &mut pointer_probe { probe.finger_down(); }
                     if let Some(link) = &mut link {
                         link.send(Event::new("key.touch"));
-                        if asks_attention(&anim, panel_focus) {
+                        if !link.side.menu.open() && !link.side.options.open() && asks_attention(&anim, panel_focus) {
                             link.send(Event::new("key.attend"));
                         }
                     }
@@ -475,9 +866,14 @@ fn run() -> Result<(), String> {
                 continue;
             }
             let dark_and_alone = anim.panel_blank() && link.as_ref().is_some_and(|l| l.quiet());
-            match keys::action(key, asks_attention(&anim, panel_focus)) {
+            let chrome_open = link.as_ref().is_some_and(|link| link.side.menu.open() || link.side.options.open());
+            match keys::action(key, !chrome_open && asks_attention(&anim, panel_focus)) {
                 keys::Action::Send(ev) => {
                     if let Some(link) = &mut link {
+                        if key == keys::Media::Launchpad {
+                            link.side.menu.set_open(false);
+                            link.side.options.set_open(false);
+                        }
                         link.send(ev);
                     }
                 }
@@ -511,35 +907,96 @@ fn run() -> Result<(), String> {
             }
             let t = clock;
             if let Some(name) = &args.script {
-                skip = scene(anim, name, previous, t);
+                if concept_scene {
+                    let previous = if frame_no == 0 { -1.0 } else { previous };
+                    audition::advance(anim, name, previous, t);
+                } else {
+                    skip = scene(anim, name, previous, t);
+                }
+            }
+            if let Some(id) = args.audition {
+                if previous < AUDITION_START && t >= AUDITION_START {
+                    let blend = args.blend.map(|other| (other, args.mix));
+                    let (primary, blend) = match blend {
+                        Some((other, 1.0)) => (other, None),
+                        Some((_, 0.0)) => (id, None),
+                        _ => (id, blend),
+                    };
+                    let hold = args.speech.as_ref().map_or(AUDITION_HOLD, |speech| AUDITION_HOLD.max(speech.duration()));
+                    anim.audition_blend(primary, args.intensity, hold, blend);
+                }
+                if let Some(gesture) = &args.gesture {
+                    if previous < AUDITION_GESTURE && t >= AUDITION_GESTURE {
+                        if let Some(gesture) = audition::Gesture::from_name(gesture) {
+                            gesture.perform(anim);
+                        }
+                    }
+                }
             }
             if args.demo && t >= demo_next {
-                let name = eye::NAMES[demo_index % eye::NAMES.len()];
+                let catalogue = args.demo_catalogue();
+                let expression = catalogue[demo_index % catalogue.len()];
                 demo_index += 1;
                 demo_next = t + 2.4;
-                match name {
-                    "asleep" => anim.set_state("asleep", false, false),
-                    "dreaming" => anim.preview_dreaming(),
-                    "muted" => anim.set_state("idle", true, false),
-                    "dazed" => anim.set_state("idle", false, true),
+                match expression {
+                    _ if args.full => anim.audition(expression, 1.0, 2.4),
+                    ExprId::Asleep => anim.set_state("asleep", false, false),
+                    ExprId::Dreaming => anim.preview_dreaming(),
+                    ExprId::Muted => anim.set_state("idle", true, false),
+                    ExprId::Dazed => anim.set_state("idle", false, true),
                     _ => {
                         anim.set_state("idle", false, false);
-                        anim.express(name, 2.4);
+                        anim.express(expression.name(), 2.4);
                     }
                 }
             }
         });
+        if look_path.is_some() && now >= next_look_check {
+            next_look_check = now + Duration::from_secs(1);
+            if let Some(saved) = look::Prefs::read(Path::new(look::MIRROR)).filter(|saved| saved.revision > prefs.revision) {
+                prefs = saved;
+                prefs.palette(&mut look);
+            }
+        }
+        if let Some(request) = link.as_ref().and_then(|link| link.side.look)
+            .filter(|request| request.revision >= prefs.revision && *request != prefs)
+        {
+            prefs = request;
+            prefs.palette(&mut look);
+        }
+        if prefs.captions != saved_captions {
+            if let Some(link) = &mut link {
+                link.side.captions.set_enabled(prefs.captions);
+            }
+            saved_captions = prefs.captions;
+        }
+        anim.set_idle_glances(prefs.idle_glances);
         let panel_blank = anim.panel_blank();
-
+        let guest = watch.get().guest || link.as_ref().is_some_and(|link| link.side.menu.guest());
+        let lookup_allowed = !panel_blank && !watch.get().guest
+            && link.as_ref().is_some_and(|link| link.lookup_available(Instant::now()));
+        if lookup_texture && !lookup_allowed {
+            if let Some(old) = panel_tex.take() {
+                unsafe { renderer.delete(&gl, old) };
+            }
+            lookup_texture = false;
+            panel_behind = true;
+        }
         // The workshop panel: read what is new, and let its focus steer the
         // eyes. Nothing is read while the screen is dark, and nothing is
         // uploaded while the face covers the panel in its sleep (the app's
         // own state does not change).
         let mut shown = None;
         let covered = anim.asleep();
-        if let (Some(panel), false) = (&mut panel, panel_blank) {
-            let update = panel.poll(now);
-            if let Some(header) = panel.shown(now).filter(|_| !covered) {
+        if let (Some(panel), false) = (&mut panel, panel_blank || guest) {
+            let update = if link.as_ref().is_some_and(|link| link.side.menu.waiting()) {
+                panel.poll_while_opening(now)
+            } else {
+                panel.poll(now)
+            };
+            let lookup_panel = panel.following().and_then(|path| path.file_stem()?.to_str()) == Some("lookup");
+            let private_lookup = lookup_panel && !lookup_allowed;
+            if let Some(header) = panel.shown(now).filter(|_| !covered && !private_lookup) {
                 shown = Some(header.clone());
                 let (w, h) = (panel.width as i32, panel.height as i32);
                 // Rows that changed while the panel was hidden never reached
@@ -559,23 +1016,95 @@ fn run() -> Result<(), String> {
                         }
                     }
                 }
-            } else if update != panel::Update::Nothing {
+                lookup_texture = lookup_panel;
+            } else if private_lookup || update != panel::Update::Nothing {
                 panel_behind = true;
             }
             let flags = panel.flags(now);
             anim.set_typing_hidden(shown.is_none() && flags & panel::flag::PIP_TYPING != 0);
-        } else if let (Some(panel), true) = (&mut panel, panel_blank) {
-            // Nothing of an app's screen stays in the face while it is dark;
-            // the whole frame is read again when the panel lights.
+        } else if let Some(panel) = &mut panel {
+            // The whole app frame is read again when the panel lights.
             if !panel.pixels.is_empty() {
                 panel.forget_picture();
             }
+            // Close old pixels immediately while hands clears its own
+            // surfaces. The menu must never expose the panel it covered.
+            if guest {
+                if let Some(old) = panel_tex.take() {
+                    unsafe { renderer.delete(&gl, old) };
+                }
+                lookup_texture = false;
+            }
         }
-        let target = if shown.is_some() { 1.0 } else { 0.0 };
-        let step = dt.min(0.1) / panel::TRANSITION;
-        panel_amount = if target > panel_amount { (panel_amount + step).min(1.0) } else { (panel_amount - step).max(0.0) };
-        panel_focus = shown.as_ref().is_some_and(|h| h.has(panel::flag::FOCUS)) && panel_amount > 0.5;
-        anim.set_focus(shown.as_ref().and_then(|h| {
+        let visible_app = shown.as_ref().and_then(|_| panel.as_ref()?.following()?.file_stem()?.to_str());
+        let mut menu_position = None;
+        let mut options_visible = false;
+        let mut opening_app = false;
+        let mut app_reaction = None;
+        if let Some(link) = &mut link {
+            link.side.menu.set_online(lookup_allowed);
+            link.side.menu.set_care_allowed(local_setup);
+            if let Some(position) = quick_menu::Position::parse(prefs.menu_position) {
+                link.side.menu.position = position;
+            } else {
+                link.side.menu.set_open(false);
+            }
+            if panel_blank || anim.asleep() || guest || link.quiet() {
+                link.side.menu.set_open(false);
+                link.side.options.set_open(false);
+            } else {
+                link.side.menu.observe(visible_app, now);
+                opening_app = link.side.menu.waiting();
+                app_reaction = link.side.menu.take_reaction();
+            }
+            let options = &link.side.options;
+            if options.open() {
+                if let Some(font) = text::font() {
+                    let style = (options.style_key(), prefs);
+                    if options_painted != Some(style) {
+                        let picture = options.picture(font, prefs);
+                        unsafe {
+                            if let Some(old) = options_tex.take() {
+                                renderer.delete(&gl, old);
+                            }
+                            options_tex = Some(renderer.texture(&gl, picture.w as i32, picture.h as i32, &picture.rgba)?);
+                        }
+                        options_painted = Some(style);
+                    }
+                    options_visible = true;
+                }
+            }
+            let menu = &link.side.menu;
+            if menu.open() {
+                if let Some(font) = text::font() {
+                    let style = (menu.style_key(true), prefs.menu_labels);
+                    if menu_painted != Some(style) {
+                        let picture = menu.picture(font, true, prefs.menu_labels);
+                        unsafe {
+                            if let Some(old) = menu_tex.take() {
+                                renderer.delete(&gl, old);
+                            }
+                            menu_tex = Some(renderer.texture(&gl, picture.w as i32, picture.h as i32, &picture.rgba)?);
+                        }
+                        menu_painted = Some(style);
+                    }
+                    menu_position = Some(menu.position);
+                }
+            }
+        }
+        let wants_text = menu_position.is_some();
+        if wants_text != text_input.is_active() {
+            if wants_text {
+                text_input.start();
+            } else {
+                text_input.stop();
+            }
+        }
+        let surface_open = shown.is_some() || menu_position.is_some() || options_visible;
+        panel_amount = panel::advance_transition(panel_amount, surface_open, dt);
+        let chrome_focus = menu_position.is_some() || options_visible;
+        panel_focus = !chrome_focus && shown.as_ref().is_some_and(|h| h.has(panel::flag::FOCUS)) && panel_amount > 0.5;
+        let focus = shown.as_ref().filter(|_| !chrome_focus).and_then(|h| {
             let gaze = |point: Option<(u32, u32)>| point.map(|(x, y)| panel::gaze_at(x, y, h.width, h.height));
             if h.has(panel::flag::PIP_PAUSED) {
                 Some(anim::Focus { kind: anim::FocusKind::Paused, at: [0.0, 0.1] })
@@ -586,12 +1115,29 @@ fn run() -> Result<(), String> {
             } else {
                 None
             }
-        }));
+        });
+        anim.set_focus(if opening_app {
+            Some(anim::Focus { kind: anim::FocusKind::Watching, at: [0.0, -0.66] })
+        } else {
+            focus
+        });
+        let job = shown.as_ref()
+            .filter(|h| panel_focus && visible_app == Some("terminal") && !h.has(panel::flag::SCROLLED))
+            .map(|h| (h.pid, h.job_result()));
+        let job_reaction = match (previous_job, job) {
+            (Some((old_pid, None)), Some((pid, result))) if old_pid == pid => result,
+            _ => None,
+        };
+        previous_job = job;
+        if let Some(success) = app_reaction.or(job_reaction) {
+            anim.screen_outcome(success);
+        }
         // Once the panel has faded out, its texture goes too.
         if shown.is_none() && panel_amount == 0.0 {
             if let Some(old) = panel_tex.take() {
                 unsafe { renderer.delete(&gl, old) };
             }
+            lookup_texture = false;
         }
 
         // Privacy on the face (task 7.5).
@@ -614,6 +1160,7 @@ fn run() -> Result<(), String> {
         match power.step(now, panel_blank, panel_blank && blank_presented) {
             dpms::Step::Nothing => {}
             step => {
+                displayed_idle = None;
                 let off = step == dpms::Step::TurnOff;
                 let value = if off { dpms::DPMS_OFF } else { dpms::DPMS_ON };
                 let result = dpms::sdl_drm_fd(&window)
@@ -637,10 +1184,32 @@ fn run() -> Result<(), String> {
             let (w, h) = window.drawable_size();
             (w as i32, h as i32)
         };
+        let captions_open = link.as_ref().is_some_and(|link| link.side.captions.on);
+        let showing_captions = link.as_ref().is_some_and(|link| link.side.captions.displaying(now));
+        if panel_blank || guest || !showing_captions {
+            if let Some(old) = caption_tex.take() {
+                unsafe { renderer.delete(&gl, old) };
+            }
+            caption_style = None;
+        } else if let (Some(font), Some(link)) = (text::font(), &mut link) {
+            let zoom = (h as f32 / 800.0).clamp(1.0, 1.5);
+            let columns = ((((w as f32 / zoom) as usize).saturating_sub(84)) / font.w).clamp(24, 96);
+            let style = (columns, prefs.caption_heard, prefs.caption_cost);
+            if link.side.captions.take_captions_changed() || caption_style != Some(style) {
+                if let Some(old) = caption_tex.take() {
+                    unsafe { renderer.delete(&gl, old) };
+                }
+                if let Some(picture) = link.side.captions.picture(font, columns, prefs.caption_heard, prefs.caption_cost) {
+                    caption_tex = Some(unsafe {
+                        renderer.texture(&gl, picture.w as i32, picture.h as i32, &picture.rgba)?
+                    });
+                }
+                caption_style = Some(style);
+            }
+        }
         if !panel_blank {
-            // Captions and health, behind F1. Redrawn at most twice a second.
-            let open = link.as_ref().is_some_and(|l| l.side.captions.on);
-            if open {
+            // Shift+F1 keeps the hardware diagnostics available independently.
+            if health_open {
                 let changed = link.as_mut().is_some_and(|l| l.side.captions.take_changed());
                 let stale = overlay_drawn.is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_millis(500));
                 if changed || stale || overlay_tex.is_none() {
@@ -660,7 +1229,7 @@ fn run() -> Result<(), String> {
                     if let (Some(font), Some(link)) = (text::font(), &link) {
                         let zoom = (h / 800).max(1) as usize;
                         let columns = ((w as usize / zoom).saturating_sub(24) / font.w).clamp(40, 120);
-                        let lines = link.side.captions.lines(&health, columns);
+                        let lines = link.side.captions.health_lines(&health, columns);
                         let pic = font.render(&lines, columns, text::Ink { rgb: CAPTION_INK, backing: 200 });
                         unsafe {
                             if let Some(old) = overlay_tex.take() {
@@ -702,7 +1271,7 @@ fn run() -> Result<(), String> {
             }
             // A software renderer says so on screen for its first half
             // minute, too dim for anyone's eye detector to count.
-            if software && scene_time < SOFTWARE_NOTE.as_secs_f64() {
+            if software && !offline_scene && scene_time < SOFTWARE_NOTE.as_secs_f64() {
                 if note_tex.is_none() {
                     if let Some(font) = text::font() {
                         let line = format!("drawn in software ({drawn_by}): slower, at 1/{scale} size");
@@ -717,13 +1286,85 @@ fn run() -> Result<(), String> {
         }
         let overlays: Vec<(&render::Texture, i32)> =
             overlay_tex.iter().map(|t| (t, 8)).chain(note_tex.iter().map(|t| (t, 4))).collect();
+        let notice = link.as_ref().and_then(|link| link.night_notice(now)).filter(|_| {
+            !panel_blank && !anim.asleep() && panel_amount == 0.0 && !privacy.guest && !captions_open && !health_open
+                && level_tex.is_none()
+        });
+        if notice != night_notice.as_ref().map(|(stages, _)| *stages) {
+            if let Some((_, old)) = night_notice.take() {
+                unsafe { renderer.delete(&gl, old) };
+            }
+            if let (Some(stages), Some(font)) = (notice, text::font()) {
+                let units = if stages == 1 { "stage" } else { "stages" };
+                let line = format!("Night shift · {stages} {units} finished · Journal");
+                let columns = line.chars().count();
+                let pic = font.render(&[line], columns, text::Ink { rgb: CAPTION_INK, backing: 200 });
+                night_notice = Some((stages, unsafe { renderer.texture(&gl, pic.w as i32, pic.h as i32, &pic.rgba)? }));
+            }
+        }
+        let layer_space = panel_amount == 0.0 && shown.is_none() && !chrome_focus
+            && !captions_open && !health_open && level_tex.is_none() && night_notice.is_none();
+        let use_prefs = !args.override_layers;
+        let layers = decor::Layers {
+            brows: args.preview_brows || (use_prefs && prefs.brows),
+            mouth: args.preview_mouth || (use_prefs && prefs.mouth),
+            details: args.preview_details || (use_prefs && prefs.eye_details),
+        };
+        let mut motion = if layer_space { anim.decor_motion(offline_scene) } else { None };
+        if let (Some(motion), Some(speech)) = (&mut motion, &args.speech) {
+            let start = if args.audition.is_some() { AUDITION_START } else { 0.45 };
+            motion.viseme = speech.sample(clock - start);
+        }
+        if args.mood_colour || (use_prefs && prefs.mood_colour) {
+            prefs.palette(&mut look);
+            if let Some(motion) = motion {
+                let tint = mood_tint(motion.expression, motion.blend);
+                mood.update(tint, motion.strength, dt);
+                mood.apply(&mut look);
+            } else {
+                mood = colour::Mood::default();
+            }
+        }
+        if let Some(palette) = args.palette {
+            palette.apply(&mut look);
+        }
+        decor.update(layers, motion, dt);
+        look.decor = decor;
+        let eyes = prefs.eyes(pose.uniforms());
+        let show_effects = effects_enabled || (use_prefs && prefs.effects);
+        look.accent_emotes = show_effects;
+        let effects = if show_effects && layer_space { anim.emote_motion(offline_scene) } else { None };
+        look.glitch = effects.map_or([0.0; 4], |(effects, _, age)| emote::glitch(effects[emote::GLITCH], age));
+        look.emotes = effects.map_or_else(emote::Sprites::default, |(effects, burst, age)| {
+            emote::sprites(&effects, burst, &eyes, age, seed)
+        });
+        if decor.active() || look.glitch[3] > 0.0 {
+            unsafe { renderer.enable_decor(&gl)? };
+        }
+        if look.emotes.len() > 0 {
+            unsafe { renderer.enable_emotes(&gl)? };
+        }
+        let widget_now = Instant::now();
+        let widget_link = link.as_ref().filter(|_| !guest && !privacy.guest);
+        let widget_readings = widget_link.and_then(|link| link.widget_readings(widget_now));
+        let widget_weather = widget_link.filter(|_| prefs.weather_widget && !anim.asleep())
+            .and_then(|link| link.online_weather(widget_now));
+        let widgets = widget_readings.is_some() || widget_weather.is_some();
+        unsafe { widget_tiles.refresh(&gl, &renderer, widget_readings.unwrap_or_default(),
+                                      prefs.clock_widget, prefs.system_widget, widget_weather)? };
         let scene = Scene {
+            widgets: widgets.then_some(&widget_tiles),
             blank: panel_blank,
             amount: panel_amount,
-            eyes: pose.uniforms(),
+            eyes,
             look: &look,
+            prefs,
             panel: panel_tex.as_ref(),
+            menu: menu_position.zip(menu_tex.as_ref()),
+            options: options_tex.as_ref().filter(|_| options_visible),
             overlays: &overlays,
+            caption: caption_tex.as_ref().filter(|_| !health_open),
+            night: night_notice.as_ref().map(|(_, texture)| texture),
             level: level_tex.as_ref(),
             level_alpha,
         };
@@ -735,13 +1376,34 @@ fn run() -> Result<(), String> {
         }
         frame_no += 1;
 
+        // Compare to the frame actually on scanout. A sequence of small pose
+        // changes still crosses the threshold and presents a new frame.
+        let pending_panel_wake = link.as_ref().is_some_and(link::Link::pending_panel_wake);
+        let idle_frame = if skip_idle_swaps && !surface_open && !pending_panel_wake && anim.trial_idle() {
+            scene.settled_eyes(w, h)
+        } else {
+            None
+        };
+        let idle_unchanged = idle_frame.as_ref().zip(displayed_idle.as_ref())
+            .is_some_and(|(next, prior)| next.same_image(prior));
         let mut drew = false;
         let mut drawing = Duration::ZERO;
-        if !hidden && !(panel_blank && blank_presented) {
+        let mut swapped_at = None;
+        if !hidden && !(panel_blank && blank_presented) && !idle_unchanged {
             unsafe { scene.draw(&gl, &mut renderer, w, h, scale)? };
             drawing = frame_start.elapsed();
             window.gl_swap_window();
+            swapped_at = Some(Instant::now());
             drew = true;
+            displayed_idle = idle_frame;
+            if !first_presented {
+                first_presented = true;
+                eprintln!("face: first frame presented {:.3} s after process start", process_started.elapsed().as_secs_f64());
+            }
+            if !first_visible && !panel_blank {
+                first_visible = true;
+                eprintln!("face: first visible eye frame {:.3} s after process start", process_started.elapsed().as_secs_f64());
+            }
             blank_presented = panel_blank;
             if let Some(link) = &mut link {
                 link.presented();
@@ -749,6 +1411,7 @@ fn run() -> Result<(), String> {
         }
         drop(overlays);
         if let Some(link) = &mut link {
+            link.report_look(prefs);
             if panel_blank {
                 // Nothing heard is kept while the screen is dark.
                 link.side.captions.forget();
@@ -756,10 +1419,18 @@ fn run() -> Result<(), String> {
         }
 
         // Draw only as often as what is on screen needs (task 2.1).
-        rate = pace::hz(anim.activity(), software);
+        let activity = anim.activity();
+        rate = pace::hz(activity, software);
         if panel_amount > 0.0 && panel_amount < 1.0 {
             rate = pace::hz(pace::Activity::Active, software);
-        } else if shown.is_some() {
+        } else if surface_open {
+            rate = rate.max(pace::hz(pace::Activity::Calm, software));
+        } else if idle_unchanged {
+            rate = pace::hz(pace::Activity::Blank, software);
+        } else if let Some(idle) = idle_trial.filter(|_| !captions_open && !health_open && level_tex.is_none() && anim.trial_idle()) {
+            rate = rate.min(idle);
+        }
+        if look.decor.moving() || look.emotes.len() > 0 || look.glitch[3] > 0.0 {
             rate = rate.max(pace::hz(pace::Activity::Calm, software));
         }
         let work = frame_start.elapsed();
@@ -767,6 +1438,7 @@ fn run() -> Result<(), String> {
             frame_ms = if frame_ms == 0.0 { work.as_secs_f64() * 1e3 } else { 0.9 * frame_ms + 0.1 * work.as_secs_f64() * 1e3 };
         }
         stats.frame(work, drawing, drew, rate);
+        stats.presentation(swapped_at.filter(|_| activity == pace::Activity::Active), idle_unchanged);
         if let Some(line) = stats.report(Instant::now()) {
             eprintln!("{line}");
         }
@@ -780,6 +1452,9 @@ fn run() -> Result<(), String> {
     }
 
     watchdog.stopping();
+    if let Some(probe) = pointer_probe {
+        eprintln!("{}", probe.summary(video.current_video_driver()));
+    }
     if power.restore() {
         if let Some(fd) = dpms::sdl_drm_fd(&window) {
             let _ = connectors.set(fd, dpms::DPMS_ON);
@@ -788,13 +1463,26 @@ fn run() -> Result<(), String> {
     if let Some(path) = &args.record {
         let (w, h) = args.size;
         let overlays: Vec<(&render::Texture, i32)> = overlay_tex.iter().map(|t| (t, 8)).collect();
+        let now = Instant::now();
+        let link_widgets = link.as_ref().filter(|link| !link.side.menu.guest() && !watch.get().guest);
+        let widget_readings = link_widgets.and_then(|link| link.widget_readings(now));
+        let widget_weather = link_widgets.filter(|_| prefs.weather_widget && !anim.asleep())
+            .and_then(|link| link.online_weather(now));
+        unsafe { widget_tiles.refresh(&gl, &renderer, widget_readings.unwrap_or_default(),
+                                      prefs.clock_widget, prefs.system_widget, widget_weather)? };
         let scene = Scene {
+            widgets: (widget_readings.is_some() || widget_weather.is_some()).then_some(&widget_tiles),
             blank: anim.panel_blank(),
             amount: panel_amount,
-            eyes: pose.uniforms(),
+            eyes: prefs.eyes(pose.uniforms()),
             look: &look,
+            prefs,
             panel: panel_tex.as_ref(),
+            menu: link.as_ref().filter(|link| link.side.menu.open()).map(|link| link.side.menu.position).zip(menu_tex.as_ref()),
+            options: options_tex.as_ref().filter(|_| link.as_ref().is_some_and(|link| link.side.options.open())),
             overlays: &overlays,
+            caption: caption_tex.as_ref().filter(|_| !health_open),
+            night: None,
             level: level_tex.as_ref(),
             level_alpha,
         };
@@ -808,19 +1496,67 @@ fn run() -> Result<(), String> {
 /// Everything one frame shows: the eyes (full screen, or gliding into the
 /// strip by `amount`), the app panel, and overlays anchored bottom left.
 struct Scene<'a> {
+    widgets: Option<&'a widgets::Tiles>,
     blank: bool,
     amount: f32,
     eyes: [f32; 32],
     look: &'a render::Look,
+    prefs: look::Prefs,
     panel: Option<&'a render::Texture>,
+    menu: Option<(quick_menu::Position, &'a render::Texture)>,
+    options: Option<&'a render::Texture>,
     /// Each overlay with its margin from the bottom-left corner.
     overlays: &'a [(&'a render::Texture, i32)],
+    caption: Option<&'a render::Texture>,
+    night: Option<&'a render::Texture>,
     /// The level bar, centred low on the screen at twice the text size.
     level: Option<&'a render::Texture>,
     level_alpha: f32,
 }
 
+struct SettledEyes {
+    rect: panel::Rect,
+    output: (i32, i32),
+    eyes: [f32; 32],
+    colours: [[f32; 3]; 3],
+    grid: f32,
+    glow_radius: f32,
+    marks: render::Marks,
+}
+
+impl SettledEyes {
+    fn same_image(&self, other: &Self) -> bool {
+        let edge_tolerance = 0.5 / self.rect.h.max(1) as f32;
+        self.rect == other.rect && self.output == other.output && self.colours == other.colours
+            && self.grid == other.grid && self.glow_radius == other.glow_radius && self.marks == other.marks
+            && self.eyes.iter().zip(&other.eyes).enumerate().all(|(channel, (&a, &b))| {
+                let tolerance = if channel % 16 < 4 { edge_tolerance } else { 0.0001 };
+                (a - b).abs() <= tolerance
+            })
+    }
+}
+
 impl Scene<'_> {
+    fn settled_eyes(&self, w: i32, h: i32) -> Option<SettledEyes> {
+        if self.blank || self.amount != 0.0 || self.widgets.is_some() || self.panel.is_some()
+            || self.menu.is_some() || self.options.is_some() || !self.overlays.is_empty()
+            || self.caption.is_some() || self.night.is_some() || self.level.is_some()
+            || self.look.decor.active() || self.look.emotes.len() != 0 || self.look.glitch[3] > 0.0
+        {
+            return None;
+        }
+        let screen = panel::Rect { x: 0, y: 0, w, h };
+        Some(SettledEyes {
+            rect: self.prefs.eye_rect(screen, w, h, 0.0),
+            output: (w, h),
+            eyes: self.eyes,
+            colours: [self.look.fill, self.look.core, self.look.halo],
+            grid: self.look.grid,
+            glow_radius: self.look.glow_r,
+            marks: self.look.marks,
+        })
+    }
+
     /// Draw into the bound framebuffer, `w` by `h`.
     ///
     /// # Safety
@@ -833,12 +1569,29 @@ impl Scene<'_> {
         if self.amount > 0.0 {
             let layout = panel::layout(w, h, self.amount);
             render::blank(gl);
-            renderer.draw_scaled_in(gl, layout.eyes, scale, &self.eyes, self.look)?;
-            if let Some(tex) = self.panel {
+            let eyes = self.prefs.eye_rect(layout.eyes, w, h, self.amount);
+            renderer.draw_scaled_in(gl, eyes, scale, &self.eyes, self.look)?;
+            if let Some(tex) = self.options {
+                let rect = options::Options::rect(layout.panel, tex.w, tex.h);
+                renderer.draw_texture(gl, tex, rect, w, h, layout.panel_alpha);
+            } else if let Some((position, tex)) = self.menu {
+                let rect = position.rect(layout.panel, tex.w, tex.h);
+                renderer.draw_texture(gl, tex, rect, w, h, layout.panel_alpha);
+            } else if let Some(tex) = self.panel {
                 renderer.draw_texture(gl, tex, layout.panel, w, h, layout.panel_alpha);
             }
         } else {
-            renderer.draw_scaled(gl, w, h, scale, &self.eyes, self.look)?;
+            let screen = panel::Rect { x: 0, y: 0, w, h };
+            let eyes = self.prefs.eye_rect(screen, w, h, 0.0);
+            if eyes == screen {
+                renderer.draw_scaled(gl, w, h, scale, &self.eyes, self.look)?;
+            } else {
+                render::blank(gl);
+                renderer.draw_scaled_in(gl, eyes, scale, &self.eyes, self.look)?;
+            }
+            if let Some(widgets) = self.widgets {
+                widgets.draw(gl, renderer, w, h, self.prefs.widget_positions());
+            }
         }
         let zoom = (h / 800).max(1);
         for &(tex, margin) in self.overlays {
@@ -847,6 +1600,20 @@ impl Scene<'_> {
         }
         if let Some(tex) = self.level {
             renderer.draw_texture(gl, tex, level_rect(tex.w, tex.h, w, h), w, h, self.level_alpha);
+        } else if let Some(tex) = self.night {
+            renderer.draw_texture(gl, tex, level_rect(tex.w, tex.h, w, h), w, h, 1.0);
+        }
+        if let Some(tex) = self.caption {
+            let zoom = (h as f32 / 800.0).clamp(1.0, 1.5)
+                .min((w - 16).max(1) as f32 / tex.w as f32)
+                .min((h / 3).max(1) as f32 / tex.h as f32);
+            let (width, height) = ((tex.w as f32 * zoom).round() as i32, (tex.h as f32 * zoom).round() as i32);
+            let bottom = self.level.map_or((h / 14).max(8), |level| {
+                let rect = level_rect(level.w, level.h, w, h);
+                rect.y + rect.h + 10
+            });
+            let rect = panel::Rect { x: (w - width) / 2, y: bottom.min((h - height).max(0)), w: width, h: height };
+            renderer.draw_texture(gl, tex, rect, w, h, 1.0);
         }
         Ok(())
     }
@@ -1067,6 +1834,10 @@ mod verbose {
 }
 
 const SCRIPTS: &[&str] = &["tour", "drowse", "birth"];
+const AUDITION_START: f64 = 2.4;
+const AUDITION_GESTURE: f64 = 3.35;
+const AUDITION_HOLD: f64 = 2.7;
+const AUDITION_END: f64 = 6.3;
 
 /// `--marks glint,ring,ears,network,ssh` (any of them).
 fn parse_marks(list: &str) -> Result<render::Marks, String> {
@@ -1165,18 +1936,60 @@ fn scene(anim: &mut anim::Anim, name: &str, from: f64, to: f64) -> f32 {
     0.0
 }
 
+fn mood_tint(expression: ExprId, blend: Option<(ExprId, f32)>) -> eye::MoodTint {
+    let primary = expression.visual().tint;
+    let Some((other, weight)) = blend else { return primary };
+    let other = other.visual().tint;
+    eye::MoodTint {
+        amount: primary.amount + (other.amount - primary.amount) * weight,
+        colour: std::array::from_fn(|i| primary.colour[i] + (other.colour[i] - primary.colour[i]) * weight),
+    }
+}
+
 /// Render still images and exit: `--snapshot` and `--sheet`.
-fn stills(gl: &glow::Context, renderer: &render::Renderer, look: &render::Look, args: &Args) -> Result<(), String> {
+fn stills(
+    gl: &glow::Context,
+    renderer: &render::Renderer,
+    look: &render::Look,
+    args: &Args,
+    effects_enabled: bool,
+) -> Result<(), String> {
+    let capture_expression = |name: &str, w, h| {
+        let expression = ExprId::from_name(name).ok_or_else(|| format!("no expression called {name}"))?;
+        let pose = if args.source_pose { expression.concept_pose() } else { expression.pose() };
+        let eyes = pose.uniforms();
+        let mut look = *look;
+        if args.mood_colour {
+            colour::Mood::still(expression.visual().tint, 1.0).apply(&mut look);
+        }
+        if let Some(palette) = args.palette {
+            palette.apply(&mut look);
+        }
+        let layers = decor::Layers { brows: args.preview_brows, mouth: args.preview_mouth, details: args.preview_details };
+        // Freeze the effects at the same point in their motion on every still.
+        let phase = 0.60;
+        look.decor = decor::Decor::still(layers, expression, phase);
+        if effects_enabled {
+            let mut effects = expression.visual().effects;
+            for (value, on) in effects.iter_mut().zip(args.manual_emotes) {
+                if on { *value = value.max(1.0); }
+            }
+            look.glitch = emote::glitch(effects[emote::GLITCH], phase);
+            look.emotes = emote::sprites(&effects, 0.0, &eyes, phase, args.seed.unwrap_or(1));
+        }
+        unsafe { renderer.snapshot(gl, w, h, &eyes, &look) }
+    };
     if let Some(path) = &args.snapshot {
-        let pose = eye::preset(&args.expr).ok_or(format!("no expression called {}", args.expr))?;
         let (w, h) = args.size;
-        let px = unsafe { renderer.snapshot(gl, w, h, &pose.uniforms(), look)? };
+        let px = capture_expression(&args.expr, w, h)?;
         write_png(path, w, h, &px)?;
         println!("wrote {} ({}, {w}x{h})", path.display(), args.expr);
     }
     if let Some(path) = &args.sheet {
         let names: Vec<&str> = if args.names.is_empty() {
             eye::SHEET.to_vec()
+        } else if args.names == ["all"] {
+            ExprId::ALL.iter().map(|id| id.name()).collect()
         } else {
             args.names.iter().map(String::as_str).collect()
         };
@@ -1192,8 +2005,7 @@ fn stills(gl: &glow::Context, renderer: &render::Renderer, look: &render::Look, 
             px.copy_from_slice(&[58, 54, 52, 255]);
         }
         for (i, name) in names.iter().enumerate() {
-            let pose = eye::preset(name).ok_or(format!("no expression called {name}"))?;
-            let tile = unsafe { renderer.snapshot(gl, tw, th, &pose.uniforms(), look)? };
+            let tile = capture_expression(name, tw, th)?;
             let (col, row) = (i as u32 % cols, i as u32 / cols);
             let (ox, oy) = (gap + col * (tw + gap), gap + row * (th + gap));
             for y in 0..th {
@@ -1229,6 +2041,37 @@ mod tests {
     use super::{anim, asks_attention, level_rect, Launcher, ATTEND_KEYS};
     use sdl2::keyboard::Keycode;
     use std::time::Duration;
+
+    #[test]
+    fn audition_arguments_select_a_bounded_native_scene() {
+        let parse = |args: &[&str]| super::parse_args(args.iter().map(|value| value.to_string()));
+        let args = parse(&["--audition", "wink", "--intensity", "0.65", "--gesture", "nod", "--frames", "poses"]).unwrap();
+        assert_eq!(args.audition, Some(super::ExprId::Wink));
+        assert_eq!(args.intensity, 0.65);
+        assert_eq!(args.gesture.as_deref(), Some("nod"));
+        assert_eq!(args.exit_after, Some(super::AUDITION_END));
+        assert!(parse(&["--audition", "typo"]).is_err());
+        assert!(parse(&["--audition", "wink", "--intensity", "NaN"]).is_err());
+        assert!(parse(&["--audition", "wink", "--demo"]).is_err());
+        assert!(parse(&["--gesture", "shake"]).is_err());
+        let animated = parse(&["--audition", "starstruck", "--gesture", "eye-roll", "--full"]).unwrap();
+        assert!(animated.preview_brows && animated.preview_mouth && animated.preview_details && animated.effects);
+        let scene = parse(&["--script", "heartbreak", "--frames", "poses"]).unwrap();
+        assert_eq!(scene.exit_after, super::audition::duration("heartbreak"));
+        assert!(parse(&["--script", "heartbreak", "--exit-after", "inf"]).is_err());
+    }
+
+    #[test]
+    fn pointer_probe_requires_bounded_standalone_fullscreen_run() {
+        let parse = |args: &[&str]| super::parse_args(args.iter().map(|v| v.to_string()));
+        for (seconds, accepted) in [("0", false), ("60", true), ("61", false)] {
+            let args = ["--pointer-probe", "--fullscreen", "--standalone", "--exit-after", seconds];
+            assert_eq!(parse(&args).is_ok(), accepted);
+        }
+        assert!(parse(&["--pointer-probe", "--fullscreen", "--exit-after", "5"]).is_err());
+        assert!(parse(&["--pointer-probe", "--fullscreen", "--standalone"]).is_err());
+        assert!(parse(&["--pointer-probe", "--fullscreen", "--standalone", "--hidden", "--exit-after", "5"]).is_err());
+    }
 
     #[test]
     fn the_level_bar_sits_centred_low_and_fits_the_screen() {

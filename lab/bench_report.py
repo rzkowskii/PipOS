@@ -57,8 +57,10 @@ def _voice(result):
 
 def summarise(data):
     """One dict per file: headline numbers plus printable lines."""
-    if not isinstance(data, dict) or data.get("kind") != "pipos-bench-v1":
+    if not isinstance(data, dict) or data.get("kind") not in ("pipos-bench-v1", "pipos-bench-v2"):
         return {"error": "not a PipOS bench file", "lines": ["not a PipOS bench file"]}
+    if data.get("kind") == "pipos-bench-v2":
+        return summarise_plus(data)
     system = data.get("system", {})
     cpu = system.get("cpu", {})
     power = system.get("power", {})
@@ -152,6 +154,38 @@ def summarise(data):
     if data.get("restore_errors"):
         lines.append(f"POWER SETTINGS NOT RESTORED: {data['restore_errors']}")
     return {"finished": bool(data.get("finished")), "models": models, "lines": lines}
+
+
+def summarise_plus(data):
+    """Validate and summarise the read-only bench+ schema."""
+    required = ("system", "provenance", "conditions", "order", "boot", "samples")
+    missing = [key for key in required if key not in data]
+    if missing:
+        return {"error": "bench+ schema missing " + ", ".join(missing),
+                "lines": ["INVALID bench+ schema: missing " + ", ".join(missing)]}
+    samples = data.get("samples") if isinstance(data.get("samples"), list) else []
+    unit = ((data.get("provenance") or {}).get("cortex_unit") or {})
+    lines = [f"bench+: {len(samples)} read-only samples; cortex unit sha256 "
+             f"{unit.get('unit_sha256') or 'unavailable'}"]
+    boot = data.get("boot") or {}
+    for name in ("time", "blame", "critical-chain"):
+        result = boot.get(name) or {}
+        lines.append(f"  systemd {name}: " + ("captured" if result.get("exit") == 0 else "unavailable"))
+    if samples:
+        first, last = samples[0], samples[-1]
+        lines.append(f"  interval: {first.get('label')} to {last.get('label')}; "
+                     f"C-state rows {len((last.get('cpuidle') or {}).get('states') or [])}; "
+                     f"RAPL domains {len(last.get('rapl') or [])}")
+        organs = last.get("units") or {}
+        measured = sum(1 for row in organs.values() if isinstance(row, dict) and row.get("CPUUsageNSec") is not None)
+        lines.append(f"  organs: {measured}/{len(organs)} with CPU counters; CPU, cgroup memory and main-process RSS retained")
+    codec = data.get("codec") or {}
+    codec_dump = codec.get("card0_codec0") or {}
+    lines.append("  codec: " + ("captured" if codec_dump.get("output") else "unavailable"))
+    if not data.get("finished"):
+        lines.append("UNFINISHED: the bench+ report stopped before its final snapshot")
+    return {"finished": bool(data.get("finished")), "models": [], "lines": lines,
+            "samples": len(samples), "unit_sha256": unit.get("unit_sha256")}
 
 
 def bench_files(paths):

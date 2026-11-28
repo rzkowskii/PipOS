@@ -35,6 +35,28 @@ pub fn hz(activity: Activity, software: bool) -> u32 {
     }
 }
 
+/// Optional one-boot experiment for a settled idle desktop.
+pub fn idle_trial(cmdline: &str) -> Option<u32> {
+    cmdline.split_ascii_whitespace().filter_map(|word| word.strip_prefix("being.face_idle_hz=")).last()
+        .and_then(|value| value.parse().ok()).filter(|rate| [5, 15, 30].contains(rate))
+}
+
+/// Explicit per-boot face experiment on Try.
+pub fn try_switch(cmdline: &str, switch: &str) -> bool {
+    let mut is_try = false;
+    let mut enabled = false;
+    for arg in cmdline.split_ascii_whitespace() {
+        if arg == "being.try=1" {
+            is_try = true;
+        } else if let Some((key, value)) = arg.split_once('=') {
+            if key == switch {
+                enabled = value == "1";
+            }
+        }
+    }
+    is_try && enabled
+}
+
 pub const REPORT_EVERY: Duration = Duration::from_secs(60);
 
 /// Frame-time bookkeeping for the once-a-minute log line. Only timings and
@@ -48,12 +70,17 @@ pub struct Stats {
     /// Of `work`, the part before the swap (with vsync, the swap itself
     /// mostly waits for the screen, so `work` alone hides the drawing cost).
     drawing: Duration,
+    draw_buckets: [u32; 129],
+    idle_swaps_skipped: u32,
+    last_active_present: Option<Instant>,
+    active_intervals: [u32; INTERVAL_MS.len() + 1],
     /// Frames spent at each rate: 5, 15, 20, 30 and 60 Hz.
     at: [u32; 5],
     gpu: Option<Rapl>,
 }
 
 const RATES: [u32; 5] = [5, 15, 20, 30, 60];
+const INTERVAL_MS: [u128; 13] = [4, 8, 12, 16, 17, 20, 25, 33, 40, 50, 67, 80, 100];
 
 impl Stats {
     pub fn new(now: Instant) -> Stats {
@@ -64,6 +91,10 @@ impl Stats {
             work: Duration::ZERO,
             worst: Duration::ZERO,
             drawing: Duration::ZERO,
+            draw_buckets: [0; 129],
+            idle_swaps_skipped: 0,
+            last_active_present: None,
+            active_intervals: [0; INTERVAL_MS.len() + 1],
             at: [0; 5],
             gpu: Rapl::open(),
         }
@@ -78,10 +109,27 @@ impl Stats {
             self.drawn += 1;
             self.work += work;
             self.worst = self.worst.max(work);
-            self.drawing += drawing.min(work);
+            let drawing = drawing.min(work);
+            self.drawing += drawing;
+            let bucket = drawing.as_micros().div_ceil(250).min(128) as usize;
+            self.draw_buckets[bucket] += 1;
         }
         if let Some(i) = RATES.iter().position(|&r| r == rate) {
             self.at[i] += 1;
+        }
+    }
+
+    /// Swap completion times for consecutive Active draws only. A deliberate
+    /// low-rate idle gap is never evidence of a slow active frame.
+    pub fn presentation(&mut self, active_swap: Option<Instant>, idle_skipped: bool) {
+        if let (Some(previous), Some(now)) = (self.last_active_present, active_swap) {
+            let delta = now.saturating_duration_since(previous).as_micros();
+            let bucket = INTERVAL_MS.iter().position(|&ms| delta <= ms * 1000).unwrap_or(INTERVAL_MS.len());
+            self.active_intervals[bucket] += 1;
+        }
+        self.last_active_present = active_swap;
+        if idle_skipped {
+            self.idle_swaps_skipped += 1;
         }
     }
 
@@ -92,7 +140,35 @@ impl Stats {
             return None;
         }
         let watts = self.gpu.as_mut().and_then(|gpu| gpu.watts());
-        let line = describe(span, self.frames, self.drawn, [self.work, self.worst, self.drawing], &self.at, watts);
+        let mut line = describe(span, self.frames, self.drawn, [self.work, self.worst, self.drawing], &self.at, watts);
+        if self.drawn > 0 {
+            let percentile = |percent: u32| {
+                let rank = (self.drawn * percent).div_ceil(100);
+                let mut seen = 0;
+                let bucket = self.draw_buckets.iter().position(|n| {
+                    seen += *n;
+                    seen >= rank
+                }).unwrap_or(128);
+                if bucket == 128 { "≥31.75".into() } else { format!("{:.2}", bucket as f64 * 0.25) }
+            };
+            line.push_str(&format!("; draw median {} ms, p95 {} ms", percentile(50), percentile(95)));
+        }
+        if self.idle_swaps_skipped > 0 {
+            line.push_str(&format!("; idle swaps skipped {}", self.idle_swaps_skipped));
+        }
+        let active_samples: u32 = self.active_intervals.iter().sum();
+        if active_samples > 0 {
+            let target = (u64::from(active_samples) * 99).div_ceil(100);
+            let mut seen = 0;
+            let index = self.active_intervals.iter().position(|&count| {
+                seen += u64::from(count);
+                seen >= target
+            }).unwrap_or(INTERVAL_MS.len());
+            let upper = INTERVAL_MS.get(index).map_or_else(|| ">100".to_string(), |ms| format!("≤{ms}"));
+            line.push_str(&format!("; active swap interval p99 {upper} ms ({active_samples} intervals)"));
+            let counts = self.active_intervals.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+            line.push_str(&format!("; active interval counts {counts}"));
+        }
         let gpu = self.gpu.take();
         *self = Stats { gpu, ..Stats::new(now) };
         Some(line)

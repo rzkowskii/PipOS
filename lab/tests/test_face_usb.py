@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import NamedTuple
 from unittest.mock import patch
 
+from lab.eye_pixels import palette_eyes
 from lab.vm import VM, eyes, machine_args
+
+DEFAULT_SWATCHES = ((8, 219, 255), (77, 250, 255), (0, 122, 255))
 
 
 def usb_machine_args(*args, **kwargs):
@@ -103,6 +106,10 @@ class FaceUSB(unittest.TestCase):
             return max(centers) - min(centers) >= 8
 
         awake = self.wait_pose("awake gaze motion", moving, timeout=15)
+        deadline = time.monotonic() + 5
+        while not all(palette_eyes(self.vm.screen(), DEFAULT_SWATCHES)):
+            self.assertLess(time.monotonic(), deadline, "the awake face should have two eye components")
+            time.sleep(0.2)
 
         def tired(visible):
             return all(

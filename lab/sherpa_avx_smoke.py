@@ -7,13 +7,24 @@ flags, and then, through the same ctypes bindings the voice uses
 
 1. Silero VAD over the Moonshine test recording (at least one segment);
 2. a Moonshine v2 tiny decode of `test_wavs/0.wav` (non-empty text);
-3. one sentence in the Piper voice (a WAV of positive length).
+3. one sentence in the Piper voice (a WAV of positive length), using the
+   guest's packaged piper-phonemize library.
 
 A stage killed by SIGILL (exit status 132) is named in the report. The
 assets are the downloads in out/voice, checked against
 lab/sherpa_avx_assets.json and out/voice/DOWNLOADS.json; nothing is fetched.
 QEMU's speed says nothing about the laptop's: timings are recorded only as
 "emulated".
+
+Besides the full report (--output), the run writes a verdict the image may
+ship as /usr/share/being/voice/sherpa-avx-smoke.json (--verdict): the stages'
+pass or fail, SIGILL, and the sha256 of the two runtime libraries it tested,
+with no host paths. The voice's automatic choice loads Moonshine only when
+those pins match the installed libraries byte for byte
+(mind/voice_engines.sherpa_smoke_passed). Use --runtime DIR with the two
+libraries from the build's target tree for a verdict intended for an image.
+Buildroot can change their bytes during packaging, including builds that
+exclude the libraries from stripping.
 
     python3 -m lab.sherpa_avx_smoke --prepare-only /tmp/media   # stage and check, no VM
     python3 -m lab.sherpa_avx_smoke                             # boot and run
@@ -34,6 +45,7 @@ from lab.vm import ROOT, VM
 ASSETS = ROOT / "out/voice"
 MANIFEST = Path(__file__).with_name("sherpa_avx_assets.json")
 BINDINGS = ROOT / "mind/sherpa.py"
+PHONEMIZER = ROOT / "mind/phonemize.py"
 GUEST_MEDIA = "/mnt/updates"
 REQUIRED = {"avx", "f16c", "sse4_2"}
 EXCLUDED = {"avx2", "fma", "bmi1", "bmi2", "avx512f"}
@@ -41,10 +53,13 @@ STAGES = ("vad", "moonshine", "piper")
 SIGILL_STATUS = 128 + signal.SIGILL
 SENTENCE = "Hello. I am Pip, and this is my natural voice."
 MARK = "SMOKE "
+RUNTIME_FILES = ("libsherpa-onnx-c-api.so", "libonnxruntime.so")
+VERDICT_VERSION = 1
 
 # Runs inside the guest, from the read-only media: python3 guest.py <media> <stage>.
 GUEST_SCRIPT = r'''
-import json, sys, time
+import json, sys, tempfile, time
+from pathlib import Path
 from mind import sherpa
 
 media, stage = sys.argv[1], sys.argv[2]
@@ -87,14 +102,22 @@ elif stage == "moonshine":
                   audio_seconds=round(len(samples) / rate, 3), sample_rate=rate)
     start = loaded
 elif stage == "piper":
-    folder = models + "/piper/"
-    tts = sherpa.OfflineTts(folder + "en_GB-alba-medium.onnx", folder + "tokens.txt", folder + "espeak-ng-data",
-                            library=library)
-    loaded = time.perf_counter()
-    seconds = tts.write(sys.argv[3], "/tmp/being-piper-smoke.wav", length_scale=1.0)
-    report.update(audio_seconds=round(seconds, 3), sample_rate=tts.sample_rate,
-                  load_s_emulated=round(loaded - start, 3))
-    start = loaded
+    from mind import phonemize
+
+    folder = Path(models) / "piper"
+    data = folder / "espeak-ng-data"
+    phonemizer = phonemize.for_voice(data, folder / "en_GB-alba-medium.onnx.json")
+    tts = sherpa.OfflineTts(folder / "en_GB-alba-medium.onnx", folder / "tokens.txt", data,
+                           library=library, phonemizer=phonemizer)
+    try:
+        loaded = time.perf_counter()
+        with tempfile.TemporaryDirectory(prefix="being-piper-smoke-") as scratch:
+            seconds = tts.write(sys.argv[3], Path(scratch) / "speech.wav")
+        report.update(audio_seconds=round(seconds, 3), sample_rate=tts.sample_rate,
+                      load_s_emulated=round(loaded - start, 3))
+        start = loaded
+    finally:
+        tts.close()
 report["compute_s_emulated"] = round(time.perf_counter() - start, 3)
 report["runtime_paths"] = runtime_paths()
 print("SMOKE " + json.dumps(report), flush=True)
@@ -176,6 +199,7 @@ def prepare_media(assets, media, manifest):
     package.mkdir(parents=True, exist_ok=True)
     (package / "__init__.py").write_text("")
     shutil.copyfile(BINDINGS, package / "sherpa.py")
+    shutil.copyfile(PHONEMIZER, package / "phonemize.py")
     (media / "py/guest.py").write_text(GUEST_SCRIPT)
     return media
 
@@ -205,6 +229,28 @@ def judge(stage, status, output):
     if not loaded_here:
         result["error"] = "the guest loaded a different sherpa-onnx or ONNX Runtime"
     return result
+
+
+def use_runtime(media, runtime):
+    """Replace the staged runtime libraries with the two files in `runtime`."""
+    runtime = Path(runtime)
+    for name in RUNTIME_FILES:
+        source = runtime / name
+        if not source.is_file():
+            raise ValueError(f"{source} is missing")
+        shutil.copyfile(source, Path(media) / "runtime" / name)
+
+
+def shippable_verdict(report):
+    """What the image may ship: the stages' outcome and the runtime pins, no host paths or logs."""
+    stages = [{"stage": stage.get("stage"), "passed": stage.get("passed") is True,
+               "sigill": stage.get("sigill") is True} for stage in report.get("stages", [])]
+    versions = next((stage["versions"] for stage in report.get("stages", [])
+                     if isinstance(stage.get("versions"), dict)), None)
+    return {"version": VERDICT_VERSION, "source": "qemu-ivybridge", "qemu_cpu": report.get("qemu_cpu"),
+            "passed": report.get("passed") is True and len(stages) == len(STAGES),
+            "sigill": any(stage["sigill"] for stage in stages), "stages": stages,
+            "runtime_sha256": dict(report.get("runtime_sha256") or {}), "versions": versions}
 
 
 def output(vm, command, timeout=30):
@@ -243,6 +289,10 @@ def main():
     parser.add_argument("--assets", type=Path, default=ASSETS)
     parser.add_argument("--image", type=Path, default=ROOT / "out/images/beingos-ivybridge.img")
     parser.add_argument("--output", type=Path, default=ROOT / "out/sherpa-avx/ivybridge-smoke.json")
+    parser.add_argument("--verdict", type=Path, default=ROOT / "out/sherpa-avx/sherpa-avx-smoke.json",
+                        help="the shippable verdict (default: %(default)s)")
+    parser.add_argument("--runtime", type=Path, metavar="DIR",
+                        help="test the two runtime libraries in DIR instead of the release archive's")
     parser.add_argument("--budget", type=int, default=1200)
     parser.add_argument("--stage-timeout", type=int, default=420)
     parser.add_argument("--prepare-only", type=Path, metavar="DIR",
@@ -260,6 +310,8 @@ def main():
         return
     if args.prepare_only:
         prepare_media(args.assets, args.prepare_only, manifest)
+        if args.runtime:
+            use_runtime(args.prepare_only, args.runtime)
         print(f"Staged the speech smoke media in {args.prepare_only}")
         return
     if args.budget < 1 or args.stage_timeout < 1 or not args.image.is_file():
@@ -269,8 +321,10 @@ def main():
               "stages": [], "passed": False}
     with tempfile.TemporaryDirectory(prefix="being-sherpa-media-", dir="/tmp") as folder:
         media = prepare_media(args.assets, Path(folder), manifest)
-        report["runtime_sha256"] = {name: file_sha256(media / "runtime" / name)
-                                    for name in ("libsherpa-onnx-c-api.so", "libonnxruntime.so")}
+        if args.runtime:
+            use_runtime(media, args.runtime)
+            report["runtime_source"] = "given"
+        report["runtime_sha256"] = {name: file_sha256(media / "runtime" / name) for name in RUNTIME_FILES}
         vm = VM(image=args.image, update_media=f"fat:ro:{media}", memory="2G", threads="single")
         signal.signal(signal.SIGALRM, expired)
         signal.signal(signal.SIGTERM, terminated)
@@ -294,8 +348,8 @@ def main():
                 result = judge(stage, status, log)
                 report["stages"].append(result)
                 checkpoint(args.output, report)
-                verdict = "SIGILL" if result["sigill"] else "passed" if result["passed"] else "failed"
-                print(f"{stage}: {verdict}" + (f" ({result['text']!r})" if result.get("text") else ""), flush=True)
+                outcome = "SIGILL" if result["sigill"] else "passed" if result["passed"] else "failed"
+                print(f"{stage}: {outcome}" + (f" ({result['text']!r})" if result.get("text") else ""), flush=True)
             report["sigill"] = any(stage["sigill"] for stage in report["stages"])
             report["passed"] = all(stage["passed"] for stage in report["stages"])
         except Exception as error:
@@ -305,6 +359,7 @@ def main():
             signal.setitimer(signal.ITIMER_REAL, 0)
             vm.destroy()
             checkpoint(args.output, report)
+            checkpoint(args.verdict, shippable_verdict(report))
     if not report["passed"]:
         raise SystemExit(1)
 

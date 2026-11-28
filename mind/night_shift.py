@@ -19,7 +19,7 @@ aborts it.
 
 The order (PIP-FUNCTIONS 2.6): database checkpoint and check, gentle expiry,
 search index upkeep, memory vectors, the rule-based journal, the day record,
-a backup to a labelled stick, the dream model, the weekly model re-check, and
+a backup to a labelled stick, requested night jobs, the dream model and core profile, the weekly model re-check, and
 re-warming the conversation model for the morning.
 """
 
@@ -31,23 +31,34 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from .storage import atomic_write
 
-ORDER = ("checkpoint", "expiry", "search", "vectors", "journal", "diary",
-         "backup", "dream", "rehash", "rewarm")
+ORDER = ("checkpoint", "integrity", "expiry", "search", "vectors", "journal", "diary",
+         "backup", "vitals", "vitals_active", "ponder", "dream", "core", "rehash", "rewarm")
 LIGHT = frozenset({"checkpoint"})
 # Dreaming, which only runs with the owner's dream consent: the rule-based
 # journal (whose entries only a consenting owner ever hears) and the model.
-DREAMING = frozenset({"journal", "dream"})
+DREAMING = frozenset({"journal", "dream", "core"})
 CHUNK_BUDGET = 1.0  # seconds a chunk should take; the interrupt bound is 2 s
 STATE_FILE = "night-shift.json"
 STATE_VERSION = 1
+JOB_LABELS = dict(zip(ORDER, (
+    "Database check", "Archive integrity schedule", "Memory expiry check", "Search index upkeep", "Memory vector upkeep",
+    "Dream journal pass", "Day record", "Backup media check", "Passive vital-signs pass",
+    "Active vital-signs pass", "Requested night jobs",
+    "Dream model pass", "Core profile", "Model verification check", "Conversation model preparation",
+), strict=True))
 
 
 def log(*parts):
     print("night:", *parts, flush=True)
+
+
+class CleanupPending(RuntimeError):
+    """A job still owns a shared service after requesting that it stop."""
 
 
 @dataclass(frozen=True)
@@ -124,6 +135,20 @@ class NightShift:
     def done_tonight(self):
         return tuple(name for name in ORDER if name in self._state["done"])
 
+    def summary(self):
+        try:
+            night = date.fromisoformat(self._state["night"])
+        except (TypeError, ValueError):
+            return None
+        finished = tuple(JOB_LABELS[name] for name in self.done_tonight())
+        return (night.isoformat(), finished) if finished else None
+
+    def reopen(self, name):
+        """An owner queued new work after this job finished for the night."""
+        if name in self._state["done"]:
+            self._state["done"].remove(name)
+            self._save()
+
     def settled(self, *, dreams=True):
         """True when nothing is left for tonight: every job is done, the
         DREAMING ones not counted when there is no dream consent."""
@@ -134,7 +159,7 @@ class NightShift:
 
     async def step(self, eligible, *, night=None):
         """Run the jobs in order while `eligible` allows. Returns
-        {name: "done" | "more" | "waiting" | "interrupted" | "failed"} for
+        {name: "done" | "more" | "waiting" | "interrupted" | "failed" | "cleanup_pending"} for
         every registered job that was not already done tonight."""
         if night is not None and night != self._state["night"]:
             self._state["night"] = night
@@ -149,7 +174,7 @@ class NightShift:
                 if job is None or name in self._state["done"]:
                     continue
                 results[name] = await self._run(name, job, eligible)
-                if results[name] == "interrupted":
+                if results[name] in ("interrupted", "cleanup_pending") or getattr(job, "cleanup_pending", False):
                     break
         finally:
             self._task = None
@@ -176,6 +201,10 @@ class NightShift:
                     self._release(name)
                     return "interrupted"
                 raise
+            except CleanupPending:
+                log(f"{name} still owns its model service")
+                self._release(name)
+                return "cleanup_pending"
             except (OSError, sqlite3.Error, ValueError, RuntimeError) as exc:
                 log(f"{name} failed:", type(exc).__name__)
                 self._remember_cursor(name, job)
@@ -213,7 +242,7 @@ class NightShift:
         to await, or None."""
         self._interrupted = True
         chunk = self._chunk
-        if chunk is not None and not chunk.done():
+        if chunk is not None and not chunk.done() and not getattr(chunk, "cancelling", lambda: False)():
             chunk.cancel()
         for name in tuple(self._holding):
             self._release(name)
@@ -242,7 +271,8 @@ class NightShift:
         if self.state_dir is None:
             return empty
         try:
-            raw = (self.state_dir / STATE_FILE).read_bytes()
+            with (self.state_dir / STATE_FILE).open("rb") as file:
+                raw = file.read(65_537)
             if len(raw) > 65_536:
                 return empty
             value = json.loads(raw)
@@ -380,6 +410,65 @@ class CheckpointJob(SideWork):
         return True
 
 
+class MonthlyIntegrityJob:
+    """Optional full read-only check, cancelled by the ordinary night gate."""
+
+    def __init__(self, memory, night):
+        self.memory = memory
+        self.night = night
+        self._lock = threading.Lock()
+        self._open = None
+        self._stop = None
+
+    def _opened(self, db):
+        with self._lock:
+            self._open = db
+
+    def _closed(self, db):
+        with self._lock:
+            if self._open is db:
+                self._open = None
+
+    async def run_chunk(self, budget_s):
+        from . import archive_integrity
+
+        root = getattr(self.memory, "root", None)
+        if root is None or not archive_integrity.due(root, self.night):
+            return True
+        stop = threading.Event()
+        with self._lock:
+            self._stop = stop
+        loop = asyncio.get_running_loop()
+        try:
+            outcome = await loop.run_in_executor(
+                _WORKER,
+                lambda: archive_integrity.check_database(
+                    Path(root) / "mind.db", stop, opened=self._opened, closed=self._closed))
+        except asyncio.CancelledError:
+            stop.set()
+            self.interrupt()
+            raise
+        finally:
+            with self._lock:
+                if self._stop is stop:
+                    self._stop = None
+        if stop.is_set():
+            raise asyncio.CancelledError
+        archive_integrity.record(root, self.night, outcome)
+        if outcome != "ok":
+            log("full archive integrity check:", outcome)
+        return True
+
+    def interrupt(self):
+        with self._lock:
+            if self._stop is not None:
+                self._stop.set()
+            if self._open is not None:
+                self._open.interrupt()
+
+    interrupted = interrupt
+
+
 class ExpiryJob:
     """Gentle expiry: one bounded step of the owner's retention policy per
     chunk. `cutoff()` returns the policy's cutoff, or None for no expiry."""
@@ -407,8 +496,7 @@ class ExpiryJob:
 
 
 class SearchJob(SideWork):
-    """Merge the search indexes into one segment each, and give space back
-    (vacuuming when there is room) when the disk is low."""
+    """Boundedly merge search segments, with full compaction when due or low."""
 
     async def run_chunk(self, budget_s):
         memory = self.memory
@@ -418,7 +506,7 @@ class SearchJob(SideWork):
             if low:
                 memory.compact(db)
             else:
-                memory.optimize_search(db)
+                memory.maintain_search(db)
 
         await self.run(work)
         return True
@@ -451,21 +539,24 @@ class JournalJob:
     """The rule-based dream: carry the day's notable owner sentences into the
     journal, one bounded, revision-checked batch per chunk."""
 
-    def __init__(self, memory, owner, night):
+    def __init__(self, memory, owner, night, *, eligible=None):
         from .dream_store import DreamStore
 
         self.store = DreamStore(memory)
         self.owner, self.night = owner, night
+        self.eligible = eligible
         self.published = 0
 
     async def run_chunk(self, budget_s):
+        if self.eligible is not None and not self.eligible():
+            return False
         night = self.night() if callable(self.night) else self.night
         try:
             batch = self.store.stage(self.owner, night=night)
             if batch is None:
                 return True
             await asyncio.sleep(0)
-            if self.store.publish(batch):
+            if (self.eligible is None or self.eligible()) and self.store.publish(batch):
                 self.published += len(batch.sources)
         except sqlite3.OperationalError:
             # The journal never waits for a lock (the conversation comes
@@ -475,17 +566,24 @@ class JournalJob:
 
 
 def standard_jobs(shift, memory, *, owner, night, cutoff=None, today=None, zone=None, state_dir=None,
-                  being=None, dream_service=None):
+                  being=None, dream_service=None, dream_eligible=None):
     """Register memory's own jobs: checkpoint, expiry (with a `cutoff`),
     search, vectors, journal, the day record (with `today`) and the dream
     model (with `being`, Pip's own speaker name). Other lanes add backup,
     rehash and rewarm."""
     shift.register("checkpoint", CheckpointJob(memory))
+    try:
+        from . import archive_integrity
+
+        if getattr(memory, "root", None) is not None and archive_integrity.enabled(memory.root):
+            shift.register("integrity", MonthlyIntegrityJob(memory, night))
+    except (ImportError, OSError, ValueError):
+        pass
     if cutoff is not None:
         shift.register("expiry", ExpiryJob(memory, cutoff))
     shift.register("search", SearchJob(memory))
     shift.register("vectors", VectorJob(memory))
-    shift.register("journal", JournalJob(memory, owner, night))
+    shift.register("journal", JournalJob(memory, owner, night, eligible=dream_eligible))
     if today is not None:
         from .diary import DiaryJob
 
@@ -493,5 +591,6 @@ def standard_jobs(shift, memory, *, owner, night, cutoff=None, today=None, zone=
     if being is not None:
         from .dream_model import DreamJob
 
-        shift.register("dream", DreamJob(memory, owner, being, night, service=dream_service, zone=zone))
+        shift.register("dream", DreamJob(memory, owner, being, night, service=dream_service, zone=zone,
+                                        eligible=dream_eligible))
     return shift

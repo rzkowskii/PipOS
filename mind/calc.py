@@ -15,14 +15,18 @@ negative number. A rounded answer always says "about".
 import ast
 import math
 import re
+from decimal import Decimal
 from fractions import Fraction
 
 from .app_commands import spoken_numbers
-from .reply import Reply, clean
+from .reply import Reply, clean, is_guest
 from .skills import number_words as _hundreds_words
 
 MAX_EXPONENT = 100
 MAX_RESULT = 10 ** 15
+MAX_EXACT_BITS = 4096  # bound intermediate denominators under repeated powers
+KEYBOARD_CHARS = 72
+PANEL_TEXT = 160
 
 _UNITS = {w: i for i, w in enumerate(
     "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
@@ -379,6 +383,8 @@ def build(tokens):
 # -- the whitelist evaluator --------------------------------------------------
 
 def _check(value):
+    if isinstance(value, Fraction) and max(value.numerator.bit_length(), value.denominator.bit_length()) > MAX_EXACT_BITS:
+        raise CalcError(TOO_BIG)
     if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
         raise CalcError(TOO_BIG)
     if abs(value) > MAX_RESULT * 1000:
@@ -430,7 +436,7 @@ def evaluate(source, names):
         if isinstance(node, ast.Expression):
             return walk(node.body)
         if isinstance(node, ast.Name) and node.id in names:
-            return names[node.id]
+            return _check(names[node.id])
         if isinstance(node, ast.Constant) and type(node.value) is int:
             return Fraction(node.value)
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
@@ -471,12 +477,18 @@ def calculate(text, name="pip"):
     return evaluate(source, names), " ".join(words)
 
 
-def answer(text, name="pip"):
-    """The spoken line for a sum, or None."""
+def _result(value):
+    near, approximate = rounded(value)
+    decimal = Decimal(near.numerator) / Decimal(near.denominator)
+    return ("About " if approximate else "") + format(decimal, "f")
+
+
+def _spoken_result(text, name):
+    """The spoken line and optional calculator display for a recognised sum."""
     try:
         result = calculate(text, name)
     except CalcError as error:
-        return error.line
+        return error.line, "", error.line.removeprefix("[neutral] "), True
     except (ValueError, SyntaxError, ZeroDivisionError, OverflowError):
         return None
     if result is None:
@@ -487,7 +499,40 @@ def answer(text, name="pip"):
     line = f"{spoken} is {about}{words}."
     if len(line.split()) > 25:
         line = f"That's {about}{words}."
-    return "[neutral] " + line[0].upper() + line[1:]
+    return "[neutral] " + line[0].upper() + line[1:], spoken, _result(value), False
+
+
+def answer(text, name="pip"):
+    """The spoken line for a sum, or None."""
+    result = _spoken_result(text, name)
+    return result[0] if result is not None else None
+
+
+_KEYBOARD_TOKEN = re.compile(r"[0-9]+(?:\.[0-9]*)?|\.[0-9]+|\*\*|[-+*/^()]")
+
+
+def keyboard(text):
+    """A strict symbolic expression from the focused keypad, evaluated exactly where possible."""
+    if len(text) > KEYBOARD_CHARS:
+        return "That calculation is too long.", True
+    tokens = _KEYBOARD_TOKEN.findall(text)
+    if not tokens or "".join(tokens) != text.replace(" ", ""):
+        return "Enter numbers and arithmetic operators.", True
+    names, source = {}, []
+    for token in tokens:
+        if token[0].isdigit() or token[0] == ".":
+            key = f"n{len(names)}"
+            names[key] = Fraction(token)
+            source.append(key)
+        else:
+            source.append("**" if token == "^" else token)
+    # Separating tokens keeps malformed "2* *3" or "2 3" from becoming valid.
+    try:
+        return _result(evaluate(" ".join(source), names)), False
+    except CalcError as error:
+        return error.line.removeprefix("[neutral] "), True
+    except (ArithmeticError, SyntaxError, ValueError):
+        return "Check the numbers, operators and parentheses.", True
 
 
 _NUMBERISH = re.compile(
@@ -511,5 +556,12 @@ def may_match(text):
 async def handle(text, ctx):
     if not may_match(text):
         return None
-    line = answer(text, getattr(ctx, "name", "pip"))
-    return Reply(line) if line else None
+    result = _spoken_result(text, getattr(ctx, "name", "pip"))
+    if result is None:
+        return None
+    line, expression, shown, error = result
+    if getattr(ctx, "calc_panel", False) and not is_guest(ctx):
+        if len(expression) > PANEL_TEXT:
+            expression = expression[:PANEL_TEXT - 3] + "..."
+        await ctx.send("app.calc_display", expression=expression, result=shown, error=error)
+    return Reply(line)

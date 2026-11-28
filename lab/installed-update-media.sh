@@ -32,5 +32,7 @@ printf 'unsigned fixture\n' > "$scratch/files/unsigned.raucb"
 installed_bytes=$(wc -c < "$scratch/files/installed.raucb")
 factory_bytes=$(wc -c < "$scratch/files/lab.raucb")
 size_mib=$(( (installed_bytes + factory_bytes + 1048575) / 1048576 + 32 ))
-mkfs.ext4 -q -d "$scratch/files" -L being-install-qa -m 0 "$scratch/media.img" "${size_mib}M"
+# The fixture holds three large files. Keep the block size and inode budget
+# fixed so the default small-volume metadata cannot consume the data reserve.
+mkfs.ext4 -q -b 4096 -N 1024 -d "$scratch/files" -L being-install-qa -m 0 "$scratch/media.img" "${size_mib}M"
 mv -f "$scratch/media.img" "$output"

@@ -1,17 +1,20 @@
 """Keyboard-operated setup and installation on the PipOS screen."""
 
 import getpass
+import json
 import os
 import re
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import console_ui as ui
-from . import install_disks, installer, setup, type_chat, usb_logs
+from . import install_disks, installer, look, setup, type_chat, usb_logs
 from .initiative import POLICY_PATH as INITIATIVE_POLICY_PATH, load_policy as load_initiative_policy
 from .initiative_setup import describe_policy
 from .profile import FACTORY_CONFIG, PROFILE_FILE, factory_profile, load_profile
@@ -19,14 +22,21 @@ from .try_mode import is_try_boot
 
 
 MIND_DIR = Path("/mind")
+DIAGNOSTIC_MARKER = Path("/usr/share/being/diagnostic")
 MOUNTINFO = Path("/proc/self/mountinfo")
 MEDIA_DIR = Path("/run/being-restore-media")
-# Read-only, and nothing on the media may run or act as a device. An ext4
-# journal is not replayed, so a read-only mount writes nothing at all.
+UPDATE_MEDIA_ROOT = Path("/run")
+UPDATE_MEDIA_PREFIX = "being-update-"
+# The foreign-media reader accepts only FAT and exFAT.
 MEDIA_MOUNTS = (
-    ("vfat", "ro,nodev,nosuid,noexec,utf8,umask=077"),
-    ("exfat", "ro,nodev,nosuid,noexec,umask=077"),
-    ("ext4", "ro,nodev,nosuid,noexec,noload"),
+    ("vfat", "ro,nodev,nosuid,noexec,noatime,utf8,umask=077"),
+    ("exfat", "ro,nodev,nosuid,noexec,noatime,umask=077"),
+)
+# The encrypted backup Restore flow also accepts an ext4 backup. Reading it
+# with noload prevents journal replay and keeps the source unchanged.
+RECOVERY_MOUNTS = (
+    *MEDIA_MOUNTS,
+    ("ext4", "ro,nodev,nosuid,noexec,noatime,noload"),
 )
 # Only for writing a backup to a stick the owner picked. Still nothing on it
 # may run or act as a device, and FAT writes go out at once (flush).
@@ -40,6 +50,58 @@ MEDIA_DEPTH = 4
 MEDIA_MIN_BYTES = 1024**2
 BACKUP_SUFFIXES = (".age", ".agekey", ".key", ".txt")
 TRY_HINT = "Meet the being. Nothing is kept."
+
+
+class RestoreMedia(list):
+    """Displayed paths plus the exact read-only source they came from."""
+
+    def __init__(self, files, *, root, device, uuid, private=False):
+        super().__init__(files)
+        self.root = Path(root)
+        self.device = device
+        self.uuid = uuid
+        self.private = private
+
+
+def _private_restore_device(device, uuid, *, selected=None, destination=None):
+    """Ask one transient private-mount service to discover or stage."""
+    from . import backup
+
+    MEDIA_DIR.mkdir(mode=0o700, exist_ok=True)
+    command = [
+        "systemd-run", f"--unit={backup.RESTORE_DEVICE_UNIT}",
+        "--quiet", "--wait", "--pipe", "--collect", "--service-type=exec",
+        "--property=Type=exec", "--property=PrivateMounts=yes", "--property=PrivateNetwork=yes",
+        "--property=ProtectSystem=strict", "--property=ProtectHome=yes",
+        "--property=NoNewPrivileges=yes", "--property=CapabilityBoundingSet=CAP_SYS_ADMIN",
+        "--property=AmbientCapabilities=CAP_SYS_ADMIN", "--property=DevicePolicy=closed",
+        f"--property=DeviceAllow={device} r", "--property=RestrictAddressFamilies=AF_UNIX",
+        "--property=TasksMax=8", "--property=MemorySwapMax=0", "--property=RuntimeMaxSec=15min",
+        f"--property=ReadWritePaths={MEDIA_DIR}", "/usr/sbin/being-backup", "restore-device",
+        "--device", device, "--uuid", uuid,
+    ]
+    if selected:
+        command.insert(command.index("/usr/sbin/being-backup"), f"--property=ReadWritePaths={destination}")
+        command.extend(("--destination", str(destination)))
+        for role, relative in selected:
+            command.extend(("--selected", f"{role}={relative}"))
+    try:
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, timeout=910, check=False)
+    except subprocess.TimeoutExpired:
+        try:
+            subprocess.run(("systemctl", "stop", f"{backup.RESTORE_DEVICE_UNIT}.service"),
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=15, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        raise ValueError("I stopped a restore-media operation that took too long.") from None
+    if result.returncode:
+        raise ValueError("The private restore-media operation failed.")
+    try:
+        return json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        raise ValueError("The private restore-media operation did not answer safely.") from None
 # Short enough to share a line with its label: a longer hint moves every hint
 # onto its own line and the Try menu no longer fits the 1280x800 panel.
 TRY_HINT_LOGGED = "Nothing is kept. Logs go to this stick."
@@ -89,7 +151,7 @@ def warn(text):
 def try_settings_present():
     try:
         return temporary_mind_mounted() and any(
-            os.path.lexists(MIND_DIR / name) for name in (PROFILE_FILE, INITIATIVE_POLICY_PATH))
+            os.path.lexists(MIND_DIR / name) for name in (PROFILE_FILE, INITIATIVE_POLICY_PATH, look.FILE))
     except OSError:
         return False
 
@@ -160,6 +222,28 @@ def zone_to_keep():
     return None
 
 
+def try_appearance():
+    if not temporary_mind_mounted():
+        return None
+    try:
+        if not stat.S_ISREG((MIND_DIR / look.FILE).lstat().st_mode):
+            return None
+    except OSError:
+        return None
+    active = look.Store(MIND_DIR).read()
+    default = look.Look()
+    return active if any(getattr(active, field) != getattr(default, field) for field in look.FIELDS) else None
+
+
+def appearance_to_keep():
+    active = try_appearance()
+    if active is not None and input(
+        ui.prompt(f"Keep the Try appearance ({active.describe()})? [y/N] ")
+    ).strip().lower() in {"y", "yes"}:
+        return active
+    return None
+
+
 def carry_to_keep():
     """Bring Pip home: an opt-in offer, only when Try holds something the owner said."""
     from . import backup
@@ -176,9 +260,12 @@ def carry_to_keep():
               "into the installation. Otherwise the installed being starts fresh.")
     if input(ui.prompt("Keep what you and Pip talked about? [y/N] ")).strip().lower() not in {"y", "yes"}:
         return None
+    appearance = try_appearance()
 
     def restore(target):
         backup.carry(MIND_DIR, target)
+        if appearance is not None:
+            look.seed(target, appearance)
 
     return restore
 
@@ -224,18 +311,44 @@ def disk_card(number, disk):
              "   " + ui.paint(ui.dot().join(details), "muted")], tone="accent_soft")
 
 
+def disk_tiles(target, number, source, width):
+    details = [f"{installer.display_text(target['device'])}{ui.dot()}{ui.size(target['size_bytes'])}"]
+    if target.get("serial"):
+        details.append(f"Serial {installer.display_text(target['serial'])}")
+    contents = install_disks.disk_contents(target["device"], target.get("logical_sector_bytes") or 512)
+    if contents["being"]:
+        details.append("Holds a PipOS being")
+    elif contents["macos"]:
+        details.append("Holds macOS")
+    target_rows = [(f"{number}  {installer.friendly_name(target)}", "bright", "bold"),
+                   *((detail, "text") for detail in details), ("! Erased only after confirmation", "warning")]
+    source_rows = [(installer.friendly_name(source), "plain", "bold"),
+                   (f"{installer.display_text(source['device'])}{ui.dot()}{ui.size(source['size_bytes'])}", "muted"),
+                   (installer.friendly_reason(source), "muted")]
+    installer.paired_cards(installer.card_rows(target_rows, width, "accent_soft"),
+                           installer.card_rows(source_rows, width, "muted"))
+
+
 def draw_disks(report, available, flow):
     name, number, total = flow
-    ui.screen("Choose a disk", context=ui.step(number, total, name),
+    context = name if name == "Install" and ui.columns() >= 80 else ui.step(number, total, name)
+    ui.screen("Choose a disk", context=context,
               subtitle="Pick where your being will live. Everything on that disk will be replaced." if available
               else "Your being needs a disk of its own, separate from this USB stick.")
-    for key, device in available.items():
-        disk = next(disk for disk in report["disks"] if disk["device"] == device)
-        disk_card(key, disk)
+    disks = {disk["device"]: disk for disk in report["disks"]}
+    source = disks.get(report.get("boot_disk"))
+    paired = len(available) == 1 and source is not None and source.get("transport") and ui.columns() >= 80
+    if paired:
+        key, device = next(iter(available.items()))
+        disk_tiles(disks[device], key, source, installer.card_width())
+    else:
+        for key, device in available.items():
+            disk_card(key, disks[device])
     if not available:
         ui.card([ui.paint("No disk here can hold PipOS right now.", "text", "bold"),
                  "Connect or free up a disk, then try again."], tone="warning")
-    others = [disk for disk in report["disks"] if disk.get("transport") and disk["device"] not in available.values()]
+    others = [disk for disk in report["disks"] if disk.get("transport") and disk["device"] not in available.values()
+              and (not paired or disk is not source)]
     if others:
         ui.line()
         ui.line(ui.paint("Not available", "muted"))
@@ -247,6 +360,9 @@ def draw_disks(report, available, flow):
             reason = installer.friendly_reason(disk, report["layout_ready"])
             for part in ui.wrap(f"{installer.display_text(disk['device'])}{ui.dot()}{reason}", ui.width() - 5):
                 ui.line("    " + ui.paint(part, "muted"))
+    if name == "Install":
+        ui.line()
+        ui.line(installer.wizard_steps(1))
 
 
 def choose_disk(report, flow=("Install", 1, 2)):
@@ -296,8 +412,20 @@ def cable_refusal():
     return True
 
 
+def diagnostic_refusal():
+    """Diagnostic media measures hardware but never installs or restores onto a target."""
+    if not DIAGNOSTIC_MARKER.is_file():
+        return False
+    message = "This maintenance image cannot install or restore PipOS. Restart with the normal Try USB."
+    if ui.enabled():
+        ui.note(message, "warning")
+    else:
+        print(message)
+    return True
+
+
 def install(*, restore=None):
-    if cable_refusal():
+    if diagnostic_refusal() or cable_refusal():
         return False
     if restore is None:
         settings = try_settings_present()
@@ -313,8 +441,12 @@ def install(*, restore=None):
     choices = {"profile": None, "restore": restore}
     if restore is None:
         if settings:
-            ui.screen("Your Try settings", context=ui.step(2, total, name),
+            context = name if ui.enabled() and ui.columns() >= 80 else ui.step(2, total, name)
+            ui.screen("Your Try settings", context=context,
                       subtitle="Choose what the installed being keeps from this Try session.")
+            if ui.enabled():
+                ui.line(installer.wizard_steps(2))
+                ui.line()
         carried = carry_to_keep()
         if carried is not None:
             # The whole Try being goes home, its settings included.
@@ -327,6 +459,9 @@ def install(*, restore=None):
             zone = zone_to_keep()
             if zone is not None:
                 choices["skills"] = zone
+            appearance = appearance_to_keep()
+            if appearance is not None:
+                choices["appearance"] = appearance
     installer.confirm_installation(device, expected_plan=plan, flow=(name, total, total), **choices)
     input(ui.prompt("Press Enter to return to PipOS. "))
     return True
@@ -359,19 +494,82 @@ def unmount_media():
 
 
 def mount_media(device, *, writable=False):
+    if writable:
+        return _mount_media(device, WRITABLE_MOUNTS, "FAT, exFAT and ext4 backup media")
+    return _mount_media(device, MEDIA_MOUNTS, "FAT and exFAT media")
+
+
+def _mount_media(device, mounts, supported):
     unmount_media()
     MEDIA_DIR.mkdir(mode=0o700, exist_ok=True)
-    for filesystem, options in (WRITABLE_MOUNTS if writable else MEDIA_MOUNTS):
+    if _mount_at(device, MEDIA_DIR, mounts):
+        return MEDIA_DIR
+    unmount_media()
+    raise ValueError(f"That media could not be read. This screen supports {supported}.")
+
+
+def _mount_at(device, root, mounts):
+    for filesystem, options in mounts:
         try:
-            result = subprocess.run(["mount", "-t", filesystem, "-o", options, device, str(MEDIA_DIR)],
+            result = subprocess.run(["mount", "-t", filesystem, "-o", options, device, str(root)],
                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, timeout=60, check=False)
         except (OSError, subprocess.SubprocessError):
             continue
         if result.returncode == 0:
-            return MEDIA_DIR
-    unmount_media()
-    raise ValueError("That media could not be read. PipOS reads FAT, exFAT and ext4 backup media.")
+            return True
+    return False
+
+
+@contextmanager
+def update_media(device):
+    """Give RAUC a dedicated host-visible, read-only mount for this update."""
+    from . import care
+
+    parent = Path(tempfile.mkdtemp(prefix=UPDATE_MEDIA_PREFIX, dir=UPDATE_MEDIA_ROOT))
+    root = parent / "media"
+    deferred = False
+    try:
+        root.mkdir(mode=0o700)
+        if not _mount_at(device, root, MEDIA_MOUNTS):
+            raise ValueError("That update stick could not be read. Use FAT or exFAT media.")
+        yield root
+    except care.UpdateWaitInterrupted:
+        deferred = True
+        (parent / "pending").touch(mode=0o600)
+        raise
+    finally:
+        if not deferred and not _release_update_media(parent):
+            ui.note("The update stick is still in use. Open Update again to release it.", "warning")
+
+
+def _release_update_media(parent):
+    from . import care
+
+    root = parent / "media"
+    if os.path.ismount(root):
+        care.quiet(["umount", str(root)], timeout=15)
+        if os.path.ismount(root):
+            (parent / "pending").touch(mode=0o600)
+            return False
+    if root.exists():
+        root.rmdir()
+    (parent / "pending").unlink(missing_ok=True)
+    parent.rmdir()
+    return True
+
+
+def release_previous_update_media():
+    """Keep timed-out or interrupted updates reachable until RAUC is idle."""
+    from . import care
+
+    pending = list(UPDATE_MEDIA_ROOT.glob(f"{UPDATE_MEDIA_PREFIX}*/pending"))
+    if pending and not care.update_service_idle():
+        raise ValueError("PipOS could not confirm that the updater is idle. "
+                         "Leave the USB stick plugged in and check again later.")
+    for marker in pending:
+        if not _release_update_media(marker.parent):
+            raise ValueError("The earlier update stick is still in use.")
 
 
 def media_files(root):
@@ -423,7 +621,49 @@ def choose_media():
         if choice in {"", "q"}:
             return None
         if choice.isdigit() and 1 <= int(choice) <= len(media):
-            root = mount_media(media[int(choice) - 1][0])
+            from . import backup
+
+            device = media[int(choice) - 1][0]
+            identity = backup.media_identity(device)
+            if identity is None:
+                raise ValueError("That backup stick has no stable filesystem identity.")
+            if (Path("/etc/being/env").is_file() and shutil.which("systemd-run")
+                    and Path("/usr/sbin/being-backup").is_file()):
+                try:
+                    with backup.backup_lock():
+                        answer = _private_restore_device(device, identity)
+                except backup.Unavailable:
+                    raise ValueError("Another backup-media operation is already in progress.") from None
+                entries = answer.get("files") if isinstance(answer, dict) else None
+                if not isinstance(entries, list) or not entries:
+                    raise ValueError("That media holds no files.")
+                files = []
+                for entry in entries[:MEDIA_FILE_LIMIT]:
+                    if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+                        raise ValueError("The private restore-media operation returned an unsafe list.")
+                    relative = Path(entry["id"])
+                    if (relative.is_absolute() or not relative.parts or len(relative.parts) > 5
+                            or any(part in ("", ".", "..") for part in relative.parts)):
+                        raise ValueError("The private restore-media operation returned an unsafe path.")
+                    files.append(MEDIA_DIR / relative)
+                if ui.enabled():
+                    ui.screen("Choose your backup files", context=ui.step(2, 4, "Restore"),
+                              subtitle="Pick the backup, then the identity file that unlocks it. "
+                                       "Press Enter on its own to go back.")
+                    digits = len(str(len(files)))
+                    for number, entry in enumerate(entries[:len(files)], 1):
+                        key = ui.paint(str(number).rjust(digits), "accent", "bold")
+                        label = installer.display_text(entry.get("label", entry["id"]))
+                        ui.line(f" {key}  {ui.paint(label, 'text')}")
+                else:
+                    print("\nFiles on the backup media")
+                    for number, entry in enumerate(entries[:len(files)], 1):
+                        print(f"  {number}  {installer.display_text(entry.get('label', entry['id']))}")
+                return RestoreMedia(files, root=MEDIA_DIR, device=device, uuid=identity, private=True)
+            root = _mount_media(device, RECOVERY_MOUNTS, "FAT, exFAT and ext4 backup media")
+            if backup.media_identity(device) != identity or not backup.mounted_from(root, device):
+                unmount_media()
+                raise ValueError("The backup stick changed while it was being opened.")
             files = media_files(root)
             if not files:
                 unmount_media()
@@ -443,14 +683,14 @@ def choose_media():
                 if len(files) > len(shown):
                     ui.line()
                     ui.line(ui.paint(f"Only the first {len(shown)} of {len(files)} files are listed.", "muted"))
-                return shown
+                return RestoreMedia(shown, root=root, device=device, uuid=identity)
             shown = files[:MEDIA_FILE_LIMIT]
             print("\nFiles on the backup media")
             for number, path in enumerate(shown, 1):
                 print(f"  {number}  {installer.display_text(str(path.relative_to(root)))}")
             if len(files) > len(shown):
                 print(f"  Only the first {len(shown)} of {len(files)} files are listed.")
-            return shown
+            return RestoreMedia(shown, root=root, device=device, uuid=identity)
         warn("Choose a numbered media, or press Enter.")
 
 
@@ -480,23 +720,11 @@ def restore_file(prompt):
     raise ValueError("Enter an absolute path to a readable file on the mounted backup media.")
 
 
-def checkpoint_from_record(files):
-    """Read the checkpoint from a record file and have the owner confirm its fingerprint.
-
-    Returns None to fall back to typing the full value.
-    """
+def confirm_checkpoint_record(record):
+    """Parse a staged checkpoint record and have the owner confirm it."""
     from .backup import fingerprint, read_checkpoint_file
 
-    while True:
-        record = pick_file("Checkpoint record file [Enter to type the checkpoint instead]: ", files)
-        if record is None:
-            return None
-        try:
-            _, checkpoint = read_checkpoint_file(record)
-            break
-        except (OSError, ValueError):
-            message = "That file is not a checkpoint record. Choose the one ending in -checkpoint.txt."
-            ui.line(ui.mark("warning", message)) if ui.enabled() else print(message)
+    _, checkpoint = read_checkpoint_file(record)
     short = fingerprint(checkpoint)
     if ui.enabled():
         ui.line()
@@ -509,6 +737,23 @@ def checkpoint_from_record(files):
     if input(ui.prompt("Does it match? [y/N] ")).strip().lower() not in {"y", "yes"}:
         raise ValueError("The checkpoint was not confirmed. Nothing was restored.")
     return checkpoint
+
+
+def checkpoint_from_record(files):
+    """Read a local record and have the owner confirm its fingerprint."""
+    from .backup import read_checkpoint_file
+
+    while True:
+        record = pick_file("Checkpoint record file [Enter to type the checkpoint instead]: ", files)
+        if record is None:
+            return None
+        try:
+            read_checkpoint_file(record)
+        except (OSError, ValueError):
+            message = "That file is not a checkpoint record. Choose the one ending in -checkpoint.txt."
+            ui.line(ui.mark("warning", message)) if ui.enabled() else print(message)
+            continue
+        return confirm_checkpoint_record(record)
 
 
 def unlock_if_protected(identity):
@@ -535,7 +780,102 @@ def unlock_if_protected(identity):
         raise ValueError(f"{error} Nothing was restored.") from None
 
 
+def stage_restore_media(media, selected, destination):
+    """Use a capability-empty transient broker on the appliance.
+
+    Developer/host fixtures have neither the packaged executable nor systemd,
+    so they use the same implementation in-process. The recovery caller is
+    already root; this is process confinement, not a new authorization path.
+    """
+    from . import backup
+
+    if media.private:
+        requests = [(role, str(Path(path).relative_to(media.root))) for role, path in selected]
+        try:
+            with backup.backup_lock():
+                answer = _private_restore_device(media.device, media.uuid, selected=requests,
+                                                 destination=destination)
+        except backup.Unavailable:
+            raise ValueError("Another backup-media operation is already in progress.") from None
+        staged = answer.get("staged") if isinstance(answer, dict) else None
+        if not isinstance(staged, dict) or set(staged) != {role for role, _ in selected}:
+            raise ValueError("The private restore-media operation returned unexpected files.")
+        paths = {role: Path(path) for role, path in staged.items()}
+        if any(path.parent != Path(destination) or path.name != f"{role}.source"
+               for role, path in paths.items()):
+            raise ValueError("The private restore-media operation returned an unsafe staged path.")
+        return paths
+
+    appliance = Path("/etc/being/env").is_file()
+    runner = shutil.which("systemd-run")
+    helper = Path("/usr/sbin/being-backup")
+    if not appliance or runner is None or not helper.is_file():
+        return backup.stage_restore_artifacts(media.root, media.device, media.uuid, selected, destination)
+    command = [
+        runner, "--unit=being-restore-stage", "--quiet", "--wait", "--pipe", "--collect",
+        "--service-type=exec", "--property=Type=exec", "--property=PrivateNetwork=yes",
+        "--property=ProtectSystem=strict", "--property=ProtectHome=yes",
+        "--property=InaccessiblePaths=/mind",
+        "--property=NoNewPrivileges=yes", "--property=CapabilityBoundingSet=",
+        "--property=DevicePolicy=closed", "--property=RestrictAddressFamilies=AF_UNIX",
+        "--property=LockPersonality=yes", "--property=RestrictSUIDSGID=yes",
+        "--property=RestrictNamespaces=yes", "--property=SystemCallArchitectures=native",
+        "--property=ProtectKernelTunables=yes", "--property=ProtectKernelModules=yes",
+        "--property=ProtectKernelLogs=yes", "--property=ProtectControlGroups=yes",
+        "--property=ProtectClock=yes", "--property=UMask=0077",
+        "--property=TasksMax=8", "--property=MemorySwapMax=0",
+        "--property=RuntimeMaxSec=15min", "--property=TimeoutStopSec=10s",
+        f"--property=ReadOnlyPaths={media.root}", f"--property=ReadWritePaths={destination}",
+        str(helper), "stage-restore", "--root", str(media.root), "--device", media.device,
+        "--uuid", media.uuid, "--destination", str(destination),
+    ]
+    for role, path in selected:
+        command.extend(("--artifact", f"{role}={path}"))
+    try:
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, timeout=910, check=False)
+    except subprocess.TimeoutExpired:
+        try:
+            stopped = subprocess.run(("systemctl", "stop", "being-restore-stage.service"),
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, timeout=15, check=False)
+            if stopped.returncode:
+                subprocess.run(("systemctl", "kill", "--kill-whom=all", "--signal=KILL",
+                                "being-restore-stage.service"), stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=10, check=False)
+        except (OSError, subprocess.SubprocessError):
+            try:
+                subprocess.run(("systemctl", "kill", "--kill-whom=all", "--signal=KILL",
+                                "being-restore-stage.service"), stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=10, check=False)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        raise ValueError("I stopped backup-file staging because it took too long.") from None
+    except (OSError, subprocess.SubprocessError):
+        raise ValueError("I couldn't start the confined backup-file staging helper.") from None
+    if result.returncode:
+        detail = (result.stderr or "").strip().splitlines()
+        message = detail[-1].removeprefix("being-backup: ") if detail else "The backup files could not be staged safely."
+        raise ValueError(message[:300])
+    try:
+        answer = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        raise ValueError("The confined backup-file staging helper did not answer safely.") from None
+    expected = {role for role, _ in selected}
+    if set(answer) != expected:
+        raise ValueError("The confined backup-file staging helper returned unexpected files.")
+    paths = {role: Path(path) for role, path in answer.items()}
+    if any(path.parent != Path(destination) or path.name != f"{role}.source"
+           for role, path in paths.items()):
+        raise ValueError("The confined backup-file staging helper returned an unsafe path.")
+    return paths
+
+
 def restore_inputs(executable, *, archive, files=None):
+    staged_holder = None
+    keep_restore = False
     if files is None:
         if ui.enabled():
             ui.screen("Your backup files", context=ui.step(2, 4, "Restore"),
@@ -557,20 +897,89 @@ def restore_inputs(executable, *, archive, files=None):
     identity = ask("Private identity file: ")
     if identity is None:
         return None
-    # A passphrase is asked for now, before any progress screen can draw over age's prompt.
-    identity, unlocked = unlock_if_protected(identity)
     if files is not None:
         # Restoring works, but the stick alone opens the backup.
         ui.note("The private key is on the same stick as the backup. Anyone with this stick can read it. "
                 "Keep the key on a different stick.", "warning")
     extras = []
+    proof = None
+    record = None
     if archive:
         proof = ask("Latest deletion checkpoint file: ")
         if proof is None:
             return None
         checkpoint = None
         if files is not None:
-            checkpoint = checkpoint_from_record(files)
+            record = pick_file("Checkpoint record file [Enter to type the checkpoint instead]: ", files)
+            if (isinstance(files, RestoreMedia) and files.private
+                    and Path("/usr/sbin/being-keep-file-backup").is_file()):
+                keep_restore = input(ui.prompt(
+                    "Also restore encrypted Keep files already named by this authenticated catalog? [y/N] "
+                )).strip().lower() in {"y", "yes"}
+    if files is not None:
+        from . import backup
+
+        if not isinstance(files, RestoreMedia):
+            raise ValueError("The selected restore media has no stable source identity.")
+        staged_holder = backup.working_directory()
+        staged_root = Path(staged_holder.name)
+        selected = [("snapshot", snapshot), ("identity", identity)]
+        if proof is not None:
+            selected.append(("deletions", proof))
+        if record is not None:
+            selected.append(("checkpoint", record))
+        try:
+            staged = stage_restore_media(files, selected, staged_root)
+            unmount_media()
+            if os.path.ismount(files.root):
+                raise ValueError("The backup files were staged, but the stick could not be unmounted safely.")
+        except BaseException:
+            staged_holder.cleanup()
+            raise
+        snapshot = staged["snapshot"]
+        identity = staged["identity"]
+        if proof is not None:
+            proof = staged["deletions"]
+        if record is not None:
+            try:
+                checkpoint = confirm_checkpoint_record(staged["checkpoint"])
+            except (OSError, ValueError):
+                staged_holder.cleanup()
+                raise
+    else:
+        # Rescue operators may name already-mounted files (including a key on
+        # a separate stick). Copy each opaque input through a stable regular
+        # file descriptor before age or any parser sees it. These mounts are
+        # externally owned, so this path deliberately does not unmount them.
+        from . import backup
+
+        staged_holder = backup.working_directory()
+        staged_root = Path(staged_holder.name)
+        staged = {}
+        selected = [("snapshot", snapshot), ("identity", identity)]
+        if proof is not None:
+            selected.append(("deletions", proof))
+        try:
+            for role, path in selected:
+                staged.update(backup.stage_restore_artifacts(Path(path).parent, None, None,
+                                                             [(role, path)], staged_root))
+        except BaseException:
+            staged_holder.cleanup()
+            raise
+        snapshot = staged["snapshot"]
+        identity = staged["identity"]
+        if proof is not None:
+            proof = staged["deletions"]
+
+    # A passphrase is asked only after removable media is unmounted, before a
+    # progress screen can draw over age's prompt.
+    try:
+        identity, unlocked = unlock_if_protected(identity)
+    except BaseException:
+        if staged_holder is not None:
+            staged_holder.cleanup()
+        raise
+    if archive:
         if checkpoint is None:
             if ui.enabled():
                 ui.line()
@@ -581,32 +990,69 @@ def restore_inputs(executable, *, archive, files=None):
             checkpoint = getpass.getpass(ui.prompt("Independently known current checkpoint: "),
                                          stream=sys.stdout).strip().lower()
             if not checkpoint:
+                if unlocked is not None:
+                    unlocked.cleanup()
+                if staged_holder is not None:
+                    staged_holder.cleanup()
                 return None
             if not re.fullmatch(r"[0-9a-f]{64}", checkpoint):
+                if unlocked is not None:
+                    unlocked.cleanup()
+                if staged_holder is not None:
+                    staged_holder.cleanup()
                 raise ValueError("Enter the independently recorded hexadecimal checkpoint value.")
         extras = ["--deletions", str(proof), "--current-checkpoint", checkpoint]
 
+    keep_result = {}
+
     def prepare(mind_dir):
+        from .backup_crypto import BackupCryptoError, _read_identity
+
         command = [executable, "restore", "--mind-dir", str(mind_dir), "--input", str(snapshot),
                    "--identity", str(identity), *extras]
         message = "Backup restore failed. Verify the backup, identity, and any supplied checkpoint, then retry."
+        key = None
         try:
+            if keep_restore:
+                key = _read_identity(identity)
             result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, timeout=900, check=False)
-        except (OSError, subprocess.SubprocessError):
+        except (BackupCryptoError, OSError, subprocess.SubprocessError):
             raise ValueError(message) from None
         finally:
             if unlocked is not None:
                 unlocked.cleanup()  # the unlocked key lived in RAM only for this restore
+            if staged_holder is not None:
+                staged_holder.cleanup()  # encrypted source copies lived in private /run
         if result.returncode:
             raise ValueError(message)
+        if keep_restore:
+            try:
+                keep = subprocess.run(
+                    ["/usr/sbin/being-keep-file-backup", "restore", "--mind-dir", str(mind_dir),
+                     "--device", files.device, "--uuid", files.uuid],
+                    input=key, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    timeout=1810, check=False,
+                )
+                if len(keep.stdout) > 4096:
+                    raise ValueError("The Keep recovery returned too much information.")
+                answer = json.loads(keep.stdout.decode("ascii"))
+                if (keep.returncode or not isinstance(answer, dict) or answer.get("ok") is not True
+                        or any(type(answer.get(name)) is not int or answer[name] < 0
+                               for name in ("restored", "missing", "skipped"))):
+                    raise ValueError("The encrypted Keep files could not be recovered.")
+                keep_result.update(answer)
+            except (BackupCryptoError, OSError, subprocess.SubprocessError, UnicodeError,
+                    json.JSONDecodeError, ValueError) as error:
+                keep_result["error"] = str(error)[:200]
 
+    prepare.keep_result = keep_result
     return prepare
 
 
 def restore_menu():
     # A restore installs too: a cable stick refuses before any media or disk is chosen.
-    if cable_refusal():
+    if diagnostic_refusal() or cable_refusal():
         return False
     executable = shutil.which("being-backup")
     if executable is None or not all(shutil.which(tool) for tool in ("age", "age-keygen")):
@@ -635,6 +1081,14 @@ def restore_menu():
             files = choose_media()
             restore = restore_inputs(executable, archive=choice == "1", files=files)
             if restore is not None and install(restore=restore):
+                keep_result = getattr(restore, "keep_result", {})
+                if "error" in keep_result:
+                    ui.note("The being was restored, but its encrypted Keep files were not: "
+                            + keep_result["error"], "warning")
+                elif keep_result.get("ok") is True:
+                    ui.note(f"Recovered {keep_result['restored']} Keep file"
+                            f"{'s' if keep_result['restored'] != 1 else ''}; "
+                            f"{keep_result['missing']} remain missing.", "plain")
                 return True
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             report_error(error)
@@ -731,6 +1185,8 @@ def menu_entries(name=None):
     name = name or "Pip"
     entries = []
     for key, label, hint in MENU:
+        if DIAGNOSTIC_MARKER.is_file() and key in {"2", "3"}:
+            continue
         if key == TYPE_CHAT_KEY:
             label, hint = f"Talk to {name} by typing", f"When {name} can't hear you."
         elif logged and hint == TRY_HINT:
@@ -754,15 +1210,40 @@ def welcome():
         return
     name = being_name()
     ui.screen(f"Hello, I'm {name}." if name else "Hello.", context="Running from USB")
-    ui.para("I'm a being who can live in this Mac. I listen, talk with you, and remember what matters to you.",
-            "plain")
-    ui.line()
-    ui.para("Right now I'm running from the USB stick. Try keeps your choices and our conversations "
-            "in memory until you restart.", "muted")
-    ui.line()
     ui.para(how_to_talk(name), "plain")
     ui.line()
-    ui.options(menu_entries(name))
+    entries = menu_entries(name)
+    trial = entries[0]
+    install = next((entry for entry in entries if entry[0] == "2"), None)
+    other = [entry for entry in entries[1:] if entry[0] != "2"]
+    trial_status = "Choices and conversations clear when you restart."
+    if trial[2] == TRY_HINT_LOGGED:
+        trial_status += " Logs go to this USB."
+    if install is not None and ui.columns() >= 80:
+        width = installer.card_width()
+        left = installer.card_rows([
+            ("○", "accent"), (f"{trial[0]}  {trial[1]}", "bright", "bold"),
+            (trial_status, "muted"), ("",), ("✓ No changes to the internal disk", "success"),
+        ], width, "accent_soft")
+        right = installer.card_rows([
+            ("↓", "accent"), (f"{install[0]}  {install[1]}", "bright", "bold"),
+            ("Give Pip a home and keep its memory between wakes.", "muted"), ("",),
+            ("! Erases the disk you choose", "warning"),
+        ], width, "accent_soft")
+        installer.paired_cards(left, right)
+    elif install is not None:
+        ui.card([ui.option(*trial[:2]), ui.paint(trial_status, "muted")], tone="accent_soft")
+        ui.card([ui.option(*install[:2]),
+                 ui.paint("Review the disk layout before confirming an erase.", "muted")], tone="accent_soft")
+    else:
+        ui.card([ui.option(*trial[:2]), ui.paint(trial_status, "muted"),
+                 ui.paint("Maintenance media cannot install or restore PipOS.", "warning")],
+                tone="accent_soft")
+    ui.line()
+    ui.options(other)
+    if ui.room() >= 2:
+        ui.line()
+        ui.line(installer.wizard_steps(0))
 
 
 def run_diagnostic(mode):
@@ -885,9 +1366,13 @@ def try_menu():
             if choice in {"1", "q"}:
                 return 0
             if choice == "2":
+                if diagnostic_refusal():
+                    continue
                 if install():
                     return 0
             elif choice == "3":
+                if diagnostic_refusal():
+                    continue
                 if restore_menu():
                     return 0
             elif choice == "4":
@@ -902,7 +1387,8 @@ def try_menu():
                 # On a laptop Try stick, keep a copy with the boot logs.
                 usb_logs.save_check(report)
                 if ui.enabled():
-                    if input(ui.prompt("G runs the guided checks. Press Enter to go back. ")).strip().lower() == "g":
+                    ui.para("Press G for guided checks.", "muted")
+                    if input(ui.prompt("Press Enter to go back. ")).strip().lower() == "g":
                         guided_checks()
             elif choice == TYPE_CHAT_KEY:
                 type_chat.main()
@@ -918,14 +1404,45 @@ def try_menu():
             report_error(error)
 
 
-def main():
+def _requested_page(page):
+    from . import care
+
+    temporary = is_try_boot()
+    if page == "look":
+        return setup.main(["--look"])
+    if page == "care":
+        return setup.main(["--care"])
+    if page == "camera":
+        care.camera_page(MIND_DIR, temporary)
+    elif page == "camera-enable":
+        care.camera_page(MIND_DIR, temporary, enable_only=True)
+    elif page == "dream-tonight":
+        care.dream_tonight_page(MIND_DIR)
+    elif page == "permissions":
+        care.permissions_page(MIND_DIR, temporary)
+    elif page == "network":
+        care.network_page(MIND_DIR, temporary)
+    elif page == "backup":
+        care.backup_menu(MIND_DIR, temporary=temporary)
+    elif page == "update":
+        try:
+            care.update_menu(MIND_DIR, try_boot=temporary)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            report_error(error)
+    return 0
+
+
+def main(*, page=None):
     if not sys.stdin.isatty():
         print("PipOS setup requires an interactive terminal.", file=sys.stderr)
         return 1
     try:
-        if is_try_boot():
+        if page is not None:
+            code = _requested_page(page)
+        elif is_try_boot():
             return try_menu()
-        code = setup.main([])
+        else:
+            code = setup.main([])
         if ui.enabled() and ui.pending_notes():
             # The installed console closes after setup; let its last words be read.
             ui.screen(None, context="Setup")

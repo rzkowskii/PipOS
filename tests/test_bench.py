@@ -3,6 +3,7 @@
 import functools
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -118,10 +119,40 @@ class FullRun(unittest.TestCase):
         self.assertEqual(command[command.index("--parallel") + 1], "2")
         dream = bench.server_command("/models/d.gguf", {**bench.PRODUCTION, **bench.DREAM_SERVER}, 8091, "/tmp/s")
         self.assertEqual((dream[dream.index("--ctx-size") + 1], dream[dream.index("--parallel") + 1]), ("2048", "1"))
-        env = bench.server_env({})
-        self.assertEqual((env["LLAMA_ARG_BATCH"], env["LLAMA_ARG_UBATCH"]), ("512", "512"))
-        self.assertNotIn("LLAMA_ARG_MLOCK", env)
         self.assertEqual(bench.PREFILL_SIZES, (16, 32, 128, 512))
+
+    def test_server_env_follows_the_cortex_unit_and_its_load_mode(self):
+        # being-cortex.service: 64/7 batches, flash attention off, weights mapped.
+        with patch.dict(os.environ, {"LLAMA_ARG_MLOCK": "1", "LLAMA_ARG_FLASH_ATTN": "on"}):
+            env = bench.server_env(dict(bench.PRODUCTION))
+            dream = bench.server_env({**bench.PRODUCTION, **bench.DREAM_SERVER})
+        self.assertEqual((env["LLAMA_ARG_BATCH"], env["LLAMA_ARG_UBATCH"], env["LLAMA_ARG_FLASH_ATTN"]),
+                         ("64", "7", "off"))
+        self.assertEqual((env["LLAMA_ARG_LOAD_MODE"], env["LLAMA_ARG_CTX_CHECKPOINTS"]), ("mmap", "6"))
+        self.assertNotIn("LLAMA_ARG_MLOCK", env, "the packaged llama-server has no such option")
+        # A setting that asks for mlock maps and locks the weights.
+        locked = bench.server_env({"threads": 2, "mlock": True})
+        self.assertEqual(locked["LLAMA_ARG_LOAD_MODE"], "mmap+mlock")
+        self.assertNotIn("LLAMA_ARG_MLOCK", locked)
+        # The thread sweep keeps the production batches; a setting may name its own.
+        sweep = bench.server_env(dict(bench.THREAD_SWEEP[-1]))
+        self.assertEqual((sweep["LLAMA_ARG_BATCH"], sweep["LLAMA_ARG_UBATCH"]), ("64", "7"))
+        own = bench.server_env({"batch": 512, "ubatch": 512, "flash_attn": "auto"})
+        self.assertEqual((own["LLAMA_ARG_BATCH"], own["LLAMA_ARG_UBATCH"], own["LLAMA_ARG_FLASH_ATTN"]),
+                         ("512", "512", "auto"))
+        # The dream server: 512-token batches and the server's own attention choice.
+        self.assertEqual((dream["LLAMA_ARG_BATCH"], dream["LLAMA_ARG_UBATCH"]), ("512", "512"))
+        self.assertNotIn("LLAMA_ARG_FLASH_ATTN", dream)
+        self.assertEqual(dream["LLAMA_ARG_LOAD_MODE"], "mmap")
+
+    def test_production_batches_match_the_cortex_unit(self):
+        unit = (Path(__file__).resolve().parents[1] / "os/package/cortex/being-cortex.service").read_text()
+        env = dict(word.split("=", 1) for line in unit.splitlines() if line.startswith("Environment=")
+                   for word in line.partition("=")[2].split())
+        self.assertEqual((env["LLAMA_ARG_BATCH"], env["LLAMA_ARG_UBATCH"], env["LLAMA_ARG_FLASH_ATTN"]),
+                         (str(bench.CORTEX_BATCHES["batch"]), str(bench.CORTEX_BATCHES["ubatch"]),
+                          bench.CORTEX_BATCHES["flash_attn"]))
+        self.assertEqual(env["LLAMA_ARG_LOAD_MODE"], bench.LOAD_MODE)
 
     def test_voice_falls_back_to_flite_and_pocketsphinx_without_voice_bench(self):
         with patch.dict(sys.modules, {"mind.voice_bench": None}), \
@@ -294,7 +325,9 @@ class Packaging(unittest.TestCase):
         unit = (REPO / "os/package/being/being-bench.service").read_text()
         lines = {line.partition("=")[0]: line.partition("=")[2] for line in unit.splitlines() if "=" in line
                  and not line.startswith("#")}
-        self.assertEqual(lines["ConditionKernelCommandLine"], "being.bench=1")
+        conditions = [line.partition("=")[2] for line in unit.splitlines()
+                      if line.startswith("ConditionKernelCommandLine=")]
+        self.assertEqual(conditions, ["|being.bench=1", "|being.bench=2"])
         self.assertEqual(lines["Type"], "oneshot")
         self.assertEqual(lines["ExecStart"], "/usr/bin/python3 -m mind.bench")
         self.assertIn("PYTHONPATH=/usr/lib/being", lines["Environment"])

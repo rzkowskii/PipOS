@@ -147,7 +147,7 @@ without Pip's name.
 | "What can you do?" / "What else can you do?" / "What can you do with lists?" / "Help" | A short tour, or one group of skills |
 | "Go to sleep" / "Good night" | "Okay. Good night." Between 5 a.m. and 6 p.m. it says "Okay. I'll rest my eyes for a while." instead. Pip then sleeps until you say the wake phrase (not while muted) or open the lid |
 | "Are you alive?" / "Are you sentient?" / "Do you have feelings?" / "What are you?" | A fixed, honest answer from code |
-| "What do you see?" / "Look at this" | Camera off: "I can't see right now. My camera is switched off." Camera on: it can tell someone is there but cannot make out things |
+| "Can you see me?" / "What do you see?" / "Look at this" | Pip can report a recent face detection while the camera is allowed. Face identification and object descriptions are pending. The reply is private. |
 | "What did you dream about?" | From its dream journal only |
 | "Speak up" / "Be quieter" / "Set your volume to 5" | Volume, through the voice organ |
 
@@ -207,10 +207,11 @@ external keyboard without media keys sends them as before.
 
 | Key | On the face | On a setup screen |
 |---|---|---|
-| **Esc** | Stop the current reply, including audio already playing (`key.interrupt`) | Leaves the typing chat |
+| **Esc** | Stop the current reply, including audio already playing (`key.interrupt`). Pip remembers only the part that played | Leaves the typing chat |
 | **M** | Mute or unmute the microphone (`key.mute`). A letter while the terminal has the keyboard | Typed as text |
 | **fn+F10** | Mute or unmute the microphone | Mute (for the **P** speaker preview) |
-| **fn+F1** | Show or hide the captions and health overlay (off by default; nothing in it is saved) | — |
+| **fn+F1** | Show or hide captions and the route badge. Off by default and never saved | — |
+| **Shift+fn+F1** | Show or hide the hardware and service health overlay | — |
 | **fn+F9** | Recover the face when the lid reading is unknown (`key.panel_recover`) | Same |
 | **fn+F2**, or **Mission Control** (F3) | Open setup on an installed Pip, or the start menu in Try | — |
 | **fn+F3** | While the workshop terminal has the keyboard: put it away (hands' control word `\0f3`) | — |
@@ -258,10 +259,10 @@ On the laptop Try stick, the GRUB menu (5 s timeout) offers these entries
 | **alternative microphone** | **m** | `snd_hda_intel.model=mbp81 being.mic_channel=auto` |
 | **alternative microphone 2** | **n** | `snd_hda_intel.model=mbp101` |
 | **measure speed** | **b** | `being.bench=1` |
+| **measure boot and idle** | **i** | `being.bench=2` |
 
-The ISO's boot menu (`os/board/beingos/iso-grub.cfg`) has the same six
-entries. A [cable development stick](#cable-development-build) has the
-same six too, and each of them also adds `being.cable=1 being.voice_debug=1`
+The ISO and the [cable development stick](#cable-development-build) both
+include these seven entries. The cable entries also add `being.cable=1 being.voice_debug=1`
 (`os/board/beingos/try-image.sh`).
 
 ## On-screen menus
@@ -318,7 +319,7 @@ time zone restart the mind. In Try, everything applies immediately.
 | Key | Page |
 |---|---|
 | 1 | Camera on or off (runs `being-camera`) |
-| 2 | Dreams: 1 at night only (lid closed, on power, midnight to 5 a.m.), 2 whenever the lid is closed on power (saved in `dreams-enabled`, but the mind does not read the window yet and keeps to the night), 3 stop |
+| 2 | Dreams: 1 at night only (lid closed, on power, midnight to 5 a.m.), 2 whenever the lid is closed on power, 3 stop |
 | 3 | Memory: persistent, explicit-only, session-only, or 4 forget conversations after N days |
 | 4 | What I remember: the newest 40 facts; forget one by number |
 | 5 | Dream journal: the newest 12 entries |
@@ -326,8 +327,10 @@ time zone restart the mind. In Try, everything applies immediately.
 | 7 | Time zone |
 | 8 | Workshop on or off |
 | 9 | Network: join Wi-Fi (scan or hidden), wired Ethernet on or off, forget Wi-Fi. Installed system only |
+| P | Permissions: view the owner settings for camera, network, workshop, announcements and dreams |
 | D | Boot diagnostics on the Try stick on or off. Try only |
 | H | Health: the doctor's check-up |
+| L | Offline library. View sources, licences and credits, or change consent for an installed pack |
 
 ## Maintenance commands
 
@@ -371,10 +374,12 @@ the Try menu's item **8** (Quick, Full or Voice).
 
 | Command | Needs root | What it does |
 |---|---|---|
-| `quick` | No | About a minute, automatic. The build, clock, units, a module import check, the bus and boot timing; the codec dump; every command phrase through the mind's own routing, and the workshop state; two model prompts; heat (5 s), battery, network, firewall and storage; the mixer settings. As root with a sound card, it also records the room floor and plays one test tone. Last, each voice's speed and the words decoded from it |
+| `quick` | No | About a minute, automatic. The build, clock, units, a module import check, the bus and boot timing; the codec dump; every command phrase through the mind's own routing, and the workshop state; two model prompts; heat (5 s), battery, firewall and storage; and a read-only wired check of the bound driver (`tg3` on the MacBookPro9,2), carrier, speed/duplex, addresses and networkd setup/address state; then the mixer settings. Offline or owner-disabled Ethernet is reported as intentional. When Internet mode and wired Ethernet are both selected, it distinguishes missing driver, missing carrier and linked-without-address, and points only to the ordinary F2 → C → 9 setting, cable/router port or router DHCP. It never raises a link, reloads networkd or changes network policy. As root with a sound card, it also records the room floor and plays one test tone. Last, each voice's speed and the words decoded from it |
 | `full` | Yes | 10 to 15 minutes, automatic. All of `quick` with every model prompt and 60 s of heat under load, plus the microphone sweep, the speaker battery, its timing, the acoustic loopback and speaker isolation, every voice scored before and after the speaker, the recognizer's self-test, the engines' speed check and, when memory allows a second model server, `bench --quick`. On a voice-debug boot it also says three phrases to the running voice (as `commands --e2e`) |
 | `voice` | Yes | Interactive, with you there, about 10 minutes. It asks whether to keep recordings, then: your speech at a few microphone gain settings; command phrases for you to say, decoded by each engine (`--phrases N`, default 10, is held between 5 and 40, but no more than the 16 phrases in the command table are said, so a run says 5 to 16: the five core phrases first, then the others in table order); each voice played for a 1 to 5 rating, and a channel test; wake trials at 1 m (`--trials`, default 10; `--two-metres` adds 2 m); and 60 s of talk without the name, to count false wakes. Refused with `--json` |
 | `commands` | No (`--e2e` needs root) | The command phrases through the mind's routing, in this process, and the workshop state. `--e2e` also renders three phrases with Flite ("Hey Pip, open a terminal.", "Hey Pip, what time is it?", "Hey Pip, close the terminal.") and says each to the running voice through the diagnostic microphone. On a voice-debug boot, as root, `--e2e` is the default |
+| `workload` | Journal access | Up to 512 route entries from this boot and Linux CPU stalls for brainstem, mind, voice and face. Private and overheard turns are excluded. If the existing voice-debug journal includes words, the report estimates how many model fallbacks looked like commands. `diag.json` contains counts and pressure readings. |
+| `continuity` | Archive read access | Validates the current life record and reads the archive's SQLite integrity and format. It checks the conversation and workshop slots against the configured context size through the local cortex API. The report contains health results and format numbers. |
 | `mic` | Yes | The mixer, the room floor per channel (a dead channel is named) and the Mic Boost × Capture sweep |
 | `speaker` | Yes | The test-signal battery through `plughw:0,0` and `hw:0,0` (rate, underruns, the `aplay -v` chain), small, default and large periods, the acoustic loopback (level, latency, distortion, octave bands, dropouts) and speaker isolation |
 | `tts` | Yes | Every voice: its speed, and the words PocketSphinx decodes from it before and after the speaker |
@@ -526,18 +531,19 @@ Sources: `mind/*.py`, `crates/brainstem/src/life.rs`
 | `log/actions.jsonl` | mind | The action log: kinds and times, never words | Yes |
 | `erasures.json` | mind | How many times "forget everything" has run | Yes |
 | `reminders.db` | mind | Pending reminders, alarms, repeats and timers, greeting days | No |
-| `context.json` | mind | The conversation to resume within 24 h | No |
-| `cortex/being.slot`, `cortex/identity.slot` | llama-server | Saved model cache, and the snapshot after a clean identity warm-up | No |
+| `context-cache/<boot>/context.json` | mind | Working conversation for a same-boot restart within 24 h. An encrypted directory or RAM | No |
+| `cortex/boot-cache/<boot>/being.slot`, `identity.slot` | llama-server | Boot-local model cache and clean identity snapshot. An encrypted directory or RAM | No |
 | `voice-volume.json`, `audio/voice.json`, `audio/engines.json`, `audio/asound.state` | mind, voice, Care | Volume, chirps and voice choice, voice-engine speed measurements, mixer levels. A key mute is never saved here | No |
-| `audio/sherpa-avx-smoke.json` | by hand (nothing in the image writes it yet) | A passed Ivy Bridge speech test in `lab/sherpa_avx_smoke.py`'s format, pinned to the sherpa-onnx and ONNX Runtime bytes it tested. "Auto" loads Moonshine only with such a report, here or in `/usr/share/being/voice/` (which no image installs yet) | No |
+| `audio/sherpa-avx-smoke.json` | `pip-diag engines --record-smoke` | A native speech compatibility result pinned to the build and the installed sherpa-onnx and ONNX Runtime libraries. A matching native result takes precedence over the packaged Ivy Bridge verdict in `/usr/share/being/voice/`. Auto also requires Moonshine to meet the speed limit. On Try, the recorded result lives in RAM until shutdown | No |
 | `speaker-muted` | mind (`mind/keys.py`) | Present while the mute key (or the volume keys stepped to nothing) holds the speaker at 0, so the next start of the mind puts the sound back | No |
 | `play.json` | mind | Which jokes and facts were told | No |
 | `night-shift.json` | mind | How far the night's chores got | No |
 | `last-backup.json`, `backup-recipient.txt` | backup, Care | When the last backup was made and how; the public half of the backup key | No |
 | `core.md` | owner (by hand) | Optional "things it always knows". Persistent mode only | No |
+| `core-profile.md` | night shift | Up to four confirmed owner fact references. The archive supplies their current text in persistent owner mode. A manual `core.md` takes precedence. | No |
 | `network/policy.json`, `network/wifi.json` | `being-network`, `being-wifi` | Network mode, permissions, Wi-Fi credentials | No |
 | `camera.enabled` | `being-camera` | Camera consent marker (root, 0600) | No |
-| `dreams-enabled` | Care | Dream consent marker; may hold the window (`night` or `closed`, not yet read by the mind) | No |
+| `dreams-enabled` | Care | Dream consent and window (`night` or `closed`). Legacy empty markers mean `night`. | No |
 | `apps.enabled`, `apps.disabled` | Care | Workshop switch (on unless `apps.disabled` exists) | No |
 | `lab-access/` | `being-lab-access` | Paired-Mac maintenance keys (maintenance builds only) | No |
 | `.being-restore-in-progress` | `being-backup restore` | Blocks the mind, voice and cortex until a restore completes | — |
@@ -626,7 +632,7 @@ BEING_REQUIRE=face,mind,voice
 | `BEING_BATTERY_CONFIRM_HOLD` | 30 s | brainstem: how long a low reading must hold |
 | `BEING_LID_BATTERY_SHUTDOWN_MIN` | 10 (0 disables) | brainstem: power off after the lid is closed this long on battery |
 | `BEING_SHUTDOWN_GRACE` | 20 s | brainstem: time the mind gets to save before a battery power-off |
-| `BEING_BODYCARE_MODE`, `BEING_CHARGE_LIMIT`, `BEING_DREAM_TARGET_C` | observe, unset, 70 | bodycare |
+| `BEING_BODYCARE_MODE`, `BEING_CHARGE_LIMIT`, `BEING_DREAM_TARGET_C` | observe, unset, 80 | bodycare |
 | `BEING_ALSA_CAPTURE`, `BEING_ALSA_PLAYBACK` | `plughw:0,0` | voice |
 | `BEING_ALSA_CARD`, `BEING_ALSA_MIXER` | the playback card, `Master` | voice, Care |
 | `BEING_MIC_GAIN`, `BEING_MIC_AUTO_GAIN`, `BEING_MIC_CHANNEL` | measured, on, `auto` on the laptop image (`/usr/share/being/variant` says `laptop`) and `mix` elsewhere | voice (software gain and channel choice; `being.mic_channel=` wins over `BEING_MIC_CHANNEL`). The lab's loopback body, the QEMU microphone port and the diagnostic microphone always mix |
@@ -661,6 +667,9 @@ BEING_REQUIRE=face,mind,voice
 | `being.cable=0`, `being.cable=1` | On a cable development stick, every entry carries `being.cable=1`; `being.cable=0` is the kill switch: no link, no SSH, and the code stays read-only. Other images ignore both |
 | `being.audio=keep` | `being-audio-init` leaves the mixer as it is |
 | `being.bench=1`, `being.bench.soak=MINUTES`, `being.bench.quick=1` | Bench mode: measure models and voices, with an optional soak or a quick run |
+| `being.bench=2`, `being.bench.idle=600` | Measure boot and idle while the production organs run. The optional interval collects repeated samples for up to ten minutes. |
+| `being.mic_test=1` or `0` | Enable or disable the Try boot microphone level measurement. It requires a confirmed open lid. Alternate microphone entries enable it. |
+| `being.face_idle_hz=5`, `15` or `30` | One-boot pacing comparison for the calm, empty desktop. Active animation, apps and captions use their usual timing. The face logs median and p95 drawing time. |
 | `hid_apple.fnmode=1` | Set on laptop images: the top row does what is printed on it (brightness, volume and the rest); fn+key sends F1 to F12 |
 
 ## Lab and simulator commands

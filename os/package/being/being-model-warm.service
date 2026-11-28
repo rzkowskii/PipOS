@@ -1,0 +1,24 @@
+[Unit]
+Description=Being: optional installed model page warming
+RequiresMountsFor=/models
+ConditionKernelCommandLine=being.installed=1
+ConditionKernelCommandLine=!being.trial=1
+ConditionKernelCommandLine=!being.try=1
+ConditionPathIsMountPoint=/models
+
+[Service]
+Type=exec
+Environment=PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m mind.model_warm
+RuntimeMaxSec=8
+TimeoutStopSec=1
+Nice=10
+IOSchedulingClass=idle
+CPUWeight=20
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+LimitCORE=0

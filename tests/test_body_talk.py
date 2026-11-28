@@ -42,6 +42,8 @@ class Phrases(unittest.TestCase):
             ("How long have you been awake?", "uptime"), ("how long have you been running", "uptime"),
             ("How well can you hear me?", "hearing"), ("Check your hearing", "hearing"),
             ("Hey Pip, can you hear me clearly?", "hearing"),
+            ("How bright is it in here?", "light"), ("Is it dark in here?", "light"),
+            ("How much light is in the room?", "light"),
         ):
             self.assertEqual(body_talk.classify(text), kind, text)
             self.assertTrue(body_talk.may_match(text), text)
@@ -53,6 +55,22 @@ class Phrases(unittest.TestCase):
                      "how much memory does a phone have", "the fan is loud"):
             self.assertIsNone(body_talk.classify(text), text)
             self.assertIsNone(ask(text), text)
+
+    def test_light_questions_do_not_capture_controls(self):
+        for text in ("Brighter", "Dimmer", "Set your brightness to 50 percent", "What do you see?"):
+            self.assertIsNone(body_talk.classify(text), text)
+
+
+class Light(unittest.TestCase):
+    def test_light_uses_measured_thresholds_and_is_honest(self):
+        self.assertIn("can't tell", ask("How bright is it in here?").line)
+        self.assertIn("dark", ask("Is it dark in here?", body={"lux": 0}).line)
+        self.assertIn("dim", ask("How much light is in the room?", body={"lux": 20}).line)
+        self.assertIn("bright", ask("How bright is it in here?", body={"lux": 50}).line)
+        self.assertIn("approximately 20 lux", ask("How many lux is it?", body={"lux": 20}).line)
+        self.assertNotIn("lux", ask("How bright is it in here?", body={"lux": 20}).line)
+        for value in (float("nan"), float("inf"), -1, True):
+            self.assertIn("can't tell", ask("How bright is it in here?", body={"lux": value}).line)
 
 
 class Battery(unittest.TestCase):

@@ -1,5 +1,29 @@
 # Sourced by lab/build.sh. The Linux build also runs this file inside a
 # disposable container, with /src read-only and /release as its only output.
+candidate_refresh() {
+    # Reapply changed package options and restore the tested sherpa bytes
+    # before the final strip exclusions run. Keep the toolchain in cache.
+    "$@" libopenssl-reconfigure linux-reconfigure sqlite-reconfigure python3-reconfigure \
+        util-linux-reconfigure dosfstools-reconfigure cortex-reconfigure sherpa-onnx-reinstall
+    # The local source rsync uses --update, so start with an empty being
+    # build directory and complete its install before constructing images.
+    "$@" being-dirclean
+    "$@" being-rebuild
+}
+
+candidate_source_verify() {
+    local out=$1 variant=$2 expected=${BEING_SOURCE_ID:-} actual
+    if ! [[ "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "Missing or invalid source ID for the $variant candidate" >&2
+        return 1
+    fi
+    if ! actual=$("$out/host/bin/unsquashfs" -cat "$out/images/rootfs.squashfs" etc/being/source-id) ||
+        [ "$actual" != "$expected" ]; then
+        echo "The $variant candidate rootfs has a missing or different embedded source ID" >&2
+        return 1
+    fi
+}
+
 candidate_artifacts() {
     local buildroot_version=$1 tar_sha=$2 defconfig=$3 lane=$4 laptop=${5:-no}
     local work=/tmp/beingos-candidate output=/tmp/beingos-candidate/output
@@ -33,14 +57,10 @@ candidate_artifacts() {
     "${buildroot[@]}" "$defconfig"
     cp "$output/.config" /release/buildroot.config
     if [ "$lane" = cache-overlay ]; then
-        # Rebuild local source, reapply the kernel config and re-detect Python's
-        # TLS modules. dosfstools installs its selected tools (fsck.fat for the
-        # boot-state volume) only at install time, so reapply it as well. The
-        # toolchain and other upstream package builds stay in cache.
-        "${buildroot[@]}" libopenssl-reconfigure linux-reconfigure python3-reconfigure dosfstools-reconfigure \
-            cortex-reconfigure being-rebuild
+        candidate_refresh "${buildroot[@]}"
     fi
     "${buildroot[@]}" all
+    candidate_source_verify "$output" lab
 
     local images="$output/images"
     cp --sparse=always "$images/beingos.img" /release/beingos.img
@@ -77,8 +97,7 @@ candidate_laptop() {
     done
     cp "$output/.config" /release/laptop-buildroot.config
     if [ "$lane" = cache-overlay ]; then
-        "${buildroot[@]}" libopenssl-reconfigure linux-reconfigure python3-reconfigure dosfstools-reconfigure \
-            cortex-reconfigure being-rebuild
+        candidate_refresh "${buildroot[@]}"
     fi
     "${buildroot[@]}" all
     candidate_laptop_verify "$output"
@@ -104,15 +123,9 @@ candidate_laptop() {
 # The same target checks `lab/build.sh laptop` runs (laptop_verify), for the
 # shipping variant: parity alone cannot see a lab file present in both roots.
 candidate_laptop_verify() {
-    local out=$1 bad=0 f
+    local out=$1 bad=0
     local t="$out/target" grub="$out/images/efi-part/EFI/BOOT/grub.cfg"
-    for f in usr/lib/systemd/system/being-lab-body.service usr/lib/being/sim/body.py usr/sbin/sshd \
-             usr/sbin/being-lab-access usr/lib/systemd/system/being-lab-observe.service \
-             usr/lib/systemd/system/being-lab-dev.service usr/share/being/cable \
-             usr/lib/systemd/system/being-cable-link.service usr/lib/systemd/system/being-cable-ssh.service \
-             usr/lib/systemd/system/being-cable-workbench.service; do
-        if [ -e "$t/$f" ]; then echo "Laptop candidate contains lab-only /$f" >&2; bad=1; fi
-    done
+    python3 "$(dirname "${BASH_SOURCE[0]}")/candidate_parity.py" laptop-check "$t" || bad=1
     if grep -q "ttyS0\|^serial " "$grub" "$t/usr/share/being/installed-grub.cfg"; then
         echo "Laptop candidate boot configuration still names the serial console" >&2; bad=1
     fi
@@ -124,9 +137,7 @@ candidate_laptop_verify() {
            grep -qx laptop "$t/usr/share/being/variant"; }; then
         echo "Laptop candidate does not carry the laptop update identity" >&2; bad=1
     fi
-    if ! grep -qx "${BEING_SOURCE_ID:-unknown}" "$t/etc/being/source-id" 2>/dev/null; then
-        echo "Note: the laptop candidate's /etc/being/source-id is missing or differs from BEING_SOURCE_ID" >&2
-    fi
+    candidate_source_verify "$out" laptop || bad=1
     return "$bad"
 }
 

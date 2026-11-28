@@ -22,6 +22,7 @@ from mind.profile import daily_greeting
 from mind.skills import find_zone
 from sim.body import SUBS, SimBody
 from sim.fake_cortex import FakeCortex
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 ROOT = Path(__file__).resolve().parent.parent
 BRAINSTEM = ROOT / "target" / "debug" / "brainstem"
@@ -163,6 +164,29 @@ class EndToEnd(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(before in said or self.expected_greeting() in said, said)
         self.assertEqual(self.cortex.chats, [])
 
+    async def test_deliberate_look_routes_a_single_private_description(self):
+        w = self.watcher
+        await w.state("idle")
+        eyes = Bus("eyes", ["camera.policy", "camera.look"], path=self.path)
+        await eyes.start()
+        self.addAsyncCleanup(eyes.stop)
+        async with asyncio.timeout(5):
+            await eyes.connected.wait()
+            await eyes.send("camera.request", enabled=True)
+            while not (grant := await eyes.recv()).get("allowed"):
+                pass
+            self.lines.put_nowait("Look at this")
+            request = await eyes.recv()
+        self.assertEqual(request["t"], "camera.look")
+        self.assertEqual(request["camera_seq"], grant["seq"])
+        await eyes.send("camera.look_result", id=request["id"], lid_seq=request["lid_seq"],
+                        camera_seq=request["camera_seq"], status="ok", description="A blue mug.")
+        await w.until("private description playback", lambda event: event["t"] == "say.done" and event.get("final"))
+        self.assertIn("A blue mug.", self.said())
+        self.assertFalse(any(event["t"].startswith("camera.look") or event.get("text") == "A blue mug."
+                             for event in w.events))
+        self.assertEqual(self.cortex.chats, [])
+
     @staticmethod
     def expected_greeting():
         """The daily greeting for the factory time zone's local time now, without its tag."""
@@ -205,8 +229,10 @@ class EndToEnd(unittest.IsolatedAsyncioTestCase):
         await w.state("attending")
         self.assertEqual(w.states(), ["idle", "attending", "listening", "thinking", "speaking", "attending"])
         self.assertIn("Hello! It's good to hear you.", self.said())
-        emotion = next(e for e in w.events if e["t"] == "face.express")
-        self.assertEqual(emotion["name"], "joy")
+        # The reply's emotion now rides with the speech (say.request face_cue, which the voice echoes on
+        # its first say.level for the face), not as a separate mind.emotion / face.express event.
+        self.assertTrue(any(e["t"] == "say.request" and e.get("face_cue") == "joy" for e in w.events),
+                        "the reply's emotion must reach the voice")
         self.assertTrue(any(e["t"] == "say.level" and e["v"] > 0 for e in w.events), "the face needs the voice level")
 
         # The body's senses reach the model, and its answer is true.

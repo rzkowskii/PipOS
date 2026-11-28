@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "notes_meeting",
+      "request": "Pick the key points from my meeting notes.",
+      "source_kind": "notes",
+      "excerpts": [
+        "The Cedar group met in Room Four.",
+        "The revised proposal is due on 18 June.",
+        "Mina will assemble the diagrams.",
+        "Tea and pears were on the table."
+      ],
+      "permissible_picks": [[2, 3], [2], [3]]
+    },
+    {
+      "id": "list_errands",
+      "request": "Pick the key points from my Saturday list.",
+      "source_kind": "list",
+      "excerpts": [
+        "Collect the repaired lamp before noon.",
+        "Buy oat milk.",
+        "Ask the library about renewing the community room.",
+        "Look at the jacaranda on the walk home."
+      ],
+      "permissible_picks": [[1, 2, 3], [1, 3], [1, 2]]
+    },
+    {
+      "id": "conversation_date",
+      "request": "Pick the key points from our saved conversation on 12 May.",
+      "source_kind": "conversation",
+      "excerpts": [
+        "The recycling collection was missed this morning.",
+        "I reported it to Rivergum Council.",
+        "They said the truck should return before Friday.",
+        "The clouds cleared after lunch."
+      ],
+      "permissible_picks": [[1, 2, 3], [1, 3], [2, 3]]
+    },
+    {
+      "id": "correction_time",
+      "request": "Pick the key point from my appointment notes.",
+      "source_kind": "notes",
+      "excerpts": [
+        "The dentist appointment is at two on Thursday.",
+        "Correction: the dentist appointment is at three on Thursday.",
+        "The clinic is beside the station."
+      ],
+      "permissible_picks": [[2], [2, 3]]
+    },
+    {
+      "id": "correction_owner",
+      "request": "Pick the key point from my project list.",
+      "source_kind": "list",
+      "excerpts": [
+        "Jon will send the final draft.",
+        "Update: Priya, not Jon, will send the final draft.",
+        "The draft uses the blue cover."
+      ],
+      "permissible_picks": [[2], [2, 3]]
+    },
+    {
+      "id": "competing_deadlines",
+      "request": "Pick the key points from these planning notes.",
+      "source_kind": "notes",
+      "excerpts": [
+        "The poster can wait until August.",
+        "The safety form must be filed by 4 July.",
+        "The volunteer roster must be confirmed by 6 July.",
+        "A new paint colour would be nice."
+      ],
+      "permissible_picks": [[2, 3], [2], [3]]
+    },
+    {
+      "id": "decision_reason",
+      "request": "Pick the key points from yesterday's saved conversation.",
+      "source_kind": "conversation",
+      "excerpts": [
+        "We chose the smaller hall.",
+        "It has step-free access and costs forty dollars less.",
+        "The larger hall has green curtains.",
+        "I will confirm the smaller hall tomorrow."
+      ],
+      "permissible_picks": [[1, 2, 4], [1, 2], [1, 4]]
+    },
+    {
+      "id": "empty_trivia",
+      "request": "Pick out anything important from these notes.",
+      "source_kind": "notes",
+      "excerpts": [
+        "The first mug was yellow.",
+        "A sparrow sat on the fence for a minute.",
+        "The pencil rolled under the notebook."
+      ],
+      "permissible_picks": [[]]
+    },
+    {
+      "id": "constraint_and_action",
+      "request": "Pick the key points from my delivery list.",
+      "source_kind": "list",
+      "excerpts": [
+        "Delivery BF-731 is scheduled for 16 October.",
+        "Someone must be home after two in the afternoon.",
+        "Call Blue Finch if the arrival window changes.",
+        "The old table has a scratched leg."
+      ],
+      "permissible_picks": [[1, 2, 3], [1, 2], [1, 3]]
+    },
+    {
+      "id": "latest_status",
+      "request": "Pick the key points from today's saved conversation.",
+      "source_kind": "conversation",
+      "excerpts": [
+        "The replacement part had not arrived at nine.",
+        "At noon, Northstar confirmed the part had arrived.",
+        "The repair is booked for Monday morning.",
+        "I read a chapter while waiting."
+      ],
+      "permissible_picks": [[2, 3], [2], [3]]
+    }
+  ]
+}

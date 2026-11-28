@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from mind import asr_sherpa, voice_bench
 from mind.tts_sherpa import PiperEngine
+from tests.test_phonemize import FakePhonemizer
 from tests.test_sherpa import FakeLibrary
 from tests.test_tts_sherpa import voice_dir
 
@@ -64,7 +65,7 @@ class BenchTests(unittest.TestCase):
             asr_root=self.asr, busy="cpu", runs=3, library=self.fake,
             vad_factory=lambda: asr_sherpa.load_vad(self.asr, self.fake),
             asr_factory=lambda size: asr_sherpa.load_moonshine(self.asr, size, self.fake),
-            tts_factory=lambda: PiperEngine(self.voice, library=self.fake),
+            tts_factory=lambda: PiperEngine(self.voice, library=self.fake, phonemizer_library=FakePhonemizer()),
         )
         defaults.update(options)
         return voice_bench.run(**defaults)
@@ -90,7 +91,8 @@ class BenchTests(unittest.TestCase):
         (self.asr / "moonshine-base/test_wavs/0.wav").unlink()
         empty = self.root / "novoice"
         empty.mkdir()
-        report = self.run_bench(busy="none", tts_factory=lambda: PiperEngine(empty, library=self.fake))
+        report = self.run_bench(busy="none", tts_factory=lambda: PiperEngine(empty, library=self.fake,
+                                                                           phonemizer_library=FakePhonemizer()))
         self.assertNotIn("piper", report)
         self.assertNotIn("moonshine_base", report)
         self.assertIn("not installed", report["errors"]["piper"])
@@ -124,7 +126,8 @@ class BenchTests(unittest.TestCase):
         with patch.object(voice_bench, "CORTEX_ALONE_S", 0.3), patch.object(voice_bench, "CORTEX_WARM_S", 1), \
                 patch.object(voice_bench, "PIPER_BESIDE_S", 0.3):
             report = self.run_bench(busy="cortex", sizes=("tiny",),
-                                    tts_factory=lambda: Speaking(self.voice, library=self.fake),
+                                    tts_factory=lambda: Speaking(self.voice, library=self.fake,
+                                                                phonemizer_library=FakePhonemizer()),
                                     load_factory=lambda: voice_bench.CortexLoad(opener=opener))
         busy = report["busy"]
         self.assertEqual(busy["kind"], "cortex")

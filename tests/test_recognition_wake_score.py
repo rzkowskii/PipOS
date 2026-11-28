@@ -4,7 +4,7 @@ import unittest
 from collections import deque
 from unittest.mock import Mock
 
-from mind.recognition import FRAME_SECONDS, Recognizer
+from mind.recognition import FRAME_SECONDS, ONESHOT_SKIP_FRAMES, Recognizer
 
 
 class WakeScore(unittest.TestCase):
@@ -28,7 +28,8 @@ class WakeScore(unittest.TestCase):
         # begin() for the dictation clears the candidate; the reported score survives it.
         self.assertEqual(recognizer.wake_score, -1234)
         self.assertIsNone(recognizer.wake_candidate_score)
-        self.assertEqual(list(recognizer.oneshot_queue)[0], int(0.6 / FRAME_SECONDS))
+        # The replay starts ONESHOT_SKIP_FRAMES after the name's aligned end.
+        self.assertEqual(list(recognizer.oneshot_queue)[0], int(0.6 / FRAME_SECONDS) + ONESHOT_SKIP_FRAMES)
 
     def test_instances_built_without_init_still_answer(self):
         recognizer = Recognizer.__new__(Recognizer)

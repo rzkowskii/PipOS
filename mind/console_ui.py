@@ -478,6 +478,13 @@ class StageProgress:
             return
         self.draw()
 
+    def progress_lines(self):
+        fraction = self.fraction()
+        return [f"{bar(fraction)} {paint(f'{int(fraction * 100):>3}%', 'text')}"]
+
+    def header_control(self):
+        return ""
+
     def lines(self):
         rows = [header(self.title, self.context), rule()]
         if self.subtitle:
@@ -492,8 +499,7 @@ class StageProgress:
             else:
                 rows.append(f" {paint('○', 'muted')}  {paint(label, 'muted')}")
         rows.append("")
-        percent = int(self.fraction() * 100)
-        rows.append(f"{bar(self.fraction())} {paint(f'{percent:>3}%', 'text')}")
+        rows.extend(self.progress_lines())
         elapsed = int(time.monotonic() - self.started)
         rows.append(paint(f"{elapsed // 60}:{elapsed % 60:02d} elapsed", "muted"))
         rows.append("")
@@ -504,6 +510,6 @@ class StageProgress:
         return rows
 
     def draw(self, first=False):
-        body = "".join(f"{MARGIN if row else ''}{row}\x1b[K\n" for row in self.lines())
         with _lock:
-            write(("\x1b[2J" if first else "") + "\x1b[H" + body)
+            body = "".join(f"{MARGIN if row else ''}{row}\x1b[K\n" for row in self.lines())
+            write(("\x1b[2J" if first else "") + self.header_control() + "\x1b[H" + body)

@@ -17,7 +17,10 @@ slot_ids() {
 #                      section 4, Mode B) turns writes on at run time.
 #   BEING_QUIET_ARGS   the normal installed laptop boot: only the eyes show,
 #                      no cursor and no systemd status unless something fails.
-being_laptop_args='hid_apple.fnmode=1 msr.allow_writes=off'
+# TODO(power-live-test, steps aspm-powersave / aspm-powersupersave): add
+# pcie_aspm.policy=<the winning policy> to being_laptop_args only if a step
+# HELPS and the cable link (tg3) stayed up through it. Not measured yet.
+being_laptop_args='hid_apple.fnmode=1 msr.allow_writes=off init_on_free=1'
 being_quiet_args='quiet vt.global_cursor_default=0 systemd.show_status=error'
 
 # The laptop image (BR2_ROOTFS_POST_SCRIPT_ARGS="laptop") has no serial line:

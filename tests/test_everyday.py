@@ -104,7 +104,8 @@ class Registry(unittest.TestCase):
 class RealOrder(unittest.TestCase):
     def test_order_is_the_spec(self):
         self.assertEqual(everyday.ORDER, ("readback", "calc", "units", "lists", "play", "body_talk", "device",
-                                          "doctor", "action_log", "diary", "voice_engines"))
+                                          "removable_media", "keep", "doctor", "action_log", "diary", "ponder",
+                                          "voice_engines", "care_routes", "library", "night_speech"))
 
     def test_own_skills_load(self):
         names = {module.__name__.rsplit(".", 1)[-1] for module in everyday.Registry().modules()}

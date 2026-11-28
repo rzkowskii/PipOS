@@ -2,7 +2,8 @@
 
 The fake keeps the C API's contract: results are handles that must be freed,
 a sentence's phonemes come back as an int32 pointer, an unknown voice gives a
-NULL result, and espeak-ng starts once per process. Set
+NULL result, and espeak-ng starts once per process (std::call_once: only the
+first Initialize does anything, and every later one returns 0). Set
 BEING_TEST_PHONEMIZE_LIBRARY (the built libpiper_phonemize_core) and
 BEING_TEST_ESPEAK_DATA (a voice pack's espeak-ng-data) to also run the real one.
 """
@@ -57,7 +58,8 @@ class FakePhonemizer:
 
     def _Initialize(self, data_dir):
         self.data_dir = data_dir
-        result, self.init_result = self.init_result, (0 if self.init_result > 0 else self.init_result)
+        # std::call_once: whatever the first call gave, later calls return 0.
+        result, self.init_result = self.init_result, 0
         return result
 
     def _Text(self, text, voice):
@@ -173,6 +175,76 @@ class CardTests(unittest.TestCase):
         self.assertEqual(mapping, {ord("a"): [ord("x"), ord("y")], ord("b"): [ord("z")]})
 
 
+class ClusterAliasTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.data = self.root / "data"
+        self.data.mkdir()
+        self.ids = {token: [index] for index, token in enumerate("_^$ helo.aɪʊɔə,!?ɚ")}
+        self.clusters = {token: {"alias": chr(0xE000 + i), "id": 161 + i}
+                         for i, token in enumerate(("aɪ", "aʊ", "ɔɪ", "eɪ", "oʊ"))}
+        self.ids.update({token: [value["id"]] for token, value in self.clusters.items()})
+        self.tokens = self.root / "tokens.txt"
+
+    def fixture(self, **changes):
+        fields = {"vowel_clusters": [list(token) for token in self.clusters], "num_symbols": 256,
+                  "phoneme_id_map": self.ids, "being_cluster_aliases": self.clusters}
+        fields.update(changes)
+        self.tokens.write_text("".join(f"{self.clusters.get(token, {}).get('alias', token)} {ids[0]}\n"
+                                      for token, ids in self.ids.items()), encoding="utf-8")
+        return card(self.root, **fields)
+
+    def test_opt_in_makes_five_single_scalars_and_preserves_spaces_and_punctuation(self):
+        phonemes = phonemize.for_voice(self.data, self.fixture(), library=FakePhonemizer())
+        options = sherpa.GenerationConfig()
+        text = "aɪ, aʊ ɔɪ eɪ oʊ. əʊ!"
+        points, lengths = phonemes.fill(options, text)
+        self.assertEqual(options.phoneme_codepoints_num_sentences, 2)
+        self.assertEqual(list(lengths), [11, 4])
+        self.assertEqual("".join(map(chr, points)), "\ue000, \ue001 \ue002 \ue003 \ue004. əʊ!")
+        self.assertEqual(phonemes.ipa(text), ["aɪ, aʊ ɔɪ eɪ oʊ.", " əʊ!"])
+
+    def test_merges_the_longest_match_after_the_scalar_map(self):
+        self.clusters["aɪɚ"] = {"alias": "\ue005", "id": 166}
+        self.ids["aɪɚ"] = [166]
+        path = self.fixture(phoneme_map={"q": ["a", "ɪ"]})
+        phonemes = phonemize.for_voice(self.data, path, library=FakePhonemizer())
+        self.assertEqual(text_of(phonemes.sentences("qɚ qaɪ.")), ["\ue005 \ue000\ue000."])
+        self.assertEqual(text_of(phonemes.sentences("aɪ")), ["\ue000"])
+
+    def test_a_legacy_card_ignores_clusters_and_needs_no_token_file(self):
+        path = card(self.root, vowel_clusters=[["a", "ɪ"]], phoneme_id_map=self.ids)
+        phonemes = phonemize.for_voice(self.data, path, library=FakePhonemizer())
+        self.assertFalse(self.tokens.exists())
+        self.assertEqual(text_of(phonemes.sentences("aɪ. oʊ!")), ["aɪ.", " oʊ!"])
+
+    def test_inconsistent_aliases_fail_before_espeak_is_started(self):
+        for bad in ({"alias": "e", "id": 161}, {"alias": "\ue001", "id": 161},
+                    {"alias": "\ue000", "id": 162}, {"alias": "\ue000", "id": True}):
+            with self.subTest(bad=bad):
+                path = self.fixture(being_cluster_aliases={**self.clusters, "aɪ": bad})
+                library = FakePhonemizer()
+                with self.assertRaisesRegex(sherpa.Unavailable, "invalid cluster aliases"):
+                    phonemize.for_voice(self.data, path, library=library)
+                self.assertNotIn("PiperPhonemizeInitialize", library.calls)
+        with self.assertRaisesRegex(sherpa.Unavailable, "invalid cluster aliases"):
+            phonemize.for_voice(self.data, self.fixture(vowel_clusters=[["a", "ɪ"]]), library=FakePhonemizer())
+
+    def test_refuses_wrong_missing_or_duplicate_tokens(self):
+        path = self.fixture()
+        correct = self.tokens.read_text()
+        for wrong in (correct.replace("\ue000 161", "\ue000 166"),
+                      correct.replace("\ue000 161", "aɪ 161"),
+                      correct + "\ue000 161\n"):
+            with self.subTest(wrong=wrong[-30:]):
+                self.tokens.write_text(wrong)
+                with self.assertRaisesRegex(sherpa.Unavailable, "tokens.txt"):
+                    phonemize.for_voice(self.data, path, library=FakePhonemizer())
+        self.tokens.unlink()
+        with self.assertRaisesRegex(sherpa.Unavailable, "tokens.txt"):
+            phonemize.for_voice(self.data, path, library=FakePhonemizer())
+
+
 class PhonemizerTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -204,6 +276,29 @@ class PhonemizerTests(unittest.TestCase):
         with self.assertRaisesRegex(sherpa.Unavailable, "would not load"):
             phonemize.Phonemizer(self.data, library=FakePhonemizer(init_result=-1))
 
+    def test_a_failed_start_is_not_retried_or_taken_for_success(self):
+        fake = FakePhonemizer(init_result=-1)
+        with self.assertRaisesRegex(sherpa.Unavailable, "would not load") as first:
+            phonemize.for_voice(self.data, card(self.root), library=fake)
+        good = self.root / "good-data"
+        good.mkdir()
+        # The real library would now return 0 without reading `good`.
+        with self.assertRaises(sherpa.Unavailable) as second:
+            phonemize.for_voice(good, card(self.root), library=fake)
+        self.assertEqual(second.exception.reason, first.exception.reason)
+        self.assertIn("restart the voice", second.exception.reason)
+        self.assertEqual(fake.calls.count("PiperPhonemizeInitialize"), 1)
+        self.assertNotIn("PiperPhonemizeText", fake.calls)
+
+    def test_a_missing_data_folder_does_not_spend_the_one_start(self):
+        fake = FakePhonemizer()
+        with self.assertRaisesRegex(sherpa.Unavailable, "is missing"):
+            phonemize.Phonemizer(self.root / "absent", library=fake)
+        self.assertNotIn("PiperPhonemizeInitialize", fake.calls)
+        ph = phonemize.Phonemizer(self.data, library=fake)
+        self.assertEqual(ph.data_dir, self.data)
+        self.assertEqual(fake.data_dir, os.fsencode(str(self.data)))
+
     def test_another_initialiser_in_the_process_is_accepted(self):
         ph = phonemize.Phonemizer(self.data, library=FakePhonemizer(init_result=0))
         self.assertTrue(ph.sentences("ok"))
@@ -226,9 +321,21 @@ class PhonemizerTests(unittest.TestCase):
         fake.voices.add("en-us")
         with self.assertRaises(ValueError):
             ph.fill(sherpa.GenerationConfig(), "\x00")
-        fake.silent = True              # espeak-ng found no phonemes at all
-        with self.assertRaisesRegex(RuntimeError, "nothing to say"):
-            ph.fill(sherpa.GenerationConfig(), "...")
+        self.assertEqual(fake.live, {})
+
+    def test_a_clause_with_no_phonemes_is_nothing_to_say_not_a_broken_voice(self):
+        # "...", "?!", "." after an emoji: espeak-ng gives no phonemes. That is
+        # ValueError (skip the clause), never RuntimeError (silence the voice).
+        fake = FakePhonemizer()
+        ph = phonemize.Phonemizer(self.data, "en-us", library=fake)
+        fake.silent = True
+        for clause in ("...", ".", "?!", "\u2026", "\u200b"):
+            self.assertEqual(ph.sentences(clause), [])
+            self.assertEqual(ph.ipa(clause), [])
+            options = sherpa.GenerationConfig()
+            with self.assertRaisesRegex(ValueError, "nothing to say"):
+                ph.fill(options, clause)
+            self.assertEqual(options.phoneme_codepoints_num_sentences, 0)
         self.assertEqual(fake.live, {})
 
     def test_text_is_cleaned_and_bounded(self):
@@ -281,6 +388,9 @@ class RealLibraryTests(unittest.TestCase):
         self.assertEqual(ph.ipa("Here's my terminal."), ["hˈiəz maɪ tˈɜːmɪnəl."])
         self.assertEqual(ph.ipa("Sorry, I didn't catch that. Could you say it again?"),
                          ["sˈɒɹɪ, aɪ dˈɪdnt kˈætʃ ðˈæt.", "kʊd juː sˈeɪ ɪt ɐɡˈɛn?"])
+        for clause in ("...", ".", "?!", "\u2026"):
+            with self.assertRaisesRegex(ValueError, "nothing to say"):
+                ph.fill(sherpa.GenerationConfig(), clause)
 
 
 if __name__ == "__main__":

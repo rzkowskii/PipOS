@@ -1,5 +1,7 @@
 # First USB readiness
 
+This records the November 21–22 release qualification. See [PipOS status](../STATUS.md#current-handover--26-november-2026) for the subsequent physical boots and current work.
+
 **Physical media is on hold as of 22 November 2026.** The target is the maintainer's 13-inch MacBookPro9,2 with Intel HD 4000, 16 GB RAM and a 256–512 GB SATA SSD. The first physical milestone is an Option-key boot into Try. Installing to an internal SSD is a separate decision.
 
 **Qualification run, 22 November 2026 (interim; details in the local status record).** Candidate `first-usb-20261121-2150` is **not** qualified. Its installed recovery exposed a product defect: after a power cut during an update, the FAT boot-state partition becomes read-only on the next boot (`fat_free_clusters: deleting FAT entry beyond EOF`), and every later update and slot confirmation fails. `first-usb-20261121-2300` adds an ESP check (`fsck.fat` packaged, `systemd-fsck@` before `/bootstate`) and passed the same interrupted-update, unhealthy-trial and rollback run, and legacy model migration. Two further product defects were then found and fixed in `first-usb-20261122-0053` (seal `15eceec6f6258b161f928c7929c24a0071a3cdffd4b8b0d2c4932a23bc323311`, Try `667c6acb341cb5501d9bf785277be0764cd3a7872d02c1e725fb0c32d086860a`). Spoken time zones never resolved on the device because the packaged tzdata links its regions. A name heard during the 1.5 s wake was dropped. The frozen lab tests now carry the reviewed fixture corrections (lazy CA store, BusyBox IPv6, face renderer timing). Requalification of 0053 is in progress. Recall ranks relevance before recency, which remains an owner decision. Long soaks and every physical check remain open.
@@ -88,15 +90,45 @@ The exact SquashFS contents of the artifacts on disk were checked. SHA-256 prefi
 | Boot, install and restore | Installer and A/B updates; Installer options; Backup and restore | Local-screen walk-through. Leave a second writable disk byte-identical during Try. Positively select the disposable target and test cancel, wrong target, interruption, reboot with USB removed and the active A/B mounts. Restore a prior identity on a blank target, apply edits or recover only permitted material, and verify after cold boot. | Open. Earlier Try is a baseline. |
 | Update, data loss and confidentiality | Installer and A/B updates; Backup and restore; Observability | Install the exact signed installed-channel bundle on the inactive slot, test foreign/unsigned rejection, interrupted update, failed-trial rollback and healthy confirmation. Observe the same profile/life ID, retained history and absence of forgotten text. Test backups, caches, migrations, defaults for camera/audio/network, access revocation, and exclusion of private credentials. | Open on the integrated candidate. The isolated installed test covered channel rejection, healthy confirmation, life ID and one retained fact. |
 | Integrated being | All organ workstreams; Release coordination | Run the host suites including six real-model cases; then exercise L0–L6, profile/rename, skills, dream work, local-screen entry, recovery and offline conversation on the sealed artifact set. Record any Wi-Fi-only hwsim kernel separately. Capture emitted sound/face evidence, missing cases, failures, skips and retries. | Open. Source, staged-image, and exact-candidate evidence have different meanings. |
+| Persona | Release coordination | Compare the waking model and all four personalities against the accepted baseline using the same pinned local judge. Include the baseline report and a fresh candidate report when persona inputs change. [Persona release evaluation](LAB.md#persona-release-evaluation) | Evaluator and candidate checks are in source. Native reports are pending. |
 | Endurance and hardware handover | Release coordination; Performance on the 2012 MacBook Pro; Observability | Record actual elapsed observation, service restarts, failures, cleanup and artifact ID. Exercise face, organ recovery and appliance endurance in the appropriate lab/physical environments. The design specifies a 24-hour face run, 48-hour recovery soak and one-week appliance soak. | Open. A short rehearsal establishes the harness only. |
-| First physical Try | The maintainer; Observability | After the software review, identify the intended external stick and record the go-ahead to write it. Log Option-key EFI boot, internal-disk isolation, built-in display/keyboard/trackpad, lid, camera/LED, radio/firmware, mic/speakers, a real spoken turn, and recovery. | Requires the MacBook and chosen USB. |
+| First physical Try | The maintainer; Observability | After the software review, identify the intended external stick and record the go-ahead to write it. Log Option-key EFI boot, internal-disk isolation, built-in display/keyboard/trackpad, lid, camera/LED, radio/firmware, mic/speakers, a real spoken turn, and recovery. For first-pixel evidence, film the panel at 240 fps from firmware picker through the face, once normally and once with boot messages. Keep the PIPLOGS “Boot display handoff” lines (EFI/simpledrm/i915 and the first face swap) beside the clip; record every black frame or mode flash rather than inferring continuity from a healthy boot. | Requires the MacBook and chosen USB. |
 | Internal installation and qualification | The maintainer; Observability; Release coordination | Before any erase, complete macOS firmware, battery/charge-cap and recovery-media preparations. Verify the target SSD and explicit erase selection, remove USB and boot the installed being; run the Phase 0–6 native targets and long soaks. | Requires separate authorization and measured hardware results. |
+
+The laptop signing command writes `beingos-laptop-update.raucb.provenance.json`
+next to the bundle. Run
+`python3 -m lab.hardware_image TRY.img --match-laptop-bundle UPDATE.raucb --release-certificate RELEASE.pem`
+to match the selected Try image's source, build and SquashFS content to the
+receipt and hash the exact image and bundle under test. The content digest omits
+SquashFS padding. The public release certificate must match both the
+embedded RAUC keyring and the receipt fingerprint. For release evidence,
+add `--verify-laptop-bundle` on a host with RAUC available. The audit verifies
+the signature with the supplied certificate, compares the signed manifest and
+hashes the extracted root filesystem against the receipt and the Try content.
+Save the report with `bundle_verified_by_rauc` set to `true` alongside the
+rehearsal results. The receipt separately records the extraction at signing.
+For a release-key change, use the separate bridge audit and retain evidence
+of rollback and the first replacement-key update. [Rotation procedure](HARDWARE.md#rotate-the-laptop-release-key)
+
+For media intended for public release, run the candidate test command with
+`--manifest` and `--require-alba-retrain`. Before starting any guest suite, it
+audits the sealed Try and factory images, including the laptop versions when
+present. Each matching audit log is named by image role under
+`alba_retrain_reports` in `report.json`. For a single image, the same flag works
+with `lab.hardware_image`.
+
+The voice audit checks the signature against each system slot's embedded model
+certificate and descriptor, then verifies every file listed in the signed pack.
+It checks the pinned Alba retrain, runtime card, token table and upstream notices,
+and refuses the known private model anywhere on the models partition. Complete
+redistribution notices and native speech qualification remain separate release
+evidence.
 
 ## Integration order
 
 1. Resolve cross-workstream interfaces first. The installer invokes the writer and the backup service. Backup consumes the durable edit history and excludes keys/network profiles. Dreams consume eligible, versioned memories and discard superseded work. The UI consumes owner capability choices, and the weather path enforces them. Coordinate overlapping edits before the freeze.
 2. Select a fresh candidate name and use the [candidate build entry point](../lab/build.sh). From the repository run `lab/build.sh candidate NAME` in the agreed builder window. It records inputs, freezes a source copy, makes one clean build and packages its artifacts under `out/candidates/NAME/`. The manifest binds the media to the frozen design, coverage table, readiness record and inspection of the weights inside both disks. A failed or partial directory retains diagnostics. A sealed `release.json` identifies a packaged candidate. Full regression and promotion still follow.
-3. Run host validation and guest qualification from the frozen source directory. Use `python3 -m lab.candidate_tests --manifest ../release.json --output ../guest-evidence`. Add `--wifi-image` for a separately identified hwsim companion built from the same sources. The screen-enabled `media/beingos-try-screen.img` is the release Try target. Run any remaining feature cases and retain named logs and per-case outcomes there. From the project root, recheck the manifest using `python3 -m lab.candidate_manifest verify --root out/candidates/NAME/source out/candidates/NAME/release.json`. A changed input or artifact needs a new named candidate and affected gates rerun.
+3. Run host validation and guest qualification from the frozen source directory. Use `python3 -m lab.candidate_tests --manifest ../release.json --persona-baseline ../persona-baseline.json --output ../guest-evidence`. Add `--persona-result` if the persona inputs changed, and `--wifi-image` for a separately identified hwsim companion built from the same sources. The screen-enabled `media/beingos-try-screen.img` is the release Try target. Run any remaining feature cases and retain named logs and per-case outcomes there. From the project root, recheck the manifest using `python3 -m lab.candidate_manifest verify --root out/candidates/NAME/source out/candidates/NAME/release.json`. A changed input or artifact needs a new named candidate and affected gates rerun.
 4. Record one dated verdict with the candidate name, full Try checksum, test and endurance reports, specific open hardware observations and the maintainer's scope decisions. The earlier images remain development evidence. The record must explicitly identify which USB image is proposed before the first physical write.
 
 The source manifest and preserved snapshot provide a reproducible identifier for the candidate. No physical erase is part of this release-coordination pass.

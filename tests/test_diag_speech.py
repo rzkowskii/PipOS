@@ -1,6 +1,7 @@
 """pip-diag's words: routing in-process, voices and their scores, hearing a file, the owner flow."""
 
 import io
+import json
 import socket
 import tempfile
 import time
@@ -76,19 +77,31 @@ class Routing(unittest.TestCase):
             self.assertEqual(speech.wake_score(match), score)
 
 
+MISSED = object()  # a Voice response: the phrase did not wake Pip
+
+
 class Voice:
     """A fake voice behind the diagnostic microphone: after each stimulus it logs a line."""
 
     LEAD = int(0.6 * speech.RATE)
 
-    def __init__(self, host, journal, responses, *, connects=True, listens=True):
+    def __init__(self, host, journal, responses, *, connects=True, listens=True, recognizer=None, adopts_after=5.0,
+                 idle_after=None, lines=()):
         self.host, self.journal = host, journal
         self.responses = list(responses)
         self.connects = connects
         self.listens = listens
+        # With `recognizer`, the voice logs "speech recognizer: X" `adopts_after` s after
+        # connecting and decodes with it from then on (PocketSphinx before).
+        self.recognizer, self.adopts_after = recognizer, adopts_after
+        self.adopted_at = None
+        # With `idle_after`, the brainstem logs "-> idle" that long after each final.
+        self.idle_after = idle_after
+        self.lines = list(lines)  # [(seconds after connecting, a voice log line)]
         self.until = 0.0
         self.closed = False
         self.heard = []
+        self.played_at = []
 
     def __call__(self, path):  # the server factory
         self.path = path
@@ -98,28 +111,47 @@ class Voice:
         if self.connects:
             self.journal.timeline.append((self.host.clock + 0.5, Entry(self.host.clock + 0.5, VOICE,
                                                                        "diagnostic microphone connected on x")))
+            self.journal.timeline.append((self.host.clock + 0.7, Entry(
+                self.host.clock + 0.7, VOICE, "wake phrase 'Hey Pip', mic gain 1x, speech engine to be chosen (auto), "
+                                              "transcript text in the log on")))
             if self.listens:
-                self.journal.timeline.append((self.host.clock + 0.7, Entry(
-                    self.host.clock + 0.7, VOICE, "wake phrase 'Hey Pip', mic gain 1x, speech engine flite (auto), "
-                                                  "transcript text in the log on")))
+                self.journal.timeline.append((self.host.clock + 0.9, Entry(
+                    self.host.clock + 0.9, VOICE, "capture open on the diagnostic microphone, mono, mic gain 1.00x")))
+            for delay, message in self.lines:
+                self.journal.timeline.append((self.host.clock + delay, Entry(self.host.clock + delay, VOICE, message)))
+            if self.recognizer is not None:
+                self.adopted_at = self.host.clock + self.adopts_after
+                self.journal.timeline.append((self.adopted_at, Entry(self.adopted_at, VOICE,
+                                                                     f"speech recognizer: {self.recognizer}")))
         return self.connects
+
+    def engine(self):
+        adopted = self.adopted_at is not None and self.host.clock >= self.adopted_at
+        return self.recognizer if adopted else "pocketsphinx"
 
     def play(self, samples):
         self.until = max(self.until, self.host.clock) + len(samples) / speech.RATE
         if len(samples) != self.LEAD:
             self.heard.append(len(samples))
-            text, route = self.responses.pop(0)
+            self.played_at.append(self.host.clock)
+            response = self.responses.pop(0)
+            if response is MISSED:  # the wake never fired: the voice logs nothing, Pip stays idle
+                return self.until
+            text, route = response
             at = self.until + 1.2
             self.journal.timeline.append((at - 0.8, Entry(at - 0.8, VOICE,
                                                           "heard the wake phrase in one breath: score -1805, ...")))
             if text is None:
                 self.journal.timeline.append((at, Entry(at, VOICE, "dictation ended after 2.5 s with no words")))
             else:
-                self.journal.timeline.append((at, Entry(at, VOICE, f'heard: "{text}" (engine pocketsphinx, '
+                self.journal.timeline.append((at, Entry(at, VOICE, f'heard: "{text}" (engine {self.engine()}, '
                                                                     'confidence 0.00, log-posterior -9.1)')))
                 if route:
                     self.journal.timeline.append((at + 0.1, Entry(at + 0.1, MIND,
                                                                   f'mind: route {{"route": "{route}", "chars": 15}}')))
+            if self.idle_after is not None:
+                idle = at + self.idle_after
+                self.journal.timeline.append((idle, Entry(idle, speech.BRAINSTEM, "brainstem: attending -> idle")))
         return self.until
 
     def close(self):
@@ -162,7 +194,9 @@ class Hearing(unittest.TestCase):
 
     def hear(self, responses, stimuli=None, **kwargs):
         voice = Voice(self.host, self.journal, responses, connects=kwargs.pop("connects", True),
-                      listens=kwargs.pop("listens", True))
+                      listens=kwargs.pop("listens", True), recognizer=kwargs.pop("recognizer", None),
+                      adopts_after=kwargs.pop("adopts_after", 5.0), idle_after=kwargs.pop("idle_after", None),
+                      lines=kwargs.pop("lines", ()))
         stimuli = stimuli or [("phrase", audio.tone(300, 1.0, speech.RATE), "Hey Pip, open a terminal.",
                                "workshop.open")]
         items = speech.run_hear(self.host, self.report, stimuli, server_factory=voice, journal=self.journal,
@@ -174,14 +208,17 @@ class Hearing(unittest.TestCase):
         original = self.systemctl
 
         def opening(argv):
-            if argv[1] == "list-units" and self.host.clock > 1005:
+            # Shut while the phrase starts (after the 5 s wait for Moonshine), open after it.
+            if argv[1] == "list-units" and self.host.clock > 1009:
                 self.panel = ["being-panel-terminal.service"]
             return original(argv)
 
         self.host.handlers["systemctl"] = opening
-        items, voice = self.hear([("open a terminal", "workshop.open")], asr="moonshine")
+        items, voice = self.hear([("open a terminal", "workshop.open")], asr="moonshine", recognizer="moonshine")
         self.assertEqual(items["hear.connect"]["status"], "pass")
+        self.assertEqual(items["hear.asr"]["status"], "pass")
         self.assertEqual(items["hear.heard.phrase"]["status"], "pass")
+        self.assertEqual(items["hear.heard.phrase"]["value"]["engine"], "moonshine")
         self.assertEqual(items["hear.heard.phrase"]["value"]["latency_s"], 1.2)
         self.assertEqual(items["hear.heard.phrase"]["value"]["wake_score"], -1805)
         self.assertEqual(items["hear.route.phrase"]["status"], "pass")
@@ -192,6 +229,25 @@ class Hearing(unittest.TestCase):
         self.assertEqual(session.started, 1)
         self.assertTrue(session.exited and voice.closed)
 
+    def test_route_may_be_journaled_before_voice_logs_its_transcript(self):
+        voice = Voice(self.host, self.journal, [("open a terminal", None)])
+        original_play = voice.play
+
+        def play(samples):
+            end = original_play(samples)
+            if len(samples) != voice.LEAD:
+                for delay, route, text in ((0.9, "model", "what is rain"),
+                                           (1.1, "workshop.open", "Open a terminal.")):
+                    data = json.dumps({"route": route, "text": text})
+                    self.journal.timeline.append((end + delay, Entry(end + delay, MIND, f"mind: route {data}")))
+            return end
+
+        voice.play = play
+        items = {item["id"]: item for item in speech.run_hear(
+            self.host, self.report, [("phrase", audio.tone(300, 1.0, speech.RATE), None, None)],
+            server_factory=voice, journal=self.journal, session_factory=Session)}
+        self.assertEqual(items["hear.route.phrase"]["value"]["route"], "workshop.open")
+
     def test_connected_alone_is_not_listening(self):
         # A listening line from before the connection (the voice that was replaced) does not count either.
         self.journal.timeline.append((0.0, Entry(0, VOICE, "listening for the wake phrase: noise floor -60 dBFS")))
@@ -199,17 +255,24 @@ class Hearing(unittest.TestCase):
         self.assertEqual((items["hear.connect"]["status"], items["hear.connect"]["value"]), ("warn", False))
         self.assertIn("did not say it was listening", items["hear.connect"]["evidence"])
 
-    def test_the_ready_match_needs_the_engine_or_listening_line_after_connecting(self):
-        match = speech.ready_after_connect()
-        lines = ["capture open on hw:0, mono, mic gain 1.00x", "diagnostic microphone connected on /run/x",
-                 "mic gain 1.00x", "speech engine: piper (auto)"]
-        self.assertEqual([match(Entry(0, VOICE, line)) for line in lines], [False, False, False, True])
+    def test_the_ready_match_requires_capture_or_listening_after_connecting(self):
         for line in ("listening for the wake phrase: noise floor -60.0 dBFS",
-                     "capture open on the diagnostic microphone, mono, mic gain 1.00x",
-                     "wake phrase 'Hey Pip', mic gain 1x, speech engine flite (auto), transcript text in the log on"):
+                     "capture open on the diagnostic microphone, mono, mic gain 1.00x"):
             match = speech.ready_after_connect()
-            self.assertFalse(match(Entry(0, VOICE, "diagnostic microphone connected on /run/x")))
-            self.assertTrue(match(Entry(0, VOICE, line)), line)
+            for earlier in (line, "diagnostic microphone connected on /run/x",
+                            "wake phrase 'Hey Pip', mic gain 1x, speech engine to be chosen (auto)",
+                            "wake phrase 'Hey Pip', mic gain 1x, speech engine flite (auto)",
+                            "speech engine: piper (auto)"):
+                self.assertFalse(match(Entry(0, VOICE, earlier)), earlier)
+            self.assertTrue(match(Entry(1, VOICE, line)), line)
+
+    def test_the_stimulus_waits_for_delayed_capture_after_tts_selection(self):
+        started = self.host.clock
+        items, voice = self.hear([("open a terminal", None)], listens=False, route_timeout=1.0,
+                                 lines=[(3.0, "speech engine: flite (auto)"),
+                                        (7.0, "capture open on the diagnostic microphone, mono, mic gain 1.00x")])
+        self.assertEqual(items["hear.connect"]["status"], "pass")
+        self.assertGreaterEqual(voice.played_at[0], started + 7.0)
 
     def test_a_one_breath_transcript_without_the_address_is_heard_right(self):
         stimuli = [(f"p{n}", audio.tone(300, 1.0, speech.RATE), text, None)
@@ -357,6 +420,75 @@ class Hearing(unittest.TestCase):
         self.assertEqual(items["hear.connect"]["status"], "fail")
         self.assertTrue(Session.instances[0].exited and voice.closed)
 
+    def test_moonshine_is_tested_only_once_the_voice_has_switched_to_it(self):
+        # On the laptop the voice adopted a forced Moonshine 4-36 s after it was ready;
+        # a phrase played 2 s after ready was decoded by PocketSphinx.
+        items, voice = self.hear([("open a terminal", None)], asr="moonshine", recognizer="moonshine",
+                                 adopts_after=30.0, route_timeout=1.0)
+        self.assertEqual(items["hear.asr"]["status"], "pass")
+        self.assertGreaterEqual(voice.played_at[0], voice.adopted_at)
+        self.assertEqual(items["hear.heard.phrase"]["value"]["engine"], "moonshine")
+        self.assertIn("decoded by moonshine", items["hear.heard.phrase"]["evidence"])
+
+    def test_a_voice_that_keeps_pocketsphinx_fails_the_moonshine_test(self):
+        voice_line = ("Moonshine waits for a passed Ivy Bridge speech test (no Ivy Bridge speech smoke test is "
+                      "recorded on this build). Using PocketSphinx.")
+        items, _ = self.hear([("open a terminal", None)], asr="moonshine", route_timeout=1.0, lines=[(3.0, voice_line)])
+        self.assertEqual(items["hear.asr"]["status"], "fail")
+        self.assertIn("would not use moonshine", items["hear.asr"]["evidence"])
+        heard = items["hear.heard.phrase"]
+        self.assertEqual((heard["status"], heard["value"]["engine"]), ("warn", "pocketsphinx"))
+        self.assertIn("not the moonshine asked for", heard["hint"])
+
+    def test_a_recognizer_line_that_never_comes_fails_after_the_wait(self):
+        started = self.host.clock
+        items, voice = self.hear([("open a terminal", None)], asr="moonshine", route_timeout=1.0, asr_timeout=60.0)
+        self.assertEqual(items["hear.asr"]["status"], "fail")
+        self.assertGreaterEqual(voice.played_at[0] - started, 60.0)
+        # PocketSphinx and auto need no wait.
+        items, _ = self.hear([("open a terminal", None)], asr="pocketsphinx", route_timeout=1.0)
+        self.assertNotIn("hear.asr", items)
+        self.assertEqual(items["hear.heard.phrase"]["status"], "pass")
+
+    def test_the_next_phrase_waits_for_pip_to_be_idle_again(self):
+        stimuli = [(f"p{n}", audio.tone(300, 0.5, speech.RATE), None, None) for n in range(2)]
+        items, voice = self.hear([("one", "model"), ("two", None)], stimuli=stimuli, route_timeout=1.0,
+                                 idle_after=25.0)
+        # The first final came 1.2 s after the phrase ended; idle 25 s after that.
+        first_end = voice.played_at[0] + 0.5
+        self.assertGreaterEqual(voice.played_at[1], first_end + 1.2 + 25.0)
+        self.assertNotIn("hear.settle.p0", items)
+        self.assertEqual(items["hear.heard.p1"]["value"]["text"], "two")
+
+    def test_no_idle_within_the_wait_warns_and_goes_on(self):
+        stimuli = [(f"p{n}", audio.tone(300, 0.5, speech.RATE), None, None) for n in range(2)]
+        items, voice = self.hear([("one", None), ("two", None)], stimuli=stimuli, route_timeout=1.0,
+                                 idle_timeout=10.0)
+        self.assertEqual(items["hear.settle.p0"]["status"], "warn")
+        self.assertNotIn("hear.settle.p1", items)  # nothing comes after the last phrase
+        self.assertEqual(len(voice.heard), 2)
+
+    def test_a_phrase_that_never_woke_pip_does_not_wait_for_idle(self):
+        # Pip never left idle, so no "-> idle" line will come: no 60 s wait, no false settle warning.
+        stimuli = [(f"p{n}", audio.tone(300, 0.5, speech.RATE), None, None) for n in range(2)]
+        items, voice = self.hear([MISSED, ("two", None)], stimuli=stimuli, route_timeout=1.0, heard_timeout=5.0,
+                                 idle_timeout=60.0)
+        self.assertEqual(items["hear.heard.p0"]["status"], "fail")
+        self.assertIn("not even the wake phrase", items["hear.heard.p0"]["evidence"])
+        self.assertNotIn("hear.settle.p0", items)
+        first_end = voice.played_at[0] + 0.5
+        self.assertLess(voice.played_at[1] - first_end, 20.0)
+        self.assertEqual(items["hear.heard.p1"]["value"]["text"], "two")
+
+    def test_a_brainstem_that_left_idle_is_waited_for_even_without_a_voice_line(self):
+        self.journal.timeline.append((0.0, Entry(0, speech.BRAINSTEM, "brainstem: idle -> listening")))
+        journal = self.journal
+        self.assertTrue(speech.left_idle(journal, None, {}))
+        self.assertFalse(speech.left_idle(journal, "1", {}))  # nothing after the cursor
+        self.assertTrue(speech.left_idle(journal, "1", {"woke": True}))
+        journal.timeline.append((0.0, Entry(0, speech.BRAINSTEM, "brainstem: attending -> idle")))
+        self.assertFalse(speech.left_idle(journal, "1", {}))
+
     def test_several_stimuli_in_one_voice_restart(self):
         stimuli = [(f"p{n}", audio.tone(300, 0.5 + n * 0.2, speech.RATE), None, None) for n in range(3)]
         items, voice = self.hear([("one", None), ("two", None), ("three", None)], stimuli=stimuli,
@@ -364,6 +496,107 @@ class Hearing(unittest.TestCase):
         self.assertEqual(len(voice.heard), 3)
         self.assertEqual(Session.instances[0].started, 1)
         self.assertEqual([items[f"hear.heard.p{n}"]["value"]["text"] for n in range(3)], ["one", "two", "three"])
+
+
+class Levels(unittest.TestCase):
+    """What the diagnostic microphone feeds: this laptop's room and a person's level."""
+
+    def test_the_room_floor_is_the_laptops_not_near_silence(self):
+        folder = Path(tempfile.mkdtemp(prefix="pdmic"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(folder, ignore_errors=True))
+        server = speech.MicServer(folder / "mic.sock")
+        self.addCleanup(server.close)
+        self.assertEqual(server.floor_dbfs, -64.0)
+        floor = audio.deinterleave(__import__("array").array("h", server.floor), 1)[0]
+        self.assertAlmostEqual(audio.dbfs(audio.rms(floor)), -64.0, delta=0.5)
+
+    def test_clean_then_realistic_with_the_floor_mixed_in(self):
+        phrase = audio.tone(500, 1.0, speech.RATE, -4.5)
+        quiet = audio.silence(0.5, speech.RATE)
+        samples = quiet + phrase + quiet
+        stimuli = [("p1", samples, "Hey Pip, open a terminal.", "workshop.open"),
+                   ("p2", samples, "Hey Pip, what time is it?", "command.time")]
+        both = speech.at_levels(stimuli, "both")
+        self.assertEqual([item[0] for item in both], ["p1", "p2", "p1-realistic", "p2-realistic"])
+        self.assertEqual([item[2:] for item in both], [item[2:] for item in stimuli] * 2)
+        clean, realistic = both[0][1], both[2][1]
+        self.assertAlmostEqual(audio.dbfs(audio.peak(clean)), -4.5, delta=0.3)
+        self.assertAlmostEqual(audio.dbfs(audio.peak(realistic)), -30.0, delta=0.5)
+        gap = realistic[:int(0.4 * speech.RATE)]
+        self.assertAlmostEqual(audio.dbfs(audio.rms(gap)), -64.0, delta=1.0)  # never digital silence
+        self.assertEqual([item[0] for item in speech.at_levels(stimuli, "clean")], ["p1", "p2"])
+        self.assertEqual([item[0] for item in speech.at_levels(stimuli, "realistic")],
+                         ["p1-realistic", "p2-realistic"])
+
+
+class Grammar(unittest.TestCase):
+    """The diagnostics' grammar pass: one word the dictionary lacks must not empty it."""
+
+    class Function:
+        """A ctypes-like function: restype and argtypes can be set on it."""
+
+        def __init__(self, grammars):
+            self.grammars = grammars
+
+        def __call__(self, decoder, name, text):
+            self.grammars.append(text.decode())
+            return 0
+
+    class Lib:
+        def __init__(self):
+            self.grammars = []
+            self.ps_add_jsgf_string = Grammar.Function(self.grammars)
+
+        def ps_activate_search(self, decoder, name):
+            return 0
+
+        def ps_start_utt(self, decoder):
+            return 0
+
+        def ps_process_raw(self, *args):
+            return 0
+
+        def ps_end_utt(self, decoder):
+            return 0
+
+        def ps_get_hyp(self, decoder, score):
+            return b"open a terminal"
+
+    class Recognizer:
+        def __init__(self, lib, unknown=("vitals",)):
+            self.lib, self.decoder, self.dictation = lib, object(), b"dictation"
+            self.unknown = set(unknown)
+
+        def knows(self, word):
+            return word not in self.unknown
+
+        def confidence(self):
+            return 0.9
+
+        def close(self):
+            pass
+
+    def test_phrases_with_unknown_words_are_left_out(self):
+        lib = self.Lib()
+        sphinx = speech.Sphinx(self.Recognizer(lib))
+        heard = sphinx.grammar([0] * 160, ["open a terminal", "show your vitals", "what time is it"])
+        self.assertEqual(heard["text"], "open a terminal")
+        self.assertEqual(sphinx.grammar_dropped, ["show your vitals"])
+        self.assertIn("open a terminal | what time is it", lib.grammars[0])
+        self.assertNotIn("vitals", lib.grammars[0])
+
+    def test_a_recognizer_that_cannot_look_words_up_keeps_them_all(self):
+        lib = self.Lib()
+        recognizer = self.Recognizer(lib)
+        recognizer.knows = None
+        sphinx = speech.Sphinx(recognizer)
+        self.assertEqual(sphinx.known_phrases(["a b", "c d"]), (["a b", "c d"], []))
+
+    def test_no_known_phrase_means_no_grammar(self):
+        lib = self.Lib()
+        sphinx = speech.Sphinx(self.Recognizer(lib, unknown=("vitals", "open", "what")))
+        self.assertIsNone(sphinx.grammar([0] * 160, ["show your vitals", "open it", "what now"]))
+        self.assertEqual(lib.grammars, [])
 
 
 class MicServer(unittest.TestCase):
@@ -418,6 +651,40 @@ class Voices(unittest.TestCase):
         self.assertEqual(items["tts.digital.kal16"]["status"], "warn")
         self.assertIn("tts.rtf.slt", items)
         self.assertTrue((self.root / "tts-slt-1.wav").exists())  # Pip's own voice is kept
+
+    def test_timings_record_the_cpu_weight_and_the_cortex(self):
+        # Timed in an SSH session at CPU weight 100 beside a generating cortex, Piper looked 8x slower.
+        host = FakeHost(self.root, programs={"systemctl"}, handlers={
+            "systemctl": lambda argv: Result(0, "1000\n" if "--property=CPUWeight" in argv else "")})
+        host.made("/proc/self/cgroup", "0::/system.slice/being-cable-ssh.service\n")
+        host.made("/sys/fs/cgroup/system.slice/being-cable-ssh.service/cpu.weight", "100\n")
+
+        class Piper:
+            def synthesize_blocking(self, text, path):
+                time.sleep(0.09)
+                audio.write_wav(path, [audio.tone(200, 0.1, 16000)], 16000)
+
+        with patch.object(speech, "available_voices", return_value=([("piper", Piper())], None)):
+            items = {item["id"]: item for item in speech.check_tts(host, self.report, sentences=("Hello.",),
+                                                                  busy=lambda: True)}
+        rtf = items["tts.rtf.piper"]
+        self.assertEqual(rtf["status"], "warn")
+        self.assertEqual((rtf["value"]["cpu_weight"], rtf["value"]["voice_cpu_weight"], rtf["value"]["cortex_busy"]),
+                         (100, 1000, True))
+        self.assertIn("CPU weight 100, below the voice's 1000", rtf["evidence"])
+        self.assertIn("the cortex was generating", rtf["hint"])
+        self.assertIn("may be faster", rtf["hint"])
+
+    def test_inside_the_diagnostics_unit_the_weight_is_the_voices(self):
+        host = FakeHost(self.root, programs={"flite"}, handlers={"flite": self.flite})
+        host.made("/proc/self/cgroup", "0::/system.slice/pip-diag-audio.service\n")
+        host.made("/sys/fs/cgroup/system.slice/pip-diag-audio.service/cpu.weight", "1000\n")
+        with patch.object(speech, "piper_engine", return_value=(None, "no")):
+            items = {item["id"]: item for item in speech.check_tts(host, self.report, sentences=("Hello.",),
+                                                                  busy=lambda: False)}
+        value = items["tts.rtf.slt"]["value"]
+        self.assertEqual((value["cpu_weight"], value["voice_cpu_weight"], value["cortex_busy"]), (1000, 1000, False))
+        self.assertNotIn("CPU weight", items["tts.rtf.slt"]["evidence"])
 
     def test_no_flite_skips(self):
         with patch.object(speech, "piper_engine", return_value=(None, "no")):

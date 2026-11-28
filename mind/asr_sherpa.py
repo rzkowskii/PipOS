@@ -23,7 +23,7 @@ from collections import deque
 from pathlib import Path
 
 from . import sherpa
-from .recognition import FRAME_SAMPLES, RATE, RecognizerEngine
+from .recognition import FRAME_SAMPLES, RATE, RecognizerEngine, strip_name_remnant
 
 ROOT = Path("/models/asr")
 VAD_FILE = "silero_vad.onnx"
@@ -107,13 +107,23 @@ def load_moonshine(root=ROOT, size="tiny", library=None, threads=1):
 
 
 def strip_wake(text, wake_word):
-    """Drop the wake phrase, and anything heard before it, from a one-breath transcript."""
+    """Drop the wake phrase, and anything heard before it, from a one-breath transcript.
+
+    The name itself near the start goes with whatever was heard before it.
+    Otherwise a misheard name goes (recognition.strip_name_remnant, the one
+    rule set for both recognizers): Moonshine writes it as a short clause of
+    its own ("Yep, close the terminal.", "Lay pit, what time is it?") or as a
+    name-like word ("Pep open a terminal."). Re-scored on the transcripts
+    measured on the laptop (cable run, 25 Nov), that took one-breath requests
+    understood from 17 to 31 of 42, and to 35 with the voice's own check of a
+    leftover before a safe command (voice.CommandGrammar.without_remnant),
+    with none lost."""
     name = (wake_word or "").split()[-1:] or ["pip"]
     match = re.search(rf"\b{re.escape(name[0])}\b[\s,.!:;-]*", text, re.I)
     # Only near the start: "Hey Pip, ..." and not a later "pip" in the request.
     if match and len(text[:match.start()].split()) <= 3:
-        text = text[match.end():]
-    return text.strip()
+        return text[match.end():].strip()
+    return strip_name_remnant(text, name[0]).strip()
 
 
 class SherpaRecognizer(RecognizerEngine):

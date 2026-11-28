@@ -46,6 +46,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import app_lookup, app_organizer
+from .app_commands import SMALL_APPS
+from .policy import WORKSHOP_DISABLED, web_lookup_ready, workshop_allowed
+from .reply import keeps_nothing
 from .bus import Bus
 
 
@@ -57,30 +61,36 @@ PANEL_DIR = Path("/run/being-panel")
 SHELLRC = "/usr/lib/being/workshop/shellrc"
 WORKSHOP_BIN = "/usr/lib/being/workshop/bin"
 SHELF_DIR = "/usr/share/being/workshop/shelf"
-APPS_DISABLED = Path("/mind/apps.disabled")
+APPS_DISABLED = Path("/mind") / WORKSHOP_DISABLED
 CONSOLE = "/usr/bin/being-console"
 MODEL_LABEL = "Qwen3.5 0.8B"
 
 SUBS = (
-    "app.open", "app.close", "app.minimise", "app.restore", "app.privacy",
+    "app.open", "app.close", "app.minimise", "app.restore", "app.privacy", "app.calc_display", "app.lookup_query",
     "term.task", "term.control", "term.read", "term.forget",
     "state.changed", "body.lid", "body.state", "organ.up", "organ.down",
     "hear.wake", "hear.speech_start", "key.interrupt",
 )
 
-APPS = ("terminal", "monitor", "clock")
+APPS = ("terminal", *SMALL_APPS)
 # The face composites the panels; being-local-screen (the Try menu) conflicts
 # with it, so while the menu has the screen no panel can be seen.
 FACE_UNIT = "being-face.service"
 LOCAL_SCREEN_UNIT = "being-local-screen.service"
 SCREEN_UNITS = (FACE_UNIT, LOCAL_SCREEN_UNIT)
 FACE_UP = ("active", "activating", "reloading")
-# The screen probe sits in front of every open, inside the mind's OPEN_WAIT
-# (4 s), and hands runs at a low CPU weight: it must answer well before the
-# mind gives up, and a probe that times out lets the open go ahead.
+# The screen probe sits in front of every open, inside the mind's OPEN_WAIT.
+# A probe that times out lets the open go ahead.
 SCREEN_PROBE_SECONDS = 1.0
-SMALL_APPS = ("monitor", "clock")   # never minimised: they close, and at most one is open
-SMALL_TITLES = {"monitor": "How I'm feeling", "clock": "Pip's clock"}
+PANEL_SIGNAL_SECONDS = 1.0
+# Text panels start hidden. The transient unit must load its fonts and
+# publish a frame before Hands can request the first visible frame.
+TEXT_PANEL_START_SECONDS = 2.5
+SMALL_TITLES = {"monitor": "How I'm feeling", "clock": "Pip's clock", "calc": "Calculator",
+                app_lookup.APP: app_lookup.TITLE, **app_organizer.TITLES}
+TEXT_PANELS = (*app_organizer.TITLES, app_lookup.APP)
+KEYBOARD_APPS = ("calc", "monitor", *TEXT_PANELS)
+PRIVATE_APPS = (*KEYBOARD_APPS, "clock")
 APP_FRAME = 1.0             # seconds between monitor and clock frames
 GRID_COLUMNS, GRID_ROWS = 107, 23
 PANEL_SIZE = (1280, 640)
@@ -97,6 +107,7 @@ COUNTDOWN = 4               # seconds before a one-liner Pip wrote is run
 UNDO_SECONDS = 30.0
 HOLD_SECONDS = 6.0          # a wake hold releases itself after this much quiet
 HUMAN_QUIET = 1.5           # Pip resumes this long after the owner's last key
+CLEAR_LINE = "\x05\x15"     # Ctrl-E, Ctrl-U: clear the whole line from any cursor position
 STATUS_EVERY = 2.0
 STALL_SECONDS = 20.0        # no token for this long while writing: pause
 KILL_GRACE = 2.0            # Ctrl-C first, then kill all but the shell
@@ -625,7 +636,7 @@ class Typist:
 
     def human(self, now):
         """The owner typed: stop at once. When Pip carries on it clears the
-        line (Ctrl-U) and retypes what it had typed of that line."""
+        line and retypes what it had typed of that line."""
         if self.human_until is None:
             self._retype = self.current_line()
         self.human_until = now + HUMAN_QUIET
@@ -655,7 +666,7 @@ class Typist:
             return ""
         out = ""
         if self._retype is not None:
-            out, self._retype = "\x15" + self._retype, None
+            out, self._retype = CLEAR_LINE + self._retype, None
         if not self._segments:
             self._credit = 0.0
             return out
@@ -1001,12 +1012,17 @@ def renderer_command(app, size=PANEL_SIZE):
         "NoNewPrivileges=yes", "CapabilityBoundingSet=", "ProtectSystem=strict", "ProtectHome=yes",
         f"ReadWritePaths={PANEL_DIR}", "PrivateNetwork=yes", "PrivateDevices=yes", "PrivateTmp=yes",
         "InaccessiblePaths=-/mind -/models -/workshop", "ProtectKernelTunables=yes", "ProtectControlGroups=yes",
-        "Nice=5", "CPUQuota=30%", "MemoryMax=32M", "RuntimeMaxSec=4h",
+        "Nice=5", "CPUQuota=30%", "MemoryMax=32M", "RuntimeMaxSec=4h", "TimeoutStopSec=2s",
     )
     argv = ["systemd-run", f"--unit=being-panel-{app}", "--pipe", "--collect", "--quiet",
             "--uid=being-panel", "--gid=being-panel"]
     argv += [f"--property={item}" for item in props]
-    return argv + [CONSOLE, "--panel", app, "--size", f"{size[0]}x{size[1]}", "--io", "-"]
+    argv += [CONSOLE, "--panel", app, "--size", f"{size[0]}x{size[1]}", "--io", "-"]
+    if app in KEYBOARD_APPS:
+        argv.extend(("--title", SMALL_TITLES[app]))
+    if app in TEXT_PANELS:
+        argv.append("--hidden")
+    return argv
 
 
 def _run(argv, timeout=10.0):
@@ -1270,11 +1286,13 @@ class PanelRenderer:
         self.command = command
         self.run = run
         self.proc = None
-        self.visible = True
+        self.visible = app not in TEXT_PANELS
 
     async def start(self):
+        # Renderer startup errors describe the unit or frame setup. Keep
+        # those in the hands journal so a failed keyboard open is diagnosable.
         self.proc = await asyncio.create_subprocess_exec(
-            *self.command(self.app), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            *self.command(self.app), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL
         )
 
     def alive(self):
@@ -1305,20 +1323,36 @@ class PanelRenderer:
     async def hide(self):
         return await self._signal("SIGUSR2", False)
 
-    async def ready(self, timeout=1.0, step=0.02):
-        """True once the renderer's frame file exists (it appears by rename,
-        so with a whole first frame), waiting up to `timeout`. hands hides
-        the last panel only after the next one is there, so the face goes
-        straight from one to the other."""
+    async def ready(self, timeout=1.0, step=0.02, *, visible=None):
+        """Wait for the frame file or for a committed visibility change."""
         path = PANEL_DIR / f"{self.app}.frame"
         deadline = time.monotonic() + timeout
         while self.alive():
-            if path.exists():
+            if visible is None and path.exists():
+                return True
+            if visible is not None and self._frame_visible(path) is visible:
                 return True
             if time.monotonic() >= deadline:
                 return False
             await asyncio.sleep(step)
         return False
+
+    @staticmethod
+    def _frame_visible(path):
+        # BPN1 publishes its flags before committing the even frame sequence.
+        try:
+            with path.open("rb") as stream:
+                header = stream.read(36)
+                if len(header) != 36 or header[:4] != b"BPN1":
+                    return None
+                sequence, = struct.unpack_from("<Q", header, 16)
+                stream.seek(16)
+                if sequence & 1 or stream.read(8) != header[16:24]:
+                    return None
+        except OSError:
+            return None
+        flags, = struct.unpack_from("<I", header, 32)
+        return bool(flags & 1)
 
     async def _signal(self, name, visible):
         """Show or hide the panel: being-console takes SIGUSR1 and SIGUSR2
@@ -1327,8 +1361,13 @@ class PanelRenderer:
         pid it read from a file the renderer writes."""
         if not self.alive():
             return False
-        code, _ = await asyncio.to_thread(
-            self.run, ["systemctl", "kill", "--kill-whom=main", f"--signal={name}", f"being-panel-{self.app}.service"])
+        try:
+            code, _ = await asyncio.to_thread(
+                self.run, ["systemctl", "kill", "--kill-whom=main", f"--signal={name}",
+                           f"being-panel-{self.app}.service"], timeout=PANEL_SIGNAL_SECONDS)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            log(f"panel {self.app} could not take {name}: {type(exc).__name__}")
+            return False
         if code == 0:
             self.visible = visible
         else:
@@ -1336,13 +1375,31 @@ class PanelRenderer:
         return code == 0
 
     async def stop(self):
-        if self.proc is not None:
+        proc = self.proc
+        if proc is None:
+            return
+        try:
+            proc.stdin.close()
+            await asyncio.wait_for(proc.wait(), 3.0)
+        except (asyncio.TimeoutError, OSError, RuntimeError):
+            # The pipe process is systemd-run. Stopping it alone can leave
+            # the actual renderer unit holding its frame and app name.
             try:
-                self.proc.stdin.close()
-                await asyncio.wait_for(self.proc.wait(), 3.0)
-            except (asyncio.TimeoutError, OSError, RuntimeError):
-                self.proc.kill()
-            self.proc = None
+                code, _ = await asyncio.to_thread(
+                    self.run, ["systemctl", "stop", f"being-panel-{self.app}.service"], timeout=3.0)
+                if code and proc.returncode is None:
+                    log(f"panel {self.app} unit did not stop")
+            except (subprocess.TimeoutExpired, OSError):
+                log(f"could not stop panel {self.app} unit")
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            await proc.wait()
+        finally:
+            if proc.returncode is not None:
+                self.proc = None
 
 
 class RecordingRenderer:
@@ -1354,7 +1411,7 @@ class RecordingRenderer:
         self.flag_log = []
         self.started = False
         self.wiped = 0
-        self.visible = True
+        self.visible = app not in TEXT_PANELS
         self.shown_log = []
 
     async def start(self):
@@ -1381,8 +1438,8 @@ class RecordingRenderer:
         self.shown_log.append(True)
         return self.started
 
-    async def ready(self, timeout=1.0, step=0.02):
-        return self.started
+    async def ready(self, timeout=1.0, step=0.02, *, visible=None):
+        return self.started and (visible is None or self.visible is visible)
 
     async def hide(self):
         self.visible = False
@@ -1616,6 +1673,10 @@ class Job:
     def lines(self):
         return self.body.count("\n") + (1 if self.body and not self.body.endswith("\n") else 0)
 
+    @property
+    def awaiting_command(self):
+        return self.phase == "waiting" and self.kind == "command"
+
     def describe(self):
         recipe = RECIPES.get(self.recipe) if self.source == "recipe" else None
         return recipe.describe if recipe else (self.request or self.text)[:60]
@@ -1627,7 +1688,8 @@ class Hands:
 
     def __init__(self, bus, *, cage, cortex, workshop=WORKSHOP, renderer=PanelRenderer,
                  clock=time.monotonic, disabled=APPS_DISABLED, key_socket=None, rng=None,
-                 model_label=MODEL_LABEL, body_root=Path("/"), state_dir=Path("/mind"), wall=time.time):
+                 model_label=MODEL_LABEL, body_root=Path("/"), state_dir=Path("/mind"), wall=time.time,
+                 organizer_path=None):
         self.bus = bus
         self.cage = cage
         self.cortex = cortex
@@ -1649,6 +1711,8 @@ class Hands:
         self.state = None
         self.lid_closed = None
         self.guest = False
+        self._guest_requested = False
+        self._organizer_starting = None
         self.mind_up = False
         self._gen_task = None
         self._typist = None
@@ -1668,9 +1732,10 @@ class Hands:
         self._key_sock = None
         self._tick_task = None
         self._loop = None
-        # The body monitor and the clock (mind/app_monitor.py, app_clock.py).
+        # Small apps (mind/app_monitor.py, app_clock.py and app_calc.py).
         self.body_root = Path(body_root)
         self.state_dir = Path(state_dir)
+        self.organizer_path = organizer_path
         self.wall = wall
         self.apps = {}              # small app -> its renderer
         self._app_tasks = {}
@@ -1684,6 +1749,8 @@ class Hands:
     # -- bus out ------------------------------------------------------------------
 
     async def send(self, topic, **fields):
+        if topic == "app.refused" and fields.get("app") in APPS:
+            log("app refused:", fields["app"], fields["reason"])
         await self.bus.send(topic, **fields)
 
     async def reply(self, topic, **fields):
@@ -1719,6 +1786,15 @@ class Hands:
 
     def urgent(self, event):
         topic = event.get("t")
+        if topic == "app.privacy" and type(event.get("guest")) is bool:
+            self._guest_requested = event["guest"]
+            if self._guest_requested:
+                for app in TEXT_PANELS:
+                    renderer = self.apps.get(app)
+                    if renderer is not None:
+                        renderer.wipe()
+                if self._organizer_starting is not None:
+                    self._organizer_starting.wipe()
         if topic == "hear.wake" and self.job is not None and self.job.phase in ("reading", "writing") and self._typist:
             # Typing stops the moment the name is heard; generation carries on.
             self._typist.hold()
@@ -1735,7 +1811,11 @@ class Hands:
         _REQ.set(str(req)[:32] if isinstance(req, (str, int)) else None)
         try:
             if topic == "app.open":
-                await self.open(event.get("app"), event.get("req"))
+                app, page = event.get("app"), event.get("page")
+                if app == "monitor" and page == "processes":
+                    await self.open(app, event.get("req"), page=page)
+                else:
+                    await self.open(app, event.get("req"))
             elif topic == "app.close":
                 await self.close(event.get("app"), bool(event.get("force")), event.get("req"))
             elif topic == "app.minimise":
@@ -1744,6 +1824,16 @@ class Hands:
                 await self.restore(event.get("app"), event.get("req"))
             elif topic == "app.privacy":
                 await self.privacy(bool(event.get("guest")))
+            elif topic == "app.calc_display":
+                self._calculator_input(spoken=event)
+            elif topic == "app.lookup_query":
+                query = app_lookup.query_text(event.get("query"))
+                if not query:
+                    await self.send("app.refused", req=req, reason="bad_query", app=app_lookup.APP)
+                elif await self.open(app_lookup.APP, req):
+                    source, _ = self._app_sources.get(app_lookup.APP, (None, None))
+                    if source is not None and not self._refusal(app_lookup.APP):
+                        source.submit(query)
             elif topic == "term.task":
                 await self.task(event)
             elif topic == "term.control":
@@ -1775,13 +1865,17 @@ class Hands:
 
     # -- apps -----------------------------------------------------------------------
 
-    def _refusal(self):
-        if self.guest:
+    def _refusal(self, app=None):
+        if self.guest or (app in TEXT_PANELS and self._guest_requested):
             return "guest"
-        if self.disabled is not None and self.disabled.exists():
+        if not workshop_allowed(self.disabled):
             return "disabled"
         if self.lid_closed is True:
             return "lid_closed"
+        if app in TEXT_PANELS and keeps_nothing(self.state_dir):
+            return "session_only"
+        if app == app_lookup.APP and not web_lookup_ready(self.state_dir):
+            return "offline"
         return None
 
     async def _menu_has_the_screen(self):
@@ -1801,14 +1895,14 @@ class Hands:
         face, menu = states.get(FACE_UNIT), states.get(LOCAL_SCREEN_UNIT)
         return face is not None and face not in FACE_UP and menu in FACE_UP
 
-    async def open(self, app, req=None):
+    async def open(self, app, req=None, *, page=None):
         """Show an app. True when it went ahead, False when it was refused
         (the app.refused has been sent), so a task that brings the terminal
         forward can stop instead of working where nobody can see."""
         if app not in APPS:
             await self.send("app.refused", req=req, reason="unknown", app=app)
             return False
-        reason = self._refusal()
+        reason = self._refusal(app)
         if reason:
             await self.send("app.refused", req=req, reason=reason, app=app)
             return False
@@ -1817,7 +1911,10 @@ class Hands:
             await self.send("app.refused", req=req, reason="no_face", app=app)
             return False
         if app in SMALL_APPS:
-            await self._open_small(app, req)
+            if page is not None:
+                await self._open_small(app, req, page=page)
+            else:
+                await self._open_small(app, req)
             return self.view[app] != "closed"
         was = self.view[app]
         if was == "closed":
@@ -1830,6 +1927,10 @@ class Hands:
                 return False
         elif was == "minimised" and self.renderer is not None:
             await self.renderer.show()
+        if not workshop_allowed(self.disabled):
+            await self._stop_terminal()
+            await self.send("app.refused", req=req, reason="disabled", app=app)
+            return False
         self.view[app] = "shown"
         self._minimised_at = None
         if self._typist:
@@ -1846,44 +1947,100 @@ class Hands:
     def _small_shown(self):
         return next((app for app in SMALL_APPS if self.view[app] != "closed"), None)
 
-    async def _open_small(self, app, req=None):
-        """The monitor or the clock: its own renderer, fed a frame a second.
+    async def _open_small(self, app, req=None, *, page=None):
+        """Open a small app in its own renderer.
         The terminal (if open) is minimised and the other small app closes,
         once this one's first frame is on its way."""
         if self.view[app] == "closed":
             renderer = self.make_renderer(app)
+            keyboard = app in KEYBOARD_APPS
+            text_panel = app in TEXT_PANELS
+            if text_panel:
+                self._organizer_starting = renderer
+            started = False
+            refused = False
             try:
                 await renderer.start()
-                self._app_sources[app] = (self._small_source(app), None)
-                frame = await asyncio.to_thread(self._small_frame, app)
+                source = self._small_source(app)
+                self._app_sources[app] = (source, None)
+                if app == "monitor":
+                    source.select(page)
+                if text_panel:
+                    frame = await source.refresh()
+                    reason = self._refusal(app)
+                    if reason or source.result["status"] == "private":
+                        refused = True
+                        await self.send("app.refused", req=req, reason=reason or "session_only", app=app)
+                        return
+                else:
+                    frame = await asyncio.to_thread(self._small_frame, app, refresh=False)
+                status = "Tab · Body / Processes" if app == "monitor" else (
+                    "Keyboard ready" if keyboard else "Live · once a second")
+                renderer.flags(title=SMALL_TITLES[app], focus=int(keyboard), pip="idle", job="idle", status=status)
+                renderer.write(frame)
+                # Leave the old panel up until the incoming renderer has had
+                # time to produce a complete picture.
+                ready = getattr(renderer, "ready", None)
+                stage = "hidden first frame" if text_panel else "first frame"
+                has_frame = True
+                if ready is not None:
+                    if text_panel:
+                        has_frame = await ready(timeout=TEXT_PANEL_START_SECONDS, visible=False)
+                    else:
+                        has_frame = await ready()
+                reason = self._refusal(app)
+                if reason:
+                    renderer.wipe()
+                    refused = True
+                    await self.send("app.refused", req=req, reason=reason, app=app)
+                    return
+                if text_panel and has_frame:
+                    stage = "show signal"
+                    has_frame = await renderer.show()
+                    if has_frame and ready is not None:
+                        stage = "visible first frame"
+                        has_frame = await ready(visible=True)
+                    if reason := self._refusal(app):
+                        renderer.wipe()
+                        refused = True
+                        await self.send("app.refused", req=req, reason=reason, app=app)
+                        return
+                alive = renderer.alive()
+                started = alive and (has_frame or not keyboard)
+                if not started:
+                    log(f"{app} renderer did not become ready at {stage}: alive={alive}, completed={has_frame}")
             except Exception as exc:
                 log(f"{app} did not start: {type(exc).__name__}")
-                self._app_sources.pop(app, None)
-                await renderer.stop()
-                await self.send("app.refused", req=req, reason="failed", app=app)
-                return
-            renderer.flags(title=SMALL_TITLES[app], status="Live · once a second", focus=0, pip="idle", job="idle")
-            renderer.write(frame)
-            # Its first frame on screen before the last panel is hidden: the
-            # face then goes straight from one to the other.
-            ready = getattr(renderer, "ready", None)
-            if ready is not None:
-                await ready()
-            if not renderer.alive():
-                self._app_sources.pop(app, None)
-                await renderer.stop()
-                await self.send("app.refused", req=req, reason="failed", app=app)
+            finally:
+                if text_panel:
+                    self._organizer_starting = None
+                if not started:
+                    self._app_sources.pop(app, None)
+                    try:
+                        # A policy refusal has already replied by this point.
+                        # Startup failures have to answer even if stop stalls.
+                        if not refused and not asyncio.current_task().cancelling():
+                            await self.send("app.refused", req=req, reason="failed", app=app)
+                    finally:
+                        await renderer.stop()
+            if not started:
                 return
             self.apps[app] = renderer
             self.view[app] = "shown"
-            self._app_tasks[app] = asyncio.get_running_loop().create_task(self._run_small(app, renderer))
+            self._app_tasks[app] = asyncio.create_task(self._run_small(app, renderer, frame))
             log(f"{app} opened, first frame {self.frame_ms.get(app, 0):.2f} ms")
+        elif app == "monitor" and page is not None:
+            self._app_sources[app][0].select(page)
         for other in SMALL_APPS:
             if other != app and self.view[other] != "closed":
                 await self._close_small(other)
         if self.view["terminal"] == "shown":
             if self.renderer is not None:
-                await self.renderer.hide()
+                hidden = await self.renderer.hide()
+                if app in KEYBOARD_APPS and not hidden:
+                    await self._close_small(app, announce=False)
+                    await self.send("app.refused", req=req, reason="failed", app=app)
+                    return
             self.view["terminal"] = "minimised"
             self._minimised_at = self.clock()
             if self._typist:
@@ -1901,34 +2058,43 @@ class Hands:
         if renderer is not None:
             # Hidden first, so the face lets go of it at once; then its
             # picture goes for real (the clock shows reminders' words).
-            await renderer.hide()
-            renderer.wipe()
+            if app in TEXT_PANELS:
+                renderer.wipe()
+                await renderer.hide()
+            else:
+                await renderer.hide()
+                renderer.wipe()
             await renderer.stop()
         self.view[app] = "closed"
         if announce:
             await self.announce_state(app, req)
 
     def _small_source(self, app):
+        if app == app_lookup.APP:
+            return app_lookup.Lookup(self.organizer_path)
+        if app in app_organizer.TITLES:
+            return app_organizer.Organizer(app, self.organizer_path)
+        if app == "calc":
+            from .app_calc import Calculator
+            return Calculator()
         if app == "monitor":
-            from .app_monitor import Sampler
-            return Sampler(root=self.body_root, disk=str(self.state_dir))
+            from .app_monitor import Monitor
+            return Monitor(root=self.body_root, disk=str(self.state_dir))
         from .app_clock import Reader
         return Reader(state_dir=str(self.state_dir))
 
-    def _small_frame(self, app):
+    def _small_frame(self, app, *, refresh=True):
         """One frame of a small app's ANSI. Runs in a worker thread: the
         readings are small file reads, but an SMC or sqlite read must never
         hold up typing or the bus."""
-        source, previous = self._app_sources[app]
+        source, _ = self._app_sources[app]
         started = time.perf_counter()
+        if app == "calc":
+            frame = source.render()
+            self.frame_ms[app] = (time.perf_counter() - started) * 1000
+            return frame
         if app == "monitor":
-            from .app_monitor import render
-            reading = source.sample()
-            frame = render(reading, previous, dict(self.body), {"state": self.state, "tok_s": self.code_tok_s})
-            # Only while this app is still open with this sampler: a close that
-            # came while this thread ran must not be undone.
-            if self._app_sources.get(app, (None,))[0] is source:
-                self._app_sources[app] = (source, reading)
+            frame = source.frame(dict(self.body), {"state": self.state, "tok_s": self.code_tok_s}, refresh=refresh)
         else:
             from .app_clock import render
             now = self.wall()
@@ -1936,12 +2102,21 @@ class Hands:
         self.frame_ms[app] = (time.perf_counter() - started) * 1000
         return frame.encode("utf-8")
 
-    async def _run_small(self, app, renderer):
+    async def _run_small(self, app, renderer, last_frame):
         """A frame just after each second turns, so the clock ticks on time.
         Nothing is read or drawn while the lid is closed or Pip sleeps."""
+        text_panel = app in TEXT_PANELS
+        refreshed = self.clock()
         while self.apps.get(app) is renderer:
-            now = self.wall()
-            await asyncio.sleep(APP_FRAME - (now % APP_FRAME) + 0.02 if APP_FRAME >= 1 else APP_FRAME)
+            source = self._app_sources[app][0]
+            if text_panel:
+                try:
+                    await asyncio.wait_for(source.changed.wait(), APP_FRAME)
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                now = self.wall()
+                await asyncio.sleep(APP_FRAME - (now % APP_FRAME) + 0.02 if APP_FRAME >= 1 else APP_FRAME)
             if self.apps.get(app) is not renderer:
                 continue
             if not renderer.alive():
@@ -1952,15 +2127,39 @@ class Hands:
                 self._app_tasks.pop(app, None)
                 await self._close_small(app)
                 return
-            if self._resting() in ("lid", "sleep"):
+            if text_panel and self._refusal(app) in ("guest", "disabled", "session_only", "offline"):
+                self._app_tasks.pop(app, None)
+                await self._close_small(app)
+                return
+            if app == "calc" or self._resting() in ("lid", "sleep"):
+                if text_panel:
+                    source.changed.clear()
                 continue
             try:
-                frame = await asyncio.to_thread(self._small_frame, app)
+                if text_panel:
+                    # The activity view scans the rotated log. Keys and
+                    # privacy keep their own immediate/one-second paths.
+                    if (app in app_organizer.TITLES and source.slow_refresh() and not source.changed.is_set()
+                            and self.clock() - refreshed < 15):
+                        continue
+                    if app == app_lookup.APP and source.pending is not None:
+                        renderer.write(source.render())
+                    frame = await source.refresh()
+                    refreshed = self.clock()
+                    if self.apps.get(app) is not renderer:
+                        continue
+                    if self._refusal(app) or source.result["status"] == "private":
+                        self._app_tasks.pop(app, None)
+                        await self._close_small(app)
+                        return
+                else:
+                    frame = await asyncio.to_thread(self._small_frame, app)
             except Exception as exc:  # one bad reading must not end the app
                 log(f"{app} frame failed: {type(exc).__name__}")
                 continue
-            if self.apps.get(app) is renderer:
+            if self.apps.get(app) is renderer and (not text_panel or frame != last_frame):
                 renderer.write(frame)
+                last_frame = frame
 
     async def _start_terminal(self):
         self.sessions += 1
@@ -2083,6 +2282,11 @@ class Hands:
         changed = guest != self.guest
         self.guest = guest
         if changed or guest:
+            # Hide and wipe private panels before waiting for a terminal
+            # job and its separate cache to be cleared.
+            for app in PRIVATE_APPS:
+                if self.view[app] != "closed":
+                    await self._close_small(app)
             await self.forget({"all": True, "quiet": True})
 
     def _panel_flags(self):
@@ -2093,9 +2297,12 @@ class Hands:
         paused = bool(job and job.phase in ("paused", "held", "frozen"))
         busy = bool(job and job.phase in BUSY)
         human = bool(self._typist and self._typist.human_until)
+        outcome = "idle"
+        if job and (job.phase == "failed" or (job.phase == "done" and job.exit == 0)):
+            outcome = job.phase
         self.renderer.flags(visible=self.view["terminal"] == "shown", focus=self.view["terminal"] == "shown",
                             pip="typing" if typing else "paused" if paused else "idle",
-                            job="busy" if busy else "idle", human=human, title="Pip's terminal",
+                            job="busy" if busy else outcome, human=human, title="Pip's terminal",
                             status=self.status_text())
 
     def status_text(self):
@@ -2220,6 +2427,19 @@ class Hands:
 
     async def tick(self):
         now = self.clock()
+        # The marker can be withdrawn while the terminal is open. Stop work
+        # on the next tick and close the session, but preserve RAM files for
+        # the owner's later inspection or forget request.
+        if not workshop_allowed(self.disabled):
+            if self.job is not None and self.job.phase in ACTIVE:
+                await self._cancel_unanswered("disabled")
+            if self.session is not None or self.view["terminal"] != "closed":
+                await self._stop_terminal()
+                await self.announce_state("terminal")
+            for app in SMALL_APPS:
+                if self.view[app] != "closed":
+                    await self._close_small(app)
+            return
         job = self.job
         if self._typing:
             self._flush_typing()
@@ -2251,7 +2471,7 @@ class Hands:
                 out = typist.take(now)
                 if out:
                     self._type(out)
-                if typist.done and job.generation_done and job.phase == "writing":
+                if typist.done and not self._typing and job.generation_done and job.phase == "writing":
                     await self._typed_all()
             if job.phase == "writing" and job.source == "model" and not job.generation_done and not job.parked:
                 if now - (job.last_token or job.started) > STALL_SECONDS:
@@ -2295,7 +2515,10 @@ class Hands:
             job.phase = "checking"
             job.check_deadline = self.clock() + 5.0
             await self.status()
-        elif job.kind == "command" or (job.kind == "recipe" and not job.file):
+        elif job.kind == "command":
+            job.phase = "waiting"
+            await self.status(speakable=True)
+        elif job.kind == "recipe":
             job.phase, job.deadline = "countdown", self.clock() + COUNTDOWN
             job.countdown_left = COUNTDOWN
             await self.status(speakable=False)
@@ -2466,6 +2689,8 @@ class Hands:
         await self.status()
 
     def _begin(self, job, text, fixed_rate=None):
+        if self.job is not None and self.job.awaiting_command:
+            self._type(CLEAR_LINE, urgent=True)
         self.job = job
         self._typist = Typist(fixed_rate=fixed_rate, now=self.clock())
         self._typist.instant = self.view["terminal"] == "minimised"
@@ -2485,7 +2710,7 @@ class Hands:
             job.word = job.word or end_word(self.rng)
             text = intro + heredoc_open(job.file, job.word) + retype
         else:
-            text = intro + retype
+            text = intro
         self._begin(job, text)
         job.phase = "reading"
         job.last_token = 0.0
@@ -2599,7 +2824,8 @@ class Hands:
                 job.reason = "policy:" + reason
                 await self._cancel_job(job.reason, speak=True, wipe_line=False)
                 return
-            self._typist.feed(job.line.strip(), self.clock(), known=True)
+            # Leave an inert preview at the prompt until the owner says run it.
+            self._typist.feed("# " + job.line.strip(), self.clock(), known=True)
         self._typist.end()
 
     async def _end_generation(self):
@@ -2622,6 +2848,10 @@ class Hands:
             if action not in ("hold", "release"):
                 await self.reply("term.status", id=job_id, phase=None, reason="no_job", speakable=False)
             return
+        if action in ("run", "resume", "fix", "undo") and not workshop_allowed(self.disabled):
+            await self.reply("term.status", id=job_id or job.id, phase=job.phase,
+                              reason="disabled", speakable=False)
+            return
         if action == "hold":
             if job.phase in ("reading", "writing") and self._typist:
                 self._typist.hold()
@@ -2642,8 +2872,7 @@ class Hands:
                 if self.session and self.session.freeze():
                     self._frozen(job, reason)
                 await self.status()
-            elif job.phase == "countdown":
-                self._type("\x15", urgent=True)
+            elif job.phase == "countdown" or job.awaiting_command:
                 await self._cancel_job(reason)
             else:
                 await self.status()
@@ -2667,7 +2896,7 @@ class Hands:
         elif action == "undo":
             await self._undo()
         elif action == "run":
-            await self._run_file()
+            await self._run_job()
         elif action == "fix":
             await self._fix()
         else:
@@ -2738,11 +2967,13 @@ class Hands:
             # Ctrl-C and the kill must reach a thawed cage.
             await asyncio.to_thread(self.session.thaw)
             self._thawed(job)
-        if was in ("reading", "writing", "held", "paused", "countdown", "checking"):
+        if was == "countdown" or job.awaiting_command:
+            self._type(CLEAR_LINE, urgent=True)
+        elif was in ("reading", "writing", "held", "paused", "checking"):
             # Ctrl-C at the prompt or inside the heredoc: ash drops the
             # unfinished command, so no half file is written.
-            if self._typist is not None and (self._typist.typed or was == "countdown"):
-                self._type("\x03" if was != "countdown" else "\x15", urgent=True)
+            if self._typist is not None and self._typist.typed:
+                self._type("\x03", urgent=True)
         if was in ("running", "frozen"):
             await self._interrupt_run()
         job.phase, job.reason = "cancelled", reason
@@ -2786,13 +3017,13 @@ class Hands:
             job.word = end_word(self.rng)
             text = intro + heredoc(job.file, retype, job.word)
         else:
-            text = intro + retype.strip()
+            text = intro + "# " + retype.strip()
         self._begin(job, text, fixed_rate=RECIPE_RATE)
         job.generation_done = True
         job.phase = "writing"
         await self.status()
 
-    async def _run_file(self):
+    async def _run_job(self):
         job = self.job
         if self.session is not None and self.session.frozen:
             # The cage is frozen while the lid is closed, Pip sleeps or is too warm.
@@ -2802,23 +3033,29 @@ class Hands:
         if self._low_battery():
             await self.reply("term.status", id=job.id, phase=job.phase, reason="low_battery", speakable=False)
             return
-        if job.phase in ("waiting", "done", "failed") and job.file and not job.reason.startswith("policy"):
+        command = job.kind == "command" and bool(job.line)
+        if job.phase in ("waiting", "done", "failed") and (job.file or command) and not job.reason.startswith("policy"):
             if not self.session or not self.session.foreground_is_shell():
                 await self.reply("term.status", id=job.id, phase=job.phase, reason="not_at_prompt", speakable=False)
                 return
-            runner = "python3" if job.file.endswith(".py") else "sh"
-            job.run_line = f"{runner} {job.file}"
+            clear_preview = CLEAR_LINE if job.awaiting_command else ""
+            if job.file:
+                runner = "python3" if job.file.endswith(".py") else "sh"
+                job.run_line = f"{runner} {job.file}"
+            else:
+                reason = check_shell_line(job.line, self._exists)
+                if reason:
+                    self._type(clear_preview)
+                    job.phase, job.reason = "failed", "policy:" + reason
+                    await self.status(speakable=True)
+                    return
+                job.run_line = job.line.strip()
             job.exit, job.reason, job.output_lines, job.output_bytes = None, "", 0, 0
             self._out_since_run = b""
-            self._type(job.run_line + "\n")
+            self._type(clear_preview + job.run_line + "\n")
             job.phase, job.run_started = "running", self.clock()
             job.deadline = job.run_started + RUN_LIMIT
             log(f"job {job.id} running")
-            await self.status()
-        elif job.phase in ("done", "failed") and job.line and job.kind == "command":
-            self._type(job.line + "\n")
-            job.phase, job.run_started, job.exit = "running", self.clock(), None
-            job.deadline = job.run_started + RUN_LIMIT
             await self.status()
         else:
             await self.reply("term.status", id=job.id, phase=job.phase, reason="nothing_to_run", speakable=False)
@@ -2865,6 +3102,8 @@ class Hands:
     async def on_lid(self, closed):
         previous, self.lid_closed = self.lid_closed, closed
         if closed is True:
+            if self.view[app_lookup.APP] == "shown":
+                await self._close_small(app_lookup.APP)
             await self._rest("lid")
         elif closed is False and previous is True:
             await self._wake("lid")
@@ -2896,7 +3135,7 @@ class Hands:
         return None
 
     async def _wake(self, reason):
-        if self._resting():
+        if self._resting() or not workshop_allowed(self.disabled):
             return  # still closed, asleep or too warm: nothing thaws yet
         job = self.job
         owner_froze = job is not None and job.phase == "frozen" and job.reason not in REST_REASONS
@@ -2939,41 +3178,70 @@ class Hands:
         """Esc: innermost first. Speech belongs to the brainstem."""
         if self.state in ("thinking", "speaking"):
             return
+        small = self._small_shown()
+        if small in KEYBOARD_APPS:
+            await self._close_small(small)
+            return
         job = self.job
         if job is None or job.phase not in ACTIVE:
-            small = self._small_shown()
             if small:
                 await self._close_small(small)
+            elif job is not None and job.awaiting_command:
+                await self.control("pause", "key")
             return
-        if job.phase == "countdown":
-            await self.control("pause", "key")
-        elif job.phase in GENERATING:
+        if job.phase in GENERATING + ("countdown",):
             await self.control("pause", "key")
         elif job.phase in ("running", "frozen"):
             await self.control("stop_run", "key")
 
     # -- keys from the face -----------------------------------------------------------------------
 
+    def _calculator_input(self, *, key=None, spoken=None):
+        renderer = self.apps.get("calc")
+        if renderer is None or not renderer.alive() or self._refusal() or self.state == "asleep":
+            return
+        source, _ = self._app_sources["calc"]
+        changed = (source.key(key) if key is not None else
+                   source.show_spoken(spoken.get("expression"), spoken.get("result"), spoken.get("error")))
+        if changed:
+            renderer.write(source.render())
+
     def on_key(self, data):
         """One datagram per key from the face. Raw bytes go to the shell; a
         leading NUL marks a control word (pgup, pgdn, f3)."""
         if not data or len(data) > 16:
             return
+        if not workshop_allowed(self.disabled):
+            return
         loop = asyncio.get_running_loop()
+        small = self._small_shown()
+        if small == "monitor" and data != b"\0f3":
+            source, _ = self._app_sources.get(small, (None, None))
+            if source is not None and not self._refusal(small) and self.state != "asleep":
+                source.key(data)
+            return
+        if small in TEXT_PANELS and data != b"\0f3":
+            source, _ = self._app_sources.get(small, (None, None))
+            if source is not None and not self._refusal(small) and self.state != "asleep":
+                source.key(data)
+            return
         if data.startswith(b"\0"):
             word = data[1:].decode("ascii", "ignore")
             if word == "f3":
                 action = self.minimise if self.view["terminal"] == "shown" else self.restore
                 if self.view["terminal"] != "closed":
                     loop.create_task(action("terminal"))
-            elif word in ("pgup", "pgdn") and self.renderer is not None:
+            elif word in ("pgup", "pgdn") and self.view["terminal"] == "shown" and self.renderer is not None:
                 self.renderer.flags(scroll="up" if word == "pgup" else "down")
+            return
+        if self.view["calc"] == "shown":
+            self._calculator_input(key=data)
             return
         if self.view["terminal"] != "shown" or self.session is None:
             return
         job = self.job
-        if job is not None and job.phase == "countdown":
-            loop.create_task(self.control("pause", "key"))  # any key cancels the countdown
+        if job is not None and (job.phase == "countdown" or job.awaiting_command):
+            loop.create_task(self.control("pause", "key", job.id))
             return
         if job is not None and job.phase in ("reading", "writing", "held") and self._typist is not None:
             self._typist.human(self.clock())
@@ -3147,7 +3415,7 @@ async def main():
         renderer = PanelRenderer
     bus = Bus("hands", SUBS, path=args.bus)
     hands = Hands(bus, cage=cage, cortex=CodeCortex(args.cortex), workshop=args.workshop, renderer=renderer,
-                  key_socket=args.keys)
+                  key_socket=args.keys, organizer_path=app_organizer.socket_path(bus.path))
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):

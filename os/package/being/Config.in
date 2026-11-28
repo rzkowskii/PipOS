@@ -3,14 +3,26 @@ config BR2_PACKAGE_BEING
 	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
 	depends on BR2_PACKAGE_SDL2_KMSDRM
 	depends on BR2_PACKAGE_PYTHON3_SQLITE
+	depends on BR2_USE_WCHAR
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on !BR2_STATIC_LIBS
+	depends on BR2_TOOLCHAIN_GCC_AT_LEAST_7
 	select BR2_PACKAGE_HOST_RUSTC
 	select BR2_PACKAGE_JPEG
+	# The confined Keep PDF worker uses only /usr/bin/pdftotext. Buildroot's
+	# upstream Poppler package owns the source/hash pin and installs the tools.
+	select BR2_PACKAGE_POPPLER
+	select BR2_PACKAGE_POPPLER_UTILS
+	select BR2_PACKAGE_SMARTMONTOOLS
 	help
 	  The being's organs: the face, the brainstem and the mind, with
 	  the systemd units that start them at boot.
 
-comment "being needs SDL2 with the KMS/DRM video driver, and Python 3 with SQLite"
-	depends on !BR2_PACKAGE_SDL2_KMSDRM || !BR2_PACKAGE_PYTHON3_SQLITE
+comment "being needs SDL2 KMS/DRM, Python SQLite, and a dynamic C++17 toolchain with threads and wchar"
+	depends on !BR2_PACKAGE_SDL2_KMSDRM || !BR2_PACKAGE_PYTHON3_SQLITE || \
+		!BR2_USE_WCHAR || !BR2_INSTALL_LIBSTDCPP || !BR2_TOOLCHAIN_HAS_THREADS || \
+		BR2_STATIC_LIBS || !BR2_TOOLCHAIN_GCC_AT_LEAST_7
 
 config BR2_PACKAGE_BEING_LAB_BODY
 	bool "lab body"
@@ -20,6 +32,14 @@ config BR2_PACKAGE_BEING_LAB_BODY
 	  speakers yet: the second serial line (ttyS1) becomes its ears
 	  and voice. What is typed there is heard; what it says is
 	  printed there. Not for the laptop.
+
+config BR2_PACKAGE_BEING_STOCK_SPEECH
+	bool "install the staged Pip stock speech bank"
+	depends on BR2_PACKAGE_BEING
+	help
+	  Include the approved bank from out/stock-speech in the system slot.
+	  The host post-build step validates the exact clause set and WAVs.
+	  Generate the bank with lab/build_stock_speech.py using the shipping voice.
 
 config BR2_PACKAGE_BEING_LAN_MAINTENANCE
 	bool "paired LAN maintenance"
@@ -47,3 +67,12 @@ config BR2_PACKAGE_BEING_CABLE_DEV
 	  kernel command line switches it off. Such a stick never installs,
 	  never becomes an ISO and is never signed as an update; the image
 	  holds its SSH host key, so keep it private.
+
+config BR2_PACKAGE_BEING_DIAGNOSTIC
+	bool "Try-only hardware maintenance image"
+	depends on BR2_PACKAGE_BEING
+	help
+	  Marks the isolated WP-C8 laptop diagnostic image. This option is
+	  selected only by BEING_LAPTOP_DIAGNOSTIC=1 in lab/build.sh; board
+	  packaging removes installation support and enables a local root
+	  console. It must never be enabled in a shipping or update image.

@@ -14,7 +14,7 @@ SYS_DEV_BLOCK = Path("/sys/dev/block")
 
 
 def installed_mapping(cmdline):
-    fields = ("being.installed", "being.try", "root", "rauc.slot", "fstab", "systemd.gpt_auto")
+    fields = ("being.installed", "being.try", "root", "rauc.slot", "fstab", "systemd.gpt_auto", "being.mind_crypt")
     fields += tuple(f"being.{field}" for field in PARTITIONS)
     values = {}
     for item in cmdline.split():
@@ -28,6 +28,8 @@ def installed_mapping(cmdline):
         raise ValueError("Installed boot options are incomplete")
     if "being.try" in values:
         raise ValueError("Try and installed boot options coexist")
+    if values.get("being.mind_crypt", "1") != "1":
+        raise ValueError("Invalid encrypted memory option")
 
     guids = tuple(values.get(f"being.{field}", "") for field in PARTITIONS)
     for value in guids:

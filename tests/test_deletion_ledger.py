@@ -5,6 +5,7 @@ from contextlib import closing
 from pathlib import Path
 
 from mind.memory import Memory, _SCHEMA
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 
 class DeletionLedgerTests(unittest.TestCase):

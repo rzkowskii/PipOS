@@ -1,0 +1,86 @@
+#!/bin/sh
+# Explicit diagnostic-boot measurement, outside the voice startup path.
+set -u
+CARD=${BEING_AUDIO_CARD:-0}
+RUN_DIR=${BEING_AUDIO_RUN:-/run/being-audio}
+MIC_TEST=${BEING_AUDIO_MIC_TEST:-/usr/sbin/being-usb-logs}
+PROC_ASOUND=${BEING_AUDIO_PROC:-/proc/asound}
+MARKER=/run/being-audio-measure/services
+LOCK=/run/being-diag/lock
+ACTIVE="$RUN_DIR/mic-test-active"
+EARS_UNIT=/usr/lib/systemd/system/being-ears.service
+
+say() { printf '%s\n' "being-audio-measure: $*"; }
+skip() {
+    say "microphone not measured: $1"
+    mkdir -p "$RUN_DIR" 2>/dev/null || return 0
+    (umask 077; printf '{"detail": "%s", "status": "skipped"}\n' "$1" > "$RUN_DIR/mic-level.json.new") &&
+        mv -f "$RUN_DIR/mic-level.json.new" "$RUN_DIR/mic-level.json"
+}
+unit_state() { systemctl is-active "$1" 2>/dev/null || true; }
+restore() {
+    trap - EXIT HUP INT TERM
+    rm -f "$ACTIVE" "$RUN_DIR/mic-level.json.new"
+    [ -f "$MARKER" ] || return 0
+    ears=$(sed -n 's/^ears=//p' "$MARKER")
+    voice=$(sed -n 's/^voice=//p' "$MARKER")
+    rm -f "$MARKER"
+    if [ "$ears" = active ] || [ "$ears" = activating ] || [ "$ears" = reloading ]; then
+        systemctl --no-block restart being-ears.service >/dev/null 2>&1 || true
+    fi
+    if [ "$voice" = active ] || [ "$voice" = activating ] || [ "$voice" = reloading ]; then
+        systemctl --no-block restart being-voice.service >/dev/null 2>&1 || true
+    fi
+}
+
+if [ "${1:-}" = --restore ]; then
+    restore
+    exit 0
+fi
+
+if [ "${1:-}" != --locked ]; then
+    mkdir -p "${LOCK%/*}" || { skip "the audio-session lock directory is unavailable"; exit 0; }
+    /usr/bin/python3 - "$0" "$LOCK" <<'PY'
+import fcntl, os, subprocess, sys
+fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT, 0o600)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit(75)
+raise SystemExit(subprocess.call([sys.argv[1], "--locked"]))
+PY
+    status=$?
+    [ "$status" -ne 75 ] || skip "another audio diagnostic is using the card"
+    exit 0
+fi
+[ ! -e /run/being/mic-policy-breach ] || { skip "the microphone safety latch is active until reboot"; exit 0; }
+[ "$(cat "$PROC_ASOUND/card$CARD/id" 2>/dev/null)" != Loopback ] || { skip "card $CARD is the lab loopback cable"; exit 0; }
+[ -x "$MIC_TEST" ] || { skip "the microphone diagnostic helper is not installed"; exit 0; }
+
+voice=$(unit_state being-voice.service)
+ears=absent
+[ ! -f "$EARS_UNIT" ] || ears=$(unit_state being-ears.service)
+mkdir -p "${MARKER%/*}" || { skip "the service restore marker could not be created"; exit 0; }
+(umask 077; set -C; printf 'voice=%s\nears=%s\n' "$voice" "$ears" > "$MARKER") || {
+    skip "the service restore marker could not be acquired"; exit 0;
+}
+trap 'restore; exit 0' HUP INT TERM
+trap restore EXIT
+rm -f "$RUN_DIR/mic-level.json" "$RUN_DIR/mic-level.json.new"
+case "$voice" in
+    active|activating|reloading)
+        if ! systemctl stop being-voice.service >/dev/null 2>&1; then
+            skip "the active voice could not release audio"; exit 0
+        fi ;;
+esac
+case "$ears" in
+    active|activating|reloading)
+        if ! systemctl stop being-ears.service >/dev/null 2>&1; then
+            skip "the active ears could not release capture"; exit 0
+        fi ;;
+esac
+(umask 077; : > "$ACTIVE") || { skip "the microphone consent marker could not be created"; exit 0; }
+"$MIC_TEST" mic-test --require-open-lid --card "$CARD" --out "$RUN_DIR/mic-level.json" 2>&1 |
+    sed 's/^being-usb-logs: /being-audio-measure: /'
+rm -f "$ACTIVE"
+exit 0

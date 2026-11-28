@@ -118,6 +118,21 @@ def stamp(image, root=ROOT, ident=None):
     return path
 
 
+def stamp_verified_install(try_image, target, *, role="try_image"):
+    """Bind a disposable installed disk to Try after checking both system slots."""
+    roots = []
+    for path, layout in ((try_image, role), (target, "installed_image")):
+        path = Path(path)
+        with path.open("rb") as stream:
+            record = candidate_manifest.disk_record(stream, path.stat().st_size, layout)
+        roots.append([part["rootfs"] for part in record["partitions"] if "rootfs" in part])
+    if roots[1] != roots[0] * 2:
+        raise ValueError("The installed system slots do not both match the Try USB.")
+    ident = image_id(try_image)
+    if ident is not None:
+        stamp(target, ident=ident)
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if not argv:

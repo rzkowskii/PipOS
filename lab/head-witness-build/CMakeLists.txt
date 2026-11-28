@@ -1,0 +1,21 @@
+cmake_minimum_required(VERSION 3.20)
+project(pipos_head_witness LANGUAGES C CXX)
+
+set(PIPOS_LLAMA_SOURCE "" CACHE PATH "Pinned Stage 2 llama.cpp v1.0.0 source tree")
+if(NOT EXISTS "${PIPOS_LLAMA_SOURCE}/src/models/qwen35.cpp")
+    message(FATAL_ERROR "Set PIPOS_LLAMA_SOURCE to the pinned Stage 2 llama.cpp source")
+endif()
+
+set(LLAMA_BUILD_COMMON OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_APP OFF CACHE BOOL "" FORCE)
+set(GGML_METAL OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
+add_subdirectory("${PIPOS_LLAMA_SOURCE}" "${CMAKE_CURRENT_BINARY_DIR}/llama" EXCLUDE_FROM_ALL)
+add_executable(head_witness ../head_witness.cpp)
+target_compile_features(head_witness PRIVATE cxx_std_17)
+target_link_libraries(head_witness PRIVATE llama)

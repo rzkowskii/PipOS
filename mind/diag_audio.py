@@ -8,9 +8,13 @@ and digital silence reads -120 dBFS.
 - signals: tones, a logarithmic sweep, pink noise, a click train, silence,
   beeps, and the channel-identity file (one beep left, two beeps right);
 - levels: peak and RMS per channel, clipping, speech above the floor;
-- spectra: a Goertzel filter, total harmonic distortion at one frequency,
-  octave-band response of a recorded sweep;
-- timing: latency by cross-correlation, dropouts in a steady signal;
+- spectra: a Goertzel filter, total harmonic distortion at one frequency
+  (and the same judged against a silence recording in the same bins, so
+  noise never reads as distortion), octave-band response of a recorded
+  sweep, Butterworth band filters and band-limited noise;
+- timing: a tone's onset from its own narrowband energy, latency by
+  cross-correlation (for broadband signals only), clock drift from a tone's
+  phase, dropouts in a steady signal;
 - words: a word error rate with the usual edit distance.
 """
 
@@ -27,6 +31,10 @@ TOP = 32767
 SILENT_DBFS = -120.0
 CLIP = 32767
 OCTAVES = (63, 125, 250, 500, 1000, 2000, 4000, 8000)
+# The raised-cosine fade every generated tone starts with (seconds).
+TONE_FADE = 0.01
+# Butterworth 4th order as two biquads (the Q of each pair of poles).
+BUTTERWORTH_Q4 = (0.5412, 1.3066)
 
 
 # Levels ---------------------------------------------------------------------
@@ -111,7 +119,7 @@ def _fade(values, rate, seconds):
     return values
 
 
-def tone(frequency, seconds, rate, level_dbfs=-20.0, *, fade=0.01):
+def tone(frequency, seconds, rate, level_dbfs=-20.0, *, fade=TONE_FADE):
     """A sine at `level_dbfs` peak."""
     amplitude = from_dbfs(level_dbfs)
     count = int(rate * seconds)
@@ -214,10 +222,36 @@ def channel_identity(rate, *, level_dbfs=-12.0):
 
 
 def white_dither(seconds, rate, level_dbfs=-80.0, *, seed=7):
-    """Very quiet noise: a room-like floor instead of digital silence."""
+    """Quiet noise at `level_dbfs` RMS: a room-like floor instead of digital silence."""
     generator = random.Random(seed)
     amplitude = from_dbfs(level_dbfs) * math.sqrt(3)
     return to_pcm([generator.uniform(-amplitude, amplitude) for _ in range(int(rate * seconds))])
+
+
+def band_noise(seconds, rate, low_hz, high_hz, level_dbfs=-20.0, *, seed=3, fade=0.02):
+    """Noise limited to `low_hz`..`high_hz` (4th-order Butterworth each side) at `level_dbfs` RMS.
+
+    Seeded, so the same call always makes the same file."""
+    generator = random.Random(seed)
+    white = [generator.uniform(-1.0, 1.0) for _ in range(int(rate * seconds))]
+    shaped = band_filter(white, rate, low_hz, high_hz)
+    level = math.sqrt(math.fsum(value * value for value in shaped) / len(shaped)) if shaped else 0.0
+    scale = from_dbfs(level_dbfs) / level if level else 0.0
+    return to_pcm(_fade([max(-1.0, min(1.0, value * scale)) for value in shaped], rate, fade))
+
+
+def at_level(samples, peak_dbfs, floor_dbfs=None, *, seed=11):
+    """`samples` scaled so their peak is `peak_dbfs` (None: as they are), with a
+    room floor of `floor_dbfs` RMS mixed in (None: no floor). Clipped to 16 bits."""
+    top = peak(samples)
+    gain = 1.0 if peak_dbfs is None else FULL_SCALE * from_dbfs(peak_dbfs) / top if top else 0.0
+    generator = random.Random(seed)
+    spread = FULL_SCALE * from_dbfs(floor_dbfs) * math.sqrt(3) if floor_dbfs is not None else 0.0
+    out = array("h")
+    for value in samples:
+        sample = int(round(value * gain + (generator.uniform(-spread, spread) if spread else 0.0)))
+        out.append(TOP if sample > TOP else -FULL_SCALE if sample < -FULL_SCALE else sample)
+    return out
 
 
 # WAV files ------------------------------------------------------------------
@@ -329,6 +363,107 @@ def thd(samples, rate, fundamental, *, harmonics=5):
             "fundamental_dbfs": dbfs(base)}
 
 
+def bin_amplitudes(samples, rate, frequencies, *, seconds=0.5):
+    """{frequency: amplitude} averaged in power over consecutive Hann windows of `seconds`.
+
+    Noise in one bin depends on the window length, so a signal and the floor
+    it is compared with must be measured with the same `seconds`: this does
+    both the same way. A stretch shorter than one window is one window."""
+    size = max(16, int(rate * seconds))
+    starts = list(range(0, len(samples) - size + 1, size)) or ([0] if samples else [])
+    result = {}
+    for frequency in frequencies:
+        powers = [goertzel(samples[start:start + size], rate, frequency) ** 2 for start in starts]
+        result[frequency] = math.sqrt(math.fsum(powers) / len(powers)) if powers else 0.0
+    return result
+
+
+def thd_against_floor(signal, floor, rate, fundamental, *, harmonics=5, seconds=0.5, margin_db=6.0,
+                      min_snr_db=20.0):
+    """Harmonic distortion that only counts what stands above the room.
+
+    `floor` is a silence recording through the same path. Each harmonic is
+    compared with the floor in its own bin (same window length): it counts
+    only `margin_db` or more above it, and then with the floor's power taken
+    off. Below `min_snr_db` of fundamental over its own bin's floor nothing
+    is measurable. Returns {measurable, percent, db, below_floor,
+    limit_percent, fundamental_dbfs, snr_db, harmonics: [...], reason}:
+    `percent` is None when no harmonic cleared the floor (then the distortion
+    is below `limit_percent`, the smallest this measurement could show)."""
+    orders = [order for order in range(2, harmonics + 1) if fundamental * order < 0.95 * rate / 2]
+    wanted = [fundamental] + [fundamental * order for order in orders]
+    heard = bin_amplitudes(signal, rate, wanted, seconds=seconds)
+    quiet = bin_amplitudes(floor, rate, wanted, seconds=seconds)
+    base, base_floor = heard[fundamental], quiet[fundamental]
+    snr = round(dbfs(base) - dbfs(base_floor), 2) if base > 0 else None
+    result = {"measurable": False, "percent": None, "db": None, "below_floor": False, "limit_percent": None,
+              "fundamental_dbfs": dbfs(base), "snr_db": snr, "harmonics": [], "reason": ""}
+    if base <= 0 or snr is None or snr < min_snr_db:
+        result["reason"] = (f"the tone is only {snr} dB above the floor in its bin" if snr is not None
+                            else "no tone")
+        return result
+    margin = from_dbfs(margin_db)
+    counted, limit = [], []
+    for order in orders:
+        frequency = fundamental * order
+        level, noise = heard[frequency], quiet[frequency]
+        clears = level >= noise * margin
+        result["harmonics"].append({"order": order, "dbfs": dbfs(level), "floor_dbfs": dbfs(noise), "counted": clears})
+        limit.append((noise * margin) ** 2)
+        if clears:
+            counted.append(max(level * level - noise * noise, 0.0))
+    result["measurable"] = True
+    result["limit_percent"] = round(100 * math.sqrt(math.fsum(limit)) / base, 3) if limit else None
+    if not counted:
+        result["below_floor"] = True
+        result["reason"] = "no harmonic stands above the floor"
+        return result
+    ratio = math.sqrt(math.fsum(counted)) / base
+    result.update(percent=round(100 * ratio, 3), db=round(20 * math.log10(ratio), 2) if ratio > 0 else SILENT_DBFS)
+    return result
+
+
+def biquad(samples, rate, kind, frequency, q=0.7071):
+    """One RBJ biquad ('lowpass' or 'highpass') over floats or ints; a list of floats."""
+    omega = 2 * math.pi * min(frequency, 0.49 * rate) / rate
+    alpha, cosine = math.sin(omega) / (2 * q), math.cos(omega)
+    if kind == "lowpass":
+        b0 = b2 = (1 - cosine) / 2
+        b1 = 1 - cosine
+    elif kind == "highpass":
+        b0 = b2 = (1 + cosine) / 2
+        b1 = -(1 + cosine)
+    else:
+        raise ValueError(f"unknown filter {kind!r}")
+    a0, a1, a2 = 1 + alpha, -2 * cosine, 1 - alpha
+    b0, b1, b2, a1, a2 = b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0
+    x1 = x2 = y1 = y2 = 0.0
+    out = []
+    for value in samples:
+        y = b0 * value + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        x2, x1, y2, y1 = x1, value, y1, y
+        out.append(y)
+    return out
+
+
+def band_filter(samples, rate, low_hz, high_hz):
+    """A 4th-order Butterworth high-pass at `low_hz` then low-pass at `high_hz` (None: no edge)."""
+    values = samples
+    if low_hz:
+        for q in BUTTERWORTH_Q4:
+            values = biquad(values, rate, "highpass", low_hz, q)
+    if high_hz and high_hz < rate / 2:
+        for q in BUTTERWORTH_Q4:
+            values = biquad(values, rate, "lowpass", high_hz, q)
+    return [float(value) for value in values] if values is samples else values
+
+
+def band_level(samples, rate, low_hz, high_hz, *, settle=0.05):
+    """RMS level in dBFS of `samples` inside `low_hz`..`high_hz` (the filter's start-up left out)."""
+    filtered = band_filter(samples, rate, low_hz, high_hz)[int(settle * rate):]
+    return dbfs(rms(filtered))
+
+
 def sweep_bands(recorded, rate, start_hz, end_hz, seconds, *, offset=0.0, bands=OCTAVES):
     """Octave-band levels (dBFS RMS) of a recorded exponential sweep.
 
@@ -396,6 +531,90 @@ def latency(reference, recorded, rate, *, max_lag_s=1.0, env_rate=1000):
         candidates = range(max(0, coarse - 2 * block), min(len(recorded) - length, coarse + 2 * block) + 1)
         fine = max(candidates, key=lambda lag: abs(_correlate(reference, recorded, lag, length)), default=coarse)
     return round(fine / rate, 4), round(best_score, 3)
+
+
+def _bin(samples, rate, frequency, start, size, window=False):
+    return goertzel(samples[start:start + size], rate, frequency, window=window)
+
+
+def tone_onset(samples, rate, frequency, *, start=0.0, rise_db=20.0, base_seconds=0.25, window=0.01,
+               fine=0.005, steady=0.3):
+    """When a tone of `frequency` begins in a recording, from its own narrowband energy.
+
+    A coarse pass finds the first of three 10 ms windows in a row whose level
+    at `frequency` stands `rise_db` above the median of the first
+    `base_seconds` (the recording before the tone). A fine pass then finds where a 5 ms
+    rectangular window, stepped by 1 ms, first reaches half the tone's
+    steady level: for a tone switched on at t0 that window is centred on t0.
+    Unlike a cross-correlation of the waveforms, a steady sine cannot line up
+    at a wrong period, and the room's noise outside the tone's bin is ignored.
+
+    Returns seconds from the start of `samples`, or None when the tone never
+    stood out."""
+    size = max(8, int(window * rate))
+    first = int(start * rate)
+    coarse = [_bin(samples, rate, frequency, index, size, window=True)
+              for index in range(first, len(samples) - size, size)]
+    base_count = max(1, int(base_seconds / window))
+    if len(coarse) <= base_count:
+        return None
+    base = sorted(coarse[:base_count])[base_count // 2]
+    threshold = max(base, 1.0) * from_dbfs(rise_db)
+    # Sustained for 30 ms: a click (the capture starting) is not a tone.
+    hit = next((index for index in range(1, len(coarse) - 3)
+                if all(value > threshold for value in coarse[index:index + 3])), None)
+    if hit is None:
+        return None
+    small, step = max(8, int(fine * rate)), max(1, int(0.001 * rate))
+    begin = first + hit * size
+    later = begin + int(0.05 * rate)
+    plateau = [_bin(samples, rate, frequency, index, small) for index in
+               range(later, min(len(samples) - small, later + int(steady * rate)), small)]
+    if not plateau:
+        return round(begin / rate, 4)
+    level = sorted(plateau)[len(plateau) // 2]
+    for index in range(max(first, begin - 2 * size), min(len(samples) - small, begin + 2 * size), step):
+        if _bin(samples, rate, frequency, index, small) >= level / 2:
+            return round((index + small / 2) / rate, 4)
+    return round(begin / rate, 4)
+
+
+def drift_ppm(samples, rate, frequency, *, start, end, window=0.04, hop=0.02):
+    """How far the playback clock runs from the capture clock, in parts per million.
+
+    A tone recorded through a different clock comes back at `frequency` x
+    (1 + drift). The phase of `frequency` in successive windows advances by
+    that small offset; a straight-line fit of the unwrapped phase over time
+    gives it to a few ppm in a second or two of tone. None when the stretch
+    is too short or holds no tone."""
+    size, step = int(window * rate), int(hop * rate)
+    first, last = int(start * rate), min(len(samples), int(end * rate))
+    if size < 16 or last - first < size + 4 * step:
+        return None
+    omega = 2 * math.pi * frequency / rate
+    times, phases = [], []
+    for index in range(first, last - size, step):
+        real = imaginary = 0.0
+        for offset in range(size):
+            value = samples[index + offset] * (0.5 - 0.5 * math.cos(2 * math.pi * offset / (size - 1)))
+            real += value * math.cos(omega * (index + offset))
+            imaginary -= value * math.sin(omega * (index + offset))
+        if real == 0.0 and imaginary == 0.0:
+            return None
+        times.append(index / rate)
+        phases.append(math.atan2(imaginary, real))
+    unwrapped = [phases[0]]
+    for phase in phases[1:]:
+        delta = phase - unwrapped[-1]
+        delta -= 2 * math.pi * round(delta / (2 * math.pi))
+        unwrapped.append(unwrapped[-1] + delta)
+    count = len(times)
+    mean_t, mean_p = math.fsum(times) / count, math.fsum(unwrapped) / count
+    spread = math.fsum((t - mean_t) ** 2 for t in times)
+    if not spread:
+        return None
+    slope = math.fsum((t - mean_t) * (p - mean_p) for t, p in zip(times, unwrapped)) / spread
+    return round(slope / (2 * math.pi) / frequency * 1e6, 1)
 
 
 def dropouts(samples, rate, *, start=0.0, end=None, window=0.02, drop_db=20.0):

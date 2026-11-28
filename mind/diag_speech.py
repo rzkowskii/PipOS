@@ -11,8 +11,10 @@
 - `check_tts()` renders fixed sentences with each voice, scores them by
   decoding (digital), then plays and records them (acoustic).
 - `run_hear()` feeds a WAV to the running voice through the diagnostic
-  microphone socket and reads what it heard and where the mind routed it
-  from the journal.
+  microphone socket and reads what it heard, which engine decoded it and
+  where the mind routed it from the journal. The socket carries a room floor
+  like this laptop's (-64 dBFS), and `at_levels()` also offers each phrase at
+  a person's level (-30 dBFS peak over that floor), as well as as rendered.
 - `run_voice()` is the owner-present flow: speech level, the command corpus,
   listening ratings and wake trials.
 
@@ -36,7 +38,7 @@ from . import diag_audio as audio
 from .diag_report import RUN_DIR, check
 from .diag_sound import (MIC_SOCKET, MIXER_STATE, VOICE, AudioSession, current_level, play, record_any,
                          record_argv, set_control)
-from .diag_system import Journal, menu_has_the_screen, terminal_open
+from .diag_system import Journal, cortex_busy, cpu_weight, menu_has_the_screen, terminal_open
 
 RATE = 16000
 FRAME = 480
@@ -87,6 +89,8 @@ TTS_SENTENCES = (
 )
 SPEECH_PROMPT = "The quick brown fox jumps over the lazy dog."
 PIPER_RTF_LIMIT = 0.7
+# being-voice.service's CPUWeight: timings at a lower weight overstate the real-time factor.
+VOICE_CPU_WEIGHT = 1000
 WAKE_GATES = {"1m": 9, "2m": 8}
 KWS_OFFSET = 1500
 KWS_DEFAULT_THRESHOLD = -675
@@ -98,11 +102,27 @@ WAKE = re.compile(r"heard the wake phrase(?P<oneshot> in one breath)?(?: while \
 NO_WORDS = re.compile(r"dictation ended after [\d.]+ s with no words")
 ENDED = re.compile(r"dictation ended")
 ROUTE = re.compile(r"\broute (\{.*\})\s*$")
-# The voice is ready for the diagnostic microphone only when, after it says it
-# connected, it logs its engine choice ("..., speech engine flite (auto), ..." or
-# "speech engine: piper (auto)") or that it listens: connected alone is not listening.
+# Socket connection and speech synthesis selection can both be announced
+# before the voice has opened capture. Wait for capture or actual listening.
 CONNECTED = re.compile(r"diagnostic microphone connected")
-READY = re.compile(r"listening for the wake phrase|capture open on|speech engine[: ]")
+READY = re.compile(r"listening for the wake phrase|capture open on")
+# The voice adopts a forced recognizer only once it is at rest, seconds after it is
+# ready ("speech recognizer: moonshine"), or says why it keeps PocketSphinx.
+RECOGNIZER = re.compile(r"speech recognizer: (?P<engine>[\w-]+)")
+KEEPS_SPHINX = re.compile(r"(?:Using|Keeping) PocketSphinx")
+ENGINE = re.compile(r"\bengine (?P<engine>[\w-]+)")
+ASR_WAIT_S = 60.0
+# The brainstem's state line; back at idle, the next phrase is a fresh one-breath command.
+BRAINSTEM = "being-brainstem.service"
+IDLE = re.compile(r"-> idle\b")
+STATE_CHANGE = re.compile(r"\b\w+ -> (?P<to>\w+)")
+IDLE_WAIT_S = 60.0
+# This laptop's microphone: a room floor of about -64 dBFS, and a person's wake
+# phrase peaking at -23 to -57 dBFS. Digital silence or a quieter floor makes
+# the voice lift its gain up to 8 times, and then a full-scale stimulus misses.
+ROOM_FLOOR_DBFS = -64.0
+SPEECH_PEAK_DBFS = -30.0
+LEVEL_CHOICES = ("clean", "realistic", "both")
 
 
 def ready_after_connect():
@@ -187,7 +207,7 @@ def grammar_phrases():
     return cleaned
 
 
-def check_commands(name="Pip", phrases=COMMAND_PHRASES):
+def check_command_routes(name="Pip", phrases=COMMAND_PHRASES):
     """Every phrase of the table through the in-process routing."""
     rows, wrong = [], []
     for text, expected in phrases:
@@ -199,9 +219,13 @@ def check_commands(name="Pip", phrases=COMMAND_PHRASES):
         rows.append({"text": text, "expected": expected, "route": route, "ok": ok})
         if not ok:
             wrong.append(f"{text!r} -> {route} (expected {expected})")
-    checks = [check("commands.routes", "commands", "fail" if wrong else "pass", rows,
-                    "; ".join(wrong) if wrong else f"all {len(rows)} phrases route as expected",
-                    "A command that reaches the model is answered slowly and wrongly." if wrong else "")]
+    return check("commands.routes", "commands", "fail" if wrong else "pass", rows,
+                 "; ".join(wrong) if wrong else f"all {len(rows)} phrases route as expected",
+                 "A command that reaches the model is answered slowly and wrongly." if wrong else "")
+
+
+def check_commands(name="Pip", phrases=COMMAND_PHRASES):
+    checks = [check_command_routes(name, phrases)]
     exported = grammar_phrases()
     from .app_commands import AppContext
 
@@ -254,6 +278,7 @@ class Sphinx:
         self.decoder = recognizer.decoder
         self.dictation = recognizer.dictation
         self.grammar_ready = None
+        self.grammar_dropped = []
 
     def _run(self, samples):
         ctypes, lib = self.ctypes, self.lib
@@ -270,14 +295,33 @@ class Sphinx:
         text = self._run(samples)
         return {"text": text, "confidence": self.recognizer.confidence()}
 
+    def known_phrases(self, phrases):
+        """The phrases whose every word the pronouncing dictionary has (and the address words).
+
+        One unknown word ("vitals") makes PocketSphinx refuse the whole grammar,
+        as the voice's own load_command_grammar knows; a recognizer that cannot
+        look words up keeps them all."""
+        knows = getattr(self.recognizer, "knows", None)
+        if not callable(knows):
+            return list(phrases), []
+        try:
+            if not all(knows(word) for word in ("hey", "pip")):
+                return list(phrases), []
+            kept = [phrase for phrase in phrases if all(knows(word) for word in phrase.split())]
+        except Exception:
+            return list(phrases), []
+        return kept, [phrase for phrase in phrases if phrase not in kept]
+
     def grammar(self, samples, phrases):
         """The best phrase of the grammar, or None when the grammar cannot be built."""
         if self.grammar_ready is None:
+            kept, self.grammar_dropped = self.known_phrases(phrases)
             try:
                 function = self.lib.ps_add_jsgf_string
                 function.restype = self.ctypes.c_int
                 function.argtypes = (self.ctypes.c_void_p, self.ctypes.c_char_p, self.ctypes.c_char_p)
-                self.grammar_ready = function(self.decoder, b"diag_grammar", jsgf(phrases).encode()) >= 0
+                self.grammar_ready = bool(kept) and function(self.decoder, b"diag_grammar",
+                                                             jsgf(kept).encode()) >= 0
             except (AttributeError, OSError):
                 self.grammar_ready = False
         if not self.grammar_ready:
@@ -435,8 +479,42 @@ def judge_wer(value):
     return "pass" if value <= 0.3 else "warn"
 
 
-def check_tts(host, report, *, sphinx=None, acoustic=False, sentences=TTS_SENTENCES):
-    """Every voice: RTF and decoded WER of fixed sentences; acoustic adds speaker -> mic."""
+def timing_conditions(host, busy=None):
+    """The CPU share a speech timing ran with: this process's weight, the voice's, the cortex.
+
+    The voice runs at CPUWeight 1000 and the cortex at 100; timed at the
+    default 100 beside a generating cortex, Piper's real-time factor comes
+    out several times worse than the voice gets (1.79 against 0.23 on the
+    laptop). `busy` asks whether the cortex is generating (None: only on the
+    real machine)."""
+    real = Path(host.root) == Path("/")
+    weight = cpu_weight(host)
+    voice = cpu_weight(host, VOICE) or VOICE_CPU_WEIGHT
+    probe = busy if busy is not None else (cortex_busy if real else (lambda: None))
+    try:
+        generating = probe()
+    except Exception:
+        generating = None
+    return {"cpu_weight": weight, "voice_cpu_weight": voice, "cortex_busy": generating}
+
+
+def timing_caveat(conditions):
+    """Why a measured real-time factor may be worse than the voice's own, or ""."""
+    notes = []
+    weight, voice = conditions.get("cpu_weight"), conditions.get("voice_cpu_weight")
+    if weight is not None and voice is not None and weight < voice:
+        notes.append(f"timed at CPU weight {weight}, below the voice's {voice} (run it as root so pip-diag runs "
+                     f"in its own unit at {voice})")
+    if conditions.get("cortex_busy"):
+        notes.append("the cortex was generating at the time")
+    return "; ".join(notes)
+
+
+def check_tts(host, report, *, sphinx=None, acoustic=False, sentences=TTS_SENTENCES, busy=None):
+    """Every voice: RTF and decoded WER of fixed sentences; acoustic adds speaker -> mic.
+
+    Each voice's timing records the CPU weight it ran at and whether the
+    cortex was generating, so a slow figure says whether it is the voice's."""
     voices, piper_note = available_voices(host)
     if not voices:
         return [check("tts.voices", "tts", "skip", None, "no speech engine here (no flite)")]
@@ -444,6 +522,7 @@ def check_tts(host, report, *, sphinx=None, acoustic=False, sentences=TTS_SENTEN
                     "voices: " + ", ".join(name for name, _ in voices) + (f"; {piper_note}" if piper_note else ""))]
     for name, engine in voices:
         rendered, digital = [], []
+        conditions = timing_conditions(host, busy)
         for number, sentence in enumerate(sentences, 1):
             path = report.path(f"tts-{name}-{number}.wav")
             result = synthesize(host, name, sentence, path, piper=engine)
@@ -460,10 +539,15 @@ def check_tts(host, report, *, sphinx=None, acoustic=False, sentences=TTS_SENTEN
         rtfs = [entry["rtf"] for entry in digital if entry.get("rtf") is not None]
         rtf = round(sorted(rtfs)[len(rtfs) // 2], 3) if rtfs else None
         slow = name == "piper" and rtf is not None and rtf > PIPER_RTF_LIMIT
+        caveat = timing_caveat(conditions)
+        hint = (f"Slower than the {PIPER_RTF_LIMIT} limit: Pip would pause before speaking." if slow else
+                ("" if rtf is not None else "This voice could not speak."))
+        if slow and caveat:
+            hint = f"Slower than the {PIPER_RTF_LIMIT} limit, but {caveat}: the voice itself may be faster."
         checks.append(check(f"tts.rtf.{name}", "tts", "warn" if slow else "pass" if rtf is not None else "fail",
-                            rtf, f"{name}: real-time factor {rtf} over {len(rtfs)} sentences",
-                            f"Slower than the {PIPER_RTF_LIMIT} limit: Pip would pause before speaking." if slow else
-                            ("" if rtf is not None else "This voice could not speak.")))
+                            {"rtf": rtf, "sentences": len(rtfs), **conditions},
+                            f"{name}: real-time factor {rtf} over {len(rtfs)} sentences"
+                            + (f" ({caveat})" if caveat else ""), hint))
         if sphinx is not None:
             value = score(digital)
             checks.append(check(f"tts.digital.{name}", "tts", judge_wer(value), digital,
@@ -554,12 +638,14 @@ def check_asr_selftest(host, report, sphinx):
 class MicServer:
     """The diagnostic microphone: a Unix socket the voice reads S16_LE 16 kHz mono from.
 
-    After `accept()`, a feeder thread writes 30 ms frames in real time, quiet
-    noise while nothing is queued, so the voice's clock and levels behave as
-    with a real microphone."""
+    After `accept()`, a feeder thread writes 30 ms frames in real time, the
+    room's noise floor while nothing is queued, so the voice's clock, floor
+    and automatic gain behave as with this laptop's real microphone (a floor
+    of digital near-silence would make the voice lift its gain 8 times)."""
 
-    def __init__(self, path, *, floor_dbfs=-80.0, clock=time.monotonic, sleep=time.sleep):
+    def __init__(self, path, *, floor_dbfs=ROOM_FLOOR_DBFS, clock=time.monotonic, sleep=time.sleep):
         self.path = Path(path)
+        self.floor_dbfs = floor_dbfs
         self.clock, self.sleep = clock, sleep
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -647,6 +733,21 @@ def stimulus_from_file(path):
     return load_16k(path)
 
 
+def at_levels(stimuli, level="both", *, floor_dbfs=ROOM_FLOOR_DBFS, peak_dbfs=SPEECH_PEAK_DBFS):
+    """The stimuli at the asked level(s), each with the room's floor mixed in.
+
+    "clean" is the phrase as rendered (label unchanged); "realistic" is the
+    level this laptop's microphone hears a person at, a -30 dBFS peak (label
+    + "-realistic"); "both" gives all the clean ones first, then all the
+    realistic ones, so a phrase that opens the terminal and one that closes
+    it run in the same order at each level."""
+    clean = [(label, audio.at_level(samples, None, floor_dbfs, seed=number), text, route)
+             for number, (label, samples, text, route) in enumerate(stimuli)]
+    realistic = [(f"{label}-realistic", audio.at_level(samples, peak_dbfs, floor_dbfs, seed=100 + number), text,
+                  route) for number, (label, samples, text, route) in enumerate(stimuli)]
+    return {"clean": clean, "realistic": realistic}.get(level, clean + realistic)
+
+
 def stimulus_from_phrase(host, text, voice="slt", folder=None):
     """Pip renders the stimulus itself: Flite, or the natural voice with voice='piper'.
 
@@ -708,13 +809,122 @@ def parse_route(message):
     return data if isinstance(data, dict) else None
 
 
+def check_route_sample(host, name):
+    """Count addressed routes from a bounded sample without keeping any words."""
+    from .commands import may_be_command
+
+    limit = 512
+    result = host.run(["journalctl", "-b", "-u", MIND, "-o", "cat", "--no-pager", "-q",
+                       "--grep=^mind: route ", f"--lines={limit}"], timeout=15)
+    if result is None or result.code:
+        return check("workload.routes", "workload", "skip", None, "No route sample available from this boot.")
+
+    counts = dict(local=0, model=0, model_unavailable=0, model_waiting=0)
+    library_counts = {}
+    examined = misses = 0
+    messages = result.out.splitlines()[-limit:]
+    for message in messages:
+        data = parse_route(message) if message.startswith("mind: route ") else None
+        route = data.get("route") if data is not None else None
+        if not isinstance(route, str):
+            continue
+        if route in ("greeting", "pending") or route.startswith(("command.", "everyday.", "workshop.")):
+            counts["local"] += 1
+        elif route in ("model", "model.unavailable", "model.waiting"):
+            counts[route.replace(".", "_")] += 1
+            text = data.get("text")
+            if route == "model" and isinstance(text, str) and text.strip():
+                examined += 1
+                misses += may_be_command(text, name)
+        lookup = data.get("library")
+        if (route not in ("private", "discarded", "overheard") and isinstance(lookup, dict)
+                and lookup.get("source") in ("guide", "dictionary", "simple-en")
+                and lookup.get("outcome") in ("hit", "miss", "ambiguous", "disabled", "unavailable")):
+            per_source = library_counts.setdefault(lookup["source"], {})
+            outcome = lookup["outcome"]
+            per_source[outcome] = per_source.get(outcome, 0) + 1
+
+    if not sum(counts.values()):
+        return check("workload.routes", "workload", "skip", None, "No addressed routes in the sample.")
+    value = {**counts, "model_fallbacks_with_debug_words": examined,
+             "possible_local_misses": misses if examined else None,
+             "sample_limit": limit, "limit_reached": len(messages) == limit}
+    if library_counts:
+        value["library"] = library_counts
+    evidence = (f"This boot's sample has {counts['local']} local, {counts['model']} model, "
+                f"{counts['model_unavailable']} model unavailable and {counts['model_waiting']} model waiting.")
+    if examined:
+        evidence += f" {misses} of {examined} model fallbacks with debug words looked like commands."
+    return check("workload.routes", "workload", "pass", value, evidence)
+
+
+def wait_for_recognizer(journal, cursor, asr, timeout):
+    """After a forced recognizer: the hear.asr check once the voice says which one it uses.
+
+    The voice swaps recognizers only at rest, 4-36 s after it is ready on this
+    laptop; phrases played before that are decoded by PocketSphinx whatever
+    was asked. Returns (check, cursor)."""
+    found = {}
+
+    def match(entry):
+        line = RECOGNIZER.search(entry.message)
+        if line:
+            found["engine"] = line["engine"]
+            return True
+        if KEEPS_SPHINX.search(entry.message):
+            found["refused"] = entry.message.strip()[:200]
+            return True
+        return False
+
+    started = journal.host.monotonic()
+    _, cursor = journal.wait(cursor, match, timeout=timeout, units=(VOICE,))
+    took = round(journal.host.monotonic() - started, 1)
+    value = {"asked": asr, "engine": found.get("engine"), "waited_s": took}
+    if found.get("engine") == asr:
+        return check("hear.asr", "hear", "pass", value, f"the voice switched to {asr} after {took} s"), cursor
+    if "refused" in found:
+        value["why"] = found["refused"]
+        return check("hear.asr", "hear", "fail", value, f"the voice would not use {asr}: {found['refused']}",
+                     f"Every phrase below was decoded by PocketSphinx, not {asr}."), cursor
+    if found.get("engine"):
+        return check("hear.asr", "hear", "fail", value, f"asked for {asr}, the voice chose {found['engine']}",
+                     f"The phrases below were not decoded by {asr}."), cursor
+    return check("hear.asr", "hear", "fail", value, f"the voice did not say it uses {asr} within {took} s",
+                 f"The phrases below were probably decoded by PocketSphinx, not {asr}; see "
+                 "`journalctl -u being-voice` for the recognizer choice."), cursor
+
+
+def wait_for_idle(host, journal, cursor, timeout):
+    """Wait until the brainstem is back at idle after a phrase; the seconds it took, or None."""
+    started = host.monotonic()
+    entry, _ = journal.wait(cursor, lambda line: bool(IDLE.search(line.message)), timeout=timeout,
+                            units=(BRAINSTEM,))
+    return round(host.monotonic() - started, 1) if entry is not None else None
+
+
+def left_idle(journal, cursor, seen):
+    """Did the phrase from `cursor` on move Pip out of idle? A wake or a final from the
+    voice, or a brainstem state change to anything but idle, says it did."""
+    if seen.get("woke") or seen.get("heard"):
+        return True
+    for entry in journal.entries(cursor, units=(BRAINSTEM,)):
+        state = STATE_CHANGE.search(entry.message)
+        if state and state["to"] != "idle":
+            return True
+    return False
+
+
 def run_hear(host, report, stimuli, *, asr=None, ready_timeout=25.0, heard_timeout=15.0, route_timeout=10.0,
-             server_factory=MicServer, journal=None, session_factory=AudioSession, name="Pip", patience=1.0):
+             server_factory=MicServer, journal=None, session_factory=AudioSession, name="Pip", patience=1.0,
+             asr_timeout=ASR_WAIT_S, idle_timeout=IDLE_WAIT_S):
     """Feed each stimulus to the voice and report what it heard and what the mind did.
 
     `stimuli`: [(label, samples16k, expected_text or None, expected_route or None)]. `name` is
     the being's name: the expected text is compared without the address in front of it.
-    `patience` multiplies every wait (an emulated CPU, as in the QEMU lab, is many times slower)."""
+    `patience` multiplies every wait (an emulated CPU, as in the QEMU lab, is many times slower).
+    With `asr` moonshine, nothing is played until the voice says it switched recognizer.
+    Between phrases it waits for the brainstem to be back at idle, so a phrase never lands
+    in the follow-up window or a reply of the one before."""
     patience = max(1.0, float(patience or 1.0))
     ready_timeout, heard_timeout, route_timeout = (ready_timeout * patience, heard_timeout * patience,
                                                    route_timeout * patience)
@@ -738,21 +948,38 @@ def run_hear(host, report, stimuli, *, asr=None, ready_timeout=25.0, heard_timeo
                                 "the voice is listening to the diagnostic microphone" if ready else
                                 "connected, but the voice did not say it was listening",
                                 "" if ready else "The voice may still be loading; results may be late."))
+            if asr in ("moonshine",):
+                item, cursor = wait_for_recognizer(journal, cursor, asr, asr_timeout * patience)
+                checks.append(item)
             host.sleep(2.0)
-            for label, samples, expected_text, expected_route in stimuli:
-                checks.extend(_hear_one(host, journal, server, cursor, label, samples, expected_text,
-                                        expected_route, heard_timeout, route_timeout, name, patience))
+            for number, (label, samples, expected_text, expected_route) in enumerate(stimuli):
+                started = journal.cursor() or cursor
+                seen = {}
+                checks.extend(_hear_one(host, journal, server, started, label, samples, expected_text,
+                                        expected_route, heard_timeout, route_timeout, name, patience, asr=asr,
+                                        seen=seen))
+                if number + 1 < len(stimuli) and left_idle(journal, started, seen):
+                    # Back to idle: out of the follow-up window, and any reply finished.
+                    # A phrase that never woke Pip left it idle: there is nothing to wait for.
+                    if wait_for_idle(host, journal, started, idle_timeout * patience) is None:
+                        checks.append(check(f"hear.settle.{label}", "hear", "warn", None,
+                                            f"{label}: Pip did not go back to idle within "
+                                            f"{round(idle_timeout * patience)} s",
+                                            "The next phrase may have landed in a reply or a follow-up."))
+                if number + 1 < len(stimuli):
+                    host.sleep(1.0)
                 cursor = journal.cursor() or cursor
-                host.sleep(4.0)  # let the voice settle back to listening for the wake phrase
     finally:
         server.close()
     return checks
 
 
 def _hear_one(host, journal, server, cursor, label, samples, expected_text, expected_route, heard_timeout,
-              route_timeout, name="Pip", patience=1.0):
+              route_timeout, name="Pip", patience=1.0, asr=None, seen=None):
+    """The checks for one stimulus. `seen`, when given, gets `woke` and `heard`: whether the
+    voice logged the wake phrase or a final for it."""
     already_open = terminal_open(host)[0] if expected_route == "workshop.open" else False
-    lead = audio.white_dither(0.6, RATE)
+    lead = audio.white_dither(0.6, RATE, getattr(server, "floor_dbfs", ROOM_FLOOR_DBFS))
     server.play(lead)
     ends = server.play(samples)
     host.sleep(max(0.0, ends - host.monotonic()))
@@ -772,7 +999,9 @@ def _hear_one(host, journal, server, cursor, label, samples, expected_text, expe
                 return True
         return False
 
-    _, after = journal.wait(cursor, voice_line, timeout=heard_timeout, units=(VOICE,))
+    journal.wait(cursor, voice_line, timeout=heard_timeout, units=(VOICE,))
+    if seen is not None:
+        seen.update(woke=found["woke"], heard=found["heard"] is not None)
     checks = []
     if found["heard"] is None:
         why = "no words" if found["no_words"] else "nothing"
@@ -784,25 +1013,39 @@ def _hear_one(host, journal, server, cursor, label, samples, expected_text, expe
         return checks
     text, at, rest = found["heard"]
     latency = round(at - ends, 2)
+    engine = ENGINE.search(rest or "")
+    engine = engine["engine"] if engine else None
     # A one-breath wake replays only the words after the name, so "Hey Pip," is not expected.
     match = audio.wer(strip_address(expected_text, name), strip_address(text, name)) if expected_text else None
     good = match is None or match["wer"] <= 0.34
-    checks.append(check(f"hear.heard.{label}", "hear", "pass" if good else "warn",
+    other_engine = asr not in (None, "auto") and engine is not None and engine != asr
+    hint = "" if good else "The recognizer misheard the recording."
+    if other_engine:
+        hint = f"Decoded by {engine}, not the {asr} asked for: this says nothing about {asr}. " + hint
+    checks.append(check(f"hear.heard.{label}", "hear", "pass" if good and not other_engine else "warn",
                         {"text": text, "latency_s": latency, "wake_score": found["wake"], "decoder": rest,
-                         **({"wer": match["wer"]} if match else {})},
-                        f"{label}: heard {text!r} {latency} s after the end of speech; {rest}",
-                        "" if good else "The recognizer misheard a clean recording."))
+                         "engine": engine, **({"wer": match["wer"]} if match else {})},
+                        f"{label}: heard {text!r} {latency} s after the end of speech, decoded by "
+                        f"{engine or 'an unnamed engine'}; {rest}", hint.strip()))
     route = None
+    heard_words = audio.words(strip_address(text, name))
 
     def mind_line(entry):
         nonlocal route
         if entry.unit == MIND:
-            route = parse_route(entry.message)
-            return route is not None
+            row = parse_route(entry.message)
+            if row is not None:
+                routed_text = row.get("text")
+                if not isinstance(routed_text, str) or audio.words(strip_address(routed_text, name)) == heard_words:
+                    route = row
+                    return True
         return False
 
-    journal.wait(after, mind_line, timeout=route_timeout, units=(MIND,))
-    model_used = any("launch_slot_" in entry.message for entry in journal.entries(after, units=(CORTEX,)))
+    # The voice sends the transcript before its own diagnostic log. Across
+    # services the route can enter the journal first. Both belong to the
+    # stimulus window, which starts after the previous turn has settled.
+    journal.wait(cursor, mind_line, timeout=route_timeout, units=(MIND,))
+    model_used = any("launch_slot_" in entry.message for entry in journal.entries(cursor, units=(CORTEX,)))
     if route is not None and model_used and expected_route not in (None, "model"):
         checks.append(check(f"hear.model.{label}", "hear", "warn", True,
                             f"{label}: the thinking model started a reply although this is a code command",
@@ -837,13 +1080,13 @@ def _hear_one(host, journal, server, cursor, label, samples, expected_text, expe
             # again when the start fails. It must still be up a moment later.
             host.sleep(3.0 * patience)
             opened, evidence = terminal_open(host)
-            failed = [entry.message for entry in journal.entries(after, units=(HANDS,))
+            failed = [entry.message for entry in journal.entries(cursor, units=(HANDS,))
                       if TERMINAL_FAILED.search(entry.message)]
             if failed:
                 opened, evidence = False, f"{evidence}; hands: {failed[-1]}"
         refused_for_menu = not opened and (
             menu_has_the_screen(host)
-            or any(MENU_REFUSAL.search(entry.message) for entry in journal.entries(after, units=(HANDS,))))
+            or any(MENU_REFUSAL.search(entry.message) for entry in journal.entries(cursor, units=(HANDS,))))
         if already_open:
             checks.append(check(f"hear.terminal.{label}", "hear", "warn", opened, f"{label}: {evidence}",
                                 "The terminal was already open before the phrase, so this proves nothing. "

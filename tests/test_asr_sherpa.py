@@ -262,6 +262,20 @@ class WakeStripTests(unittest.TestCase):
             self.assertEqual(strip_wake(heard, "Hey Pip"), expected, heard)
         self.assertEqual(strip_wake("Hey Clover, how are you", "Hey Clover"), "how are you")
 
+    def test_a_misheard_name_goes_too(self):
+        # Moonshine transcripts of one-breath requests measured on the laptop.
+        cases = {
+            "Pep open a terminal.": "open a terminal.",
+            "Yep, close the terminal.": "close the terminal.",
+            "I ate pip, are you okay?": "are you okay?",
+            "Shake it openly terminal.": "Shake it openly terminal.",
+            "No, close the terminal.": "No, close the terminal.",
+            "Pip.": "",
+            "Pep.": "Pep.",
+        }
+        for heard, expected in cases.items():
+            self.assertEqual(strip_wake(heard, "Hey Pip"), expected, heard)
+
 
 class FilesTests(unittest.TestCase):
     def test_missing_lists_what_is_absent_and_load_refuses(self):

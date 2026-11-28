@@ -13,7 +13,7 @@ import signal
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -255,6 +255,12 @@ class Reports(unittest.TestCase):
         report.finish()
         self.assertFalse(spill.exists())
         self.assertIn("1 evidence files", json.loads((self.folder / "diag.json").read_text())["files_not_kept"])
+        # Said plainly at the top of diag.txt, not only in the JSON.
+        head = (self.folder / "diag.txt").read_text().split("Top problems")[0].split("No problems found")[0]
+        self.assertIn("EVIDENCE NOT KEPT: 1 evidence files", head)
+
+    def test_the_evidence_cap_leaves_room_on_the_try_stick(self):
+        self.assertLessEqual(diag_report.MAX_BYTES, 40 * 1024 * 1024)
 
     def test_output_folder_prefers_the_logs_stick(self):
         stick = self.folder / "boot-0001-x"
@@ -333,8 +339,9 @@ class VoiceRestore(unittest.TestCase):
         with diag_sound.AudioSession(self.host, signals=False) as session:
             self.assertTrue(session.save_mixer())
             self.host.path(str(diag_sound.MIXER_STATE)).write_text("state")
-        restores = [call for call in self.host.calls if call[:2] == ["alsactl", "restore"]]
-        self.assertEqual(len(restores), 1)
+        (restored,) = (index for index, call in enumerate(self.host.calls) if call[:2] == ["alsactl", "restore"])
+        restarted = self.host.calls.index(["systemctl", "--no-block", "restart", diag_sound.VOICE])
+        self.assertLess(restored, restarted, "the restarted voice must see the restored playback switch")
 
     def test_running_children_are_stopped(self):
         class Running(FakeProcess):
@@ -494,6 +501,14 @@ class ExitCodes(unittest.TestCase):
             code = diag.main(argv + ["--out", str(self.out)], host=host, reader=reader)
         return code, out.getvalue(), err.getvalue()
 
+    def test_microphone_latch_rejects_active_audio_checks(self):
+        host = FakeHost(self.root)
+        host.made("/run/being/mic-policy-breach", "latched\n")
+        code, _, error = self.main(["mic"], host)
+        self.assertEqual(code, 2)
+        self.assertIn("microphone safety latch is active until reboot", error)
+        self.assertEqual(host.calls, [])
+
     def test_could_not_run_is_two(self):
         host = FakeHost(self.root, root_user=False)
         for argv in (["mic"], ["hear", "x.wav"], ["speaker"], ["restore"]):
@@ -518,6 +533,136 @@ class ExitCodes(unittest.TestCase):
         self.assertIn("commands.routes", [item["id"] for item in data["checks"]])
         self.assertIn("In plain English", out)
 
+    def test_workload_reports_bounded_routes_and_real_pressure_without_words(self):
+        messages = [{"route": "command.time"}, {"route": "greeting"}, {"route": "overheard", "text": "room words"},
+                    {"route": "private", "text": "guest words"}, {"route": "discarded"}, {"route": []},
+                    {"route": "model", "text": "Pip, change your time zone maybe someday"},
+                    {"route": "model", "text": "I planted silverleaf yesterday"}, {"route": "model"},
+                    {"route": "model.unavailable"}, {"route": "model.waiting"}]
+        journal = "\n".join("mind: route " + json.dumps(row) for row in messages) + "\nmind: route {malformed\n"
+        host = FakeHost(self.root, root_user=False, handlers={"journalctl": lambda cmd: Result(0, journal)})
+        cgroups = "/sys/fs/cgroup/system.slice"
+        host.made(f"{cgroups}/being-voice.service/cpu.pressure",
+                  "\nsome avg10=2.50 avg60=1.01 avg300=0.11 total=12345\nfull avg10=0.50 avg60=0.01 avg300=0.00 total=25\n")
+        host.made(f"{cgroups}/being-face.service/cpu.pressure", "some avg10=nan avg60=0 avg300=0 total=100\n")
+        code, stdout, stderr = self.main(["workload", "--json"], host)
+        report = (self.out / "diag.json").read_text()
+        self.assertEqual(code, 0, stdout + stderr)
+        checks = {item["id"]: item for item in json.loads(report)["checks"]}
+        self.assertEqual(checks["workload.routes"]["value"],
+                         {"local": 2, "model": 3, "model_unavailable": 1, "model_waiting": 1,
+                          "model_fallbacks_with_debug_words": 2, "possible_local_misses": 1,
+                          "sample_limit": 512, "limit_reached": False})
+        pressure = checks["workload.reflex_pressure"]["value"]
+        self.assertEqual(pressure["being-voice.service"]["some"],
+                         {"avg10": 2.5, "avg60": 1.01, "avg300": 0.11, "total_us": 12345})
+        self.assertEqual(pressure["being-voice.service"]["full"]["total_us"], 25)
+        self.assertIsNone(pressure["being-face.service"])
+        self.assertIsNone(pressure["being-brainstem.service"])
+        self.assertTrue(any(call[0] == "journalctl" and "--lines=512" in call and "-b" in call for call in host.calls))
+        self.assertEqual(host.systemctl_calls(), [])
+        for words in ("silverleaf", "room words", "guest words", "maybe someday"):
+            self.assertNotIn(words, report + stdout + stderr)
+
+    def test_workload_does_not_invent_misses_without_debug_words(self):
+        journal = 'mind: route {"route":"model","chars":10}'
+        host = FakeHost(self.root, root_user=False, handlers={"journalctl": lambda cmd: Result(0, journal)})
+        self.assertEqual(self.main(["workload"], host)[0], 0)
+        checks = {item["id"]: item for item in json.loads((self.out / "diag.json").read_text())["checks"]}
+        self.assertEqual(checks["workload.routes"]["value"]["model"], 1)
+        self.assertIsNone(checks["workload.routes"]["value"]["possible_local_misses"])
+        self.assertEqual(checks["workload.reflex_pressure"]["status"], "skip")
+
+    def test_continuity_reads_archive_and_both_cortex_slots_without_writing(self):
+        from mind.memory import Memory, SCHEMA_VERSION
+
+        host = FakeHost(self.root, root_user=False)
+        identity = "12" * 16
+        host.made("/mind/life.json", json.dumps({"id": identity, "born": 1795500000}))
+        host.made("/etc/being/being.json", '{"ctx_tokens":4096}')
+        with closing(Memory(host.path("/mind"), embedder=None)) as archive:
+            archive.log("heard", "a fixture memory word", "owner")
+        path = host.path("/mind/mind.db")
+        before = path.read_bytes()
+        with patch.object(diag_system, "cortex_client") as factory:
+            request = factory.return_value.request
+            request.return_value = [{"id": 1, "n_ctx": 4096}, {"id": 0, "n_ctx": 4096, "is_processing": True}]
+            code, stdout, stderr = self.main(["continuity", "--json"], host)
+        self.assertEqual(code, 0, stdout + stderr)
+        request.assert_called_once_with("GET", "/slots")
+        data = (self.out / "diag.json").read_text()
+        checks = {item["id"]: item for item in json.loads(data)["checks"]}
+        self.assertEqual(checks["continuity.life"]["status"], "pass")
+        self.assertEqual(checks["continuity.archive"]["value"], {"schema": SCHEMA_VERSION, "expected_schema": SCHEMA_VERSION})
+        self.assertEqual(checks["continuity.slots"]["status"], "pass")
+        self.assertEqual(checks["continuity.baseline"]["status"], "skip")
+        self.assertEqual(checks["continuity.recall"]["status"], "pass")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(host.calls, [])
+        for private in (identity, "fixture memory word"):
+            self.assertNotIn(private, data + stdout + stderr)
+
+    def test_continuity_cli_fails_on_a_changed_life_identity(self):
+        from mind import continuity_baseline
+        from mind.memory import Memory
+
+        host = FakeHost(self.root, root_user=False)
+        host.made("/mind/life.json", json.dumps({"id": "12" * 16, "born": 1795500000}))
+        host.made("/etc/being/being.json", '{"ctx_tokens":4096}')
+        with closing(Memory(host.path("/mind"), embedder=None)):
+            pass
+        self.assertTrue(continuity_baseline.write(
+            host.path("/mind"), etc=host.path("/etc/being"), share=host.path("/usr/share/being"),
+            models=host.path("/models"),
+        ))
+        host.made("/mind/life.json", json.dumps({"id": "34" * 16, "born": 1795500000}))
+        with patch.object(diag_system, "cortex_client") as factory:
+            factory.return_value.request.return_value = [{"id": 0, "n_ctx": 4096}, {"id": 1, "n_ctx": 4096}]
+            code, stdout, stderr = self.main(["continuity", "--json"], host)
+        self.assertEqual(code, 1, stdout + stderr)
+        checks = {item["id"]: item for item in json.loads((self.out / "diag.json").read_text())["checks"]}
+        self.assertEqual(checks["continuity.slots"]["status"], "pass")
+        baseline = checks["continuity.baseline"]
+        self.assertEqual(baseline["status"], "fail")
+        self.assertFalse(baseline["value"]["life_matches"])
+        self.assertIn("life identity", baseline["evidence"])
+
+    def test_continuity_refuses_a_stale_cortex_shape_and_leaves_an_active_restore_alone(self):
+        host = FakeHost(self.root, root_user=False)
+        host.made("/mind/.being-restore-in-progress", "pending")
+        host.made("/mind/life.json", "{damaged")
+        host.made("/etc/being/being.json", '{"ctx_tokens":4096}')
+        with patch.object(diag_system, "cortex_client") as factory:
+            request = factory.return_value.request
+            request.return_value = [{"id": 0, "n_ctx": 8192}]
+            self.assertEqual(self.main(["continuity"], host)[0], 1)
+        checks = {item["id"]: item for item in json.loads((self.out / "diag.json").read_text())["checks"]}
+        self.assertEqual(checks["continuity.archive"]["status"], "skip")
+        self.assertNotIn("continuity.life", checks)
+        self.assertEqual(checks["continuity.slots"]["status"], "fail")
+        request.assert_called_once_with("GET", "/slots")
+
+    def test_continuity_reads_the_committed_schema_in_a_live_wal(self):
+        import sqlite3
+
+        from mind.memory import SCHEMA_VERSION
+
+        host = FakeHost(self.root, root_user=False)
+        path = host.path("/mind/mind.db")
+        path.parent.mkdir()
+        future = SCHEMA_VERSION + 1
+        with closing(sqlite3.connect(path)) as writer:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            writer.execute("INSERT INTO meta VALUES ('schema', ?)", (str(future),))
+            writer.commit()
+            wal = path.with_name("mind.db-wal")
+            before = (path.read_bytes(), wal.read_bytes())
+            checks = {item["id"]: item for item in diag_system.check_continuity_archive(host)}
+            self.assertEqual(checks["continuity.archive"]["status"], "fail")
+            self.assertEqual(checks["continuity.archive"]["value"]["schema"], future)
+            self.assertEqual((path.read_bytes(), wal.read_bytes()), before)
+
     def test_commands_end_to_end_says_each_phrase_to_the_voice(self):
         from mind import diag_audio
 
@@ -531,8 +676,116 @@ class ExitCodes(unittest.TestCase):
             code, _, _ = self.main(["commands", "--e2e"], host)
         self.assertEqual(code, 0)
         stimuli = hear.call_args.args[2]
-        self.assertEqual([item[0] for item in stimuli], ["p1", "p2", "p3"])
-        self.assertEqual([item[3] for item in stimuli], [route for _, route in diag.diag_speech.E2E_PHRASES])
+        # As rendered first, then at a person's level: open, ask, close at each level, in that order.
+        self.assertEqual([item[0] for item in stimuli],
+                         ["p1", "p2", "p3", "p1-realistic", "p2-realistic", "p3-realistic"])
+        routes = [route for _, route in diag.diag_speech.E2E_PHRASES]
+        self.assertEqual([item[3] for item in stimuli], routes + routes)
+        realistic = stimuli[3][1]
+        self.assertAlmostEqual(diag_audio.dbfs(diag_audio.peak(realistic)), -30.0, delta=0.5)
+        with patch.object(diag.diag_speech, "run_hear", return_value=[]) as hear, \
+                patch.object(diag.diag_speech, "_scratch", return_value=str(self.root)):
+            self.main(["commands", "--e2e", "--level", "clean"], host)
+        self.assertEqual([item[0] for item in hear.call_args.args[2]], ["p1", "p2", "p3"])
+
+    def test_hear_predicts_the_route_from_the_terminal_as_it_is(self):
+        # "Close the terminal" with it open is workshop.close; predicted for a shut one it is workshop.say.
+        from mind import diag_audio
+
+        def flite(argv):
+            diag_audio.write_wav(argv[argv.index("-o") + 1], [diag_audio.tone(200, 0.5, 16000)], 16000)
+            return Result(0, "")
+
+        def systemctl(argv):
+            if argv[1] == "list-units":
+                return Result(0, "being-panel-terminal.service loaded active running x\n")
+            return Result(0, "")
+
+        host = FakeHost(self.root, programs={"flite", "systemctl"}, handlers={"flite": flite,
+                                                                              "systemctl": systemctl})
+        with patch.object(diag.diag_speech, "run_hear", return_value=[]) as hear, \
+                patch.object(diag.diag_speech, "_scratch", return_value=str(self.root)):
+            self.main(["hear", "--phrase", "Hey Pip, close the terminal.", "--no-unit"], host)
+        stimuli = hear.call_args.args[2]
+        self.assertEqual([(item[0], item[3]) for item in stimuli], [("phrase", "workshop.close")])
+        self.assertIsNone(hear.call_args.kwargs["asr"])
+        # "Open a terminal" with one already open is still expected to open one, so the
+        # hear checks warn that nothing was proved rather than pass the "already open" reply.
+        self.assertEqual(diag.diag_speech.predict_route("Hey Pip, open a terminal.", "Pip",
+                                                        ctx=diag.app_context(host)), "workshop.say")
+        with patch.object(diag.diag_speech, "run_hear", return_value=[]) as hear, \
+                patch.object(diag.diag_speech, "_scratch", return_value=str(self.root)):
+            self.main(["hear", "--phrase", "Hey Pip, open a terminal.", "--no-unit"], host)
+        self.assertEqual([item[3] for item in hear.call_args.args[2]], ["workshop.open"])
+
+    def engines(self, smoke, argv=("engines", "--no-unit"), root_user=True, mountinfo=None):
+        children = []
+
+        def python(argv):
+            children.append(argv)
+            if "mind.voice_engines" in argv:
+                return smoke if isinstance(smoke, Result) else Result(0 if smoke.get("passed") else 1,
+                                                                      json.dumps(smoke) + "\n")
+            return Result(0, "")
+
+        host = FakeHost(self.root, root_user=root_user, handlers={Path(sys.executable).name: python})
+        if mountinfo is not None:
+            host.made("/proc/self/mountinfo", mountinfo)
+        with patch.object(diag.diag_speech, "moonshine_ready", return_value=(True, None)), \
+                patch.object(diag.diag_speech, "piper_engine", return_value=(None, "no Piper")):
+            code, _, _ = self.main(list(argv), host)
+        data = json.loads((self.out / "diag.json").read_text()) if (self.out / "diag.json").exists() else {}
+        return code, {item["id"]: item for item in data.get("checks", [])}, children
+
+    PASSED = {"passed": True, "sigill": False, "stages": [{"stage": "vad", "passed": True, "sigill": False},
+                                                          {"stage": "moonshine", "passed": True, "sigill": False},
+                                                          {"stage": "piper", "passed": True, "sigill": False}]}
+
+    def test_engines_runs_the_speech_smoke_and_records_it_only_when_asked(self):
+        code, items, children = self.engines(self.PASSED)
+        smoke = items["engines.smoke"]
+        self.assertEqual(smoke["status"], "pass")
+        self.assertIn("vad passed, moonshine passed, piper passed", smoke["evidence"])
+        self.assertIn("--record-smoke", smoke["hint"])
+        call = next(argv for argv in children if "mind.voice_engines" in argv)
+        self.assertEqual(call[call.index("mind.voice_engines") + 1:], ["smoke", "--json"])
+        self.assertTrue((self.out / "speech-smoke.json").exists())
+        code, items, children = self.engines(self.PASSED, ("engines", "--no-unit", "--record-smoke"))
+        call = next(argv for argv in children if "mind.voice_engines" in argv)
+        self.assertIn("--record", call)
+        self.assertTrue(items["engines.smoke"]["value"]["recorded"])
+        self.assertIn("kept in /mind/audio", items["engines.smoke"]["evidence"])
+        self.assertEqual(self.engines(self.PASSED, ("engines", "--record-smoke"), root_user=False)[0], 2)
+
+    TRY_MOUNTS = ("22 1 8:1 / / ro,relatime - squashfs /dev/sda2 ro\n"
+                  "31 22 0:27 / /mind rw,nosuid,nodev - tmpfs tmpfs rw,size=524288k\n")
+
+    def test_a_smoke_kept_in_a_try_boots_ram_says_it_lasts_this_boot_only(self):
+        code, items, _ = self.engines(self.PASSED, ("engines", "--no-unit", "--record-smoke"),
+                                      mountinfo=self.TRY_MOUNTS)
+        smoke = items["engines.smoke"]
+        self.assertEqual(smoke["value"]["lasts"], "this boot")
+        self.assertIn("for this boot only", smoke["evidence"])
+        self.assertIn("/usr/share/being/voice/sherpa-avx-smoke.json", smoke["hint"])
+        # Not recorded: the hint does not promise a lasting fix either.
+        code, items, _ = self.engines(self.PASSED, mountinfo=self.TRY_MOUNTS)
+        self.assertIn("until the next reboot only", items["engines.smoke"]["hint"])
+        # On an installed system's disk /mind the record lasts.
+        disk = "31 22 8:3 / /mind rw,relatime - ext4 /dev/sda3 rw\n"
+        code, items, _ = self.engines(self.PASSED, ("engines", "--no-unit", "--record-smoke"), mountinfo=disk)
+        self.assertEqual(items["engines.smoke"]["value"]["lasts"], "this build")
+        self.assertEqual(items["engines.smoke"]["hint"], "")
+
+    def test_a_sigill_fails_and_an_old_voice_skips(self):
+        sigill = {"passed": False, "sigill": True, "stages": [
+            {"stage": "vad", "passed": True, "sigill": False},
+            {"stage": "moonshine", "passed": False, "sigill": True, "error": "it was killed by SIGILL"}]}
+        code, items, _ = self.engines(sigill)
+        self.assertEqual(items["engines.smoke"]["status"], "fail")
+        self.assertIn("moonshine SIGILL", items["engines.smoke"]["evidence"])
+        self.assertEqual(code, 1)
+        old = Result(2, "", "error: argument command: invalid choice: 'smoke'")
+        self.assertEqual(self.engines(old)[1]["engines.smoke"]["status"], "skip")
 
     def test_a_failure_is_one(self):
         host = FakeHost(self.root, root_user=False)
@@ -602,7 +855,15 @@ class SystemdRun(unittest.TestCase):
         self.assertEqual(command[0], "systemd-run")
         self.assertIn(f"ExecStopPost={diag.WRAPPER} restore --quiet", command)
         self.assertIn("--setenv=PIP_DIAG_UNIT=1", command)
+        # The voice's CPU weight, so speech timings are the voice's; a failed check is not a failed unit.
+        properties = [command[index + 1] for index, word in enumerate(command) if word == "-p"]
+        self.assertIn("CPUWeight=1000", properties)
+        self.assertIn("SuccessExitStatus=1", properties)
         self.assertEqual(command[-2:], ["speaker", "--json"])
+
+    def test_engines_runs_in_the_unit_too_so_its_timings_are_the_voices(self):
+        command = self.wrapped(["engines"])
+        self.assertIn("CPUWeight=1000", command)
 
     def test_not_wrapped_inside_the_unit_or_when_asked_or_without_root(self):
         self.assertIsNone(self.wrapped(["speaker"], env={"PIP_DIAG_UNIT": "1"}))
@@ -610,6 +871,56 @@ class SystemdRun(unittest.TestCase):
         self.assertIsNone(self.wrapped(["report"]))
         self.host.root_user = False
         self.assertIsNone(self.wrapped(["speaker"]))
+
+    def run_main_wrapped(self, inner_code, unit_code=0):
+        """main() as root with systemd-run faked: the run inside leaves `inner_code` (None: nothing)."""
+        seen = {}
+
+        def fake_systemd_run(command):
+            target = next(word.split("=", 2)[2] for word in command if word.startswith("--setenv=PIP_DIAG_VERDICT="))
+            seen["verdict"] = target
+            if inner_code is not None:
+                with patch.dict(os.environ, {"PIP_DIAG_UNIT": "1", "PIP_DIAG_VERDICT": target}):
+                    diag.record_verdict(inner_code)
+            return unit_code
+
+        with patch.object(diag, "run_wrapped", side_effect=fake_systemd_run), \
+                patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PIP_DIAG_UNIT", None)
+            code = diag.main(["speaker"], host=self.host)
+        return code, Path(seen["verdict"])
+
+    def test_a_wrapped_run_whose_checks_fail_exits_one(self):
+        # SuccessExitStatus=1 makes systemd-run --wait return 0 for "a check failed":
+        # the inner run's own verdict decides.
+        code, verdict = self.run_main_wrapped(1)
+        self.assertEqual(code, 1)
+        self.assertFalse(verdict.exists())  # read once, then removed
+        self.assertEqual(self.run_main_wrapped(0)[0], 0)
+        # A run that could not be done (2) or was killed is the unit's own failure.
+        self.assertEqual(self.run_main_wrapped(None, unit_code=2)[0], 2)
+        self.assertEqual(self.run_main_wrapped(1, unit_code=130)[0], 130)
+        # No verdict at all (an older pip-diag inside): systemd-run's 0 stands.
+        self.assertEqual(self.run_main_wrapped(None)[0], 0)
+
+    def test_a_stale_verdict_never_decides_a_new_run(self):
+        stale = diag.verdict_file(self.host)
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text('{"code": 1}')
+        self.assertEqual(self.run_main_wrapped(None)[0], 0)
+
+    def test_the_run_inside_leaves_its_verdict_and_the_restore_after_does_not(self):
+        target = self.root / "run" / "being-diag" / "verdict-1.json"
+        host = FakeHost(self.root, root_user=False)
+        with patch.dict(os.environ, {"PIP_DIAG_UNIT": "1", "PIP_DIAG_VERDICT": str(target)}), \
+                patch.object(diag.diag_speech, "check_commands",
+                             return_value=[check("commands.routes", "commands", "fail", None, "wrong")]), \
+                quiet(), redirect_stderr(io.StringIO()):
+            self.assertEqual(diag.main(["commands", "--out", str(self.root / "out")], host=host), 1)
+            self.assertEqual(json.loads(target.read_text()), {"code": 1})
+            # ExecStopPost's `pip-diag restore` has the same environment and exits 0.
+            diag.main(["restore", "--quiet"], host=host)
+        self.assertEqual(json.loads(target.read_text()), {"code": 1})
 
     def test_a_second_run_is_refused(self):
         self.host.active.add(f"{diag.UNIT_NAME}.service")

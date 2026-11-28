@@ -51,7 +51,7 @@ A Linux live USB can establish a read-only hardware inventory first.
 | Power-on and display | Use Apple EFI to boot the selected stick. Record power-button-to-face time, i915 binding, the face service's `face: drawn by` line, and whether the panel actually blanks and reappears with the lid. |
 | Wired recovery | Check the Ethernet PCI ID and `tg3` binding. After enrollment on the installed system, confirm DHCP, negotiated speed and duplex, and a pinned observation snapshot over Ethernet. Leave Ethernet available for the wireless reconnect test. |
 | Wi-Fi | Record the PCI ID, actual driver and requested firmware names locally. Once firmware loads, verify association, DHCP, signal and reconnect after an access point restart and a lid cycle. Use wired management during the test so a Wi-Fi outage can be measured. |
-| Speakers and microphone | Use `aplay -l`, `arecord -l` and `amixer -c CARD scontrols` to check the analog card and mixer. Test a spoken turn, mute and interrupt with the built-in mic and speakers. Check the default `plughw:0,0`; if the card order differs, test stable card IDs via `BEING_ALSA_CAPTURE` and `BEING_ALSA_PLAYBACK` in a volatile `being-voice.service` drop-in. |
+| Speakers and microphone | Use `aplay -l`, `arecord -l` and `amixer -c CARD scontrols` to check the analog card and mixer. Test a spoken turn, mute and interrupt with the built-in mic and speakers. On the MacBookPro9,2, confirm Ears uses the mapped `PCH` capture card and PCM 0 even if ALSA card numbering changes. Test playback with `BEING_ALSA_PLAYBACK` in a volatile `being-voice.service` drop-in if needed. |
 | Power and cooling | Confirm the thermals follow `coretemp` and AppleSMC reports, with fan RPM, AC state and battery discharge where available. Take an idle and warm-voice capture on AC and battery, then check sustained clocks and throttle counters during a longer repeated-turn run. |
 
 Use `being-installer --check --json` for the kernel inventory when a
@@ -108,6 +108,83 @@ Keep observed device paths and endpoints with the results. A missing
 attribute and a present attribute that stays unchanged are separate
 outcomes. When a kernel channel is unavailable, record the fallback you
 were able to use and any resulting appliance behavior that remains untested.
+
+For camera recovery, restart Brainstem on the private diagnostic image
+while the internal camera is active. Record the kernel USB authorization,
+capture handle and LED through disconnect and recovery. Repeat with consent
+revoked or the lid closed and verify capture stays off after the restart.
+On a cold boot with camera consent off, record the same readings before
+granting consent.
+
+### Native trackpad motion
+
+Use the built-in trackpad on the private maintenance image and disconnect
+external pointing devices. Record the trackpad's event node and whether Linux
+reports movement, physical click and tap there. Use the face's SDL pointer
+probe to check the same input path through KMS. The probe reports the video
+driver, event counts and the distance between the smallest and largest
+observed coordinates on each axis in logical pixels.
+
+From the [maintenance shell](#run-an-on-device-experiment), temporarily stop
+the running `being-face` service so the probe can take the display. Restore
+the service after the capture, including if the command fails.
+
+```sh
+SDL_VIDEODRIVER=kmsdrm /usr/bin/being-face --standalone --fullscreen --pointer-probe --exit-after 15
+```
+
+Run separate short windows for idle, a horizontal and vertical stroke, a
+physical click, and a tap. Save each summary with its gesture label and image
+build ID. A usable motion result shows `kmsdrm` and a measurable span on each
+axis during the stroke. Compare the click and tap windows with the idle
+window to see how SDL represents each gesture. This is the hardware evidence
+needed for Shell Lab's pointer design decision.
+
+### Present-on-change Try experiment
+
+For WP-D7, add `being.face_present_on_change=1` to a single Try boot in
+GRUB. On KMS the face can skip swaps when the idle eyes have barely moved
+since the last presented frame. The next poll is then at 5 Hz. Active
+animation, app surfaces, captions, widgets, decorated eyes and pending
+panel wake continue to draw. An ordinary Try boot gives the control.
+
+The once-a-minute face line reports skipped idle swaps. It also records the
+p99 and the histogram of intervals between consecutive Active swaps. The
+histogram uses upper bounds of 4, 8, 12, 16, 17, 20, 25, 33, 40, 50, 67,
+80 and 100 ms, followed by the overflow count. Use these with the concurrent
+model workload and battery power measurements. The interval series begins
+after the first Active swap and excludes idle-to-active transition latency.
+
+The independent Try argument `being.face_reply_ladder=1` auditions the
+visual acknowledgement of an accepted utterance. It uses Voice's estimated
+speech-end timestamp and computes the age when the face receives it. It can
+blink in the first 300 ms, avert the
+eyes from 300 ms to one second, and make small search movements from one to
+two seconds. A late final skips stages whose time has already passed. An
+app panel keeps its own gaze focus. A spoken filler and gaze ahead of
+playback need separate playback timing and consent.
+
+### Native voice diagnostic capture
+
+For the private cable Try image, record the image hash, embedded source ID and
+boot options. Start with automatic ASR and TTS selection and the built-in
+microphone and speakers. With the lid open, speak the same labelled prompts
+at 1 m and 2 m. Include a wake-and-command turn, a follow-up, a nearby
+non-wake phrase and a long reply to interrupt. Observe a separate quiet
+window for false wakes and record its duration.
+
+For each attempt, record the selected ALSA endpoint and channel, input and
+noise levels, wake and transcript verdicts, recognizer and voice, and time
+to first audible word. Record mixer settings and compare EQ on and off at
+matched volume for intelligibility. The [timing probe](#run-an-on-device-experiment)
+can supply playback launch timing. Measure audible output separately.
+Capture any forced-engine rerun separately from the automatic baseline.
+
+Use the [cable workflow](LAB.md#cable-development-build) to collect
+diagnostics and the boot journal over Ethernet. Run `lab/cable.sh pull-logs`
+with `umask 077`. Keep the original capture private because voice debug
+can include transcripts. In the acceptance record, use prompt labels,
+counts and timings and remove transcripts and device identifiers.
 
 ## Enroll the laptop once
 
@@ -389,6 +466,53 @@ dev rauc install /mind/lab-access/updates/candidate.raucb
 dev rm /mind/lab-access/updates/candidate.raucb
 dev systemctl reboot
 ```
+
+## Rotate the laptop release key
+
+The installed A/B slots carry their own update certificates. A rotation
+bundle is signed by the current key and installs a root filesystem that
+trusts the replacement certificate. The separate model-pack certificate
+must continue to verify the packs already on the SSD. Retain the current
+public certificate and the matching Try image with the rotation records.
+
+Make the replacement key with `lab/build.sh release-key` and the existing
+offline custody procedure. With the currently installed public certificate
+in `PIPOS_PREVIOUS_CERT`, set `PIPOS_NEXT_CERT` to the replacement public
+certificate and `PIPOS_PREVIOUS_KEY` to the current encrypted private key.
+Use a distinct `PIPOS_ROTATION_VERSION` for the bridge.
+
+```sh
+BEING_REPLACE_RELEASE_CERT=1 lab/build.sh release-cert "$PIPOS_NEXT_CERT"
+BEINGOS_REQUIRE_RELEASE_KEY=1 lab/build.sh laptop-try
+lab/build.sh laptop-rotation-bundle "$PIPOS_PREVIOUS_KEY" "$PIPOS_PREVIOUS_CERT" "$PIPOS_ROTATION_VERSION"
+```
+
+The build command writes `out/images/beingos-laptop-key-rotation-<version>.raucb`
+and a receipt with both public certificate fingerprints. Audit the bridge
+and the exact new Try image with RAUC and 7-Zip available. Set
+`PIPOS_PREVIOUS_TRY` to the saved Try image matching the installed release.
+
+```sh
+python3 -m lab.hardware_image out/images/beingos-laptop-try.img \
+  --match-laptop-bundle "out/images/beingos-laptop-key-rotation-$PIPOS_ROTATION_VERSION.raucb" \
+  --previous-release-certificate "$PIPOS_PREVIOUS_CERT" \
+  --release-certificate "$PIPOS_NEXT_CERT" \
+  --previous-image "$PIPOS_PREVIOUS_TRY" --verify-laptop-bundle
+```
+
+Before using the bridge, sign a follow-up with the replacement private key
+using `lab/build.sh laptop-bundle NEW_KEY VERSION`. Audit that ordinary
+bundle against the replacement certificate and its matching Try image.
+
+Rehearse on a disposable installation of the prior release before using the
+MacBook's SSD. Apply the bridge through **F2 → Update → USB**, reboot and
+wait for the trial to be confirmed. Verify a model reply and archive recall.
+Exercise **Care → Previous system** to confirm the older slot still boots,
+then return to the confirmed replacement slot. The bridge can also be
+applied again while the prior slot is running. Installing the follow-up
+from the confirmed replacement slot replaces the remaining old slot.
+Verify both slots' trust and that an old-key update is refused.
+Keep the signed bridge with its receipt and the rehearsal results.
 
 The workflow helps pinpoint where a delay begins, find configurations
 that stay fast once the laptop heats up, reproduce driver and Wi-Fi

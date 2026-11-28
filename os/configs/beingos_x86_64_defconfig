@@ -7,6 +7,11 @@ BR2_x86_ivybridge=y
 
 # Toolchain
 BR2_TOOLCHAIN_BUILDROOT_CXX=y
+# A UTF-8 locale (glibc's C.UTF-8, about 0.4 MB). Without one, Python stays
+# in the C locale, and espeak-ng inside piper-phonemize then reads accented
+# letters by name ("Café" as "caf e acute") in the natural voice. Python
+# switches to C.UTF-8 by itself once it exists (PEP 538).
+BR2_GENERATE_LOCALE="C.UTF-8"
 BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_18=y
 BR2_CCACHE=y
 BR2_CCACHE_DIR="/work/ccache"
@@ -31,6 +36,7 @@ BR2_TARGET_TZ_INFO=y
 BR2_PACKAGE_SYSTEMD_LOGIND=y
 BR2_PACKAGE_SYSTEMD_NETWORKD=y
 BR2_PACKAGE_SYSTEMD_RESOLVED=y
+BR2_PACKAGE_SYSTEMD_ANALYZE=y
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_BEINGOS_PATH)/board/beingos/post-build.sh"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_BEINGOS_PATH)/board/beingos/post-image.sh"
 # No setuid or setgid file in the image (BusyBox is setuid by default).
@@ -100,12 +106,17 @@ BR2_PACKAGE_HOST_RUSTC=y
 BR2_PACKAGE_HOST_RUST_BIN=y
 BR2_PACKAGE_PYTHON3=y
 BR2_PACKAGE_PYTHON3_SQLITE=y
+BR2_PACKAGE_PYTHON3_ZLIB=y
 # OpenSSL supplies WPA2 key derivation and HTTPS weather lookups.
 BR2_PACKAGE_PYTHON3_SSL=y
 BR2_PACKAGE_LIBOPENSSL_BIN=y
 BR2_PACKAGE_CA_CERTIFICATES=y
+# Offline Keep PDF extraction; Qt support stays disabled.
+BR2_PACKAGE_POPPLER=y
+BR2_PACKAGE_POPPLER_UTILS=y
 BR2_PACKAGE_BEING=y
 BR2_PACKAGE_BEING_BACKUP_AGE=y
+BR2_PACKAGE_CRYPTSETUP=y
 # This image is for the lab: the second serial line stands in for a voice.
 BR2_PACKAGE_BEING_LAB_BODY=y
 
@@ -118,6 +129,11 @@ BR2_PACKAGE_POCKETSPHINX=y
 # Prebuilt; ONNX Runtime picks its CPU kernels at run time, and
 # lab/sherpa_avx_smoke.py runs it on an Ivy Bridge CPU model (AVX, no AVX2).
 BR2_PACKAGE_SHERPA_ONNX=y
+BR2_PACKAGE_PIPER_PHONEMIZE=y
+# Installed as the release archive has them (about 7 MB more), so a smoke
+# verdict, pinned to the archive bytes it tested, matches the installed bytes
+# and the voice may load Moonshine (mind/voice_engines.sherpa_smoke_passed).
+BR2_STRIP_EXCLUDE_FILES="libsherpa-onnx-c-api.so libonnxruntime.so"
 BR2_PACKAGE_ALSA_UTILS=y
 BR2_PACKAGE_ALSA_UTILS_APLAY=y
 BR2_PACKAGE_ALSA_UTILS_AMIXER=y

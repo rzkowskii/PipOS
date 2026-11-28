@@ -8,13 +8,15 @@ import re
 import signal
 from pathlib import Path
 
-from . import sd_notify
+from . import app_organizer, core_profile, sd_notify
 from .app_commands import AppBridge
 from .bus import Bus
+from .context_storage import WorkingFiles
 from .cortex import Cortex
 from .memory import Memory
 from .profile import DEFAULT_PERSONALITY, DEFAULT_TEMPERAMENT, default_mind_dir, load_profile, read_factory, temperament
 from .retention import load_policy
+from .try_mode import is_try_boot
 from .turn import SUBS, Config, Mind, log, optional_module
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,12 +27,16 @@ FACTORY_KEYS = {
     "max_tokens": (int,),
     "temperature": _NUMBER,
     "prefill": (bool,),
+    "listening_scaffold": (bool,),
     "morning_brief": (bool,),
     "time_zone": (str,),
     "top_k": (int,),
     "top_p": _NUMBER,
     "presence_penalty": _NUMBER,
     "reply_shape": (str,),
+    "intent_aliases": (bool,),
+    "mood": (bool,),
+    "defer_idle_slot_writes": (bool,),
     "battery_plea_percent": _NUMBER,
     "battery_plea_minutes": _NUMBER,
     "battery_second_plea_percent": _NUMBER,
@@ -64,9 +70,16 @@ def load_config(config_dir, mind_dir, *, include_core=True):
     cfg.identity = re.sub(r"\{(?:name|owner)\}", lambda match: names[match[0]], identity)
     guest_names = {**names, "{owner}": "a person"}
     cfg.guest_identity = re.sub(r"\{(?:name|owner)\}", lambda match: guest_names[match[0]], identity)
-    core = mind_dir / "core.md"
-    cfg.core = core.read_text() if include_core and core.exists() else ""
+    cfg.core = core_profile.manual_text(mind_dir) if include_core else ""
     return cfg, settings
+
+
+def memory_label(mode, try_boot):
+    """What the start-up line says about memory. A Try boot's /mind is RAM,
+    so even "persistent" memory lasts only for this session there."""
+    if try_boot and mode == "persistent":
+        return "memory for this Try session only"
+    return f"{mode} memory"
 
 
 def build_night_shift(mind_dir, memory, cfg):
@@ -125,12 +138,23 @@ async def main():
     bus = Bus("mind", SUBS, path=args.bus)
     apps = AppBridge(bus, name=cfg.name)
     night_shift = build_night_shift(mind_dir, memory, cfg) if memory is not None else None
-    mind = Mind(bus, cortex, memory, cfg, mind_dir, policy=policy, apps=apps, night_shift=night_shift)
+    mind = Mind(bus, cortex, memory, cfg, mind_dir, policy=policy, apps=apps, night_shift=night_shift,
+                working_files=WorkingFiles.for_process(mind_dir), guest_latch=args.config == Path("/etc/being"))
     everyday = optional_module("everyday")
     if everyday is not None and hasattr(everyday, "preload"):
         # Every skill is imported now, not on the first thing said.
         everyday.preload()
-    log(f"{cfg.name} | {policy.mode} memory | cortex at {url}")
+    log(f"{cfg.name} | {memory_label(policy.mode, is_try_boot())} | cortex at {url}")
+
+    organizer_path = app_organizer.socket_path(bus.path)
+    organizer = None
+    try:
+        organizer = await app_organizer.start_server(
+            organizer_path, mind_dir, lambda: mind._owner_services and not apps.guest and apps.enabled(),
+            owner=cfg.owner, timezone=lambda: mind.skills.zone, routes=mind.route_snapshot,
+            lookup_scope=lambda: (bus.generation, mind.lid_seq) if mind.lid_open and bus.connected.is_set() else None)
+    except OSError as exc:
+        log(f"organizer panels unavailable: {type(exc).__name__}")
 
     task = asyncio.create_task(mind.run())
     # READY once the bus is up (code commands answer from then on, with or
@@ -144,6 +168,10 @@ async def main():
     except asyncio.CancelledError:
         pass
     finally:
+        if organizer is not None:
+            organizer.close()
+            await organizer.wait_closed()
+            organizer_path.unlink(missing_ok=True)
         alive.cancel()
         await asyncio.gather(alive, return_exceptions=True)
         await bus.stop()

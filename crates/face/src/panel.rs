@@ -34,7 +34,7 @@
 //!
 //! RGBA rows follow at offset 128, top row first, `height` rows of `stride`
 //! bytes. Flags: 1 visible, 2 focus, 4 pip_typing, 8 pip_paused, 16 job_busy,
-//! 32 human_typing, 64 scrolled.
+//! 32 human_typing, 64 scrolled, 128 job_done, 256 job_failed.
 //!
 //! Seqlock: the renderer writes an odd sequence, then the rows and the rest of
 //! the header, then the next even sequence. The face reads the header, then
@@ -89,6 +89,8 @@ pub mod flag {
     pub const JOB_BUSY: u32 = 16;
     pub const HUMAN_TYPING: u32 = 32;
     pub const SCROLLED: u32 = 64;
+    pub const JOB_DONE: u32 = 128;
+    pub const JOB_FAILED: u32 = 256;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,6 +118,14 @@ pub struct Header {
 impl Header {
     pub fn has(&self, bit: u32) -> bool {
         self.flags & bit != 0
+    }
+
+    pub fn job_result(&self) -> Option<bool> {
+        match self.flags & (flag::JOB_DONE | flag::JOB_FAILED) {
+            flag::JOB_DONE => Some(true),
+            flag::JOB_FAILED => Some(false),
+            _ => None,
+        }
     }
 
     /// Where Pip is typing: the middle of the cursor cell.
@@ -426,6 +436,16 @@ impl Panel {
         }
     }
 
+    /// Look for the first frame promptly after a launcher selection.
+    pub fn poll_while_opening(&mut self, now: Instant) -> Update {
+        if self.source.is_none()
+            && self.scanned.is_some_and(|at| now.saturating_duration_since(at) >= RESCAN_HIDDEN)
+        {
+            self.scanned = None;
+        }
+        self.poll(now)
+    }
+
     /// Read whatever is new. Never blocks on anything but a page-cache read.
     pub fn poll(&mut self, now: Instant) -> Update {
         self.discover(now);
@@ -565,6 +585,12 @@ pub fn smoothstep(x: f32) -> f32 {
     x * x * (3.0 - 2.0 * x)
 }
 
+/// Advance the dock transition, holding either endpoint until the surface changes.
+pub fn advance_transition(amount: f32, open: bool, dt: f32) -> f32 {
+    let step = dt.min(0.1) / TRANSITION;
+    if open { (amount + step).min(1.0) } else { (amount - step).max(0.0) }
+}
+
 pub fn layout(w: i32, h: i32, amount: f32) -> Layout {
     let s = smoothstep(amount);
     let strip_h = ((h as f32) * STRIP_FRACTION).round().max(1.0);
@@ -620,6 +646,12 @@ pub fn key_bytes(key: sdl2::keyboard::Keycode, keymod: sdl2::keyboard::Mod) -> O
         K::PageDown => return seq("\0pgdn"),
         K::F3 => return seq("\0f3"),
         K::Kp0 => return seq("0"),
+        K::KpPlus => return seq("+"),
+        K::KpMinus => return seq("-"),
+        K::KpMultiply => return seq("*"),
+        K::KpDivide => return seq("/"),
+        K::KpPeriod => return seq("."),
+        K::KpEquals => return seq("="),
         _ => {}
     }
     let code = key.into_i32();
@@ -928,6 +960,19 @@ mod tests {
     }
 
     #[test]
+    fn a_requested_lists_panel_is_discovered_at_the_faster_scan_interval() {
+        let fake = Fake::new();
+        let mut panel = Panel::new(&fake.dir);
+        let t = Instant::now();
+        assert_eq!(panel.poll(t), Update::Nothing);
+        fake.write_app("lists", &app_header(2, flag::VISIBLE, "Lists"), 7);
+
+        assert_eq!(panel.poll(t + RESCAN_HIDDEN), Update::Nothing);
+        assert_eq!(panel.poll_while_opening(t + RESCAN_HIDDEN), Update::Resized);
+        assert_eq!(panel.shown(t + RESCAN_HIDDEN).unwrap().title, "Lists");
+    }
+
+    #[test]
     fn opening_the_monitor_over_the_terminal_goes_straight_from_one_panel_to_the_other() {
         // hands shows the monitor first, then hides the terminal (SIGUSR2).
         let fake = Fake::new();
@@ -1028,6 +1073,36 @@ mod tests {
     }
 
     #[test]
+    fn the_dock_holds_both_endpoints_and_reverses_from_its_current_position() {
+        let full = layout(1280, 800, 0.0);
+        let strip = layout(1280, 800, 1.0);
+        let frame_times = [1.0 / 60.0, 1.0 / 30.0, 0.08];
+        let mut amount = 0.0;
+        for dt in frame_times.into_iter().cycle().take(60) {
+            let next = advance_transition(amount, true, dt);
+            assert!(next >= amount);
+            if amount == 1.0 {
+                assert_eq!(layout(1280, 800, next), strip);
+            }
+            amount = next;
+        }
+        assert_eq!(amount, 1.0);
+
+        amount = advance_transition(amount, false, frame_times[0]);
+        assert!(amount > 0.0 && amount < 1.0);
+        assert_eq!(advance_transition(amount, true, frame_times[0]), 1.0);
+        for dt in frame_times.into_iter().cycle().take(60) {
+            let next = advance_transition(amount, false, dt);
+            assert!(next <= amount);
+            if amount == 0.0 {
+                assert_eq!(layout(1280, 800, next), full);
+            }
+            amount = next;
+        }
+        assert_eq!(amount, 0.0);
+    }
+
+    #[test]
     fn eyes_look_down_at_the_cursor() {
         let [x, y] = gaze_at(0, 0, 1280, 640);
         assert!(x < -0.8 && y < -0.5);
@@ -1049,6 +1124,10 @@ mod tests {
         assert_eq!(key_bytes(K::Space, none), Some(b" ".to_vec()));
         assert_eq!(key_bytes(K::Return, none), Some(b"\r".to_vec()));
         assert_eq!(key_bytes(K::Backspace, none), Some(vec![0x7f]));
+        for (key, byte) in [(K::KpPlus, b'+'), (K::KpMinus, b'-'), (K::KpMultiply, b'*'),
+                            (K::KpDivide, b'/'), (K::KpPeriod, b'.'), (K::KpEquals, b'=')] {
+            assert_eq!(key_bytes(key, none), Some(vec![byte]));
+        }
         assert_eq!(key_bytes(K::Up, none), Some(b"\x1b[A".to_vec()));
         assert_eq!(key_bytes(K::PageDown, none), Some(b"\0pgdn".to_vec()), "the panel scrolls its history");
         assert_eq!(key_bytes(K::PageUp, none), Some(b"\0pgup".to_vec()));

@@ -1,0 +1,90 @@
+#!/bin/sh
+# Native MacBookPro9,2 residency profile. QEMU and every other body keep the
+# measured portable service defaults; an unknown body must never fail boot.
+set -efu
+
+product=
+vendor=
+if [ -r /sys/class/dmi/id/product_name ]; then
+    IFS= read -r product </sys/class/dmi/id/product_name || product=
+fi
+[ -r /sys/class/dmi/id/sys_vendor ] && IFS= read -r vendor </sys/class/dmi/id/sys_vendor || vendor=
+[ "$product" = MacBookPro9,2 ] || exit 0
+[ "$vendor" = 'Apple Inc.' ] || exit 0
+[ ! -d /sys/firmware/qemu_fw_cfg ] || exit 0
+if command -v systemd-detect-virt >/dev/null 2>&1; then
+    systemd-detect-virt --quiet --vm && exit 0
+elif [ -r /sys/hypervisor/type ]; then
+    IFS= read -r hypervisor </sys/hypervisor/type || hypervisor=
+    [ -z "$hypervisor" ] || exit 0
+fi
+
+normal=${1:?Missing systemd generator directory}
+mkdir -p "$normal/system.slice.d" "$normal/being-cortex.service.d" "$normal/being-voice.service.d"
+
+cat >"$normal/system.slice.d/40-native-residency.conf" <<'EOF'
+[Slice]
+# memory.min protection is hierarchical. Reserve the exact sum delegated to
+# the two protected children so it remains effective below system.slice.
+MemoryMin=1G
+EOF
+
+cat >"$normal/being-cortex.service.d/40-native-residency.conf" <<'EOF'
+[Service]
+# MacBookPro9,2 native profile v1. The 532 MiB conversation weights are
+# mapped and locked; the remaining protected allowance covers active model
+# state without promising a hard maximum before native RSS qualification.
+Environment=LLAMA_ARG_LOAD_MODE=mmap+mlock
+Environment=BEING_RESIDENCY_PROFILE=MacBookPro9,2-native-v1
+MemoryMin=768M
+EOF
+
+cat >"$normal/being-voice.service.d/40-native-residency.conf" <<'EOF'
+[Service]
+# Protect the already resident recognizer and Piper voice from optional
+# backup/night workloads. This is protection, not a hard MemoryMax.
+Environment=BEING_RESIDENCY_PROFILE=MacBookPro9,2-native-v1
+MemoryMin=256M
+EOF
+
+# The two installation experiments can be compared independently. Try and
+# unconfirmed trial slots never open a persistent display cache.
+installed=0
+trial=0
+try=0
+warm=0
+mesa=0
+safe_graphics=0
+for word in $(cat /proc/cmdline 2>/dev/null || true); do
+    case "$word" in
+        being.installed=1) installed=1 ;;
+        being.trial=1) trial=1 ;;
+        being.try=1) try=1 ;;
+        nomodeset) safe_graphics=1 ;;
+        being.model_warm_mib=64|being.model_warm_mib=128|being.model_warm_mib=256)
+            warm=${word#*=} ;;
+        being.model_warm_mib=*) warm=0 ;;
+        being.mesa_cache=1) mesa=1 ;;
+        being.mesa_cache=*) mesa=0 ;;
+    esac
+done
+[ "$installed:$trial:$try" = 1:0:0 ] || exit 0
+
+if [ "$warm" != 0 ]; then
+    mkdir -p "$normal/multi-user.target.wants" "$normal/being-model-warm.service.d"
+    ln -sf /usr/lib/systemd/system/being-model-warm.service "$normal/multi-user.target.wants/being-model-warm.service"
+    printf '[Service]\nEnvironment=BEING_MODEL_WARM_MIB=%s\n' "$warm" \
+        > "$normal/being-model-warm.service.d/40-native-model-warm.conf"
+fi
+
+if [ "$mesa:$safe_graphics" = 1:0 ]; then
+    for organ in face local-screen; do
+        output="$normal/being-$organ.service.d"
+        mkdir -p "$output"
+        cat >"$output/40-native-mesa-cache.conf" <<'EOF'
+[Service]
+EnvironmentFile=-/run/being/mesa-native.env
+ExecStartPre=-/usr/libexec/being/being-prepare-mesa-cache
+EOF
+    done
+fi

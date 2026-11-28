@@ -87,13 +87,15 @@ class Apology(unittest.IsolatedAsyncioTestCase):
                 harness.clock.now += CHIRP_TAIL_SECONDS + 0.01
                 harness.sent.clear()
 
-                # A second miss in the same wake is reported but not spoken.
+                # A second miss in the same wake is neither reported again nor
+                # spoken: "say that again" goes out at most once per wake.
                 voice.expecting = True
                 await harness.frames(tone(4000), tone(10))
-                self.assertEqual(harness.topics(), ["hear.speech_start", "hear.cancel", "hear.missed"])
+                self.assertEqual(harness.topics(), ["hear.speech_start", "hear.cancel"])
                 self.assertEqual(len(self.synthesis.commands), 1)
                 voice.disarm()
         self.assertTrue(any("said sorry" in line for line in logs.output))
+        self.assertTrue(any("asking only once" in line for line in logs.output))
 
     async def test_attention_lapsing_after_the_wake_phrase_is_answered_aloud(self):
         harness = self.harness([WAKE])

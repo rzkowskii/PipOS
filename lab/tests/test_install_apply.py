@@ -15,6 +15,7 @@ import zlib
 from pathlib import Path
 from unittest.mock import patch
 
+from lab.source_id import stamp_verified_install
 from lab.vm import IMAGE, ROOT, VM, Timeout, machine_args, overlay
 
 
@@ -25,7 +26,13 @@ BUNDLE = Path(os.environ.get("BEING_INSTALL_BUNDLE", ROOT / "out/images/beingos-
 HARDWARE_BUNDLE = Path(os.environ.get("BEING_HARDWARE_BUNDLE", ROOT / "out/images/beingos-install-qa-lab.raucb")).resolve()
 INSTALLED_BUNDLE = "/mnt/updates/installed.raucb"
 LAB_BUNDLE = "/mnt/updates/lab.raucb"
-TARGET_BYTES = 8 << 30
+CHECKPOINT = "/mind/update-checkpoint/before-update.age"
+CHECKPOINT_KEY = "/run/install-qa-backup.key"
+# Sparse, with room for the live model packs, replacement space and both slots.
+TARGET_BYTES = 64 << 30
+# Both packing and reading back the full model set can take several minutes in TCG.
+# Use the same bound as the keyboard install tests.
+INSTALL_TIMEOUT = 900
 TARGET_MODEL = "PipOS target"
 TARGET_SERIAL = "BEINGOS-INSTALL-TEST"
 SECTOR = 512
@@ -33,6 +40,8 @@ PARTITIONS = ("esp", "system-a", "system-b", "models", "mind")
 BOOT_ENV = "/bootstate/EFI/BOOT/grubenv"
 FACT = "my telescope is called Ultraviolet"
 RECALL = "What do you remember about my telescope?"
+ERASED_FACT = "my bicycle is called Sablewillow"
+RECALL_ERASED = "What do you remember about my bicycle?"
 
 
 def read_gpt(disk, lba):
@@ -56,25 +65,6 @@ def read_gpt(disk, lba):
             partitions.append({"name": name.decode("utf-16-le").rstrip("\0"),
                                "id": str(uuid.UUID(bytes_le=part_guid)), "start": start, "end": end})
     return str(uuid.UUID(bytes_le=disk_guid)), partitions, first, last, alternate
-
-
-def squashfs_digest(path, partition):
-    with path.open("rb") as disk:
-        disk.seek(partition["start"] * SECTOR)
-        header = disk.read(96)
-        used, = struct.unpack_from("<Q", header, 40)
-        capacity = (partition["end"] + 1 - partition["start"]) * SECTOR
-        if header[:4] != b"hsqs" or not len(header) <= used <= capacity:
-            raise ValueError(f"invalid SquashFS on {path.name}, partition {partition['name']}")
-        digest = hashlib.sha256(header)
-        remaining = used - len(header)
-        while remaining:
-            chunk = disk.read(min(remaining, 1 << 20))
-            if not chunk:
-                raise ValueError(f"short read from {path}")
-            digest.update(chunk)
-            remaining -= len(chunk)
-        return digest.hexdigest()
 
 
 MOUNT_PROBE = """
@@ -105,7 +95,7 @@ class InstallerApply(unittest.TestCase):
         self.usb_disk = self.files / "usb.qcow2"
         self.installed_disk = self.files / "installed.qcow2"
 
-    def start(self, *, try_boot=False, usb_attached=False, updates=False):
+    def start(self, *, try_boot=False, usb_attached=False, updates=False, login=True):
         image, disk = (TRY_IMAGE, self.usb_disk) if try_boot else (self.target, self.installed_disk)
 
         def configure(*args, **kwargs):
@@ -138,6 +128,8 @@ class InstallerApply(unittest.TestCase):
         self.addCleanup(self.vm.destroy)
         with patch("lab.vm.machine_args", configure):
             self.vm.start(disk)
+        if not login:
+            return
         try:
             self.vm.login(120)
         except Timeout as error:
@@ -156,6 +148,17 @@ class InstallerApply(unittest.TestCase):
 
     def bootenv(self):
         return dict(line.split("=", 1) for line in self.sh(f"grub-editenv {BOOT_ENV} list").splitlines())
+
+    def schedule_previous(self, current, previous):
+        program = (
+            "from mind.update_slots import Rollback, rollback_plan, schedule_rollback; "
+            f"plan = rollback_plan(); assert plan == Rollback({current!r}, {previous!r}), plan; "
+            "schedule_rollback(plan)"
+        )
+        self.sh("PYTHONPATH=/usr/lib/being python3 -c " + shlex.quote(program))
+        env = self.bootenv()
+        self.assertEqual((env["GOOD"], env["ORDER"], env[f"{previous}_TRY"], env[f"{previous}_LEFT"]),
+                         (current, f"{previous} {current}", "1", "1"))
 
     def wait_good(self, slot):
         deadline = time.monotonic() + 180
@@ -178,6 +181,15 @@ class InstallerApply(unittest.TestCase):
                              "-n 100 --no-pager -o cat")
             self.fail(f"the installed being did not reach idle:\n{status}\n{error}")
 
+    def check_continuity(self):
+        output = "/run/installed-continuity-check"
+        self.sh(f"pip-diag continuity --out {output}", 60)
+        report = json.loads(self.sh(f"cat {output}/diag.json"))
+        checks = {item["id"]: item for item in report["checks"]}
+        for name in ("life", "archive", "slots", "baseline"):
+            item = checks[f"continuity.{name}"]
+            self.assertEqual(item["status"], "pass", item["evidence"])
+
     def update_channel(self, bundle):
         info = self.sh(f"rauc info --keyring=/etc/rauc/keyring.pem {shlex.quote(bundle)}", 90)
         info = re.sub(r"\x1b\[[0-9;]*m", "", info)
@@ -185,8 +197,41 @@ class InstallerApply(unittest.TestCase):
         self.assertIsNotNone(compatible, info)
         return compatible[1]
 
-    def exercise_updates(self, parts):
-        self.wait_good("A")
+    def check_update_checkpoint(self, life):
+        program = f"""
+import json
+import os
+import sqlite3
+import stat
+import subprocess
+import tarfile
+import tempfile
+from contextlib import closing
+from pathlib import Path
+
+checkpoint = Path({CHECKPOINT!r})
+assert stat.S_IMODE(checkpoint.stat().st_mode) == 0o600
+with tempfile.TemporaryDirectory(dir="/run") as folder:
+    archive = Path(folder) / "snapshot.tar"
+    subprocess.run(["age", "-d", "-i", {CHECKPOINT_KEY!r}, "-o", archive, checkpoint], check=True)
+    with tarfile.open(archive, "r:") as snapshot:
+        with snapshot.extractfile("manifest.json") as metadata:
+            manifest = json.load(metadata)
+        assert manifest["kind"] == "snapshot" and manifest["life_id"] == {life!r}
+        database = Path(folder) / "mind.db"
+        with snapshot.extractfile("mind.db") as source:
+            database.write_bytes(source.read())
+    with closing(sqlite3.connect(database)) as db:
+        assert db.execute("SELECT 1 FROM facts WHERE instr(lower(text), ?) LIMIT 1",
+                          ({FACT.lower()!r},)).fetchone()
+        for table in ("facts", "episodes"):
+            assert not db.execute(f"SELECT 1 FROM {{table}} WHERE instr(lower(text), ?) LIMIT 1",
+                                  ({ERASED_FACT.lower()!r},)).fetchone()
+os.unlink({CHECKPOINT_KEY!r})
+"""
+        self.sh("python3 -c " + shlex.quote(program), 60)
+
+    def exercise_updates(self, parts, life):
         self.sh("mount -t ext4 -o ro,noload /dev/vda /mnt/updates")
         for artifact, loaded in ((BUNDLE, INSTALLED_BUNDLE), (HARDWARE_BUNDLE, LAB_BUNDLE)):
             with artifact.open("rb") as bundle:
@@ -198,6 +243,8 @@ class InstallerApply(unittest.TestCase):
         self.assertEqual(installed_channel, "beingos-installed-v1")
         self.assertIn(f"compatible={installed_channel}", runtime.splitlines())
         before = self.bootenv()
+        self.sh(f"umask 077; age-keygen -o {CHECKPOINT_KEY} && "
+                f"age-keygen -y {CHECKPOINT_KEY} > /mind/backup-recipient.txt")
         slot_b = shlex.quote(f"/dev/disk/by-partuuid/{parts['system-b']}")
         sha_b = self.sh(f"sha256sum {slot_b}", 100)
         for fixture in ("lab.raucb", "unsigned.raucb"):
@@ -206,10 +253,14 @@ class InstallerApply(unittest.TestCase):
             if fixture == "lab.raucb":
                 self.assertIn("compatib", output.lower())
             self.assertEqual(self.bootenv(), before, output)
+            self.sh(f"test ! -e {CHECKPOINT}")
         self.assertEqual(self.sh(f"sha256sum {slot_b}", 100), sha_b)
         self.sh(f"rauc install {INSTALLED_BUNDLE}", 240)
         env = self.bootenv()
         self.assertEqual((env["ORDER"], env["GOOD"], env["B_OK"]), ("B A", "A", "1"))
+        self.assertEqual(env.get("PIP_LAST_UPDATE_SLOT"), "B")
+        self.assertIn("next restart", self.vm.converse("Did your update work?", 30))
+        self.check_update_checkpoint(life)
         print("  rejected the trusted lab channel and unsigned media, then staged the signed installed update", flush=True)
 
     def check_runtime(self):
@@ -292,10 +343,7 @@ class InstallerApply(unittest.TestCase):
             self.assertTrue(previous < part["start"] <= part["end"] <= last, part)
             self.assertEqual(part["start"] % ((1 << 20) // SECTOR), 0)
             previous = part["end"]
-        with TRY_IMAGE.open("rb") as disk:
-            source_root = read_gpt(disk, 1)[1][1]
-        copied = [squashfs_digest(self.target, part) for part in partitions[1:3]]
-        self.assertEqual(copied, [squashfs_digest(TRY_IMAGE, source_root)] * 2)
+        stamp_verified_install(TRY_IMAGE, self.target)
         return {part["name"]: part["id"] for part in partitions}
 
     def assert_binding(self, parts, active):
@@ -348,7 +396,7 @@ class InstallerApply(unittest.TestCase):
                     iops=0, iops_rd=0, iops_wr=0)
         before = self.written_target_bytes()
         self.begin_install(target, f"ERASE {target}")
-        self.await_install_text("Writing installation data.", 175)
+        self.await_install_text("Writing installation data.", INSTALL_TIMEOUT)
         deadline = time.monotonic() + 180
         # Two MiB alone would be the old GPT invalidation, before copying began.
         while self.written_target_bytes() - before < 4 << 20:
@@ -379,7 +427,7 @@ class InstallerApply(unittest.TestCase):
         now = self.target.stat()
         self.assertEqual((now.st_mtime_ns, now.st_blocks), (blank.st_mtime_ns, blank.st_blocks))
         self.begin_install(target, f"ERASE {target}")
-        self.assertIn("Installation complete.", self.install_result(0))
+        self.assertIn("Installation complete.", self.install_result(0, timeout=INSTALL_TIMEOUT))
         self.poweroff()
         parts = self.layout()
         self.unchanged_media()
@@ -389,14 +437,23 @@ class InstallerApply(unittest.TestCase):
         self.assert_binding(parts, "A")
         self.check_runtime()
         self.wait_ready()
+        # The local mind answers code at idle before the model is done opening.
+        # The installed health marker also requires a stable cortex on this boot.
+        self.wait_good("A")
         self.assertEqual(json.loads(self.sh("cat /models/manifest.json")), manifest)
         self.assertEqual(self.sh("sha256sum /models/reflex.gguf", 90).split()[0], manifest["reflex"]["sha256"])
         self.sh("python3 -c 'from urllib.request import urlopen; urlopen(\"http://127.0.0.1:8080/health\", timeout=5)'")
         self.assertEqual(self.vm.converse("What is your name?", 30), "My name is Pip.")
         self.assertEqual(self.vm.converse(f"Remember that {FACT}", 30), "Okay. I'll remember that.")
         self.assertIn(FACT, self.vm.converse(RECALL, 30))
+        self.assertEqual(self.vm.converse(f"Remember that {ERASED_FACT}", 30), "Okay. I'll remember that.")
+        self.assertIn(ERASED_FACT, self.vm.converse(RECALL_ERASED, 30))
         life = json.loads(self.sh("cat /mind/life.json"))["id"]
-        self.exercise_updates(parts)
+        program = 'from mind.continuity_baseline import write; assert write("/mind")'
+        self.sh("PYTHONPATH=/usr/lib/being python3 -c " + shlex.quote(program))
+        self.assertEqual(self.vm.converse("Forget that", 45), "Okay. That's forgotten.")
+        self.check_continuity()
+        self.exercise_updates(parts, life)
         self.poweroff()
 
         self.start()
@@ -405,14 +462,53 @@ class InstallerApply(unittest.TestCase):
         self.assertEqual(json.loads(self.sh("cat /mind/life.json"))["id"], life)
         self.assertIn(FACT, self.vm.converse(RECALL, 30))
         self.wait_good("B")
+        self.assertIn("running the last update", self.vm.converse("Did your update work?", 30))
+        self.check_continuity()
+        self.assertEqual(self.vm.converse(RECALL_ERASED, 30), "I don't remember anything about that.")
         self.poweroff()
-        print("  the installed disk booted both slots without USB and kept Pip's identity and memory", flush=True)
+        print("  the installed disk booted both slots without USB and preserved identity, memory and forgetting",
+              flush=True)
 
         self.start(usb_attached=True)
         self.assert_binding(parts, "B")
+        self.wait_good("B")
+        before = self.bootenv()
+        self.assertIn("previous system once", self.vm.converse("Go back to how you were", 30))
+        self.assertIn("left it", self.vm.converse("No", 30))
+        self.assertEqual(self.bootenv(), before)
+        self.schedule_previous("B", "A")
         self.poweroff()
         self.unchanged_media()
         print("  the confirmed installed slot still bound its own devices when USB was reattached", flush=True)
+
+        self.start()
+        self.assert_binding(parts, "A")
+        self.wait_ready()
+        self.wait_good("A")
+        self.assertEqual(json.loads(self.sh("cat /mind/life.json"))["id"], life)
+        self.assertIn("running a different system", self.vm.converse("Did your update work?", 30))
+        self.check_continuity()
+        self.assertIn(FACT, self.vm.converse(RECALL, 30))
+        self.assertEqual(self.vm.converse(RECALL_ERASED, 30), "I don't remember anything about that.")
+        self.schedule_previous("A", "B")
+        self.poweroff()
+        print("  the previous confirmed system survived a one-attempt rollback with the same archive", flush=True)
+
+        self.start(login=False)
+        # GRUB persists the decremented attempt before printing this banner.
+        # Stop the disposable guest before the health service can confirm.
+        self.vm.expect(r"PipOS slot B", 120)
+        self.vm.destroy()
+
+        self.start()
+        self.assert_binding(parts, "A")
+        self.wait_good("A")
+        env = self.bootenv()
+        self.assertEqual((env["GOOD"], env["B_TRY"], env["B_LEFT"]), ("A", "1", "0"))
+        self.check_continuity()
+        self.poweroff()
+        self.unchanged_media()
+        print("  the interrupted one-attempt rollback returned to the last confirmed system", flush=True)
 
 
 if __name__ == "__main__":

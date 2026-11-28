@@ -4,8 +4,9 @@ import tempfile
 import unittest
 import uuid
 import zlib
+from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from mind import install_apply as writer
 from mind.installer import GIB, installation_plan
@@ -99,11 +100,12 @@ class PublicationTests(unittest.TestCase):
         self.target = self.enterContext(target.open("r+b", buffering=0)).fileno()
         for offset in (0, self.sector, self.capacity - self.sector):
             os.pwrite(self.target, b"old records", offset)
-        self.enterContext(patch.object(writer.fcntl, "ioctl"))
+        self.ioctl = self.enterContext(patch.object(writer.fcntl, "ioctl"))
 
-    def write(self, progress, meter=None):
+    def write(self, progress, meter=None, previous_mind=None):
         writer.write_validated(self.target, self.capacity, self.sector, self.parts, self.records,
-                               self.images, self.source, len(self.root_bytes), progress, meter)
+                               self.images, self.source, len(self.root_bytes), progress, meter,
+                               previous_mind=previous_mind)
 
     def check_unbootable(self):
         for offset in (0, self.sector, self.capacity - self.sector):
@@ -141,6 +143,27 @@ class PublicationTests(unittest.TestCase):
                                    (offset, table), (self.capacity - self.sector, backup)):
             self.assertEqual(os.pread(self.target, len(expected), position), expected)
 
+    def test_reinstall_discards_the_old_archive_even_when_its_layout_differs(self):
+        old_parts = [dict(part) for part in self.parts]
+        old_parts[-1]["start_lba"] += writer.MIB // self.sector
+        ids = {part["name"]: uuid.uuid4() for part in old_parts}
+        mbr, primary, table, backup, offset = writer.gpt_records(
+            self.sector, self.capacity, old_parts, uuid.uuid4(), ids)
+        # Recover the previous archive location from the intact backup GPT.
+        damaged_primary = primary[:16] + bytes((primary[16] ^ 1,)) + primary[17:]
+        for data, position in ((mbr, 0), (damaged_primary, self.sector), (table, 2 * self.sector),
+                               (table, offset), (backup, self.capacity - self.sector)):
+            os.pwrite(self.target, data, position)
+        contents, old_mind = writer.install_disks.inspect_target(self.target, self.sector, self.capacity)
+        self.assertTrue(contents["being"])
+        self.assertEqual(old_mind, (6 * writer.MIB, writer.MIB))
+
+        self.write(lambda _: None, previous_mind=old_mind)
+        self.assertEqual(self.ioctl.call_args_list[:2], [
+            call(self.target, writer.BLKDISCARD, struct.pack("=QQ", *old_mind)),
+            call(self.target, writer.BLKDISCARD, struct.pack("=QQ", 5 * writer.MIB, writer.MIB)),
+        ])
+
     def test_meter_reports_whole_write_and_readback_without_changing_the_result(self):
         stages, readings = [], []
         self.write(stages.append, lambda done, total: readings.append((stages[-1], done, total)))
@@ -160,6 +183,39 @@ class PublicationTests(unittest.TestCase):
 
 
 class MindSeedAndDiscard(unittest.TestCase):
+    def test_encrypted_mind_stages_inner_ext4_on_mapper_and_marks_boot(self):
+        folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        ids = {name: uuid.uuid4() for name in writer.PARTITIONS}
+        parts = [{"name": "mind", "size_bytes": 1024 * writer.MIB}]
+        commands = []
+        mapper = Path("/dev/mapper/pipos-mind-fixture")
+        pin = bytearray(b"386047195275")
+        restored = []
+        with patch.object(writer, "empty_image"), \
+             patch.object(writer, "format_image", return_value=nullcontext(mapper)) as luks, \
+             patch.object(writer, "run_tool", side_effect=lambda *args: commands.append(args)):
+            images = writer.create_images(folder, parts, ids, 512, mind_pin=pin, restore=restored.append)
+        luks.assert_called_once_with(folder / "mind.img", ids["mind"], 512, pin)
+        self.assertEqual(images["mind"], folder / "mind.img")
+        self.assertEqual(restored, [folder / "restore-mind"])
+        self.assertEqual([command[0] for command in commands], ["mke2fs", "mount", "umount", "e2fsck"])
+        self.assertEqual(commands[0][-1], mapper)
+        self.assertEqual(commands[1], ("mount", "-t", "ext4", "-o", "nodev,nosuid,noexec", mapper, restored[0]))
+        self.assertEqual(commands[-1], ("e2fsck", "-f", "-n", mapper))
+
+    def test_encrypted_boot_marker_is_bound_to_mind_uuid(self):
+        folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        template = folder / "grub.cfg"
+        template.write_text("linux being.esp=INSTALL_ESP_UUID being.a=SLOT_A_UUID being.b=SLOT_B_UUID "
+                            "being.models=INSTALL_MODELS_UUID being.mind=INSTALL_MIND_UUID quiet\n")
+        ids = {name: uuid.uuid4() for name in writer.PARTITIONS}
+        with patch.object(writer, "BOOTLOADER", folder / "loader") as loader, \
+             patch.object(writer, "GRUB_TEMPLATE", template), patch.object(writer, "run_tool"):
+            loader.write_bytes(b"loader" * 200)
+            writer.boot_files(folder, ids, encrypted_mind=True)
+        config = (folder / "EFI" / "BOOT" / "grub.cfg").read_text()
+        self.assertIn(f"being.mind={ids['mind']} being.mind_crypt=1", config)
+
     def test_seeded_time_zone_is_checked_and_private(self):
         import json
         import tempfile

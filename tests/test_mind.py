@@ -20,6 +20,7 @@ from mind.network_policy import NetworkPolicy, save_policy
 from mind.skills import Skills
 from mind.turn import Config, Mind, speakable_time
 from sim.fake_cortex import FakeCortex, default_reply, render
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 mind.turn.log = lambda *parts: None  # keep test output readable
 
@@ -78,6 +79,7 @@ class MindCase(unittest.IsolatedAsyncioTestCase):
     reply = staticmethod(default_reply)
     delay = 0.0
     cfg = {}
+    guest_latch = False
 
     async def asyncSetUp(self):
         self.cortex_server = FakeCortex(delay=self.delay, reply=self.reply).start()
@@ -96,7 +98,8 @@ class MindCase(unittest.IsolatedAsyncioTestCase):
                      morning_brief=False)
         for key, value in self.cfg.items():
             setattr(cfg, key, value)
-        self.mind = Mind(self.bus, Cortex(self.cortex_server.url), self.memory, cfg, self.root)
+        self.mind = Mind(self.bus, Cortex(self.cortex_server.url), self.memory, cfg, self.root,
+                         guest_latch=self.guest_latch)
         self.task = asyncio.create_task(self.mind.run())
         await self.bus.wait("mind.ready")
         self.bus.push("body.lid", closed=False)
@@ -137,10 +140,8 @@ class Conversation(MindCase):
 
     async def test_a_turn_end_to_end(self):
         await self.hear(GREET_WITH_TOPIC, 1)
-        topics = [e["t"] for e in self.bus.sent]
-        # The face hears the emotion before the voice gets a word.
-        self.assertLess(topics.index("mind.emotion"), topics.index("say.request"))
-        self.assertEqual(self.bus.of("mind.emotion")[0]["name"], "joy")
+        self.assertEqual(self.bus.of("mind.emotion"), [])
+        self.assertEqual(self.bus.of("say.request")[0]["face_cue"], "joy")
 
         requests = self.bus.of("say.request")
         self.assertEqual([r["seq"] for r in requests], list(range(1, len(requests) + 1)))
@@ -225,7 +226,7 @@ class Conversation(MindCase):
         self.assertEqual(self.bus.of("being.sleep"), [], "must wait for the voice to finish")
         self.bus.push("say.done", final=True)
         await self.bus.wait("being.sleep")
-        self.assertEqual(self.bus.of("mind.emotion")[0]["name"], "sleepy")
+        self.assertEqual(self.bus.of("say.request")[0]["face_cue"], "sleepy")
 
 
 class Greetings(MindCase):
@@ -285,7 +286,10 @@ class Remembering(MindCase):
         self.bus.sent.clear()
         await self.hear("I am thinking about getting my cat a toy", 1)
         content = self.cortex_server.chats[0]["messages"][-1]["content"]
-        self.assertTrue(content.endswith('(you remember: they told you "my cat is called Tom")'), content)
+        # The note is current-turn evidence placed before the owner's words, so the
+        # cached history before it stays a stable prefix.
+        self.assertEqual(content, '(you remember: they told you "my cat is called Tom")\n'
+                                  "I am thinking about getting my cat a toy")
         self.assertIn("my cat is called Tom", said(self.bus))
 
     async def test_forget_that_is_real(self):
@@ -481,7 +485,12 @@ class Interrupting(MindCase):
         self.bus.push("state.changed", state="attending")
         self.bus.push("hear.final", text="tell me a long story", speaker="Richard")
         await self.bus.wait("say.request", 2)
+        # The voice reports the two clauses it played, then its stop.
+        token = self.bus.of("say.request")[0]["reply"]
+        for seq in (1, 2):
+            self.bus.push("say.played", reply=token, seq=seq)
         self.bus.push("mind.cancel")
+        self.bus.push("say.played", reply=token, final=True, stopped=True)
         await asyncio.sleep(0.4)
 
         requests = self.bus.of("say.request")
@@ -776,7 +785,7 @@ class WithoutACortex(MindCase):
         self.assertEqual(self.bus.of("mind.ready")[0]["cortex"], False)
         await self.hear(GREET_WITH_TOPIC, 1)
         self.assertIn("can't think right now", said(self.bus))
-        self.assertEqual(self.bus.of("mind.emotion")[0]["name"], "concern")
+        self.assertEqual(self.bus.of("say.request")[0]["face_cue"], "concern")
         # Commands still work, because they never needed the model.
         self.bus.sent.clear()
         await self.hear("Remember that my cat is called Tom", 1)
@@ -1014,6 +1023,18 @@ class BrokenReplies(MindCase):
     async def test_an_empty_reply_is_owned_up_to(self):
         await self.hear(GREET_WITH_TOPIC, 1)
         self.assertEqual(said(self.bus), "Sorry. I lost my thought.")
+        self.assertEqual(self.bus.of("mind.emotion"), [])
+        self.assertTrue(all(r["face_cue"] == "concern" for r in self.bus.of("say.request") if r["text"]))
+
+    async def test_accepted_clauses_can_change_the_spoken_expression(self):
+        self.cortex_server.reply = lambda _: "[joy] I found two entries. One is missing."
+        await self.hear("How did it go with my entries?", 1)
+        self.assertEqual([r["face_cue"] for r in self.bus.of("say.request") if r["text"]], ["joy", "concern"])
+
+    def test_clauses_do_not_react_to_quotes_or_negated_loss(self):
+        from mind.speech import clause_cue
+        self.assertEqual(clause_cue('"I could not find it," she said.', "neutral"), "neutral")
+        self.assertEqual(clause_cue("None of them is missing.", "joy"), "joy")
         self.assertEqual(self.mind.messages, [], "a failed turn leaves nothing in the context")
 
 
@@ -1037,7 +1058,7 @@ class Thinker(MindCase):
     async def test_thinking_markup_and_emoji_are_never_spoken(self):
         await self.hear(GREET_WITH_TOPIC, 1)
         self.assertEqual(said(self.bus), "Hi! Nice to see you .")
-        self.assertEqual(self.bus.of("mind.emotion")[0]["name"], "joy")
+        self.assertEqual(self.bus.of("say.request")[0]["face_cue"], "joy")
 
 
 class Reciter(MindCase):
@@ -1059,6 +1080,49 @@ class Reciter(MindCase):
         self.cortex_server.reply = lambda _: "[neutral] Fine (private"
         await self.hear("tell me more about Tom", 2)
         self.assertEqual(said(self.bus), "Tom sleeps well. Fine (private")
+
+
+class BodyReadings(MindCase):
+    async def test_room_light_answer_expires_without_another_body_report(self):
+        with patch("mind.turn._uptime", return_value=100.0) as uptime:
+            self.bus.push("body.state", lux=0)
+            await self.hear("Is it dark in here?", 1)
+            self.assertEqual(said(self.bus), "It's dark in here.")
+            self.bus.sent.clear()
+            uptime.return_value += mind.turn.BODY_STATE_MAX_AGE
+            await self.hear("How bright is it in here?", 1)
+            self.assertIn("I can't tell how much light", said(self.bus))
+        self.assertEqual(self.cortex_server.chats, [])
+
+    async def test_thermal_care_reports_expire_and_are_revoked_when_bodycare_leaves(self):
+        with patch("mind.turn._uptime", return_value=100.0) as uptime:
+            report = {"t": "body.care", "fan_rpm": 2000, "package_c": 72}
+            await self.mind._on_event(report)
+            self.assertEqual(self.mind._body_facts()["fan_rpm"], 2000)
+            uptime.return_value += mind.turn.BODY_CARE_MAX_AGE
+            await self.mind._on_event({"t": "body.state", "temp": 60})
+            self.assertEqual(self.mind._body_facts()["temp"], 60)
+            self.assertNotIn("package_c", self.mind._body_facts())
+            await self.mind._on_event(report)
+            await self.mind._on_event({"t": "organ.down", "name": "bodycare"})
+            self.assertNotIn("fan_rpm", self.mind._body_facts())
+
+    async def test_light_habit_needs_a_fresh_baseline_after_a_gap(self):
+        with patch("mind.turn._uptime", return_value=100.0) as uptime, \
+                patch.object(self.mind, "_queue_habit_event") as queue:
+            async def reading(lux):
+                await self.mind._on_event({"t": "body.state", "lux": lux})
+
+            await reading(60)
+            await reading(None)
+            await reading(0)
+            uptime.return_value += mind.turn.BODY_STATE_MAX_AGE
+            await reading(60)
+            queue.assert_not_called()
+
+            await reading(20)
+            await reading(0)
+            queue.assert_called_once_with("light.dark")
 
 
 class BodyClock(MindCase):
@@ -1100,6 +1164,8 @@ class Parroting(MindCase):
         self.cortex_server.reply = lambda _: next(replies)
         await self.hear("How are you feeling right now?", 1)
         self.assertEqual(said(self.bus), "Bright and warm, thank you.")
+        self.assertEqual(self.bus.of("mind.emotion"), [])
+        self.assertEqual({r["face_cue"] for r in self.bus.of("say.request") if r["text"]}, {"joy"})
         self.assertNotIn("How are you feeling right now?",
                          [m["content"] for m in self.mind.messages if m["role"] == "assistant"][-1])
 
@@ -1107,6 +1173,18 @@ class Parroting(MindCase):
         self.cortex_server.reply = lambda _: "[curiosity] How are you feeling right now?"
         await self.hear("How are you feeling right now?", 1)
         self.assertEqual(said(self.bus), "Sorry. I lost my thought.")
+        self.assertEqual(self.bus.of("mind.emotion"), [])
+        self.assertTrue(all(r["face_cue"] == "concern" for r in self.bus.of("say.request") if r["text"]))
+
+    async def test_accepted_clauses_can_change_the_spoken_expression(self):
+        self.cortex_server.reply = lambda _: "[joy] I found two entries. One is missing."
+        await self.hear("How did it go with my entries?", 1)
+        self.assertEqual([r["face_cue"] for r in self.bus.of("say.request") if r["text"]], ["joy", "concern"])
+
+    def test_clauses_do_not_react_to_quotes_or_negated_loss(self):
+        from mind.speech import clause_cue
+        self.assertEqual(clause_cue('"I could not find it," she said.', "neutral"), "neutral")
+        self.assertEqual(clause_cue("None of them is missing.", "joy"), "joy")
 
 
 class Age(MindCase):
@@ -1520,7 +1598,7 @@ class Waking(MindCase):
         self.bus.push("life.woke", **born)
         await self.hear("Hello", 1)
         self.assertEqual(said(self.bus), "Oh. Hello. I'm Pip. You're the very first person I've met.")
-        self.assertEqual(self.bus.of("mind.emotion")[-1]["name"], "joy")
+        self.assertEqual([r["face_cue"] for r in self.bus.of("say.request") if r.get("face_cue")][-1], "joy")
         # Said once only, however often the brainstem repeats the birth.
         self.bus.push("life.woke", **born)
         self.bus.sent.clear()
@@ -1543,7 +1621,7 @@ class Character(MindCase):
     """Canned replies carry a feeling, so the face acts as it speaks."""
 
     def emotion(self):
-        return self.bus.of("mind.emotion")[-1]["name"]
+        return [r["face_cue"] for r in self.bus.of("say.request") if r.get("face_cue")][-1]
 
     async def test_remembering_and_recalling_for_you_is_a_joy(self):
         await self.hear("Remember that my cat is called Tom", 1)
@@ -1838,10 +1916,74 @@ class HonestSelf(MindCase):
         self.assertEqual(self.cortex_server.chats, [])
 
     async def test_look_reply_follows_the_real_camera_state(self):
-        self.assertEqual(await self.say("Look at this"), "I can't see right now. My camera is switched off.")
-        self.bus.push("body.presence", present=True, lid_seq=None)
-        await asyncio.sleep(0.05)
-        self.assertIn("I can tell when someone is in front of me", await self.say("Look at this"))
+        unavailable = "I can't use my camera right now."
+        unclear = "I don't have a clear view of a face right now."
+        detected = "I can see a face in front of me. I can't tell whose it is."
+        self.assertEqual(await self.say("Look at this"), unavailable)
+
+        self.bus.push("body.lid", closed=False, seq=1)
+        self.bus.push("camera.policy", allowed=True, seq=3)
+        self.assertEqual(await self.say("Can you see me?"), unclear)
+        self.bus.push("body.presence", present=True, lid_seq=1, camera_seq=3)
+        self.assertEqual(await self.say("Can you see me?"), detected)
+        reply = next(event for event in self.bus.of("say.request") if event["text"])
+        self.assertTrue(reply.get("private"))
+        self.assertFalse(self.memory.contains("I can see a face"))
+
+        self.mind._presence_at -= mind.turn.PRESENCE_SECONDS
+        self.assertEqual(await self.say("Can you see me?"), unclear)
+        self.bus.push("camera.policy", allowed=False, seq=4)
+        self.bus.push("body.presence", present=True, lid_seq=1, camera_seq=3)
+        self.assertEqual(await self.say("Look at this"), unavailable)
+
+        self.bus.push("body.lid", closed=True, seq=2)
+        self.bus.push("body.lid", closed=False, seq=3)
+        self.bus.push("camera.policy", allowed=True, seq=5)
+        self.bus.push("body.presence", present=True, lid_seq=1, camera_seq=5)
+        self.bus.push("body.presence", present=True, lid_seq=3, camera_seq=3)
+        self.assertEqual(await self.say("Can you see me?"), unclear)
+        self.bus.push("body.presence", present=True, lid_seq=3, camera_seq=5)
+        self.assertEqual(await self.say("Can you see me?"), detected)
+        self.bus.push("organ.down", name="eyes")
+        self.assertEqual(await self.say("Can you see me?"), unavailable)
+        self.assertEqual(self.cortex_server.chats, [])
+
+    async def test_deliberate_look_accepts_only_the_requested_private_description(self):
+        self.bus.push("body.lid", closed=False, seq=1)
+        self.bus.push("camera.policy", allowed=True, seq=3)
+        turn = asyncio.create_task(self.say("Look at this"))
+        try:
+            request = await self.bus.wait("camera.look")
+            self.assertEqual(request["lid_seq"], 1)
+            fields = {"id": request["id"], "lid_seq": 1, "status": "ok"}
+            self.bus.push("camera.look_result", **{**fields, "id": "0" * 32}, description="Wrong request.")
+            self.bus.push("camera.look_result", **fields, description="[happy] Invalid markup.")
+            self.assertFalse(self.mind._camera_look_request.result.done())
+            self.bus.push("camera.look_result", **fields, description="A blue mug.")
+            self.assertEqual(await turn, "A blue mug.")
+        finally:
+            if not turn.done():
+                turn.cancel()
+                await asyncio.gather(turn, return_exceptions=True)
+        self.assertEqual(self.bus.of("say.request"), [
+            {"t": "say.request", "text": "A blue mug.", "seq": 1, "last": True, "private": True,
+             "camera_seq": 3, "lid_seq": 1},
+        ])
+        self.assertFalse(self.memory.contains("A blue mug"))
+        self.assertIsNone(self.mind.last_said)
+        self.assertEqual(self.cortex_server.chats, [])
+
+    async def test_lid_close_cancels_deliberate_look_without_describing_the_frame(self):
+        self.bus.push("body.lid", closed=False, seq=1)
+        self.bus.push("camera.policy", allowed=True, seq=3)
+        self.bus.push("state.changed", state="attending")
+        self.bus.push("hear.final", text="Look at this", speaker="Richard")
+        request = await self.bus.wait("camera.look")
+        self.bus.push("body.lid", closed=True, seq=2)
+        self.bus.push("camera.look_result", id=request["id"], lid_seq=1, status="ok", description="A mug.")
+        cancel = await self.bus.wait("camera.look_cancel")
+        self.assertEqual((cancel["id"], cancel["lid_seq"]), (request["id"], 1))
+        self.assertFalse(self.bus.of("say.request"))
 
     async def test_what_is_this_is_conversation_not_the_camera(self):
         await self.say("What is this?")

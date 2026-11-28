@@ -13,9 +13,22 @@
     X(void, LinkProgram, (GLuint program)) \
     X(void, GetProgramiv, (GLuint program, GLenum option, GLint *value)) \
     X(void, GetProgramInfoLog, (GLuint program, GLsizei capacity, GLsizei *length, GLchar *log)) \
+    X(void, DeleteProgram, (GLuint program)) \
     X(void, UseProgram, (GLuint program)) \
     X(void, GenVertexArrays, (GLsizei n, GLuint *arrays)) \
     X(void, BindVertexArray, (GLuint array)) \
+    X(void, GenBuffers, (GLsizei n, GLuint *buffers)) \
+    X(void, BindBuffer, (GLenum target, GLuint buffer)) \
+    X(void, BufferData, (GLenum target, GLsizeiptr size, const void *data, GLenum usage)) \
+    X(void, VertexAttribPointer, (GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void *pointer)) \
+    X(void, EnableVertexAttribArray, (GLuint index)) \
+    X(GLint, GetUniformLocation, (GLuint program, const GLchar *name)) \
+    X(void, Uniform1f, (GLint location, GLfloat x)) \
+    X(void, Uniform1i, (GLint location, GLint x)) \
+    X(void, Uniform2f, (GLint location, GLfloat x, GLfloat y)) \
+    X(void, Enable, (GLenum capability)) \
+    X(void, Disable, (GLenum capability)) \
+    X(void, BlendFunc, (GLenum source, GLenum destination)) \
     X(void, GenTextures, (GLsizei count, GLuint *textures)) \
     X(void, BindTexture, (GLenum target, GLuint texture)) \
     X(void, TexParameteri, (GLenum target, GLenum option, GLint value)) \
@@ -33,6 +46,9 @@ struct display {
     SDL_Surface *surface;
     int texture_width, texture_height;
     int headless_width, headless_height; /* no window: draw into the surface only (previews) */
+    const char *shader_version;
+    bool es;
+    GLuint program, geometry;
 #define DECLARE_GL(result, name, args) result (APIENTRYP name) args;
     CONSOLE_GL_FUNCTIONS(DECLARE_GL)
 #undef DECLARE_GL
@@ -99,11 +115,14 @@ static bool initialize_gl(struct display *display, bool es)
         return false;
     }
 
-    display->UseProgram(program);
+    display->es = es;
+    display->shader_version = version;
+    display->program = program;
+    display->UseProgram(display->program);
     // No vertex data is needed, but core OpenGL still requires a bound VAO.
-    GLuint geometry = 0, texture = 0;
-    display->GenVertexArrays(1, &geometry);
-    display->BindVertexArray(geometry);
+    GLuint texture = 0;
+    display->GenVertexArrays(1, &display->geometry);
+    display->BindVertexArray(display->geometry);
     display->GenTextures(1, &texture);
     display->BindTexture(GL_TEXTURE_2D, texture);
     display->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -153,8 +172,8 @@ static bool resize_surface(struct display *display, int width, int height)
 }
 
 /* Uploads rows [first_row, last_row) of the surface (all of it after a resize)
- * and shows the frame. A headless display only keeps the surface. */
-static void present_frame(struct display *display, int width, int height, bool visible, int first_row, int last_row)
+ * and draws the base frame. A headless display only keeps the surface. */
+static void draw_frame(struct display *display, int width, int height, bool visible, int first_row, int last_row)
 {
     if (!display->window)
         return;
@@ -177,5 +196,4 @@ static void present_frame(struct display *display, int width, int height, bool v
         display->ClearColor(0, 0, 0, 1);
         display->Clear(GL_COLOR_BUFFER_BIT);
     }
-    SDL_GL_SwapWindow(display->window);
 }

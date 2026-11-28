@@ -16,7 +16,7 @@ from unittest.mock import patch
 from lab import candidate_manifest
 
 ROOT = Path(__file__).resolve().parent.parent
-SUITES = ("l0", "l1", "l2", "l3", "l4", "l5", "l6", "apps", "model_pack", "installer", "try", "setup",
+SUITES = ("l0", "l1", "l2", "privacy", "l3", "l4", "l5", "l6", "apps", "model_pack", "installer", "try", "setup",
           "face_usb", "local_screen", "install_apply", "hardware", "hardware_image", "b43_firmware",
           "hardware_ssh", "network_modes", "wifi", "laptop_smoke", "iso", "voice_terminal", "cable_dev")
 # Suites whose media no candidate seals yet: run them by hand (lab/make-iso.sh, then
@@ -44,6 +44,7 @@ INSTALLED_CASE = ("lab.tests.test_install_apply.InstallerApply."
 
 RELEASE_ROLES = {role: "extra:installed_fixtures" if role == "installed_fixtures" else role
                  for role in BINDINGS if role not in OPTIONAL_ROLES}
+PUBLIC_IMAGE_ROLES = ("laptop_try", "laptop_factory", "factory", "try_image")
 
 
 def read_release(path):
@@ -56,27 +57,24 @@ def read_release(path):
 
 
 def bind_release(args):
-    overrides = [role for role in RELEASE_ROLES if getattr(args, role) is not None]
+    overrides = [role for role in (*RELEASE_ROLES, "laptop_try") if getattr(args, role) is not None]
     if overrides:
         raise ValueError("--manifest selects candidate files; remove explicit " + ", ".join(overrides))
     release, digest = read_release(args.manifest)
     candidate_manifest.check_source(ROOT, release["source"])
-    for role, key in RELEASE_ROLES.items():
+    artifact_roles = {**RELEASE_ROLES, "laptop_try": "laptop_try"}
+    if args.require_alba_retrain:
+        artifact_roles["laptop_factory"] = "laptop_factory"
+    for role, key in artifact_roles.items():
         record = release["artifacts"].get(key)
-        if not record:
-            raise ValueError(f"manifest is missing {key}")
+        if record is None:
+            if role in RELEASE_ROLES:
+                raise ValueError(f"manifest is missing {key}")
+            continue
         path = Path(record["path"])
         if path.is_absolute() or str(path) != os.path.normpath(str(path)):
             raise ValueError(f"{key} in manifest must use a normalized relative path")
         setattr(args, role, args.manifest.parent / path)
-    laptop = release["artifacts"].get("laptop_try")
-    if laptop:
-        if getattr(args, "laptop_try", None) is not None:
-            raise ValueError("--manifest selects candidate files; remove explicit laptop_try")
-        path = Path(laptop["path"])
-        if path.is_absolute() or str(path) != os.path.normpath(str(path)):
-            raise ValueError("laptop_try in manifest must use a normalized relative path")
-        args.laptop_try = args.manifest.parent / path
     return release, digest
 
 
@@ -96,14 +94,15 @@ def suite_names(with_wifi, with_laptop=False):
 def inputs(args):
     env = os.environ.copy()
     env.pop("BEING_FACE_SHA256", None)
+    env.pop("BEING_LAPTOP_CABLE_TRY_IMAGE", None)
     if args.face_sha256:
         env["BEING_FACE_SHA256"] = args.face_sha256
     records = {}
     identities = {}
-    for role, names in BINDINGS.items():
+    for role, names in {**BINDINGS, "laptop_factory": ()}.items():
         for name in names:
             env.pop(name, None)
-        path = getattr(args, role)
+        path = getattr(args, role, None)
         if path is None:
             if role in RELEASE_ROLES:
                 raise ValueError(f"provide --manifest or --{role.replace('_', '-')}")
@@ -130,6 +129,20 @@ def check_inputs(records):
     for role, record in records.items():
         if file_identity(Path(record["path"]).lstat()) != record["file_identity"]:
             raise ValueError(f"{role} changed during qualification: {record['path']}")
+
+
+def check_alba_report(log, role, record):
+    try:
+        evidence = json.loads(log.read_text())
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{role}: Alba audit did not produce a JSON report") from error
+    if not isinstance(evidence, dict) or evidence.get("image_sha256") != record["sha256"]:
+        raise ValueError(f"{role}: Alba audit did not report the sealed image digest")
+    voice = evidence.get("alba_retrain")
+    systems = voice.get("systems") if isinstance(voice, dict) else None
+    expected_slots = {"try-system"} if role in ("try_image", "laptop_try") else {"system-a", "system-b"}
+    if not isinstance(systems, dict) or systems.keys() != expected_slots:
+        raise ValueError(f"{role}: Alba audit did not report signed voice-pack evidence for every slot")
 
 
 def run_suite(name):
@@ -207,7 +220,7 @@ def stop_group(group):
     raise RuntimeError(f"process group {group} still has a live member after SIGKILL")
 
 
-def batch(command, env, log, timeout):
+def batch(command, env, log, timeout, *, cancelled=None):
     with log.open("x") as stream:
         proc = subprocess.Popen(command, cwd=ROOT, env=env, stdout=stream, stderr=subprocess.STDOUT,
                                 start_new_session=True)
@@ -216,8 +229,10 @@ def batch(command, env, log, timeout):
             return info is not None and info.si_pid == proc.pid
 
         try:
-            if not wait_until(worker_exited, timeout):
+            if not wait_until(lambda: (cancelled is not None and cancelled.is_set()) or worker_exited(), timeout):
                 return f"timed out after {timeout}s"
+            if cancelled is not None and cancelled.is_set():
+                return "interrupted"
         finally:
             try:
                 survivors = stop_group(proc.pid)
@@ -236,9 +251,24 @@ def batch(command, env, log, timeout):
         return "passed" if code == 0 else f"failed with exit {code}"
 
 
+def check_persona(release, baseline, result):
+    from lab.persona_eval import release_check
+
+    if baseline is None:
+        raise ValueError("A sealed candidate needs --persona-baseline with its accepted local judge report")
+    evidence, regressions = release_check(release, baseline, result, root=ROOT)
+    if regressions:
+        raise ValueError("Persona regression\n" + "\n".join(regressions))
+    return evidence
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, help="integrated release mode: sealed manifest from this checkout")
+    parser.add_argument("--require-alba-retrain", action="store_true",
+                        help="require the signed public Alba retrain on all sealed factory and Try images")
+    parser.add_argument("--persona-baseline", type=Path, help="accepted fixed-judge report for the previous persona")
+    parser.add_argument("--persona-result", type=Path, help="fixed-judge report for this sealed candidate")
     for role in BINDINGS:
         parser.add_argument("--" + role.replace("_", "-"), type=Path,
                             help={"wifi_image": "separate lab-only managed hwsim image",
@@ -248,6 +278,10 @@ def main(argv=None):
     parser.add_argument("--face-sha256", help="expected packaged face binary for the Try USB display test")
     parser.add_argument("--output", type=Path, help="new evidence directory (default unique under out/logs)")
     args = parser.parse_args(argv)
+    if args.require_alba_retrain and not args.manifest:
+        parser.error("--require-alba-retrain requires --manifest")
+    if (args.persona_baseline or args.persona_result) and not args.manifest:
+        parser.error("Persona evidence requires --manifest")
     if args.suite_timeout <= 0:
         parser.error("--suite-timeout must be positive")
     if args.face_sha256 and (len(args.face_sha256) != 64 or
@@ -255,18 +289,22 @@ def main(argv=None):
         parser.error("--face-sha256 must be a 64-character hex digest")
     try:
         release = None
+        persona_evidence = None
         if args.manifest:
             release, digest = bind_release(args)
+            if "lab/persona_eval.py" in release["source"]["files"] or args.persona_baseline or args.persona_result:
+                persona_evidence = check_persona(release, args.persona_baseline, args.persona_result)
         modules = suite_names(args.wifi_image is not None, getattr(args, "laptop_try", None) is not None)
         env, records = inputs(args)
         if release:
-            for role, key in RELEASE_ROLES.items():
+            sealed_roles = {role: RELEASE_ROLES.get(role, role) for role in records if role != "wifi_image"}
+            for role, key in sealed_roles.items():
                 expected = release["artifacts"][key]
                 if any(records[role][field] != expected[field] for field in ("bytes", "sha256")):
                     raise ValueError(f"{key} does not match the sealed manifest: {records[role]['path']}")
-            laptop = release["artifacts"].get("laptop_try")
-            if laptop and any(records["laptop_try"][field] != laptop[field] for field in ("bytes", "sha256")):
-                raise ValueError(f"laptop_try does not match the sealed manifest: {records['laptop_try']['path']}")
+        if "laptop_try" in records and not release:
+            candidate_manifest.require_non_cable({"laptop_try": Path(records["laptop_try"]["path"])})
+            check_inputs(records)
         if args.output:
             output = args.output.resolve()
             if release and any(output.is_relative_to(ROOT / scope)
@@ -277,25 +315,43 @@ def main(argv=None):
             logs = ROOT / "out/logs"
             logs.mkdir(parents=True, exist_ok=True)
             output = Path(tempfile.mkdtemp(prefix="candidate-", dir=logs))
-    except (OSError, ValueError, TypeError, KeyError) as error:
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
         parser.error(str(error))
 
     print(f"Candidate evidence: {output}", flush=True)
     if args.wifi_image is None:
         print("Separate Wi-Fi hwsim qualification was not selected.", flush=True)
     batches = {}
+    alba_audits = {}
     if release:
-        for role in ("factory", "try_image", "laptop_try"):
+        for role in PUBLIC_IMAGE_ROLES:
             if role in records:
-                batches["inspect_" + role] = [sys.executable, "-m", "lab.hardware_image", records[role]["path"]]
+                name = "inspect_" + role
+                command = [sys.executable, "-m", "lab.hardware_image", records[role]["path"]]
+                if role in candidate_manifest.LAPTOP_IMAGES:
+                    command.append("--require-ordinary")
+                if args.require_alba_retrain:
+                    command.append("--require-alba-retrain")
+                    alba_audits[name] = role
+                batches[name] = command
     for module in modules:
         batches[module] = [sys.executable, "-m", "lab.candidate_tests", "_worker", module]
     report = {"inputs": records, "wifi_selected": args.wifi_image is not None,
               "laptop_selected": "laptop_try" in records, "face_sha256": args.face_sha256,
               "suite_timeout_seconds": args.suite_timeout, "suites": dict.fromkeys(batches, "pending")}
+    if alba_audits:
+        report["alba_retrain_reports"] = {}
+    report["installed_update_scope"] = {
+        "channel": "beingos-installed-v1",
+        "suite": "lab.tests.test_install_apply",
+        "input_roles": ["factory", "try_image", "factory_bundle", "installed_bundle", "installed_fixtures"],
+        "laptop_channel_covered": False,
+    }
     if release:
         report["manifest"] = {"path": str(args.manifest.absolute()), "sha256": digest,
                               "source_sha256": release["source"]["sha256"], "checked_after_suites": False}
+    if persona_evidence:
+        report["persona"] = persona_evidence
     def save():
         staging = output / ".report.json"
         staging.write_text(json.dumps(report, indent=2) + "\n")
@@ -313,6 +369,10 @@ def main(argv=None):
                 check_inputs(records)
                 status = batch(command, dict(env, TMPDIR=scratch), log, args.suite_timeout)
                 check_inputs(records)
+                if status == "passed" and module in alba_audits:
+                    role = alba_audits[module]
+                    check_alba_report(log, role, records[role])
+                    report["alba_retrain_reports"][role] = log.name
             except (KeyboardInterrupt, OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
                 status = "interrupted" if isinstance(error, KeyboardInterrupt) else str(error)
             report["suites"][module] = status

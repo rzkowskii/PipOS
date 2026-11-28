@@ -22,6 +22,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from lab.candidate_parity import laptop_violations
 from mind import install_apply
 from tests.test_build_try_bench import try_image_options
 from tests.test_os_image import _Shim, find_openssl3, unit, values
@@ -170,8 +171,10 @@ class CableSshdConfig(unittest.TestCase):
     """os/package/being/cable/sshd_config against the Mac's own OpenSSH."""
 
     def setUp(self):
-        # sshd's StrictModes refuses keys under a world-writable folder such as /tmp.
-        self.folder = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        # sshd applies StrictModes to the key's parent directories. Keep
+        # this fixture under the user's home even when TMPDIR is shared.
+        scratch = self.enterContext(tempfile.TemporaryDirectory(prefix=".pipos-sshd-", dir=Path.home()))
+        self.folder = Path(scratch).resolve()
         keygen(self.folder / "ssh_host_ed25519_key")
         self.client = keygen(self.folder / "client")
         self.write_keys(peers=self.peers())
@@ -200,7 +203,7 @@ class CableSshdConfig(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_effective_settings_allow_only_root_by_key_from_link_local(self):
-        for address in ("169.254.162.20", "10.0.2.2", "fe80::1", "fe80::1%1", LINK_LOCAL):
+        for address in ("169.254.10.10", "10.0.2.2", "fe80::1", "fe80::1%1", LINK_LOCAL):
             with self.subTest(address=address):
                 result = subprocess.run([SSHD, "-T", "-f", str(self.config()), "-C",
                                          f"user=root,host=mac,addr={address}"],
@@ -538,7 +541,8 @@ class CableBuildPlumbing(unittest.TestCase):
         checks = [call for call in calls if "laptop-check" in call or "laptop-verify" in call]
         self.assertEqual(len(checks), 2)
         for call in checks:
-            self.assertEqual(call[-3:], ["/work/output/laptop-cable", "0", "1"])
+            # Arguments: tree, maintenance, cable, diagnostic.
+            self.assertEqual(call[-4:], ["/work/output/laptop-cable", "0", "1", "0"])
         for call in calls:
             if call[:3] == ["--context", "colima-beingos", "run"]:
                 self.assertIn("BEINGOS_CABLE_KEYS=/work/beingos-cable", call)
@@ -580,7 +584,7 @@ class CableBuildPlumbing(unittest.TestCase):
         self.assertFalse([call for call in self.calls() if "laptop-bundle" in call])
         result = self.build("candidate", "cable-test", BEING_LAPTOP_CABLE="1")
         self.assertEqual(result.returncode, 2)
-        self.assertIn("never carries the cable development link", result.stderr)
+        self.assertIn("never carries cable or diagnostic development tooling", result.stderr)
         self.assertFalse((self.root / "out/candidates").exists())
 
     def test_try_image_refuses_a_cable_stick_that_is_not_a_laptop_stick(self):
@@ -681,7 +685,8 @@ class CableNeverInstalls(unittest.TestCase):
         self.assertIn(pattern, (ROOT / "lab/build.sh").read_text().split("laptop_bundle() {", 1)[1])
         candidate = (ROOT / "lab/candidate-build.sh").read_text()
         self.assertIn("BR2_PACKAGE_BEING_CABLE_DEV", candidate)
-        self.assertIn("usr/share/being/cable", candidate.split("candidate_laptop_verify() {", 1)[1])
+        self.assertIn('candidate_parity.py" laptop-check "$t"', candidate.split("candidate_laptop_verify() {", 1)[1])
+        self.assertTrue(laptop_violations(["usr/share/being/cable"]))
 
 
 @unittest.skipUnless(SSH_KEYGEN and shutil.which("bash"), "needs ssh-keygen and bash on the Mac")

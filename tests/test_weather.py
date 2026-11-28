@@ -203,7 +203,7 @@ class WeatherHTTPTest(unittest.TestCase):
 
     def test_unapproved_endpoint_never_creates_a_connection(self):
         with patch.object(socket, "getaddrinfo") as resolve:
-            with self.assertRaisesRegex(ValueError, "Unknown weather service endpoint"):
+            with self.assertRaisesRegex(ValueError, "Unknown public lookup endpoint"):
                 weather._fetch_json("example.com", "/v1/forecast", {}, 2.5)
             resolve.assert_not_called()
 

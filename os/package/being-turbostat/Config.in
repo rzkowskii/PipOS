@@ -1,0 +1,9 @@
+config BR2_PACKAGE_BEING_TURBOSTAT
+	bool "turbostat from the selected Linux kernel"
+	depends on BR2_i386 || BR2_x86_64
+	depends on BR2_LINUX_KERNEL
+	depends on BR2_USE_MMU
+	select BR2_PACKAGE_LIBCAP
+	help
+	  Build turbostat from the exact pinned Linux source tree used for the
+	  diagnostic kernel. No independent userspace source is downloaded.

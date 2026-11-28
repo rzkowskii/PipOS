@@ -13,11 +13,13 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 from . import install_disks
 from .initiative import InitiativePolicy, save_policy
+from .look import Look, seed as seed_appearance
+from .mind_encryption import format_image, valid_pin
 from .profile import Profile, save_profile
 from .try_mode import is_try_boot
 
@@ -41,8 +43,8 @@ GPT_ENTRY_SIZE = 128
 CHUNK = MIB
 PARTITIONS = ("esp", "system-a", "system-b", "models", "mind")
 TYPES = (
-    "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
-    "0fc63daf-8483-4772-8e79-3d69d8477de4",
+    install_disks.ESP_TYPE,
+    install_disks.LINUX_TYPE,
 )
 
 
@@ -253,13 +255,18 @@ def empty_image(path, length):
         output.truncate(length)
 
 
-def boot_files(directory, ids):
+def boot_files(directory, ids, *, encrypted_mind=False):
     root = directory / "EFI" / "BOOT"
     root.mkdir(parents=True)
     if not BOOTLOADER.is_file() or BOOTLOADER.stat().st_size <= 512:
         raise ValueError("The Try USB has no packaged UEFI loader.")
     shutil.copyfile(BOOTLOADER, root / "bootx64.efi")
     config = GRUB_TEMPLATE.read_text()
+    if encrypted_mind:
+        marker = "being.mind=INSTALL_MIND_UUID "
+        if config.count(marker) != 1:
+            raise ValueError("The installed boot template has no unique memory option.")
+        config = config.replace(marker, marker + "being.mind_crypt=1 ")
     tokens = ("INSTALL_ESP_UUID", "SLOT_A_UUID", "SLOT_B_UUID", "INSTALL_MODELS_UUID", "INSTALL_MIND_UUID")
     for token, name in zip(tokens, PARTITIONS):
         if token not in config:
@@ -271,10 +278,11 @@ def boot_files(directory, ids):
              "A_TRY=0", "A_LEFT=0", "B_OK=1", "B_TRY=0", "B_LEFT=0")
 
 
-def restore_mind_image(path, directory, restore):
+def restore_mind_image(path, directory, restore, *, loop=True):
     mind = directory / "restore-mind"
     mind.mkdir(mode=0o700)
-    run_tool("mount", "-t", "ext4", "-o", "loop,nodev,nosuid,noexec", path, mind)
+    options = "loop,nodev,nosuid,noexec" if loop else "nodev,nosuid,noexec"
+    run_tool("mount", "-t", "ext4", "-o", options, path, mind)
     try:
         restore(mind)
     finally:
@@ -298,7 +306,8 @@ def seed_skills(directory, skills):
     os.chmod(path, 0o600)
 
 
-def create_images(directory, parts, ids, sector, *, profile=None, initiative=None, restore=None, skills=None):
+def create_images(directory, parts, ids, sector, *, profile=None, initiative=None, restore=None, skills=None,
+                  appearance=None, mind_pin=None):
     images = {}
     for part in parts:
         name = part["name"]
@@ -308,7 +317,7 @@ def create_images(directory, parts, ids, sector, *, profile=None, initiative=Non
         path = directory / f"{name}.img"
         empty_image(path, length)
         if name == "esp":
-            boot_files(directory, ids)
+            boot_files(directory, ids, encrypted_mind=mind_pin is not None)
             volume_id = f"{uuid.uuid4().int & 0xffffffff:08x}"
             # One sector per cluster keeps this FAT32 volume above the
             # minimum cluster count even on a 4096-byte logical sector disk.
@@ -324,7 +333,7 @@ def create_images(directory, parts, ids, sector, *, profile=None, initiative=Non
                     raise OSError(f"The staged EFI file {name_on_esp} could not be verified.")
         else:
             populate = ("-d", MODELS) if name == "models" else ()
-            if name == "mind" and (profile is not None or initiative is not None or skills is not None):
+            if name == "mind" and any(value is not None for value in (profile, initiative, skills, appearance)):
                 seed = directory / "mind-seed"
                 seed.mkdir(mode=0o700)
                 if profile is not None:
@@ -333,13 +342,19 @@ def create_images(directory, parts, ids, sector, *, profile=None, initiative=Non
                     save_policy(seed, initiative)
                 if skills is not None:
                     seed_skills(seed, skills)
+                if appearance is not None:
+                    seed_appearance(seed, appearance)
                 populate = ("-d", seed)
-            run_tool("mke2fs", "-q", "-F", "-t", "ext4", "-b", "4096", "-m", "0",
-                     "-L", name, "-U", str(uuid.uuid4()), "-E", "nodiscard,lazy_itable_init=1",
-                     *populate, path)
-            if name == "mind" and restore is not None:
-                restore_mind_image(path, directory, restore)
-            run_tool("e2fsck", "-f", "-n", path)
+            protected = name == "mind" and mind_pin is not None
+            volume = format_image(path, ids["mind"], sector, mind_pin) if protected else nullcontext(path)
+            with volume as filesystem:
+                features = ("-O", "encrypt") if name == "mind" else ()
+                run_tool("mke2fs", "-q", "-F", "-t", "ext4", "-b", "4096", "-m", "0", *features,
+                         "-L", name, "-U", str(uuid.uuid4()), "-E", "nodiscard,lazy_itable_init=1",
+                         *populate, filesystem)
+                if name == "mind" and restore is not None:
+                    restore_mind_image(filesystem, directory, restore, loop=not protected)
+                run_tool("e2fsck", "-f", "-n", filesystem)
         images[name] = path
     return images
 
@@ -412,21 +427,22 @@ def bytes_to_write(images, parts, root_size):
     return total
 
 
-def discard_mind(target, parts, sector):
-    """Tell the disk the old memory range is free, so a previous being's data is
-    not left in blocks the new, sparse mind image never writes. Best effort: a
-    disk without discard support keeps the old blocks until they are reused."""
-    for part in parts:
-        if part["name"] == "mind":
-            try:
-                fcntl.ioctl(target, BLKDISCARD, struct.pack("=QQ", part["start_lba"] * sector, part["size_bytes"]))
-            except OSError:
-                return False
-            return True
-    return False
+def discard_mind(target, parts, sector, previous=None):
+    """Best-effort discard of the previous archive and the sparse new mind range."""
+    part = next(part for part in parts if part["name"] == "mind")
+    new = (part["start_lba"] * sector, part["size_bytes"])
+    ranges = (previous, new) if previous is not None and previous != new else (new,)
+    accepted = True
+    for start, length in ranges:
+        try:
+            fcntl.ioctl(target, BLKDISCARD, struct.pack("=QQ", start, length))
+        except OSError:
+            accepted = False
+    return accepted
 
 
-def write_validated(target, capacity, sector, parts, records, images, source, root_size, progress, meter=None):
+def write_validated(target, capacity, sector, parts, records, images, source, root_size, progress, meter=None,
+                    *, previous_mind=None):
     mbr, primary, table, backup, backup_table = records
     total = bytes_to_write(images, parts, root_size) if meter is not None else 0
 
@@ -438,7 +454,7 @@ def write_validated(target, capacity, sector, parts, records, images, source, ro
     # Announced first: from here on an error leaves a disk that no longer starts.
     progress("Writing installation data.")
     invalidate_boot()
-    discard_mind(target, parts, sector)
+    discard_mind(target, parts, sector, previous_mind)
     written = progress_counter(meter, total)
     verification = []
     for part in parts:
@@ -492,7 +508,7 @@ def write_validated(target, capacity, sector, parts, records, images, source, ro
 
 
 def apply_installation(plan, recheck, *, progress=print, meter=None, profile=None, initiative=None, restore=None,
-                       skills=None):
+                       skills=None, appearance=None, expected_contents=None, mind_pin=None):
     """Install from the Try USB. Validate any mind content before claiming the disk.
 
     `progress` receives each stage message and the optional `meter` receives
@@ -505,10 +521,13 @@ def apply_installation(plan, recheck, *, progress=print, meter=None, profile=Non
     if ((profile is not None and not isinstance(profile, Profile))
             or (initiative is not None and not isinstance(initiative, InitiativePolicy))
             or (restore is not None and not callable(restore))
-            or (skills is not None and not isinstance(skills, dict))):
+            or (skills is not None and not isinstance(skills, dict))
+            or (appearance is not None and not isinstance(appearance, Look))):
         raise ValueError("Invalid installed mind initialization.")
-    if restore is not None and (profile is not None or initiative is not None or skills is not None):
+    if restore is not None and any(value is not None for value in (profile, initiative, skills, appearance)):
         raise ValueError("Choose trial settings or a backup for the new installation.")
+    if mind_pin is not None and not valid_pin(mind_pin):
+        raise ValueError("Invalid mind unlock PIN.")
     sector, capacity = geometry(plan)
     parts = plan["partitions"]
     disk_id = uuid.uuid4()
@@ -522,8 +541,11 @@ def apply_installation(plan, recheck, *, progress=print, meter=None, profile=Non
         progress("Preparing the installation files in RAM.")
         with staging(bytes_to_stage) as directory:
             images = create_images(directory, parts, ids, sector, profile=profile, initiative=initiative,
-                                   restore=restore, skills=skills)
+                                   restore=restore, skills=skills, appearance=appearance, mind_pin=mind_pin)
             with claim_target(plan, recheck, sector, capacity) as target:
+                contents, previous_mind = install_disks.inspect_target(target, sector, capacity)
+                if expected_contents is not None and contents != expected_contents:
+                    raise ValueError("The disk contents changed after confirmation. Review them again.")
                 write_validated(target, capacity, sector, parts, records, images, source, root_size, progress,
-                                meter)
+                                meter, previous_mind=previous_mind)
     return {"disk_guid": str(disk_id), "partuuids": {name: str(value) for name, value in ids.items()}}

@@ -25,6 +25,8 @@ class Reply:
     confirm: "Confirm | None" = None
     action: str | None = None       # "poweroff" | "reboot" | None: run by the mind after line
     logged: str | None = None       # action-log kind, e.g. "list.add"
+    settings_page: str | None = None
+    private: bool = False           # local speech/captions only
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,8 @@ class Confirm:
     # True for what cannot be undone (switching off, clearing a list): only a
     # plain yes confirms, never "okay" or "sure".
     strict: bool = False
+    plain_yes: bool = False         # Only the word "yes" answers this question.
+    after_speech: bool = False      # Begin expiry after Voice completes the question.
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,10 @@ class Context:
     voice: Mapping[str, Any]        # latest voice.level
     send: Callable[..., Awaitable[None]]   # bus send(topic, **fields)
     name: str = "pip"               # the being's own name, taken off the front of what was said
+    calc_panel: bool = False        # surface available for the calculator's live result
+    ponder: Any = None              # the owner's night queue, when available
+    current_body: Callable[[], Mapping[str, Any] | None] | None = None
+    library_focus: Any = None       # the current page in the public offline guide
 
 
 def is_guest(ctx):

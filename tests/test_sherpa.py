@@ -227,6 +227,13 @@ class FakeLibrary:
         self.configs.setdefault("speeds", []).append(round(speed, 4))
         if self.error:
             return None
+        cfg = options.contents
+        if cfg.phoneme_codepoints_num_sentences > 0:
+            # Pre-phonemized input wins over the text, as in sherpa-onnx 2.x.
+            lengths = cfg.phoneme_codepoints_lens[:cfg.phoneme_codepoints_num_sentences]
+            spoken = "".join(map(chr, cfg.phoneme_codepoints[:sum(lengths)]))
+            self.configs.setdefault("phonemes", []).append((text, lengths, spoken))
+            text = spoken.encode()
         words = len(text.split())
         count = int(self.tts_rate * self.tts_seconds_per_word * words / speed)
         if self.delay:

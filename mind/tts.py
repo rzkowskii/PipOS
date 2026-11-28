@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import wave
 from array import array
+from collections import OrderedDict
 from contextlib import suppress
 from pathlib import Path
 
@@ -20,6 +21,70 @@ MAX_SEGMENT_METADATA_BYTES = 16 * 1024
 _MAX_WAV_BYTES = 2 * 1024 * 1024
 _WAV_HEADER = struct.Struct("<4sI4s4sIHHIIHH4sI")
 _SEGMENT = re.compile(rb"([a-z][a-z0-9]{0,7}):(0|[1-9][0-9]{0,2})\.([0-9]{3})")
+
+# These exact, product-authored clauses can be retained with the current voice.
+# Model output and owner words never become new cache keys.
+STOCK_LINES = frozenset((
+    "Okay.",
+    "Okay, I've left it.",
+    "Sorry.",
+    "I lost my thought.",
+    "Use the arrow keys and Enter.",
+    "Nothing is ringing right now.",
+    "I can't see right now.",
+    "My camera is switched off.",
+))
+
+
+class WavCache:
+    """One engine's small, RAM-only bank of generated clauses."""
+
+    MAX_BYTES = 1_048_576
+    MAX_CLIP = 196_608
+
+    def __init__(self):
+        self.engine = None
+        self.data = OrderedDict()
+        self.size = 0
+
+    def clear(self, engine=None):
+        self.engine = engine
+        self.data.clear()
+        self.size = 0
+
+    def restore(self, engine, key, target):
+        if self.engine is not engine:
+            self.clear(engine)
+        clip = self.data.get(key)
+        if clip is None:
+            return False
+        try:
+            Path(target).write_bytes(clip)
+        except OSError:
+            return False
+        self.data.move_to_end(key)
+        return True
+
+    def remember(self, engine, key, source):
+        if self.engine is not engine or key in self.data:
+            return
+        try:
+            with Path(source).open("rb") as stream:
+                clip = stream.read(self.MAX_CLIP + 1)
+        except OSError:
+            return
+        self.remember_bytes(engine, key, clip)
+
+    def remember_bytes(self, engine, key, clip):
+        if self.engine is not engine or key in self.data:
+            return
+        if len(clip) > self.MAX_CLIP or clip[:4] != b"RIFF" or clip[8:12] != b"WAVE":
+            return
+        while self.size + len(clip) > self.MAX_BYTES:
+            _, old = self.data.popitem(last=False)
+            self.size -= len(old)
+        self.data[key] = clip
+        self.size += len(clip)
 
 
 def available_voices():

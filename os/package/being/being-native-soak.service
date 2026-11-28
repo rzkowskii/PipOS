@@ -1,0 +1,29 @@
+[Unit]
+Description=PipOS owner-selected native endurance observation
+ConditionKernelCommandLine=being.installed=1
+ConditionPathExists=/mind/log/soak/current.json
+ConditionPathExists=!/mind/.being-restore-in-progress
+RequiresMountsFor=/mind /models
+After=being-boot-health.service being-brainstem.service being-face.service being-mind.service being-voice.service being-cortex.service
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/usr/lib/being PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m mind.native_soak collect
+RuntimeMaxSec=7d 2h 5min
+TimeoutStopSec=8s
+Nice=15
+CPUWeight=20
+IOWeight=20
+ProtectSystem=strict
+ReadWritePaths=/mind/log/soak
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

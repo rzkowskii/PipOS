@@ -15,8 +15,8 @@ import importlib
 import inspect
 import logging
 
-ORDER = ("readback", "calc", "units", "lists", "play", "body_talk", "device", "doctor",
-         "action_log", "diary", "voice_engines")
+ORDER = ("readback", "calc", "units", "lists", "play", "body_talk", "device", "removable_media", "keep", "doctor",
+         "action_log", "diary", "ponder", "voice_engines", "care_routes", "library", "night_speech")
 
 log = logging.getLogger("being.everyday")
 

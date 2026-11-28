@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from mind.dream_store import journal
 from tests import test_mind
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 
 class DreamLifecycle(test_mind.MindCase):

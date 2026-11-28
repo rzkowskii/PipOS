@@ -12,6 +12,7 @@ from mind.initiative import InitiativePolicy, QuietHours, load_policy as load_in
 from mind.memory import Memory
 from mind.profile import Profile, load_profile, save_profile
 from mind.retention import MemoryPolicy, save_policy
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 
 ROOT = Path(__file__).resolve().parents[1]

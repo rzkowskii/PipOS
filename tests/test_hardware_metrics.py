@@ -239,6 +239,7 @@ class HardwareMetricsTests(unittest.TestCase):
             "memory_available_min_kib": 80000, "package_power_mean_watts": 2,
             "cpu_frequency_mean_khz": 2000000, "temperature_max_c": None, "fan_max_rpm": None,
             "cpu_temperature_max_c": None, "cpu_core_throttle_max_events": 2,
+            "cpu_package_throttle_max_events": None,
             "battery_discharge_mean_watts": None, "wifi_signal_mean_dbm": None, "wifi_connected_percent": None,
             "network": {"wifi0": {"rx_bytes": 350, "tx_bytes": None, "rx_errors": None, "tx_errors": None}},
             "disk": {"sda": {"read_bytes": 3072, "write_bytes": 7680, "busy_ms": 20}},
@@ -266,6 +267,71 @@ class HardwareMetricsTests(unittest.TestCase):
         battery, = metrics.power_info(self.root / "sys")["batteries"]
         self.assertNotIn("health_percent", battery)
         self.assertNotIn("cycles", battery, "0 means the controller does not count")
+
+    def test_charge_is_a_share_of_todays_full_not_of_the_design(self):
+        # 25 November 2026, the laptop's Smart Battery (sbs): capacity is
+        # the absolute state of charge, so a full pack read 80%.
+        for name, text in (("type", "Battery"), ("capacity", "80"), ("status", "Full"),
+                           ("charge_now", "4593000"), ("charge_full", "4629000"),
+                           ("charge_full_design", "5770000"), ("cycle_count", "71")):
+            self.write(f"sys/class/power_supply/BAT0/{name}", text + "\n")
+        battery, = metrics.power_info(self.root / "sys")["batteries"]
+        self.assertEqual((battery["charge_percent"], battery["health_percent"]), (100, 80))
+        self.write("sys/class/power_supply/BAT0/status", "Charging\n")
+        battery, = metrics.power_info(self.root / "sys")["batteries"]
+        self.assertEqual(battery["charge_percent"], 99)
+        self.write("sys/class/power_supply/BAT0/status", "Discharging\n")
+        self.write("sys/class/power_supply/BAT0/charge_now", "2314500\n")
+        self.write("sys/class/power_supply/BAT0/capacity", "40\n")
+        battery, = metrics.power_info(self.root / "sys")["batteries"]
+        self.assertEqual(battery["charge_percent"], 50)
+        (self.root / "sys/class/power_supply/BAT0/charge_now").unlink()
+        battery, = metrics.power_info(self.root / "sys")["batteries"]
+        self.assertEqual(battery["charge_percent"], 40, "capacity when there is nothing better")
+
+    def test_a_window_reads_the_battery_at_its_ends_and_every_15_s_not_every_sample(self):
+        # 25 November 2026: one Smart Battery read costs about 126 EC
+        # interrupts; a 60 s window at 1 s would read it 61 times.
+        bat = "sys/class/power_supply/BAT0"
+        for name, text in (("type", "Battery"), ("status", "Discharging"), ("power_now", "9000000"),
+                           ("charge_now", "2000000"), ("charge_full", "4000000")):
+            self.write(f"{bat}/{name}", text + "\n")
+        self.write("sys/class/power_supply/ADP1/type", "Mains\n")
+        self.write("sys/class/power_supply/ADP1/online", "0\n")
+        now = 0
+
+        def advance(wait):
+            nonlocal now
+            now += wait
+
+        data = metrics.collect(60, 1, root=self.root, clock=lambda: now, sleep=advance, services=lambda _: {})
+        read = [sample["elapsed_seconds"] for sample in data["samples"] if sample["power"]["batteries_read"]]
+        self.assertEqual(read, [0, 15, 30, 45, 60])
+        self.assertEqual(len(data["samples"]), 61)
+        skipped = data["samples"][1]["power"]
+        self.assertEqual((skipped["batteries"], skipped["mains_online"]), ([], False),
+                         "the adapter is still read every sample; it costs nothing")
+        self.assertEqual(data["samples"][15]["power"]["batteries"][0]["charge_percent"], 50)
+        self.assertEqual(data["window"]["battery_discharge_mean_watts"], 9)
+        # A short window still reads it at both ends.
+        now = 0
+        data = metrics.collect(3, 1, root=self.root, clock=lambda: now, sleep=advance, services=lambda _: {})
+        self.assertEqual([s["power"]["batteries_read"] for s in data["samples"]], [True, False, False, True])
+        # Read on its own (pip-diag's battery check), it is always read.
+        self.assertTrue(metrics.power_info(self.root / "sys")["batteries_read"])
+
+    def test_package_throttle_events_are_counted_apart_from_core_events(self):
+        cpu = "sys/devices/system/cpu"
+        for n in (0, 1):
+            self.write(f"{cpu}/cpu{n}/thermal_throttle/core_throttle_count", "3\n")
+            self.write(f"{cpu}/cpu{n}/thermal_throttle/package_throttle_count", "7\n")
+        first = metrics.snapshot(self.root, 0)
+        self.assertEqual(first["thermal_throttle"]["cpu0"], {"core_events": 3, "package_events": 7})
+        for n in (0, 1):
+            self.write(f"{cpu}/cpu{n}/thermal_throttle/package_throttle_count", "12\n")
+        window = metrics.summarize([first, metrics.snapshot(self.root, 1)])
+        self.assertEqual((window["cpu_core_throttle_max_events"], window["cpu_package_throttle_max_events"]), (0, 5),
+                         "the package counter repeats on each CPU: the largest, not the sum")
 
     def test_power_and_wifi_window_use_only_valid_readings(self):
         samples = [metrics.snapshot(self.root, elapsed) for elapsed in range(4)]

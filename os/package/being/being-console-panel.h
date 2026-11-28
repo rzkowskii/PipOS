@@ -49,7 +49,7 @@
  * In-band control from hands, which strips every OSC a program writes before
  * relaying: ESC ] 7770 ; key=value [; key=value ...] BEL (or ESC \). Values
  * hold no ';' and no control bytes. Keys:
- *   pip=typing|paused|idle   job=busy|idle   human=0|1   focus=0|1
+ *   pip=typing|paused|idle   job=busy|done|failed|idle   human=0|1   focus=0|1
  *   title=TEXT (31 bytes)    status=TEXT (63 bytes; empty: the default)
  *   wipe=1 (scrollback, screen and the frame's pixels, for real)
  *   scroll=up|down|end (a page; end returns to the newest output)
@@ -67,6 +67,8 @@ enum {
     PANEL_JOB_BUSY = 1u << 4,
     PANEL_HUMAN_TYPING = 1u << 5,
     PANEL_SCROLLED = 1u << 6,
+    PANEL_JOB_DONE = 1u << 7,
+    PANEL_JOB_FAILED = 1u << 8,
 };
 /* The chrome: status bar on top, key hints at the bottom (voice-apps.md 3.2). */
 enum { PANEL_STATUS_BAR = 28, PANEL_FOOTER = 40, PANEL_PAD_TOP = 6, PANEL_PAD_BOTTOM = 4 };
@@ -74,7 +76,7 @@ enum { PANEL_FRAME_MS = 34, PANEL_BEAT_MS = 500 }; /* at most 30 frames a second
 
 /* What hands controls in-band. Changes set `changed`. */
 struct panel_control {
-    bool pip_typing, pip_paused, job_busy, human_typing, unfocused;
+    bool pip_typing, pip_paused, job_busy, job_done, job_failed, human_typing, unfocused;
     char title[PANEL_TITLE];
     char status[PANEL_STATUS];
     int scroll_request; /* +1 a page up, -1 a page down, -2 to the end */
@@ -171,6 +173,8 @@ static void panel_osc(struct panel_control *control, const char *text, size_t le
                 control->pip_paused = panel_word(value, size, "paused");
             } else if (key == 3 && memcmp(pair, "job", 3) == 0) {
                 control->job_busy = panel_word(value, size, "busy");
+                control->job_done = panel_word(value, size, "done");
+                control->job_failed = panel_word(value, size, "failed");
             } else if (key == 5 && memcmp(pair, "human", 5) == 0) {
                 control->human_typing = panel_word(value, size, "1");
             } else if (key == 5 && memcmp(pair, "focus", 5) == 0) {
@@ -207,6 +211,10 @@ static uint32_t panel_flags(const struct panel_control *control, bool visible, b
         flags |= PANEL_PIP_PAUSED;
     if (control->job_busy)
         flags |= PANEL_JOB_BUSY;
+    if (control->job_done)
+        flags |= PANEL_JOB_DONE;
+    if (control->job_failed)
+        flags |= PANEL_JOB_FAILED;
     if (control->human_typing)
         flags |= PANEL_HUMAN_TYPING;
     if (scrolled)
@@ -248,7 +256,7 @@ static void paint_panel_backdrop(const struct canvas *canvas)
     static const uint8_t bayer[4][4] = { { 0, 8, 2, 10 }, { 12, 4, 14, 6 }, { 3, 11, 1, 9 }, { 15, 7, 13, 5 } };
     for (int y = 0; y < canvas->height; ++y) {
         float t = (float)y / (float)SDL_max(canvas->height - 1, 1);
-        float base_r = 10.0f - 4.0f * t, base_g = 15.0f - 6.0f * t, base_b = 26.0f - 10.0f * t;
+        float base_r = 10.0f - 5.0f * t, base_g = 17.0f - 8.0f * t, base_b = 25.0f - 12.0f * t;
         uint8_t *pixel = pixel_at(canvas, 0, y);
         for (int x = 0; x < canvas->width; ++x, pixel += 4) {
             float dither = (bayer[y & 3][x & 3] - 7.5f) / 16.0f;
@@ -268,14 +276,20 @@ static void draw_panel_status(const struct canvas *canvas, int face, int pad_x, 
     int text_face = panel_chrome_face(face);
     const struct console_face *info = &console_faces[text_face];
     int bar = SDL_min(PANEL_STATUS_BAR, canvas->height);
-    fill_rect(canvas, 0, 0, canvas->width, bar, footer_fill);
-    fill_rect(canvas, 0, bar - 1, canvas->width, 1, footer_rule);
+    fill_rect(canvas, 0, 0, canvas->width, bar, (struct rgb){13, 24, 33});
+    fill_rect(canvas, 0, bar - 1, canvas->width, 1, (struct rgb){26, 42, 53});
     int y = (bar - info->height) / 2;
     draw_text(canvas, text_face, WEIGHT_BOLD, pad_x, y, title, wordmark_text);
     struct rgb dot;
     const char *status = panel_status(control, &dot);
     int width = text_width(text_face, status);
     int x = canvas->width - pad_x - width;
+    int start = x - 2 * info->width - 5;
+    if (start < pad_x + text_width(text_face, title) + info->width)
+        return;
+    int chip_height = SDL_min(info->height + 6, bar - 4);
+    outline_rounded(canvas, start, (bar - chip_height) / 2, width + 2 * info->width + 12,
+                    chip_height, chip_height / 2.0f, (struct rgb){8, 17, 24}, (struct rgb){26, 42, 53});
     draw_text(canvas, text_face, WEIGHT_REGULAR, x, y, status, control->pip_typing || control->pip_paused ||
               control->job_busy ? wordmark_text : hint_text);
     draw_text(canvas, text_face, WEIGHT_REGULAR, x - 2 * info->width, y, "●", dot);

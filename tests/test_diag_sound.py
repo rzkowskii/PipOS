@@ -61,7 +61,8 @@ class Card(FakeHost):
     """A sound card: arecord writes a room floor (left dead); a recording made while
     aplay plays hears the stimulus 40 ms late at -18 dB; the hardware pointer runs at `speed`."""
 
-    def __init__(self, root, *, left_dbfs=-84.0, right_dbfs=-63.0, speed=1.0, underrun=False):
+    def __init__(self, root, *, left_dbfs=-84.0, right_dbfs=-63.0, speed=1.0, underrun=False, delay=0.04,
+                 drift_ppm=0.0, divide=8, heard_on=(0, 1)):
         super().__init__(root, programs={"arecord", "aplay", "amixer", "alsactl", "dmesg", "systemctl"},
                          handlers={"arecord": self.arecord, "amixer": self.amixer, "alsactl": self.alsactl,
                                    "dmesg": lambda argv: Result(0, "")})
@@ -72,6 +73,10 @@ class Card(FakeHost):
         self.played = []
         self.mixer = {"Mic Boost": 2, "Capture": 54}
         self.started = None
+        # Where the stimulus lands after the recording starts (preroll + delay), how fast
+        # the playback clock runs against the capture's, and how much quieter it comes back.
+        self.delay, self.drift_ppm, self.divide = delay, drift_ppm, divide
+        self.heard_on = heard_on  # the microphone channels that hear the speaker
 
     def arecord(self, argv):
         path = Path(argv[-1])
@@ -129,11 +134,12 @@ class Card(FakeHost):
     def write_loop(self, path, rate, seconds):
         floor = [noise(seconds, rate, level, 10 + seed) for seed, level in enumerate(self.levels)]
         source_rate, source = audio.read_wav(self.current)
-        stimulus = audio.resample(source[0], source_rate, rate)
-        start = int((0.3 + 0.04) * rate)
-        for channel in floor:
+        # A playback clock fast by d plays the file at source_rate x (1 + d).
+        stimulus = audio.resample(source[0], source_rate * (1 + self.drift_ppm * 1e-6), rate)
+        start = int((0.3 + self.delay) * rate)
+        for channel in (floor[number] for number in self.heard_on):
             for index, value in enumerate(stimulus[:len(channel) - start]):
-                channel[start + index] = max(-32768, min(32767, channel[start + index] + value // 8))
+                channel[start + index] = max(-32768, min(32767, channel[start + index] + value // self.divide))
         audio.write_wav(path, floor, rate)
 
 
@@ -295,6 +301,179 @@ class Loopback(Base):
             path, [noise(seconds, rate, -80, 1), noise(seconds, rate, -80, 2)], rate)
         level = sound.check_loopback(host, self.report)[0]
         self.assertEqual(level["status"], "fail")
+        self.assertFalse(level["value"]["heard"])
+
+    def test_heard_comes_from_the_level_not_from_correlating_a_sine(self):
+        # On the laptop the -20 dBFS tone came back 25 dB above the right channel's floor,
+        # but a cross-correlation of the steady sine gave match 0.056 and -0.256 s: a false fail.
+        host = Card(self.root, left_dbfs=-84, right_dbfs=-65.7, divide=10, heard_on=(1,))
+        with patch.object(audio, "latency", return_value=(-0.256, 0.056)):
+            checks = {item["id"]: item for item in sound.check_loopback(host, self.report)}
+        level = checks["loopback.level"]
+        self.assertEqual(level["status"], "pass")
+        self.assertEqual(level["value"]["channel"], 1)  # the right channel, where the tone is
+        self.assertGreater(level["value"]["rise_db"], 15)
+        self.assertGreater(level["value"]["bin_snr_db"], 30)
+        self.assertAlmostEqual(level["value"]["latency_s"], 0.04, delta=0.004)  # from the tone's onset
+        self.assertTrue(level["value"]["floor_measured"])
+        self.assertIn("dB above the room floor", level["evidence"])
+        self.assertEqual(checks["loopback.thd"]["status"], "pass")
+
+    def test_a_capture_that_started_late_gives_an_unknown_delay_not_a_negative_one(self):
+        host = Card(self.root, delay=-0.2)  # the tone is already playing 0.1 s into the recording
+        level = sound.check_loopback(host, self.report)[0]
+        self.assertEqual(level["status"], "pass")
+        self.assertIsNone(level["value"]["latency_s"])
+        self.assertIn("delay unknown", level["evidence"])
+
+    def test_the_floor_is_recorded_in_ram_and_not_kept(self):
+        host = Card(self.root)
+        sound.check_loopback(host, self.report)
+        self.assertFalse((self.folder / "loop-silence-48k.wav").exists())
+        self.assertTrue((self.folder / "loop-tone1k-20-16k.wav").exists())
+        folder = host.path(str(sound.SCRATCH))
+        self.assertEqual(sorted(path.name for path in folder.iterdir()) if folder.is_dir() else [], [])
+        # A kept loopback recording is the louder channel alone (half the bytes on the stick).
+        rate, channels = audio.read_wav(self.folder / "loop-tone1k-20-16k.wav")
+        self.assertEqual((rate, len(channels)), (48000, 1))
+
+    def test_the_natural_voices_rate_and_its_clock_drift(self):
+        checks = {item["id"]: item for item in sound.check_loopback(Card(self.root, drift_ppm=180), self.report)}
+        rate = checks["loopback.rate_22k"]
+        self.assertEqual(rate["status"], "pass")
+        self.assertAlmostEqual(rate["value"]["drift_ppm"], 180, delta=15)
+        self.assertIn("+", rate["evidence"])
+        far = {item["id"]: item for item in sound.check_loopback(Card(self.root, drift_ppm=2500), self.report)}
+        self.assertEqual(far["loopback.rate_22k"]["status"], "warn")
+
+
+class Distortion(unittest.TestCase):
+    """THD counts only harmonics that stand above the room in their own bins."""
+
+    RATE = 48000
+
+    def recording(self, harmonic=0.0, tone_dbfs=-38.0, floor_dbfs=-63.0, seconds=2.0):
+        floor = noise(seconds, self.RATE, floor_dbfs, 3)
+        amplitude = audio.from_dbfs(tone_dbfs) * 32767
+        step = 2 * math.pi * 1000 / self.RATE
+        return array_of([floor[index] + amplitude * (math.sin(step * index) + harmonic * math.sin(2 * step * index))
+                         for index in range(len(floor))])
+
+    def test_noise_in_the_harmonic_bins_is_below_the_floor_not_distortion(self):
+        silence = noise(2.0, self.RATE, -63.0, 9)
+        result = audio.thd_against_floor(self.recording(), silence, self.RATE, 1000)
+        self.assertTrue(result["measurable"])
+        self.assertTrue(result["below_floor"])
+        self.assertIsNone(result["percent"])
+        self.assertLess(result["limit_percent"], 1.0)
+
+    def test_real_second_harmonic_distortion_is_measured(self):
+        silence = noise(2.0, self.RATE, -63.0, 9)
+        result = audio.thd_against_floor(self.recording(harmonic=0.05), silence, self.RATE, 1000)
+        self.assertAlmostEqual(result["percent"], 5.0, delta=0.5)
+        self.assertTrue(result["harmonics"][0]["counted"])
+
+    def test_a_tone_barely_above_the_floor_is_not_measurable(self):
+        silence = noise(2.0, self.RATE, -40.0, 9)
+        result = audio.thd_against_floor(self.recording(tone_dbfs=-75.0, floor_dbfs=-40.0), silence, self.RATE, 1000)
+        self.assertFalse(result["measurable"])
+        self.assertIn("above the floor", result["reason"])
+
+    def test_the_loopback_says_below_the_floor_instead_of_a_percentage(self):
+        rows = [{"stimulus": "tone1k-20-16k", "thd": {"measurable": False, "reason": "the tone is only 9 dB above "
+                 "the floor in its bin", "percent": None, "below_floor": False, "limit_percent": None,
+                 "snr_db": 9.0, "harmonics": []}},
+                {"stimulus": "tone1k-12-16k", "thd": {"measurable": True, "percent": None, "below_floor": True,
+                 "limit_percent": 0.4, "snr_db": 45.0, "harmonics": [], "reason": ""}}]
+        item = sound.judge_thd(rows)
+        self.assertEqual(item["status"], "pass")
+        self.assertIn("tone1k-12-16k below the floor (< 0.4%)", item["evidence"])
+        self.assertIn("tone1k-20-16k not measurable", item["evidence"])
+        self.assertEqual(sound.judge_thd(rows[:1])["status"], "skip")
+
+
+def array_of(values):
+    from array import array
+
+    return array("h", [max(-32768, min(32767, int(round(value)))) for value in values])
+
+
+class PinCard(Card):
+    """The MacBookPro9,2's speakers: Bass Speaker (0x0a) carries 300-1200 Hz from the right
+    channel only (its left is dead); Speaker (0x0b) carries 1.2-8 kHz, its right 12 dB down.
+    The microphone hears on its right channel."""
+
+    def __init__(self, root, *, speaker_plays=True, **kwargs):
+        super().__init__(root, **kwargs)
+        self.speaker_plays = speaker_plays
+        self.handlers["alsactl"] = self.pins_alsactl
+
+    def pins_alsactl(self, argv):
+        if argv[1] == "restore":
+            for name in ("Speaker", "Bass Speaker"):
+                self.mixer.pop(name, None)
+        return Card.alsactl(self, argv)
+
+    def write_loop(self, path, rate, seconds):
+        floor = [noise(seconds, rate, level, 10 + seed) for seed, level in enumerate(self.levels)]
+        source_rate, source = audio.read_wav(self.current)
+        left, right = (source + source)[:2] if len(source) == 1 else source[:2]
+        out = [0.0] * len(left)
+        if self.mixer.get("Bass Speaker") != "mute":
+            for index, value in enumerate(audio.band_filter(right, source_rate, 300, 1200)):
+                out[index] += value
+        if self.mixer.get("Speaker") != "mute" and self.speaker_plays:
+            mixed = [l_value + r_value / 4 for l_value, r_value in zip(left, right)]
+            for index, value in enumerate(audio.band_filter(mixed, source_rate, 1200, 8000)):
+                out[index] += value
+        heard = audio.resample(array_of(out), source_rate, rate)
+        start = int((0.3 + self.delay) * rate)
+        channel = floor[1]
+        for index, value in enumerate(heard[:len(channel) - start]):
+            channel[start + index] = max(-32768, min(32767, channel[start + index] + value // self.divide))
+        audio.write_wav(path, floor, rate)
+
+
+class Isolation(Base):
+    def run_isolation(self, host):
+        files = sound.speaker_stimuli(self.report, -20.0, {"silence-48k", "band300-1200-48k", "band1200-2400-48k",
+                                                           "band2400-8000-48k", "band300-8000-48k-left",
+                                                           "band300-8000-48k-right"})
+        with sound.AudioSession(host, signals=False) as session:
+            items = sound.check_speaker_isolation(host, self.report, session, files)
+        return {item["id"]: item for item in items}
+
+    def test_each_pin_is_measured_in_its_own_band_and_on_each_channel(self):
+        items = self.run_isolation(PinCard(self.root))
+        pins = items["speaker.isolation"]
+        self.assertEqual(pins["status"], "pass")
+        self.assertIn("300-1200 Hz: Bass Speaker", pins["evidence"])
+        self.assertIn("1200-2400 Hz: Speaker", pins["evidence"])
+        self.assertIn("2400-8000 Hz: Speaker", pins["evidence"])
+        self.assertEqual(pins["value"]["mic_channel"], 1)
+        bands = pins["value"]["bands"]
+        self.assertGreater(bands["300-1200 Hz"]["bass_only"], bands["300-1200 Hz"]["speaker_only"] + 6)
+        self.assertGreater(bands["1200-2400 Hz"]["speaker_only"], bands["1200-2400 Hz"]["bass_only"] + 6)
+        sides = items["speaker.isolation.channels"]
+        self.assertEqual(sides["status"], "pass")
+        self.assertIn("Bass Speaker's left channel is at the room floor", sides["evidence"])
+        self.assertIn("Speaker's right channel is", sides["evidence"])
+        # Each pin carries a band of its own: nothing here may suggest muting one.
+        for item in items.values():
+            self.assertNotIn("mute", (item["hint"] + item["evidence"]).lower().replace("muted", ""))
+
+    def test_a_pin_that_plays_nothing_warns(self):
+        items = self.run_isolation(PinCard(self.root, speaker_plays=False))
+        pins = items["speaker.isolation"]
+        self.assertEqual(pins["status"], "warn")
+        self.assertIn("Speaker gives nothing above the room in any band", pins["evidence"])
+        self.assertEqual(items["speaker.isolation.channels"]["status"], "warn")
+
+    def test_the_mixer_is_put_back_after(self):
+        host = PinCard(self.root)
+        self.run_isolation(host)
+        self.assertNotIn("Speaker", host.mixer)
+        self.assertNotIn("Bass Speaker", host.mixer)
 
 
 if __name__ == "__main__":
@@ -350,7 +529,8 @@ class Timing(Base):
         self.assertTrue(any("--period-time=100000" in argv and "--buffer-time=400000" in argv for argv in aplays))
         self.assertTrue(any(not any(arg.startswith("--period") for arg in argv) for argv in aplays))
         self.assertEqual({argv[argv.index("-D") + 1] for argv in aplays}, {"plughw:0,0", "hw:0,0"})
-        self.assertEqual(len(aplays), 12)  # 3 sizes x (tone, speech) x (plughw, hw)
+        # 3 sizes x (16 kHz tone and speech, 22050 Hz tone on plughw; 48 kHz tone and speech on hw)
+        self.assertEqual(len(aplays), 15)
         self.assertTrue((self.folder / "speaker-timing.json").exists())
         self.assertTrue((self.folder / "stim-speech-16k.wav").exists())
 
@@ -438,13 +618,14 @@ class Runs(Base):
     def test_speaker(self):
         code, ids, data, host = self.run_command(["speaker"])
         self.assertEqual(code, 0)
-        for name in ("speaker.play.sweep-48k.plug", "speaker.play.tone1k-12-48k.hw", "loopback.level", "loopback.thd",
-                     "loopback.bands", "speaker.isolation"):
+        for name in ("speaker.play.sweep-48k.plug", "speaker.play.tone1k-12-48k.hw", "speaker.play.tone1k-12-22k.plug",
+                     "speaker.play.speech-22k.plug", "loopback.level", "loopback.thd", "loopback.bands",
+                     "loopback.rate_22k", "speaker.isolation", "speaker.isolation.channels"):
             self.assertEqual(ids[name], "pass", name)
         self.assertEqual(data["extra"]["restore"], ["restored the mixer", "restarted the voice"])
         self.assertIn(sound.VOICE, host.active)
         stimuli = [path for path in (self.root / "speaker").iterdir() if path.name.startswith("stim-")]
-        self.assertEqual(len(stimuli), 13)  # made once, shared by every check
+        self.assertEqual(len(stimuli), 20)  # made once, shared by every check
         for setting in ("small", "default", "large"):
             self.assertEqual(ids[f"speaker.timing.{setting}"], "pass", setting)
         self.assertEqual(ids["speaker.timing"], "pass")

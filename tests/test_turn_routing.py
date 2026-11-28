@@ -94,6 +94,16 @@ class RoutingOrder(SkillCase):
         self.assertTrue(self.mind._may_be_code("set a timer for"))
         self.assertFalse(self.mind._may_be_code("I went down to the river and"))
 
+    async def test_permission_report_is_local_and_private_to_the_owner(self):
+        self.assertTrue(self.mind._may_be_code("what are you allowed to do"))
+        owner = await self.ask("What are you allowed to do?")
+        self.assertIn("My camera is off.", owner)
+        self.assertIn("Permissions in Care", owner)
+        self.assertFalse(self.memory.contains("Permissions in Care"))
+        self.assertEqual(await self.ask("What permissions do you have?", speaker="Visitor"),
+                         "My owner can ask about my permissions.")
+        self.assertEqual(self.cortex_server.chats, [])
+
 
 class KeptReplies(SkillCase):
     answers = {"make a note the plumber comes thursday": Reply("[joy] Noted.", keep=True, logged="note.add")}

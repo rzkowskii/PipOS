@@ -15,8 +15,12 @@ Before=shutdown.target
 EnvironmentFile=/etc/being/env
 RuntimeDirectory=being
 RuntimeDirectoryPreserve=yes
+# Revoke any inherited hardware grant before the new hub accepts consent.
+# The hub can still start with an absent or unreadable camera.
+ExecStartPre=-/usr/bin/being-brainstem --close-camera
 ExecStart=/usr/bin/being-brainstem --bus ${BEING_BUS} --require ${BEING_REQUIRE} \
     --mind-dir ${BEING_MIND} --mind-is-a-mount --appliance-body
+ExecStopPost=-/usr/bin/being-brainstem --close-camera
 # A crash loop that recovery cannot end reboots the machine, but never on a Try
 # or verbose boot (where a reboot would hide the failure), and no sooner than
 # five minutes after boot and eight failures in ten minutes, so the machine can
@@ -46,6 +50,9 @@ NotifyAccess=main
 # The hub reads the body (sysfs, input devices) and owns the bus socket. It
 # never needs a network or a new privilege.
 NoNewPrivileges=yes
+LimitCORE=0
+DevicePolicy=closed
+DeviceAllow=char-input r
 ProtectHome=yes
 PrivateNetwork=yes
 IPAddressDeny=any

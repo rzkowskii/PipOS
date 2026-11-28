@@ -3,9 +3,9 @@
 //! In observe mode it decides and reports exactly the same, and writes
 //! nothing at all.
 
-use crate::hw::{self, Hardware, Reading};
+use crate::hw::{self, BatteryReading, Hardware, Reading};
 use crate::journal::{Journal, Kind};
-use crate::policy::{self, Being, Config, CpuCap, DreamLoop, Latch};
+use crate::policy::{self, BatteryRead, Being, Config, CpuCap, DreamLoop, Latch, Pressure, ResourceProfile};
 use bus::Event;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
@@ -54,10 +54,16 @@ pub struct Care {
     dream: DreamLoop,
     fan_floor: Option<i64>,
     fan_stepped_at: f64,
+    /// The last `/proc/stat` ticks, the smoothed busy share, and the
+    /// sustained-load latch the fan floor follows.
+    cpu_ticks: Option<(u64, u64)>,
+    busy: Option<f64>,
+    fan_load: Latch,
     charge_checked_at: Option<f64>,
     over_since: Option<f64>,
     honoured: Option<bool>,
     rapl_locked: bool,
+    max_perf_clamp: Option<(String, String)>,
     said: HashSet<String>,
     /// Log lines waiting to be printed.
     pub notes: Vec<String>,
@@ -69,9 +75,22 @@ pub struct Care {
     /// Act mode: why the restore journal cannot be written, if it cannot.
     pub journal_error: Option<String>,
     pub cap: Option<CpuCap>,
+    /// Observe-only WP-D8 advice. No actuator consumes these fields.
+    pub resource_profile: Option<ResourceProfile>,
+    pub pressure: Option<Pressure>,
+    pub resource_priority: &'static str,
+    pub resource_state_epoch: Option<u64>,
     pub fan_target: Option<i64>,
     pub factory_fan_min: Option<i64>,
     pub reading: Reading,
+    /// The battery's own figures, read slowly (`policy::battery_due`), and
+    /// when they were read.
+    battery: BatteryReading,
+    battery_read: Option<BatteryRead>,
+    /// The power-change stamp as it was at the last battery read.
+    power_stamp: Option<std::time::SystemTime>,
+    /// How many times the battery's files have been read (tests, report).
+    pub battery_reads: u64,
 }
 
 impl Care {
@@ -91,22 +110,54 @@ impl Care {
             dream: DreamLoop::default(),
             fan_floor: None,
             fan_stepped_at: f64::NEG_INFINITY,
+            cpu_ticks: None,
+            busy: None,
+            fan_load: Latch::default(),
             charge_checked_at: None,
             over_since: None,
             honoured: None,
             rapl_locked: false,
+            max_perf_clamp: None,
             said: HashSet::new(),
             notes: Vec::new(),
             wanted: HashMap::new(),
             not_applied: BTreeSet::new(),
             journal_error: None,
             cap: None,
+            resource_profile: None,
+            pressure: None,
+            resource_priority: "state_unknown",
+            resource_state_epoch: None,
             fan_target: None,
             factory_fan_min: None,
             reading: Reading::default(),
+            battery: BatteryReading::default(),
+            battery_read: None,
+            power_stamp: None,
+            battery_reads: 0,
         };
         for line in care.hw.survey() {
             care.notes.push(line);
+        }
+        if care.hw.fan_min.is_some() {
+            let c = &care.cfg;
+            care.notes.push(format!(
+                "fan floor: the factory minimum until the package passes {:.0} C under sustained load (CPU busy over {:.0}%, smoothed over {:.0} s{}), rising to {:.0}% of the maximum by {:.0} C, where the SMC's own curve starts; over {:.0} C whatever the load; held while listening",
+                c.fan_start_c,
+                c.fan_load_on * 100.0,
+                c.fan_load_tau,
+                if care.hw.stat.is_some() { "" } else { "; no CPU counters here, so the temperature alone" },
+                c.fan_top_share * 100.0,
+                c.fan_full_c,
+                c.hot_package_c
+            ));
+        }
+        if care.hw.battery.is_some() {
+            let c = &care.cfg;
+            care.notes.push(format!(
+                "battery figures: read every {:.0} s on AC, {:.0} s on battery, {:.0} s when low, at once when the adapter or a power-supply uevent says it changed, and {:.0} s after that",
+                c.battery_every, c.battery_unplugged_every, c.battery_low_every, c.battery_settle
+            ));
         }
         if mode == Mode::Act {
             if let Err(e) = care.journal.check_writable() {
@@ -132,7 +183,15 @@ impl Care {
         self.wanted.insert(label, value.clone());
         let Some(path) = path else { return false };
         if current.as_deref() == Some(value.as_str()) {
+            if kind == Kind::MaxPerf {
+                self.max_perf_clamp = None;
+            }
             self.not_applied.remove(label);
+            return false;
+        }
+        if kind == Kind::MaxPerf && self.max_perf_clamp.as_ref().is_some_and(|(requested, reported)| {
+            requested == &value && current.as_deref() == Some(reported.as_str())
+        }) {
             return false;
         }
         let done = self.write(label, &path, kind, &value, current);
@@ -164,6 +223,17 @@ impl Care {
         self.journal_error = None;
         match hw::write_value(path, value) {
             Ok(()) => {
+                if kind == Kind::MaxPerf {
+                    let actual = hw::read_text(path);
+                    if actual.as_deref() != Some(value) {
+                        let reported = actual.as_deref().unwrap_or("unavailable");
+                        self.once(format!("read-back:{label}:{value}:{reported}"),
+                                  || format!("{label}: requested {value}, kernel reports {reported}"));
+                        self.max_perf_clamp = actual.map(|reported| (value.to_owned(), reported));
+                        return false;
+                    }
+                    self.max_perf_clamp = None;
+                }
                 self.notes.push(format!("set {label} to {value} (was {original})"));
                 true
             }
@@ -190,14 +260,24 @@ impl Care {
                 self.hw = fresh;
             }
         }
-        let r = hw::read(&self.hw);
+        let r = self.read_hardware(now);
         let dt = self.last_at.map_or(1.0, |at| (now - at).max(0.0));
         self.last_at = Some(now);
         self.package = policy::smooth(self.package, r.package_c, dt, self.cfg.smoothing);
         if r.package_c.is_none() {
             self.package = None;
         }
-        let cfg = self.cfg.clone();
+        let mut cfg = self.cfg.clone();
+        cfg.dream_min_pct = cfg.dream_min_pct.clamp(r.min_perf.unwrap_or(1), 100);
+
+        // CPU load, for the fan floor: the busy share since the last pass,
+        // smoothed, and latched with hysteresis.
+        let share = policy::busy_share(self.cpu_ticks, r.cpu_ticks);
+        if r.cpu_ticks.is_some() {
+            self.cpu_ticks = r.cpu_ticks;
+        }
+        self.busy = policy::smooth(self.busy, share, dt, cfg.fan_load_tau);
+        let sustained = self.hw.stat.is_some().then(|| self.fan_load.update(self.busy, cfg.fan_load_on, cfg.fan_load_off));
 
         // Battery heat gates.
         let pause = self.dream_pause.update(r.battery_c, cfg.battery_pause_c, cfg.battery_resume_c);
@@ -219,7 +299,8 @@ impl Care {
             self.dream.reset();
             None
         };
-        let cap = policy::cpu_cap(&cfg, being, self.package, r.on_ac, r.battery_present, hot, dream_pct);
+        let mut cap = policy::cpu_cap(&cfg, being, self.package, r.on_ac, r.battery_present, hot, dream_pct);
+        cap.max_perf_pct = cap.max_perf_pct.max(r.min_perf.unwrap_or(1));
         let turbo_now = r.no_turbo.map(|v| if v { "1" } else { "0" }.to_string());
         self.set("no_turbo", self.hw.no_turbo.clone(), Kind::NoTurbo, if cap.no_turbo { "1" } else { "0" }.into(), turbo_now);
         self.set("max_perf_pct", self.hw.max_perf.clone(), Kind::MaxPerf, cap.max_perf_pct.to_string(), r.max_perf.map(|v| v.to_string()));
@@ -248,7 +329,8 @@ impl Care {
             let factory = self.journal.original(&path).and_then(|v| v.parse().ok()).unwrap_or(current);
             self.factory_fan_min = Some(factory);
             let floor = *self.fan_floor.get_or_insert(current);
-            let target = policy::fan_target(&cfg, self.package, factory, r.fan_max);
+            let loaded = policy::fan_loaded(&cfg, self.package, sustained);
+            let target = policy::fan_target(&cfg, self.package, loaded, factory, r.fan_max);
             self.fan_target = Some(target);
             if now - self.fan_stepped_at >= cfg.fan_step_every {
                 let next = policy::fan_next(&cfg, floor, target, being.listening());
@@ -279,6 +361,37 @@ impl Care {
             self.judge_cap(limit, &r, now);
         }
         self.reading = r;
+        self.resource_profile = policy::resource_profile(being);
+        self.resource_state_epoch = self.resource_profile.and(being.state_epoch);
+        self.pressure = policy::pressure(&cfg, self.package, self.reading.battery_c);
+        self.resource_priority = match (self.pressure, self.reading.on_ac, being.lid_closed) {
+            (Some(Pressure::Hot | Pressure::Critical), _, _) => "thermal",
+            (_, Some(false), _) => "power_source",
+            (_, None, _) => "power_unknown",
+            (_, _, Some(true)) => "lid",
+            _ if self.resource_profile.is_some() => "cognitive",
+            _ => "state_unknown",
+        };
+    }
+
+    /// One reading: the cheap controls every pass, the battery's own files
+    /// only when `policy::battery_due` says so or the battery changed. A
+    /// read that a change caused (the battery rediscovered, the adapter, a
+    /// power-supply uevent) is followed by one more `battery_settle` later.
+    fn read_hardware(&mut self, now: f64) -> Reading {
+        let on_ac = hw::read_ac(&self.hw);
+        let moved = self.battery.dir != self.hw.battery;
+        let stamp = hw::power_stamp(&self.root);
+        let poked = stamp != self.power_stamp;
+        let last = self.battery_read.as_ref();
+        if moved || policy::battery_due(&self.cfg, last, on_ac, poked, now) {
+            let follow_up = (moved && last.is_some()) || policy::battery_edge(last, on_ac, poked);
+            self.battery = hw::read_battery(&self.hw);
+            self.battery_reads += 1;
+            self.battery_read = Some(BatteryRead { at: now, on_ac, percent: self.battery.percent, follow_up });
+            self.power_stamp = stamp;
+        }
+        hw::read_fast(&self.hw, &self.battery)
     }
 
     /// Is the cap honoured? Judged only while the control really reads the
@@ -348,10 +461,23 @@ impl Care {
             .with("max_perf_pct", cap.as_ref().map(|c| c.max_perf_pct))
             .with("rapl_w", cap.as_ref().and_then(|c| c.rapl_w))
             .with("cpu_reasons", cap.as_ref().map(|c| c.reasons.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap_or_default())
+            // WP-D8 preparation: descriptive, short-lived advice only. It
+            // never selects performance and is not connected to an actuator.
+            .with("resource_profile", self.resource_profile.map(ResourceProfile::name))
+            .with("resource_pressure", self.pressure.map(Pressure::name))
+            .with("resource_priority", self.resource_priority)
+            .with("resource_state_epoch", self.resource_state_epoch)
+            .with("resource_observe_only", true)
+            .with("resource_ttl_ms", if self.resource_profile.is_some() { 12_000 } else { 0 })
+            .with("performance_eligible", false)
             .with("fan_rpm", r.fan_rpm)
             .with("fan_floor", self.fan_floor)
             .with("fan_target", self.fan_target)
             .with("fan_factory_min", self.factory_fan_min)
+            // The smoothed busy share of all CPUs (0-1; null: no counters
+            // yet) and whether it counts as sustained load for the fan.
+            .with("cpu_busy", self.busy.map(|v| (v * 100.0).round() / 100.0))
+            .with("fan_load", self.hw.stat.as_ref().map(|_| self.fan_load.on))
             // Always present, so "how's your battery health" never guesses:
             // the owner's chosen cap (null: none) and whether it holds.
             .with("charge_limit", self.cfg.charge_limit)
@@ -452,6 +578,8 @@ mod tests {
         t.file(&format!("{PSTATE}/status"), "passive\n");
         t.file(&format!("{PSTATE}/no_turbo"), "0\n");
         t.file(&format!("{PSTATE}/max_perf_pct"), "100\n");
+        // The 35 W / 43.75 W limits below are synthetic PC fixture values.
+        // The target MacBook reported its factory package limits at 100 W / 125 W.
         t.file(&format!("{RAPL}/name"), "package-0\n");
         t.file(&format!("{RAPL}/constraint_0_name"), "long_term\n");
         t.file(&format!("{RAPL}/constraint_0_power_limit_uw"), "35000000\n");
@@ -462,7 +590,7 @@ mod tests {
     }
 
     fn being(state: &str, lid_closed: bool) -> Being {
-        Being { state: Some(state.into()), lid_closed: Some(lid_closed), dreaming: false }
+        Being { state: Some(state.into()), lid_closed: Some(lid_closed), dreaming: false, state_fresh: true, state_epoch: Some(1) }
     }
 
     fn act(t: &Tree, cfg: Config) -> Care {
@@ -529,7 +657,7 @@ mod tests {
         for s in 60..400 {
             care.step(&being("attending", true), f64::from(s));
         }
-        assert_eq!(floor(&t), 5250);
+        assert_eq!(floor(&t), 2850, "90 C: 5/12 of the way from 2000 to the 4000 top");
         assert_eq!(t.get(&format!("{SMC}/fan1_manual")), "0", "never manual mode");
         // Cool again: back down by steps to the factory floor.
         t.file("sys/class/hwmon/hwmon3/temp1_input", "45000\n");
@@ -537,6 +665,142 @@ mod tests {
             care.step(&being("idle", false), f64::from(s));
         }
         assert_eq!(floor(&t), 2000);
+    }
+
+    /// `/proc/stat` for a four-thread CPU that has been `busy` (0-1) since
+    /// the last write, `secs` seconds of ticks (100 a second per thread).
+    struct Stat {
+        busy: u64,
+        total: u64,
+    }
+
+    impl Stat {
+        fn advance(&mut self, t: &Tree, secs: f64, busy: f64) {
+            let ticks = (secs * 400.0) as u64;
+            let worked = (ticks as f64 * busy) as u64;
+            self.busy += worked;
+            self.total += ticks;
+            // user, nice (the model runs niced), system, idle, iowait.
+            let (user, nice) = (self.busy / 3, self.busy - self.busy / 3 - self.busy / 10);
+            let system = self.busy - user - nice;
+            let idle = (self.total - self.busy) * 9 / 10;
+            let iowait = self.total - self.busy - idle;
+            t.file("proc/stat", &format!("cpu {user} {nice} {system} {idle} {iowait} 0 0 0 0 0\n"));
+        }
+    }
+
+    /// The package as measured under sustained model load on 25 November
+    /// 2026, from a warm idle: 80 C, 95 C after 61 s, 100-101 C after about
+    /// 110 s, then flat (TjMax 105, no throttling).
+    fn package_under_load(secs: f64) -> f64 {
+        let points = [(0.0, 80.0), (61.0, 95.0), (110.0, 100.5), (600.0, 101.0)];
+        let i = points.windows(2).position(|w| secs <= w[1].0).unwrap_or(points.len() - 2);
+        let ((t0, c0), (t1, c1)) = (points[i], points[i + 1]);
+        c0 + (c1 - c0) * ((secs - t0) / (t1 - t0)).clamp(0.0, 1.0)
+    }
+
+    /// What the SMC's own curve did in the same runs: 2000 rpm until about
+    /// 97 C, then up (2105 at 98 C, 2772-2990 at 100 C).
+    fn smc_rpm(package_c: f64) -> i64 {
+        if package_c < 97.0 { 2000 } else { 2000 + ((package_c - 97.0) * 300.0) as i64 }
+    }
+
+    #[test]
+    fn a_warm_idle_never_asks_for_more_fan() {
+        // Observe mode on the laptop asked for "fan1_min from 2000 to 3300",
+        // rising to 4450, with the package at 71-82 C and nothing working.
+        let t = macbook("warm-idle");
+        let mut stat = Stat { busy: 0, total: 0 };
+        stat.advance(&t, 1.0, 0.2);
+        let mut care = Care::new(&t.0, &t.journal(), Config::default(), Mode::Observe);
+        assert!(care.notes.iter().any(|n| n.contains("fan floor: the factory minimum until the package passes 85 C")), "{:?}", care.notes);
+        for s in 0..1800u32 {
+            // An idle that wanders 71-82 C, with the voice and face at 15-22%.
+            let temp = 76.5 + 5.5 * (f64::from(s) / 97.0).sin();
+            t.file("sys/class/hwmon/hwmon3/temp1_input", &format!("{}\n", (temp * 1000.0) as i64));
+            stat.advance(&t, 1.0, 0.185 + 0.035 * (f64::from(s) / 13.0).sin());
+            let state = if s % 300 < 20 { "listening" } else { "idle" };
+            care.step(&being(state, false), f64::from(s));
+            assert_eq!(care.fan_target, Some(2000), "at {s} s, {temp:.1} C");
+        }
+        let notes = care.notes.join("\n");
+        assert!(!notes.contains("would set fan1_min"), "{notes}");
+        let report = care.report();
+        assert_eq!(report.bool("fan_load"), Some(false));
+        let busy = report.f64("cpu_busy").unwrap();
+        assert!((0.15..0.23).contains(&busy), "{busy}");
+    }
+
+    #[test]
+    fn sustained_model_load_adds_air_before_the_smc_would_and_one_reply_does_not() {
+        let t = macbook("load");
+        let floor = |t: &Tree| t.get(&format!("{SMC}/fan1_min")).parse::<i64>().unwrap();
+        let mut stat = Stat { busy: 0, total: 0 };
+        stat.advance(&t, 1.0, 0.18);
+        let mut care = act(&t, Config::default());
+        let mut now = 0.0;
+        let mut step = |care: &mut Care, stat: &mut Stat, temp: f64, busy: f64, state: &str| {
+            t.file("sys/class/hwmon/hwmon3/temp1_input", &format!("{}\n", (temp * 1000.0) as i64));
+            stat.advance(&t, 1.0, busy);
+            care.step(&being(state, false), now);
+            now += 1.0;
+        };
+        // Warm idle for a minute, then one reply: four seconds of the model at
+        // 92-94 C (the die heats in seconds) and back.
+        for _ in 0..60 {
+            step(&mut care, &mut stat, 80.0, 0.18, "idle");
+        }
+        for _ in 0..4 {
+            step(&mut care, &mut stat, 93.0, 0.68, "thinking");
+        }
+        for _ in 0..60 {
+            step(&mut care, &mut stat, 80.0, 0.18, "speaking");
+        }
+        assert_eq!(floor(&t), 2000, "one reply never spins the fan");
+        assert!(!care.notes.iter().any(|n| n.contains("set fan1_min")), "{:?}", care.notes);
+
+        // A long read: the model flat out, the package on the measured curve.
+        let mut first_raise = None;
+        let mut most = 0;
+        for s in 0..300u32 {
+            let temp = package_under_load(f64::from(s));
+            step(&mut care, &mut stat, temp, 0.68, "speaking");
+            let f = floor(&t);
+            if f > 2000 && first_raise.is_none() {
+                first_raise = Some((s, temp));
+            }
+            most = most.max(f);
+        }
+        let (at, temp) = first_raise.expect("sustained load raises the floor");
+        assert!(temp < 95.0 && smc_rpm(temp) == 2000, "it adds air before the SMC would: {at} s, {temp:.1} C");
+        assert!(at >= 15, "not before the load has lasted ({at} s)");
+        assert!(most <= 4000, "never over the top: {most}");
+        assert!(floor(&t) >= smc_rpm(package_under_load(299.0)), "at the plateau it is at least what the SMC runs");
+        assert_eq!(care.report().bool("fan_load"), Some(true));
+
+        // The read ends: idle again, and the floor steps back to the factory.
+        for _ in 0..400 {
+            step(&mut care, &mut stat, 78.0, 0.18, "idle");
+        }
+        assert_eq!(floor(&t), 2000);
+        assert_eq!(care.report().bool("fan_load"), Some(false));
+    }
+
+    #[test]
+    fn a_hot_package_raises_the_floor_whatever_the_load() {
+        // Heat from somewhere the CPU counters do not see (the GPU, a blocked
+        // vent): over 92 C the temperature alone decides.
+        let t = macbook("hot");
+        let mut stat = Stat { busy: 0, total: 0 };
+        stat.advance(&t, 1.0, 0.1);
+        let mut care = act(&t, Config::default());
+        for s in 0..30u32 {
+            t.file("sys/class/hwmon/hwmon3/temp1_input", "95000\n");
+            stat.advance(&t, 1.0, 0.1);
+            care.step(&being("idle", false), f64::from(s));
+        }
+        assert!(t.get(&format!("{SMC}/fan1_min")).parse::<i64>().unwrap() > 2000);
+        assert_eq!(care.report().bool("fan_load"), Some(false), "not load: heat");
     }
 
     #[test]
@@ -714,7 +978,7 @@ mod tests {
     fn hot_battery_pauses_dreams_and_caps_the_cpu() {
         let t = macbook("battery-heat");
         let mut care = act(&t, Config::default());
-        let dreaming = Being { state: Some("asleep".into()), lid_closed: Some(true), dreaming: true };
+        let dreaming = Being { state: Some("asleep".into()), lid_closed: Some(true), dreaming: true, state_fresh: true, state_epoch: Some(1) };
         care.step(&dreaming, 0.0);
         assert!(care.dream_allowed());
         assert!(care.report().data["cpu_reasons"].to_string().contains("dreaming"));
@@ -800,6 +1064,121 @@ mod tests {
         let mut open = act(&macbook("night-open"), Config::default());
         open.step(&being("asleep", false), 0.0);
         assert!(!open.report().data["cpu_reasons"].to_string().contains("night"));
+    }
+
+    #[test]
+    fn the_battery_is_read_once_a_minute_not_every_pass() {
+        // 25 November, live: a 1 s poll of the Smart Battery cost about 126
+        // EC interrupts a second. The loop still runs every second for the
+        // cheap readings.
+        let t = macbook("battery-poll");
+        let cfg = Config { charge_limit: Some(80), ..Config::default() };
+        let mut care = Care::new(&t.0, &t.journal(), cfg, Mode::Observe);
+        assert!(care.notes.iter().any(|n| n.contains("battery figures: read every 60 s on AC")), "{:?}", care.notes);
+        for s in 0..=600 {
+            care.step(&being("idle", false), f64::from(s));
+        }
+        assert_eq!(care.battery_reads, 11, "at 0, 60, ... 600 s");
+        // The fan and package still follow every second.
+        t.file("sys/class/hwmon/hwmon3/temp1_input", "90000\n");
+        care.step(&being("idle", false), 601.0);
+        assert!(care.report().f64("package_c").unwrap() > 50.0);
+        assert_eq!(care.battery_reads, 11);
+        // Unplugged: read at once, once more 4 s on, then every 30 s.
+        t.file("sys/class/power_supply/ADP1/online", "0\n");
+        t.file("sys/class/power_supply/BAT0/status", "Discharging\n");
+        care.step(&being("idle", false), 602.0);
+        assert_eq!(care.battery_reads, 12);
+        assert_eq!(care.reading.status.as_deref(), Some("Discharging"));
+        for s in 603..=662 {
+            care.step(&being("idle", false), f64::from(s));
+        }
+        assert_eq!(care.battery_reads, 14, "the follow-up at 606 s, then 636 s");
+        // A change of charge is seen within the period, not before.
+        t.file("sys/class/power_supply/BAT0/capacity", "15\n");
+        care.step(&being("idle", false), 663.0);
+        assert_eq!(care.reading.percent, Some(70.0));
+        for s in 664..=692 {
+            care.step(&being("idle", false), f64::from(s));
+        }
+        assert_eq!(care.reading.percent, Some(15.0));
+        // Low: every 10 s.
+        let before = care.battery_reads;
+        for s in 693..=722 {
+            care.step(&being("idle", false), f64::from(s));
+        }
+        assert_eq!(care.battery_reads - before, 3);
+    }
+
+    #[test]
+    fn a_status_that_lags_the_adapter_is_corrected_seconds_later() {
+        // Unplugged: ADP1/online says 0 at once, but the gauge still says
+        // Charging on the first read. One follow-up read 4 s on fixes it.
+        let t = macbook("status-lag");
+        let mut care = Care::new(&t.0, &t.journal(), Config::default(), Mode::Observe);
+        t.file("sys/class/power_supply/BAT0/status", "Charging\n");
+        care.step(&being("idle", false), 0.0);
+        t.file("sys/class/power_supply/ADP1/online", "0\n");
+        care.step(&being("idle", false), 10.0);
+        assert_eq!(care.battery_reads, 2);
+        assert_eq!(care.reading.status.as_deref(), Some("Charging"), "the stale edge read");
+        t.file("sys/class/power_supply/BAT0/status", "Discharging\n");
+        for s in 11..=13 {
+            care.step(&being("idle", false), f64::from(s));
+        }
+        assert_eq!(care.battery_reads, 2);
+        care.step(&being("idle", false), 14.0);
+        assert_eq!(care.battery_reads, 3);
+        assert_eq!(care.reading.status.as_deref(), Some("Discharging"));
+        // Then only the slow cadence: no second follow-up.
+        for s in 15..=43 {
+            care.step(&being("idle", false), f64::from(s));
+        }
+        assert_eq!(care.battery_reads, 3);
+    }
+
+    #[test]
+    fn a_pack_that_goes_while_bat0_stays_listed_is_seen_from_the_uevent() {
+        // The sbs driver keeps BAT0 and flips present to 0; the adapter does
+        // not change. The udev rule touches the stamp on the uevent.
+        let t = macbook("uevent");
+        let mut care = Care::new(&t.0, &t.journal(), Config::default(), Mode::Observe);
+        for s in 0..=5 {
+            care.step(&being("idle", false), f64::from(s));
+        }
+        assert_eq!(care.battery_reads, 1);
+        assert_eq!(care.reading.battery_present, Some(true));
+        t.file("sys/class/power_supply/BAT0/present", "0\n");
+        care.step(&being("idle", false), 6.0);
+        assert_eq!(care.reading.battery_present, Some(true), "no uevent yet: not seen");
+        t.file(hw::POWER_STAMP, "");
+        care.step(&being("idle", false), 7.0);
+        assert_eq!(care.battery_reads, 2);
+        assert_eq!(care.reading.battery_present, Some(false), "seen on the uevent, not a minute later");
+        assert_eq!(care.reading.percent, None);
+        // The follow-up 4 s on, then quiet: one uevent is one read and one follow-up.
+        for s in 8..=60 {
+            care.step(&being("idle", false), f64::from(s));
+        }
+        assert_eq!(care.battery_reads, 3);
+    }
+
+    #[test]
+    fn the_charge_cap_is_judged_on_the_share_of_full_not_of_the_design() {
+        // The laptop's sbs battery: capacity is against the design (80 when
+        // full on a pack at 80% health). Resting at an 80% cap it reads 64.
+        let t = macbook("cap-share");
+        let bat = "sys/class/power_supply/BAT0";
+        t.file(&format!("{SMC}/battery_charge_limit"), "80\n");
+        t.file(&format!("{bat}/status"), "Full\n");
+        t.file(&format!("{bat}/capacity"), "64\n");
+        t.file(&format!("{bat}/charge_now"), "3703200\n");
+        t.file(&format!("{bat}/charge_full"), "4629000\n");
+        t.file(&format!("{bat}/charge_full_design"), "5770000\n");
+        let mut care = Care::new(&t.0, &t.journal(), Config { charge_limit: Some(80), ..Config::default() }, Mode::Observe);
+        care.step(&being("idle", false), 0.0);
+        assert_eq!(care.reading.percent, Some(80.0));
+        assert_eq!(care.report().bool("cap_honoured"), Some(true));
     }
 
     #[test]

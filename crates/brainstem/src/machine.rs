@@ -129,14 +129,19 @@ pub const RESUME_LID_HOLD: f64 = 3.0;
 pub struct Machine {
     cfg: Config,
     state: State,
+    /// Changes on every state transition, including returning to the same
+    /// profile later. Consumers echo it instead of matching names alone.
+    state_epoch: u64,
     since: f64,
     boot: f64,
     up: BTreeSet<String>,
     seen: BTreeSet<String>,
     mind_ready: bool,
-    announcing: bool,
+    /// Exact Mind-owned token while an unsolicited announcement owns the turn.
+    announcing: Option<String>,
     muted: bool,
     unwell: bool,
+    privacy_fault: bool,
     lid_blocked: bool,
     lid_wake: bool,
     /// The lid was confirmed closed during the current blocked spell.
@@ -148,6 +153,13 @@ pub struct Machine {
     lid_hold_until: f64,
     /// The mind has said it reports progress while it thinks.
     progress_capable: bool,
+    /// The current mind's own `mind.ready`, kept so an organ that joins
+    /// later is told it too (it goes out once per mind connection).
+    ready_event: Option<Event>,
+    /// Some of this reply has been handed to the voice (`say.request`).
+    handed: bool,
+    /// All of it has: the final clause has been handed to the voice.
+    handed_last: bool,
     last_progress: f64,
     dark: bool,
     night: bool,
@@ -165,20 +177,25 @@ impl Machine {
         Machine {
             cfg,
             state: State::Waking,
+            state_epoch: 0,
             since: now,
             boot: now,
             up: BTreeSet::new(),
             seen: BTreeSet::new(),
             mind_ready: false,
-            announcing: false,
+            announcing: None,
             muted: false,
             unwell: false,
+            privacy_fault: false,
             lid_blocked: false,
             lid_wake: false,
             closed_seen: false,
             woke_once: false,
             lid_hold_until: f64::NEG_INFINITY,
             progress_capable: false,
+            ready_event: None,
+            handed: false,
+            handed_last: false,
             last_progress: now,
             dark: false,
             night: false,
@@ -230,7 +247,10 @@ impl Machine {
         self.state
     }
 
-    #[cfg(test)]
+    pub fn state_epoch(&self) -> u64 {
+        self.state_epoch
+    }
+
     pub fn muted(&self) -> bool {
         self.muted
     }
@@ -240,14 +260,37 @@ impl Machine {
         self.unwell
     }
 
+    pub fn set_privacy_fault(&mut self, fault: bool, now: f64) -> Vec<Event> {
+        self.privacy_fault = fault;
+        let mut out = Vec::new();
+        self.check_health(now, &mut out);
+        out
+    }
+
     /// The current state as a `state.changed` event, for an organ that just joined.
+    /// While thinking with the whole reply already with the voice it says so
+    /// (`reply_with_voice`): the turn is not orphaned, the voice will finish
+    /// it, so a mind that starts into it leaves it alone (turn.py
+    /// `_note_inherited_turn`).
     pub fn snapshot(&self) -> Event {
-        self.changed(None)
+        let ev = self.changed(None);
+        if self.state == State::Thinking && self.handed_last {
+            ev.with("reply_with_voice", true)
+        } else {
+            ev
+        }
+    }
+
+    /// The connected mind's `mind.ready`, for an organ that joined after it
+    /// went out (marked `snapshot`), or None while no mind has said it.
+    pub fn ready_snapshot(&self) -> Option<Event> {
+        self.ready_event.clone().map(|ev| ev.with("snapshot", true))
     }
 
     fn changed(&self, prev: Option<State>) -> Event {
         let mut ev = Event::new("state.changed")
             .with("state", self.state.name())
+            .with("state_epoch", self.state_epoch)
             .with("muted", self.muted)
             .with("unwell", self.unwell);
         if let Some(prev) = prev {
@@ -262,8 +305,9 @@ impl Machine {
         }
         let prev = self.state;
         self.state = to;
+        self.state_epoch = self.state_epoch.wrapping_add(1);
         if !matches!(to, State::Thinking | State::Speaking) {
-            self.announcing = false;
+            self.announcing = None;
         }
         if to != State::Waking {
             self.lid_wake = false;
@@ -273,6 +317,9 @@ impl Machine {
         }
         if to == State::Thinking {
             self.last_progress = now;
+            // A new reply: nothing of it is with the voice yet.
+            self.handed = false;
+            self.handed_last = false;
         }
         self.since = now;
         self.last_activity = now;
@@ -282,6 +329,49 @@ impl Machine {
     fn attend(&mut self, now: f64, out: &mut Vec<Event>) {
         self.attend_until = now + self.cfg.attend;
         self.go(State::Attending, now, out);
+    }
+
+    /// An organ that carries part of a turn went away, or came back as a new
+    /// connection (a restart). Either way its part of the turn is gone: a
+    /// voice that loses the bus drops its reply and its dictation, and a mind
+    /// that loses it cancels its turn (voice.py `connection_lost`, turn.py
+    /// `_connection_lost`). Waiting for the speak or think timeout left the
+    /// being deaf for 60 s after a voice restart while speaking and 300 s
+    /// after a mind restart while thinking (cable log, 25 Nov), because the
+    /// voice only listens in a hearing state and a name is not taken while
+    /// thinking. So the turn ends now and the ears open. `why` goes out as
+    /// the cancel's reason.
+    fn organ_left_turn(&mut self, name: &str, why: &str, now: f64, out: &mut Vec<Event>) {
+        let replying = matches!(self.state, State::Thinking | State::Speaking);
+        let end = match name {
+            // An announcement waits on both; the mind retries it later.
+            "mind" | "voice" if self.announcing.is_some() && replying => {
+                out.push(Event::new("say.stop"));
+                true
+            }
+            // The voice's words are gone: once any of the reply was handed
+            // to it, or it was speaking, nothing will finish the turn.
+            // Before that, the reply still goes to whichever voice is there.
+            "voice" if self.state == State::Speaking || (self.state == State::Thinking && self.handed) => true,
+            // It was taking dictation; a new voice is not.
+            "voice" if self.state == State::Listening => {
+                self.attend(now, out);
+                return;
+            }
+            // The mind's reply is gone unless all of it is already with the
+            // voice, which then finishes the turn by itself (say.done final).
+            "mind" if replying && !self.handed_last => {
+                if self.handed {
+                    out.push(Event::new("say.stop"));
+                }
+                true
+            }
+            _ => false,
+        };
+        if end {
+            out.push(Event::new("mind.cancel").with("reason", why));
+            self.attend(now, out);
+        }
     }
 
     /// Someone called its name.
@@ -328,7 +418,7 @@ impl Machine {
 
     fn check_health(&mut self, now: f64, out: &mut Vec<Event>) {
         let late = now - self.boot > self.cfg.boot_grace;
-        let unwell = self
+        let unwell = self.privacy_fault || self
             .cfg
             .required
             .iter()
@@ -370,28 +460,42 @@ impl Machine {
         out
     }
 
+    /// What the brainstem knew of a mind connection that has ended.
+    fn forget_mind(&mut self) {
+        self.mind_ready = false;
+        self.progress_capable = false;
+        self.ready_event = None;
+    }
+
     pub fn on_event(&mut self, ev: &Event, now: f64) -> Vec<Event> {
         let mut out = Vec::new();
         match ev.topic.as_str() {
             "organ.up" => {
-                if let Some(name) = ev.str("name") {
+                let name = ev.str("name").unwrap_or_default();
+                // A voice joining for the first time had no part in a turn
+                // (a reply typed during boot); one seen before is a restart.
+                // A mind that has just connected never has a turn running.
+                let returning = self.seen.contains(name) || name == "mind";
+                if !name.is_empty() {
                     self.up.insert(name.to_string());
                     self.seen.insert(name.to_string());
                 }
+                if name == "mind" {
+                    // A new mind connection says it is ready for itself.
+                    self.forget_mind();
+                }
                 self.check_health(now, &mut out);
+                if returning {
+                    self.organ_left_turn(name, &format!("{name}_restarted"), now, &mut out);
+                }
             }
             "organ.down" => {
                 if let Some(name) = ev.str("name") {
                     self.up.remove(name);
                     if name == "mind" {
-                        self.mind_ready = false;
-                        self.progress_capable = false;
+                        self.forget_mind();
                     }
-                    if self.announcing && matches!(name, "mind" | "voice") {
-                        out.push(Event::new("say.stop"));
-                        out.push(Event::new("mind.cancel"));
-                        self.attend(now, &mut out);
-                    }
+                    self.organ_left_turn(name, &format!("{name}_lost"), now, &mut out);
                 }
                 self.check_health(now, &mut out);
             }
@@ -399,6 +503,16 @@ impl Machine {
                 self.mind_ready = true;
                 if ev.bool("progress") == Some(true) {
                     self.progress_capable = true;
+                }
+                self.ready_event = Some(ev.clone());
+            }
+            "say.request" => {
+                if matches!(self.state, State::Thinking | State::Speaking) {
+                    self.handed = true;
+                    // The voice treats anything but `last: false` as the end.
+                    if ev.bool("last") != Some(false) {
+                        self.handed_last = true;
+                    }
                 }
             }
             "mind.progress" => {
@@ -415,10 +529,19 @@ impl Machine {
                     && matches!(self.state, State::Idle | State::Drowsy | State::Attending) =>
             {
                 if let Some(announcement) = ev.str("announcement").filter(|value| !value.is_empty()) {
-                    self.announcing = true;
+                    self.announcing = Some(announcement.to_owned());
                     self.go(State::Thinking, now, &mut out);
                     out.push(Event::new("stem.announce_ready").with("announcement", announcement));
                 }
+            }
+            "mind.announce_cancel"
+                if ev.str("announcement").is_some_and(|token| {
+                    self.announcing.as_deref() == Some(token)
+                }) && matches!(self.state, State::Thinking | State::Speaking) =>
+            {
+                out.push(Event::new("say.stop").with("reason", "announcement_revoked"));
+                out.push(Event::new("mind.cancel").with("reason", "announcement_revoked"));
+                self.attend(now, &mut out);
             }
             "hear.wake" if !self.muted => self.engage(now, &mut out),
             // Space, Return or a click while the eyes rest: the same as its name.
@@ -436,6 +559,15 @@ impl Machine {
                     if said {
                         self.last_stimulus = now;
                         self.go(State::Thinking, now, &mut out);
+                        if let Some(end) = ev.data.get("speech_end_mono_ms").and_then(|value| value.as_u64()) {
+                            let recent = bus::monotonic_millis().and_then(|now| now.checked_sub(end))
+                                .is_some_and(|age| age <= 3000);
+                            if recent {
+                                if let Some(changed) = out.last_mut() {
+                                    changed.data.insert("speech_end_mono_ms".into(), end.into());
+                                }
+                            }
+                        }
                     } else {
                         self.attend(now, &mut out);
                     }
@@ -460,8 +592,12 @@ impl Machine {
                 }
             }
             "mind.reply_done" => {
-                // A reply with nothing to say never reaches the voice.
-                if self.state == State::Thinking && !ev.bool("spoke").unwrap_or(true) {
+                // A reply with nothing to say never reaches the voice. One
+                // whose every clause is already with the voice is not that,
+                // whatever the mind says (a new mind giving up a turn it
+                // inherited, or a turn that failed after its last clause):
+                // the voice speaks it and its say.done final ends the turn.
+                if self.state == State::Thinking && !ev.bool("spoke").unwrap_or(true) && !self.handed_last {
                     self.attend(now, &mut out);
                 }
             }
@@ -1064,6 +1200,272 @@ mod tests {
         let out = m.on_tick(21.0);
         assert_eq!(out[0].bool("unwell"), Some(true));
         assert_eq!(m.state(), State::Waking);
+    }
+
+    fn down(name: &str) -> Event {
+        Event::new("organ.down").with("name", name)
+    }
+
+    fn clause(last: bool) -> Event {
+        Event::new("say.request").with("text", if last { "" } else { "Once upon a time." }).with("last", last)
+    }
+
+    /// A reply under way: asked at 11-12 s, the first clause handed to the
+    /// voice and playing from 14 s, more still to come from the mind.
+    fn speaking_a_long_reply() -> Machine {
+        let mut m = awake();
+        m.on_event(&ev("hear.wake"), 11.0);
+        m.on_event(&ev("hear.speech_start"), 11.2);
+        m.on_event(&Event::new("hear.final").with("text", "tell me a long story about the sea"), 12.0);
+        m.on_event(&clause(false), 13.9);
+        m.on_event(&ev("say.started"), 14.0);
+        assert_eq!(m.state(), State::Speaking);
+        m
+    }
+
+    /// The owner can be heard again: a wake and speech reach listening.
+    fn hears_again(m: &mut Machine, t: f64) {
+        m.on_event(&ev("hear.wake"), t);
+        m.on_event(&ev("hear.speech_start"), t + 0.5);
+        assert_eq!(m.state(), State::Listening, "deaf at {t}");
+    }
+
+    fn cancel_reason(out: &[Event]) -> Option<&str> {
+        out.iter().find(|e| e.topic == "mind.cancel").and_then(|e| e.str("reason"))
+    }
+
+    #[test]
+    fn before_the_fix_a_restarted_voice_left_it_deaf_until_the_speak_timeout() {
+        // What the cable log showed (restart-voice-speaking.json): with no
+        // word from the dead voice the brainstem stayed speaking for 60 s,
+        // and a voice listens only in a hearing state. The machine still
+        // gets there by the timeout when nothing at all is said, as before.
+        let mut m = speaking_a_long_reply();
+        m.on_event(&ev("hear.wake"), 20.0);
+        assert_eq!(m.state(), State::Speaking, "a name while speaking is not taken");
+        assert!(m.on_tick(73.9).is_empty());
+        assert_eq!(topics(&m.on_tick(74.1)), ["say.stop", "state.changed"]);
+        assert_eq!(m.state(), State::Attending);
+    }
+
+    #[test]
+    fn a_voice_restart_while_speaking_ends_the_turn_at_once() {
+        // The new voice connects before the old connection is noticed gone
+        // (no organ.down): its hello alone ends the turn.
+        let mut m = speaking_a_long_reply();
+        let out = m.on_event(&up("voice"), 15.0);
+        assert_eq!(topics(&out), ["mind.cancel", "state.changed"], "the mind stops; nothing left to stop in the voice");
+        assert_eq!(cancel_reason(&out), Some("voice_restarted"));
+        assert_eq!(out[1].str("state"), Some("attending"));
+        assert_eq!(out[1].str("prev"), Some("speaking"));
+        hears_again(&mut m, 16.0);
+
+        // The old voice died first (organ.down), then the new one said hello.
+        let mut m = speaking_a_long_reply();
+        let out = m.on_event(&down("voice"), 15.0);
+        assert_eq!(cancel_reason(&out), Some("voice_lost"));
+        assert_eq!(m.state(), State::Attending);
+        let out = m.on_event(&up("voice"), 15.2);
+        assert_eq!(cancel_reason(&out), None, "the turn was already over");
+        hears_again(&mut m, 16.0);
+    }
+
+    #[test]
+    fn a_voice_restart_after_the_reply_was_handed_over_ends_it_too() {
+        // Every clause went to the old voice, which died before it played one.
+        let mut m = awake();
+        m.on_event(&ev("hear.wake"), 11.0);
+        m.on_event(&Event::new("hear.final").with("text", "what time is it"), 12.0);
+        m.on_event(&clause(false), 12.5);
+        m.on_event(&clause(true), 12.6);
+        assert_eq!(m.state(), State::Thinking);
+        let out = m.on_event(&up("voice"), 13.0);
+        assert_eq!(cancel_reason(&out), Some("voice_restarted"));
+        assert_eq!(m.state(), State::Attending);
+    }
+
+    #[test]
+    fn a_voice_restart_while_the_mind_is_still_thinking_keeps_the_reply() {
+        // Nothing has gone to the voice yet: the new voice speaks all of it.
+        let mut m = awake();
+        m.on_event(&ev("hear.wake"), 11.0);
+        m.on_event(&Event::new("hear.final").with("text", "tell me a joke"), 12.0);
+        let out = m.on_event(&up("voice"), 13.0);
+        assert!(cancel_reason(&out).is_none());
+        assert_eq!(m.state(), State::Thinking);
+        m.on_event(&clause(false), 14.0);
+        m.on_event(&ev("say.started"), 14.1);
+        m.on_event(&clause(true), 14.5);
+        m.on_event(&Event::new("say.done").with("final", true), 16.0);
+        assert_eq!(m.state(), State::Attending);
+    }
+
+    #[test]
+    fn a_voice_restart_while_listening_opens_the_ears_again() {
+        let mut m = awake();
+        m.on_event(&ev("hear.wake"), 11.0);
+        m.on_event(&ev("hear.speech_start"), 11.5);
+        assert_eq!(m.state(), State::Listening);
+        let out = m.on_event(&up("voice"), 12.0);
+        assert_eq!(topics(&out), ["state.changed"], "no reply to cancel");
+        assert_eq!(m.state(), State::Attending);
+        hears_again(&mut m, 12.5);
+    }
+
+    #[test]
+    fn a_voice_joining_for_the_first_time_does_not_end_a_typed_reply() {
+        // A reply typed in the local menu's chat while the voice is still
+        // starting: the voice had no part in it.
+        let cfg = Config { required: vec!["face".into(), "mind".into()], ..Config::default() };
+        let mut m = Machine::new(cfg, 0.0);
+        m.on_event(&up("face"), 0.1);
+        m.on_event(&up("mind"), 0.1);
+        m.on_event(&ev("mind.ready"), 0.2);
+        m.on_tick(10.0);
+        m.on_event(&ev("hear.wake"), 11.0);
+        m.on_event(&Event::new("hear.final").with("text", "hello"), 12.0);
+        m.on_event(&clause(false), 12.5);
+        assert!(cancel_reason(&m.on_event(&up("voice"), 13.0)).is_none());
+        assert_eq!(m.state(), State::Thinking);
+    }
+
+    #[test]
+    fn before_the_fix_a_restarted_mind_left_it_deaf_until_the_think_budget() {
+        // restart-mind-thinking.json: thinking for 300.1 s, 34 wakes unheard.
+        // A restarted mind has not reported progress, so it gets the blind cap.
+        let mut m = awake();
+        m.on_event(&ev("hear.wake"), 11.0);
+        m.on_event(&Event::new("hear.final").with("text", "tell me a long story about the sea"), 12.0);
+        m.on_event(&ev("hear.wake"), 20.0);
+        assert_eq!(m.state(), State::Thinking, "a name while thinking is not taken");
+        assert!(m.on_tick(311.9).is_empty());
+        assert_eq!(m.on_tick(312.1)[0].str("reason"), Some("think_timeout"));
+    }
+
+    #[test]
+    fn a_mind_restart_while_thinking_ends_the_turn_at_once() {
+        for died_first in [false, true] {
+            let mut m = awake();
+            m.on_event(&Event::new("mind.ready").with("progress", true), 10.5);
+            m.on_event(&ev("hear.wake"), 11.0);
+            m.on_event(&Event::new("hear.final").with("text", "tell me a long story about the sea"), 12.0);
+            m.on_event(&Event::new("mind.progress").with("phase", "prompt"), 12.3);
+            let mut out = Vec::new();
+            if died_first {
+                out = m.on_event(&down("mind"), 12.5);
+            }
+            out.extend(m.on_event(&up("mind"), 12.6));
+            let reason = if died_first { "mind_lost" } else { "mind_restarted" };
+            assert_eq!(cancel_reason(&out), Some(reason));
+            assert!(!topics(&out).contains(&"say.stop"), "nothing was with the voice");
+            assert_eq!(m.state(), State::Attending);
+            hears_again(&mut m, 13.0);
+            // The new mind starts blind and not yet ready.
+            assert!(m.ready_snapshot().is_none());
+            m.on_event(&Event::new("hear.final").with("text", "hello again"), 14.0);
+            assert!(m.on_tick(14.0 + 100.0).is_empty(), "no stall clock for a mind that never said it reports progress");
+        }
+    }
+
+    #[test]
+    fn a_mind_restart_mid_reply_stops_the_half_said_reply() {
+        let mut m = speaking_a_long_reply();
+        let out = m.on_event(&up("mind"), 15.0);
+        assert_eq!(topics(&out), ["say.stop", "mind.cancel", "state.changed"]);
+        assert_eq!(cancel_reason(&out), Some("mind_restarted"));
+        assert_eq!(m.state(), State::Attending);
+        hears_again(&mut m, 16.0);
+    }
+
+    #[test]
+    fn a_mind_restart_after_the_whole_reply_reached_the_voice_lets_it_finish() {
+        let mut m = speaking_a_long_reply();
+        m.on_event(&clause(false), 14.2);
+        m.on_event(&clause(true), 14.3);
+        let out = m.on_event(&up("mind"), 15.0);
+        assert!(out.iter().all(|e| e.topic != "mind.cancel" && e.topic != "say.stop"));
+        assert_eq!(m.state(), State::Speaking);
+        m.on_event(&Event::new("say.done").with("final", true), 18.0);
+        assert_eq!(m.state(), State::Attending);
+        // The next reply is tracked afresh.
+        m.on_event(&Event::new("hear.final").with("text", "and then"), 19.0);
+        m.on_event(&clause(false), 19.5);
+        assert_eq!(cancel_reason(&m.on_event(&up("mind"), 20.0)), Some("mind_restarted"));
+    }
+
+    #[test]
+    fn a_new_minds_empty_reply_does_not_cut_off_a_reply_already_with_the_voice() {
+        // The mind handed the whole reply over and died before the voice
+        // started it. Its replacement cannot tell that from an orphaned
+        // turn, so the snapshot says it, and an empty reply_done from the
+        // new mind (an older one, which does not read the mark) is ignored.
+        let mut m = awake();
+        m.on_event(&ev("hear.wake"), 11.0);
+        m.on_event(&Event::new("hear.final").with("text", "what time is it"), 12.0);
+        assert!(m.snapshot().data.get("reply_with_voice").is_none());
+        m.on_event(&clause(false), 12.2);
+        assert!(m.snapshot().data.get("reply_with_voice").is_none(), "only part of it is with the voice");
+        m.on_event(&clause(true), 12.3);
+        let out = m.on_event(&up("mind"), 12.5);
+        assert!(cancel_reason(&out).is_none());
+        assert_eq!(m.state(), State::Thinking);
+        let snap = m.snapshot();
+        assert_eq!((snap.str("state"), snap.bool("reply_with_voice")), (Some("thinking"), Some(true)));
+        assert!(m.on_event(&Event::new("mind.reply_done").with("spoke", false), 13.6).is_empty());
+        assert_eq!(m.state(), State::Thinking);
+        m.on_event(&ev("say.started"), 14.0);
+        assert_eq!(m.state(), State::Speaking);
+        assert!(m.snapshot().data.get("reply_with_voice").is_none());
+        m.on_event(&Event::new("say.done").with("final", true), 16.0);
+        assert_eq!(m.state(), State::Attending);
+        // The next turn starts unmarked, and an empty reply ends it as before.
+        m.on_event(&Event::new("hear.final").with("text", "never mind"), 17.0);
+        assert!(m.snapshot().data.get("reply_with_voice").is_none());
+        m.on_event(&Event::new("mind.reply_done").with("spoke", false), 17.5);
+        assert_eq!(m.state(), State::Attending);
+    }
+
+    #[test]
+    fn an_announcement_still_ends_when_either_organ_leaves_or_returns() {
+        for organ in ["mind", "voice"] {
+            for event in [down(organ), up(organ)] {
+                let mut m = awake();
+                m.on_event(&Event::new("mind.announce").with("announcement", "due-1"), 10.5);
+                assert_eq!(m.state(), State::Thinking);
+                let out = m.on_event(&event, 11.0);
+                assert!(topics(&out).starts_with(&["say.stop", "mind.cancel"]), "{organ} {}", event.topic);
+                assert_eq!(m.state(), State::Attending);
+            }
+        }
+    }
+
+    #[test]
+    fn the_minds_ready_is_kept_for_organs_that_join_later() {
+        let mut m = Machine::new(Config::default(), 0.0);
+        assert!(m.ready_snapshot().is_none());
+        m.on_event(&up("mind"), 0.1);
+        assert!(m.ready_snapshot().is_none(), "connected is not ready");
+        m.on_event(&Event::new("mind.ready").with("cortex", true).with("progress", true), 0.2);
+        let snap = m.ready_snapshot().expect("kept");
+        assert_eq!(snap.topic, "mind.ready");
+        assert_eq!(snap.bool("cortex"), Some(true));
+        assert_eq!(snap.bool("progress"), Some(true));
+        assert_eq!(snap.bool("snapshot"), Some(true));
+        // A later ready (the cortex came back) replaces it.
+        m.on_event(&Event::new("mind.ready").with("cortex", false), 1.0);
+        assert_eq!(m.ready_snapshot().unwrap().bool("cortex"), Some(false));
+        // Another organ coming and going changes nothing.
+        m.on_event(&up("voice"), 1.1);
+        m.on_event(&down("voice"), 1.2);
+        assert!(m.ready_snapshot().is_some());
+        // The mind leaving, or a new mind connection replacing it, forgets it.
+        m.on_event(&down("mind"), 2.0);
+        assert!(m.ready_snapshot().is_none());
+        m.on_event(&up("mind"), 2.1);
+        m.on_event(&ev("mind.ready"), 2.2);
+        assert!(m.ready_snapshot().is_some());
+        m.on_event(&up("mind"), 3.0);
+        assert!(m.ready_snapshot().is_none(), "a replacing connection has not said it yet");
     }
 
     #[test]

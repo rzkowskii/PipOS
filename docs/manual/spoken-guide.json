@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "topics": ["backup", "backups", "back up", "back you up", "make a backup"],
+      "summary": "Open Setup with function two, then choose Backup. The backup is encrypted. Keep its key, snapshot and deletion proof.",
+      "steps": [
+        "Plug in a backup drive and choose it in Backup.",
+        "Keep the encryption key apart from the backup. Anyone with both can read what was saved.",
+        "Write down the checkpoint shown on screen. A full restore uses it to verify the deletion proof."
+      ]
+    },
+    {
+      "topics": ["restore", "restore a backup", "restore your memory"],
+      "summary": "Boot from a PipOS Try stick and choose Restore a being. Restoring is an installation and erases the target disk.",
+      "steps": [
+        "For a full restore, bring the snapshot, key, deletion proof and the checkpoint you recorded.",
+        "Choose the intended internal disk, inspect what will be erased and follow the typed confirmation on screen."
+      ]
+    },
+    {
+      "topics": ["f9", "function 9", "function nine", "recover the panel", "recover your screen"],
+      "summary": "Function nine recovers the face when the lid reading is unknown. On the MacBook, hold the function key while pressing F nine."
+    },
+    {
+      "topics": ["f6", "function 6", "function six", "quick menu", "open your quick menu"],
+      "summary": "Open the Quick Menu with function six, or say open the Quick Menu. Use the arrow keys and Enter to select an app. Escape closes it."
+    },
+    {
+      "topics": ["f2", "function 2", "function two", "setup", "open setup"],
+      "summary": "Function two or Mission Control opens Setup on an installed Pip. In Try, it opens the start menu."
+    },
+    {
+      "topics": ["f1", "function 1", "function one", "captions", "turn on captions"],
+      "summary": "Function one toggles captions. Captions start off. The screen clears private caption text when a guest arrives."
+    },
+    {
+      "topics": ["f10", "function 10", "function ten", "microphone", "mute your microphone"],
+      "summary": "Function ten toggles my microphone. On the MacBook, the printed speaker mute key controls the speaker. Hold function to use microphone mute."
+    },
+    {
+      "topics": ["guest mode", "guest", "start guest mode"],
+      "summary": "Say start guest mode for a private conversation, and end guest mode when it is over. Saved memory and personal screen apps stay closed to guests."
+    },
+    {
+      "topics": ["camera permission", "camera settings"],
+      "summary": "Say you can use your camera and press E at the screen to allow it. Say stop watching to turn permission off."
+    },
+    {
+      "topics": ["dream permission", "dream settings", "dreams tonight"],
+      "summary": "Say you can dream tonight. Check the date on screen and press Y for that one night. Say stop dreaming to switch it off."
+    },
+    {
+      "topics": ["installation", "install pipos", "install pip", "install you"],
+      "summary": "Boot from the Try stick first. The installer shows the disks and their contents, then asks for typed confirmation before erasing the target.",
+      "steps": [
+        "Back up anything you need from the target disk before starting.",
+        "Open the installer from the Try menu and check the capacity and partitions on the disk it offers.",
+        "If power fails before the installer finishes, boot from the USB and start the installation again."
+      ]
+    },
+    {
+      "topics": ["terminal", "run a script", "run a command", "run your script"],
+      "summary": "Say open the terminal. When I write a command or script for you, check what I show and say run it when ready."
+    },
+    {
+      "topics": ["forgetting", "forget a memory", "forget something"],
+      "summary": "Ask me to forget a topic or a day. I'll tell you what I found and wait for yes before deleting it.",
+      "steps": [
+        "For just the memory I last read back, say forget that.",
+        "After a deletion, export an updated deletion proof to keep the memory gone when you restore a backup."
+      ]
+    },
+    {
+      "topics": ["timer", "timers", "set a timer", "use a timer"],
+      "summary": "Say set a timer for five minutes, or name another duration. Ask how long left on my timer, or say cancel the timer."
+    },
+    {
+      "topics": ["alarm", "alarms", "set an alarm", "use an alarm"],
+      "summary": "Say set an alarm for 6:30 tomorrow, or set an alarm for ten minutes. Alarms can ring during quiet hours."
+    },
+    {
+      "topics": ["reminder", "reminders", "set a reminder", "make a reminder"],
+      "summary": "Give the task and time together, for example remind me to close the window tomorrow at nine a.m. Ask what are my reminders to hear pending items."
+    },
+    {
+      "topics": ["quiet hours", "change quiet hours", "set quiet hours"],
+      "summary": "Open Setup, then choose Quiet hours and announcements. During quiet hours, automatic reminders and timers wait. Alarms can still ring."
+    },
+    {
+      "topics": ["shopping list", "shopping lists", "use a shopping list", "add to a shopping list"],
+      "summary": "Say add milk to my shopping list, or ask what's on my shopping list. Say cross off milk when you have it."
+    },
+    {
+      "topics": ["notes", "make a note", "read notes", "read my notes"],
+      "summary": "Say make a note, followed by what to keep. Say read my notes to hear the saved notes. For the most recent note, you can say delete my last note."
+    },
+    {
+      "topics": ["conversation threads", "bookmark a conversation", "continue a conversation", "pick up a conversation"],
+      "summary": "After a topic, say pick this up later. Ask what were we working on to bring it back. Say close the thread to remove the bookmark."
+    },
+    {
+      "topics": ["calculator", "use the calculator", "open the calculator"],
+      "summary": "Say open the calculator or choose Calculator in the Quick Menu. You can also say an arithmetic question directly, such as what's fifteen times eight."
+    },
+    {
+      "topics": ["time zone", "time zones", "change the time zone", "set a time zone"],
+      "summary": "Choose Time zone in Setup, or say set my time zone to Australia Sydney for that example. Use an exact region and city when the zone name needs both."
+    },
+    {
+      "topics": ["weather", "weather lookups", "check the weather", "get the weather"],
+      "summary": "On an installed system with Internet mode and web lookups allowed, ask for the weather and give a city if one isn't saved. You can ask about today or tomorrow."
+    }
+  ]
+}

@@ -11,6 +11,7 @@ from mind import diary
 from mind.retention import MemoryPolicy, save_policy
 from mind.turn import Announcement, Ring, _spoken_words
 from tests.test_mind import MindCase
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 
 class ForgetEverything(MindCase):

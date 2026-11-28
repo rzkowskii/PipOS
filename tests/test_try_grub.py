@@ -15,9 +15,11 @@ from pathlib import Path
 CONFIG = Path(__file__).resolve().parent.parent / "os/board/beingos/try-grub.cfg"
 # Each extra laptop entry is the default entry plus these kernel arguments.
 EXTRA_ARGS = {
-    "Try PipOS (alternative microphone)": ["snd_hda_intel.model=mbp81", "being.mic_channel=auto"],
-    "Try PipOS (alternative microphone 2)": ["snd_hda_intel.model=mbp101"],
+    "Try PipOS (alternative microphone)": ["snd_hda_intel.model=mbp81", "being.mic_channel=auto",
+                                          "being.mic_test=1"],
+    "Try PipOS (alternative microphone 2)": ["snd_hda_intel.model=mbp101", "being.mic_test=1"],
     "Try PipOS (measure speed)": ["being.bench=1"],
+    "Try PipOS (measure boot and idle)": ["being.bench=2"],
 }
 
 
@@ -65,14 +67,15 @@ class TryGrubSource(unittest.TestCase):
         self.assertNotIn("mic_channel", lab[0])
         self.assertIn("terminal_output serial", self.config.splitlines())
 
-    def test_the_laptop_gets_six_entries_in_order_with_their_hotkeys(self):
+    def test_the_laptop_gets_seven_entries_in_order_with_their_hotkeys(self):
         found = entries(laptop(self.config))
         titles = [title for title, _, _ in found]
         self.assertEqual(titles, ["Try PipOS", "Try PipOS (show boot messages)", "Try PipOS (safe graphics)",
                                   "Try PipOS (alternative microphone)", "Try PipOS (alternative microphone 2)",
-                                  "Try PipOS (measure speed)"])
+                                  "Try PipOS (measure speed)", "Try PipOS (measure boot and idle)"])
         self.assertEqual([options for _, options, _ in found],
-                         [[], ["--hotkey=v"], ["--hotkey=s"], ["--hotkey=m"], ["--hotkey=n"], ["--hotkey=b"]])
+                         [[], ["--hotkey=v"], ["--hotkey=s"], ["--hotkey=m"], ["--hotkey=n"],
+                          ["--hotkey=b"], ["--hotkey=i"]])
         self.assertNotIn("ttyS0", laptop(self.config))
         self.assertNotIn("serial", "\n".join(line for line in laptop(self.config).splitlines()
                                              if not line.lstrip().startswith("#")))

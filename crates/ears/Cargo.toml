@@ -1,0 +1,8 @@
+[package]
+name = "ears"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bus = { path = "../bus" }
+libc = "0.2"

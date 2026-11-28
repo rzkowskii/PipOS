@@ -1,18 +1,18 @@
-"""The voice's side of the top row's volume keys (mind/keys.py): a key mute
-that is never stored, a start that is never silent, and the Mac's click."""
+"""The voice's side of the volume keys, start-up volume and Mac's click."""
 
 import asyncio
 import math
 import tempfile
 import unittest
 import wave
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 from mind import turn
 from mind.tts import CHIRP_PEAK, CHIRP_RATE, ChirpBank
 from mind.voice import (
-    CLICK_SECONDS, VOLUME_FLOOR, Voice, click_path, click_samples, load_voice_settings, save_voice_settings,
+    CLICK_SECONDS, VOLUME_FLOOR, Mixer, Voice, click_path, click_samples, load_voice_settings, save_voice_settings,
 )
 
 
@@ -32,7 +32,7 @@ def make_voice(**options):
 
 def hardware_mixer():
     return Mock(set=AsyncMock(return_value=True), store=AsyncMock(return_value=True),
-                get=AsyncMock(return_value=None))
+                get=AsyncMock(return_value=None), playback_muted=AsyncMock(return_value=False))
 
 
 class KeyMute(unittest.IsolatedAsyncioTestCase):
@@ -43,7 +43,7 @@ class KeyMute(unittest.IsolatedAsyncioTestCase):
             voice = make_voice(settings_dir=Path(mind), settings=load_voice_settings(mind), mixer=mixer)
             async with asyncio.TaskGroup() as voice.tasks:
                 await voice.handle({"t": "voice.volume", "level": 0, "persist": False})
-            mixer.set.assert_awaited_once_with(0)
+            mixer.set.assert_awaited_once_with(0, switch=True)
             mixer.store.assert_not_awaited()
             self.assertEqual(voice.volume, 0)
             self.assertIn(("voice.volume_state", {"level": 0, "mixer": "hardware"}), sent(voice))
@@ -102,7 +102,7 @@ class StartingRun(unittest.IsolatedAsyncioTestCase):
         with patch("mind.voice.sd_notify.keep_alive", AsyncMock()), self.assertLogs("being.voice", "INFO"):
             with self.assertRaises(asyncio.CancelledError):
                 await voice.run()
-        mixer.set.assert_awaited_once_with(VOLUME_FLOOR)
+        mixer.set.assert_awaited_once_with(VOLUME_FLOOR, switch=False)
         self.assertEqual(voice.volume, VOLUME_FLOOR)
 
     async def run_briefly(self, voice, events=()):
@@ -128,9 +128,6 @@ class StartingRun(unittest.IsolatedAsyncioTestCase):
         return [fields for topic, fields in sent(voice) if topic == "voice.volume_state"]
 
     async def test_the_start_reports_the_level_it_plays_at(self):
-        # A key mute is never saved: a voice that restarts during one (the
-        # watchdog, pip-diag) plays at the saved 50 and says so, which clears
-        # the face's "speaker muted" and the mind's mute.
         with tempfile.TemporaryDirectory() as mind:
             save_voice_settings(mind, volume=50, chirps=True)
             voice = make_voice(settings_dir=Path(mind), settings=load_voice_settings(mind), mixer=hardware_mixer())
@@ -138,11 +135,39 @@ class StartingRun(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.states(voice), [{"level": 50, "mixer": "hardware"}])
             self.assertEqual(load_voice_settings(mind)["volume"], 50)
 
+    async def test_an_alsa_only_mute_survives_restart_until_the_owner_changes_volume(self):
+        commands = []
+        mixer_output = b"Simple mixer control 'Master',0\n  Mono: Playback 37 [29%] [-45.00dB] [off]\n"
+
+        @asynccontextmanager
+        async def fake_child(*command, **options):
+            commands.append(command)
+            yield Mock(communicate=AsyncMock(return_value=(mixer_output, b"")),
+                       wait=AsyncMock(return_value=0), returncode=0)
+
+        with tempfile.TemporaryDirectory() as mind, patch("mind.voice.child", fake_child):
+            save_voice_settings(mind, volume=6, chirps=True)
+            voice = make_voice(settings_dir=Path(mind), settings=load_voice_settings(mind), mixer=Mixer("0"))
+            async with asyncio.TaskGroup() as voice.tasks:
+                await voice.start_volume()
+                await voice.handle({"t": "mind.ready"})
+                self.assertEqual(commands, [("amixer", "-M", "-c", "0", "sget", "Master")])
+                self.assertEqual(self.states(voice), [])
+                self.assertEqual(load_voice_settings(mind)["volume"], 6)
+                await voice.handle({"t": "voice.volume", "step": 6, "persist": False})
+            self.assertEqual(commands[-2:], [
+                ("amixer", "-q", "-M", "-c", "0", "sset", "Master", "35%"),
+                ("amixer", "-q", "-c", "0", "sset", "Master", "unmute"),
+            ])
+            self.assertEqual(self.states(voice), [{"level": 35, "mixer": "hardware"}])
+            self.assertEqual(load_voice_settings(mind)["volume"], 6)
+
     async def test_a_level_raised_to_the_floor_is_reported_and_saved(self):
         with tempfile.TemporaryDirectory() as mind:
             save_voice_settings(mind, volume=6, chirps=True)
             voice = make_voice(settings_dir=Path(mind), settings=load_voice_settings(mind),
-                               mixer=Mock(set=AsyncMock(return_value=False)))
+                               mixer=Mock(set=AsyncMock(return_value=False),
+                                          playback_muted=AsyncMock(return_value=False)))
             with self.assertLogs("being.voice", "INFO"):
                 await self.run_briefly(voice)
             self.assertEqual(self.states(voice), [{"level": VOLUME_FLOOR, "mixer": "software"}])

@@ -4,6 +4,7 @@
 //! until the relevant device reports a value.
 
 use crate::battery::{self, Battery};
+use crate::body_work;
 use bus::Event;
 
 /// Publish at least this often, and at once when a reading changes.
@@ -23,6 +24,7 @@ pub struct Body {
     cycles: Option<i64>,
     temp: Option<f64>,
     lux: Option<f64>,
+    work: body_work::Reading,
     lid_closed: Option<bool>,
     lid_seq: u64,
     /// The battery's keeper: pleas, time to empty and the clean power-off.
@@ -37,6 +39,7 @@ pub struct Body {
     /// The owner's time zone as seconds east of UTC, told by the mind. The
     /// image itself keeps UTC, so without this "night" would be UTC's night.
     utc_offset: Option<i64>,
+    clock_trusted: bool,
     /// True words about its own life (how long awake, how old), added to the
     /// senses line. Set by the brainstem from the life record.
     pub note: String,
@@ -59,6 +62,7 @@ impl Body {
             cycles: None,
             temp: Some(45.0),
             lux: Some(150.0),
+            work: body_work::Reading::default(),
             lid_closed: Some(false),
             lid_seq: 0,
             care: Battery::new(battery::Thresholds::default()),
@@ -68,6 +72,7 @@ impl Body {
             panel_ready: false,
             hour: None,
             utc_offset: None,
+            clock_trusted: true,
             note: String::new(),
             dirty: true,
             last_pub: now - PERIOD,
@@ -84,6 +89,7 @@ impl Body {
             temp: None,
             lux: None,
             lid_closed: None,
+            clock_trusted: false,
             ..Body::new(now)
         }
     }
@@ -132,6 +138,14 @@ impl Body {
         self.set_wear(reading.health_pct, reading.cycles);
         self.set_temperature(reading.temp);
         self.set_lux(reading.lux);
+        // A new incident or the start/end of strain matters immediately.
+        if self.work.strain_pct.map(|pct| pct > 0.0) != reading.work.strain_pct.map(|pct| pct > 0.0)
+            || self.work.thermal_throttles != reading.work.thermal_throttles
+            || self.work.oom_organs != reading.work.oom_organs
+        {
+            self.dirty = true;
+        }
+        self.work = reading.work;
     }
 
     pub fn set_lid(&mut self, closed: Option<bool>) {
@@ -292,16 +306,27 @@ impl Body {
     /// The mind knows the owner's time zone; `None` returns to the system's.
     /// Offsets beyond any real zone are refused.
     pub fn set_utc_offset(&mut self, offset: Option<i64>) {
-        let offset = offset.filter(|seconds| seconds.abs() <= 16 * 3600);
+        let offset = offset.filter(|seconds| (-(16 * 3600)..=(16 * 3600)).contains(seconds));
         if offset != self.utc_offset {
             self.utc_offset = offset;
             self.dirty = true;
         }
     }
 
+    pub fn set_clock_trusted(&mut self, trusted: bool) {
+        if trusted != self.clock_trusted {
+            self.clock_trusted = trusted;
+            self.dirty = true;
+        }
+    }
+
+    pub fn clock_trusted(&self) -> bool {
+        self.clock_trusted
+    }
+
     pub fn night(&self) -> bool {
         let (h, _) = self.clock();
-        !(7..22).contains(&h)
+        self.clock_trusted && !(7..22).contains(&h)
     }
 
     fn low_battery(&self) -> bool {
@@ -313,7 +338,7 @@ impl Body {
     /// One short line of true facts, for the mind to show the model.
     pub fn senses_line(&self) -> String {
         let (h, m) = self.clock();
-        let mut line = format!("{h:02}:{m:02}");
+        let mut line = if self.clock_trusted { format!("{h:02}:{m:02}") } else { "clock uncertain".into() };
         if let Some(battery) = self.battery {
             line.push_str(&format!(", battery {battery:.0}%"));
             if self.low_battery() {
@@ -360,12 +385,17 @@ impl Body {
             out.push(self.snapshot());
             out.push(self.senses());
             let round = |v: f64| (v.clamp(0.0, 1.0) * 100.0).round() / 100.0;
+            let energy = if self.on_ac == Some(true) { Some(1.0) } else { self.battery.map(|v| round(v / 100.0)) };
+            let social = round((-(now - self.last_contact) / 3600.0).exp());
+            let comfort = self.temp.map(|v| round(1.0 - (v - 50.0) / 40.0));
             out.push(
                 Event::new("body.drives")
-                    .with("energy", if self.on_ac == Some(true) { Some(1.0) } else { self.battery.map(|v| round(v / 100.0)) })
+                    .with("energy", energy)
                     .with("arousal", round((-(now - self.last_stimulus) / 60.0).exp()))
-                    .with("social", round((-(now - self.last_contact) / 3600.0).exp()))
-                    .with("comfort", self.temp.map(|v| round(1.0 - (v - 50.0) / 40.0))),
+                    .with("social", social)
+                    .with("comfort", comfort)
+                    .with("tiredness", bus::body_drives::tiredness(energy.map(|v| v as f32), comfort.map(|v| v as f32)))
+                    .with("eagerness", bus::body_drives::eagerness(Some(social as f32))),
             );
         }
         out.extend(said);
@@ -385,6 +415,11 @@ impl Body {
             .with("cycles", self.cycles)
             .with("temp", self.temp)
             .with("lux", self.lux)
+            .with("reflex_strain_pct", self.work.strain_pct)
+            .with("package_w", self.work.package_w)
+            .with("effort", self.work.effort)
+            .with("thermal_throttles", self.work.thermal_throttles)
+            .with("oom_organs", self.work.oom_organs)
             .with("lid_closed", self.lid_closed)
             .with("hour", h)
             .with("minute", m)
@@ -399,8 +434,12 @@ impl Body {
 /// mid-2012 MacBook Pro (MacBookPro9,2) and tolerant of anything else:
 ///
 /// - power: ACPI battery `BAT0` (type Battery) and AC adapter `ADP1` (type
-///   Mains) under /sys/class/power_supply. Some ACPI batteries have no
-///   `capacity`, so energy_* or charge_* are used instead.
+///   Mains) under /sys/class/power_supply. The charge is charge_now over
+///   charge_full (or the energy pair): this Mac's Smart Battery driver
+///   (`sbs`) reports `capacity` against the design capacity, so a full pack
+///   worn to 80% read "80". `capacity` is the fallback. The battery's files
+///   are read slowly (see `PowerPoll`): each refresh waits on the embedded
+///   controller.
 /// - temperature: Intel `coretemp` under /sys/class/hwmon, or failing that the
 ///   CPU keys (labels TC*) of `applesmc`.
 /// - light: applesmc at /sys/devices/platform/applesmc.768/light, "(left,right)".
@@ -414,6 +453,7 @@ impl Body {
 /// panics; the readings run on their own thread, never on the hub's.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod sysfs {
+    use crate::body_work;
     use std::collections::HashSet;
     use std::fs;
     use std::io::Read;
@@ -435,6 +475,39 @@ pub mod sysfs {
     /// The device survey is logged at start and once more this much later.
     #[cfg(target_os = "linux")]
     const RESURVEY: Duration = Duration::from_secs(20);
+    /// How often the battery's own files are read. On the MacBookPro9,2
+    /// every attribute of the ACPI Smart Battery (present, status, charge,
+    /// voltage, current) refreshes through the embedded controller once the
+    /// driver's 1 s cache has expired: about 126 EC interrupts and 55-64 ms
+    /// blocked per refresh (measured 25 November 2026). The adapter's
+    /// `online` costs nothing and is read on every pass; a change there
+    /// reads the battery at once.
+    pub const BATTERY_ON_AC: Duration = Duration::from_secs(60);
+    pub const BATTERY_UNPLUGGED: Duration = Duration::from_secs(20);
+    /// At or under `BATTERY_LOW_PCT` on battery (or with the charge unknown),
+    /// faster, for the pleas and the clean power-off: every judgement there
+    /// holds for 30 s (`battery::Thresholds` confirm_hold and floor_hold),
+    /// so 10 s still gives it three readings, at half the EC traffic of 5 s
+    /// when the pack can least afford it. bodycare reads at 10 s then too.
+    pub const BATTERY_LOW: Duration = Duration::from_secs(10);
+    pub const BATTERY_LOW_PCT: f64 = 25.0;
+    /// A read that a change caused (the adapter, the batteries listed, a
+    /// power-supply uevent) is read once more this much later: the gauge's
+    /// status can lag the adapter's `online`, and the driver's 1 s cache
+    /// can hand back the figures bodycare read at the moment of the change.
+    pub const BATTERY_SETTLE: Duration = Duration::from_secs(4);
+    /// Uevents never read the battery more often than this.
+    pub const BATTERY_POKE_GAP: Duration = Duration::from_secs(2);
+    /// Touched by 60-being-power.rules on every power_supply change uevent
+    /// (relative to the root). The `sbs` driver keeps `BAT0` listed and
+    /// flips `present` to 0 when the pack goes, and the adapter does not
+    /// change: only the uevent tells. A stat of it costs no EC traffic.
+    pub const POWER_STAMP: &str = "run/being-power-changed";
+
+    /// When the power supplies last sent a change uevent; None before any.
+    pub fn power_stamp(root: &Path) -> Option<std::time::SystemTime> {
+        fs::metadata(root.join(POWER_STAMP)).and_then(|m| m.modified()).ok()
+    }
 
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
     pub struct Reading {
@@ -453,6 +526,7 @@ pub mod sysfs {
         pub health_pct: Option<f64>,
         /// Charge cycles the battery has counted.
         pub cycles: Option<i64>,
+        pub work: body_work::Reading,
     }
 
     impl Reading {
@@ -522,7 +596,7 @@ pub mod sysfs {
         path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned())
     }
 
-    #[derive(Default, Debug, PartialEq)]
+    #[derive(Clone, Copy, Default, Debug, PartialEq)]
     pub struct Power {
         pub battery: Option<f64>,
         pub charging: Option<bool>,
@@ -566,25 +640,42 @@ pub mod sysfs {
         (energy.filter(|e| *e < 500.0), power, volts)
     }
 
-    /// Percent charge from `capacity`, or from energy or charge now and full.
-    fn battery_percent(dir: &Path) -> Option<f64> {
-        if let Some(percent) = read_number(&dir.join("capacity")).filter(|p| (0..=100).contains(p)) {
-            return Some(percent as f64);
-        }
-        ["energy", "charge"].into_iter().find_map(|kind| {
+    /// Percent charge: how full the pack is against what it holds when full
+    /// today. Energy or charge now over full comes first; `capacity` only
+    /// when neither pair is there. On the laptop's Smart Battery `capacity`
+    /// is the AbsoluteStateOfCharge (against the design): measured status
+    /// Full, capacity 80, charge_now 4593000, charge_full 4629000. A pack
+    /// that says Full and is within 3 points of full is 100: the gauge
+    /// stopped the charge. Battery health stays separate (`battery_wear`).
+    pub fn battery_percent(dir: &Path) -> Option<f64> {
+        let ratio = ["energy", "charge"].into_iter().find_map(|kind| {
             let now = read_number(&dir.join(format!("{kind}_now"))).filter(|v| *v >= 0)?;
             let full = read_number(&dir.join(format!("{kind}_full"))).filter(|v| *v > 0)?;
             // A worn battery can report more than its last full charge.
-            Some((now as f64 * 100.0 / full as f64).clamp(0.0, 100.0).round())
-        })
+            Some((now as f64 * 100.0 / full as f64).clamp(0.0, 100.0))
+        });
+        match ratio {
+            Some(r) if r >= 97.0 && read_text(&dir.join("status")).as_deref() == Some("Full") => Some(100.0),
+            Some(r) => Some(r.round()),
+            None => read_number(&dir.join("capacity")).filter(|p| (0..=100).contains(p)).map(|p| p as f64),
+        }
     }
 
-    pub fn read_power(root: &Path, notes: &mut Notes) -> Power {
-        let mut power = Power::default();
+    /// The cheap half of a power reading: whether the mains is on (the
+    /// adapters' `online`, which the drivers answer from their own state)
+    /// and which directories are the body's batteries (`type` costs
+    /// nothing either). None when the power supplies cannot be listed.
+    pub struct Supplies {
+        pub on_ac: Option<bool>,
+        pub batteries: Vec<PathBuf>,
+    }
+
+    pub fn read_supplies(root: &Path, notes: &mut Notes) -> Option<Supplies> {
         let Some(devices) = list(&root.join("sys/class/power_supply")) else {
             notes.once("power:none", || "power: no power_supply devices; battery and AC unknown".into());
-            return power;
+            return None;
         };
+        let mut supplies = Supplies { on_ac: None, batteries: Vec::new() };
         let mut ac_unreadable = false;
         for path in devices {
             let name = name_of(&path);
@@ -597,32 +688,13 @@ pub mod sysfs {
             match read_text(&path.join("type")).as_deref() {
                 Some("Battery") => {
                     notes.once(key, || format!("power: found battery {name}"));
-                    if power.battery.is_some() {
-                        continue;
-                    }
-                    if read_text(&path.join("present")).as_deref() == Some("0") {
-                        notes.once(format!("power:{name}:absent"), || format!("power: battery {name} is not present"));
-                        continue;
-                    }
-                    power.battery = battery_percent(&path);
-                    (power.energy_wh, power.power_w, power.voltage_v) = battery_energy(&path);
-                    (power.health_pct, power.cycles) = battery_wear(&path);
-                    if power.battery.is_none() {
-                        notes.once(format!("power:{name}:unreadable"), || {
-                            format!("power: battery {name} reports no readable charge")
-                        });
-                    }
-                    power.charging = match read_text(&path.join("status")).as_deref() {
-                        Some("Charging") => Some(true),
-                        Some("Discharging" | "Full" | "Not charging") => Some(false),
-                        _ => None,
-                    };
+                    supplies.batteries.push(path);
                 }
                 Some("Mains") => {
                     notes.once(key, || format!("power: found AC adapter {name}"));
                     match read_text(&path.join("online")).as_deref() {
-                        Some("1") => power.on_ac = Some(true),
-                        Some("0") if power.on_ac.is_none() => power.on_ac = Some(false),
+                        Some("1") => supplies.on_ac = Some(true),
+                        Some("0") if supplies.on_ac.is_none() => supplies.on_ac = Some(false),
                         Some("0") => {}
                         _ => ac_unreadable = true,
                     }
@@ -635,10 +707,110 @@ pub mod sysfs {
             }
         }
         // One adapter saying "off" is not proof while another cannot be read.
-        if ac_unreadable && power.on_ac == Some(false) {
-            power.on_ac = None;
+        if ac_unreadable && supplies.on_ac == Some(false) {
+            supplies.on_ac = None;
         }
-        power
+        Some(supplies)
+    }
+
+    /// The expensive half: the first present battery's charge, energy, draw,
+    /// wear and status (`on_ac` is left unknown), and which battery it was.
+    pub fn read_battery(batteries: &[PathBuf], notes: &mut Notes) -> (Power, Option<PathBuf>) {
+        let mut power = Power::default();
+        for path in batteries {
+            let name = name_of(path);
+            if read_text(&path.join("present")).as_deref() == Some("0") {
+                notes.once(format!("power:{name}:absent"), || format!("power: battery {name} is not present"));
+                continue;
+            }
+            power.battery = battery_percent(path);
+            (power.energy_wh, power.power_w, power.voltage_v) = battery_energy(path);
+            (power.health_pct, power.cycles) = battery_wear(path);
+            if power.battery.is_none() {
+                notes.once(format!("power:{name}:unreadable"), || format!("power: battery {name} reports no readable charge"));
+            }
+            power.charging = match read_text(&path.join("status")).as_deref() {
+                Some("Charging") => Some(true),
+                Some("Discharging" | "Full" | "Not charging") => Some(false),
+                _ => None,
+            };
+            return (power, Some(path.clone()));
+        }
+        (power, None)
+    }
+
+    /// Everything at once: the adapters and the battery.
+    pub fn read_power(root: &Path, notes: &mut Notes) -> Power {
+        let Some(supplies) = read_supplies(root, notes) else { return Power::default() };
+        let (power, _) = read_battery(&supplies.batteries, notes);
+        Power { on_ac: supplies.on_ac, ..power }
+    }
+
+    /// Reads the power supplies on every pass, but the battery's own files
+    /// only every `BATTERY_ON_AC` / `BATTERY_UNPLUGGED` / `BATTERY_LOW`, at
+    /// once when the adapter or the batteries listed change or a
+    /// power-supply uevent comes (`POWER_STAMP`), once more `BATTERY_SETTLE`
+    /// after such a read, and again soon after a read that found no charge.
+    /// Figures are only kept while their battery is still listed.
+    #[derive(Default)]
+    pub struct PowerPoll {
+        last: Option<(Instant, Option<bool>)>,
+        battery: Power,
+        /// The battery the figures came from, and every battery listed then.
+        from: Option<PathBuf>,
+        listed: Vec<PathBuf>,
+        /// The uevent stamp as it was at the last read.
+        stamp: Option<std::time::SystemTime>,
+        /// The last read was caused by a change: one follow-up is due.
+        follow_up: bool,
+        /// How many times the battery's files have been read.
+        pub reads: u64,
+    }
+
+    impl PowerPoll {
+        fn every(&self) -> Duration {
+            let low = self.battery.battery.is_none_or(|p| p <= BATTERY_LOW_PCT);
+            match self.last.map(|(_, on_ac)| on_ac) {
+                _ if self.from.is_some() && self.battery.battery.is_none() => HOLD,
+                Some(Some(true)) => BATTERY_ON_AC,
+                _ if low => BATTERY_LOW,
+                _ => BATTERY_UNPLUGGED,
+            }
+        }
+
+        /// The adapter or the batteries listed changed since the last read,
+        /// or a uevent came. None before the first read.
+        fn changed(&self, on_ac: Option<bool>, batteries: &[PathBuf], poked: bool) -> Option<bool> {
+            let (_, then) = self.last?;
+            Some(then != on_ac || self.listed != batteries || poked)
+        }
+
+        fn due(&self, on_ac: Option<bool>, batteries: &[PathBuf], poked: bool, now: Instant) -> bool {
+            let Some((at, then)) = self.last else { return true };
+            if then != on_ac || self.listed != batteries || now < at {
+                return true;
+            }
+            let since = now.saturating_duration_since(at);
+            (poked && since >= BATTERY_POKE_GAP) || (self.follow_up && since >= BATTERY_SETTLE) || since >= self.every()
+        }
+
+        pub fn read(&mut self, root: &Path, notes: &mut Notes, now: Instant) -> Power {
+            let Some(supplies) = read_supplies(root, notes) else {
+                *self = PowerPoll { reads: self.reads, ..PowerPoll::default() };
+                return Power::default();
+            };
+            let stamp = power_stamp(root);
+            let poked = stamp != self.stamp;
+            if self.due(supplies.on_ac, &supplies.batteries, poked, now) {
+                self.follow_up = self.changed(supplies.on_ac, &supplies.batteries, poked) == Some(true);
+                (self.battery, self.from) = read_battery(&supplies.batteries, notes);
+                self.last = Some((now, supplies.on_ac));
+                self.listed = supplies.batteries;
+                self.stamp = stamp;
+                self.reads += 1;
+            }
+            Power { on_ac: supplies.on_ac, ..self.battery }
+        }
     }
 
     fn chip_name(chip: &Path) -> Option<String> {
@@ -874,6 +1046,7 @@ pub mod sysfs {
     pub struct Sensors {
         root: PathBuf,
         pub notes: Notes,
+        pub power: PowerPoll,
         battery: Option<(f64, Instant)>,
         charging: Option<(bool, Instant)>,
         on_ac: Option<(bool, Instant)>,
@@ -884,6 +1057,7 @@ pub mod sysfs {
         volts: Option<(f64, Instant)>,
         health: Option<(f64, Instant)>,
         cycles: Option<(i64, Instant)>,
+        work: body_work::Counters,
     }
 
     impl Sensors {
@@ -891,6 +1065,7 @@ pub mod sysfs {
             Self {
                 root,
                 notes: Notes::default(),
+                power: PowerPoll::default(),
                 battery: None,
                 charging: None,
                 on_ac: None,
@@ -901,11 +1076,12 @@ pub mod sysfs {
                 volts: None,
                 health: None,
                 cycles: None,
+                work: body_work::Counters::default(),
             }
         }
 
         pub fn read(&mut self, now: Instant) -> Reading {
-            let power = read_power(&self.root, &mut self.notes);
+            let power = self.power.read(&self.root, &mut self.notes, now);
             let smc = find_smc(&self.root);
             let temp = read_temperature(&self.root, smc.as_deref());
             if temp.is_none() {
@@ -929,6 +1105,7 @@ pub mod sysfs {
                 voltage_v: hold(power.voltage_v, &mut self.volts, now),
                 health_pct: hold(power.health_pct, &mut self.health, now),
                 cycles: hold(power.cycles, &mut self.cycles, now),
+                work: self.work.read(&self.root, now),
             }
         }
 
@@ -1327,6 +1504,7 @@ mod tests {
                 voltage_v: None,
                 health_pct: None,
                 cycles: None,
+                ..Reading::default()
             }
         );
         let notes = sensors.notes.take().join("\n");
@@ -1500,6 +1678,168 @@ mod tests {
         assert_eq!(sensors.read(start + Duration::from_secs(11)), Reading::default());
         // And it does not come back from the dead.
         assert_eq!(sensors.read(start + Duration::from_secs(12)), Reading::default());
+    }
+
+    #[test]
+    fn a_full_worn_pack_reads_full_and_its_health_stays_separate() {
+        // Measured on the laptop, 25 November 2026 (ACPI Smart Battery):
+        // capacity is against the design, so the old reading said 80%.
+        let tree = macbook_pro_9_2("sbs-full");
+        let bat = "sys/class/power_supply/BAT0";
+        tree.remove(&format!("{bat}/energy_now"));
+        tree.remove(&format!("{bat}/energy_full"));
+        for (name, value) in [
+            ("status", "Full"),
+            ("capacity", "80"),
+            ("charge_now", "4593000"),
+            ("charge_full", "4629000"),
+            ("charge_full_design", "5770000"),
+            ("voltage_now", "12431000"),
+            ("current_now", "0"),
+            ("cycle_count", "71"),
+        ] {
+            tree.file(&format!("{bat}/{name}"), format!("{value}\n"));
+        }
+        let power = sysfs::read_power(tree.root(), &mut sysfs::Notes::default());
+        assert_eq!((power.battery, power.health_pct, power.cycles), (Some(100.0), Some(80.0), Some(71)));
+        assert_eq!(power.charging, Some(false));
+        let mut body = Body::physical(0.0);
+        body.sense(&Sensors::new(tree.0.clone()).read(Instant::now()));
+        assert!(body.senses_line().contains("battery 100% plugged in"), "{}", body.senses_line());
+        // Still charging at that charge: 99, the honest figure.
+        tree.file(&format!("{bat}/status"), "Charging\n");
+        assert_eq!(sysfs::read_power(tree.root(), &mut sysfs::Notes::default()).battery, Some(99.0));
+        // Half of today's full is 50%, though it is 40% of the design.
+        tree.file(&format!("{bat}/status"), "Discharging\n");
+        tree.file(&format!("{bat}/charge_now"), "2314500\n");
+        tree.file(&format!("{bat}/capacity"), "40\n");
+        assert_eq!(sysfs::battery_percent(&tree.0.join(bat)), Some(50.0));
+        // No pairs at all: capacity is what there is.
+        tree.remove(&format!("{bat}/charge_now"));
+        assert_eq!(sysfs::battery_percent(&tree.0.join(bat)), Some(40.0));
+    }
+
+    #[test]
+    fn the_battery_is_read_slowly_and_at_once_when_the_adapter_changes() {
+        let tree = macbook_pro_9_2("poll");
+        let bat = "sys/class/power_supply/BAT0";
+        let mut sensors = Sensors::new(tree.0.clone());
+        let start = Instant::now();
+        let at = |s: u64| start + Duration::from_secs(s);
+        assert_eq!(sensors.read(at(0)).battery, Some(87.0));
+        // The sensor thread passes every 2 s: the charge is not re-read...
+        tree.file(&format!("{bat}/energy_now"), "48000000\n");
+        for s in (2..60).step_by(2) {
+            assert_eq!(sensors.read(at(s)).battery, Some(87.0), "{s} s");
+        }
+        assert_eq!(sensors.power.reads, 1);
+        // ...until a minute has passed on AC.
+        assert_eq!(sensors.read(at(60)).battery, Some(80.0));
+        assert_eq!(sensors.power.reads, 2);
+        // The temperature and the light still follow every pass.
+        tree.file("sys/class/hwmon/hwmon2/temp1_input", "70000\n");
+        assert_eq!(sensors.read(at(62)).temp, Some(70.0));
+        // Pulled out of the wall: read at once, once more 4 s on (the gauge
+        // can lag the adapter), then every 20 s.
+        tree.file("sys/class/power_supply/ADP1/online", "0\n");
+        tree.file(&format!("{bat}/status"), "Discharging\n");
+        let r = sensors.read(at(63));
+        assert_eq!((r.on_ac, r.charging), (Some(false), Some(false)));
+        assert_eq!(sensors.power.reads, 3);
+        sensors.read(at(65));
+        assert_eq!(sensors.power.reads, 3);
+        sensors.read(at(67));
+        assert_eq!(sensors.power.reads, 4, "the follow-up");
+        tree.file(&format!("{bat}/energy_now"), "12000000\n");
+        assert_eq!(sensors.read(at(85)).battery, Some(80.0));
+        assert_eq!(sensors.read(at(87)).battery, Some(20.0), "20 s on battery");
+        // Low: every 10 s, for the pleas and the power-off.
+        tree.file(&format!("{bat}/energy_now"), "6000000\n");
+        assert_eq!(sensors.read(at(91)).battery, Some(20.0));
+        assert_eq!(sensors.read(at(96)).battery, Some(20.0));
+        assert_eq!(sensors.read(at(97)).battery, Some(10.0));
+        // Plugged in again: at once.
+        tree.file("sys/class/power_supply/ADP1/online", "1\n");
+        tree.file(&format!("{bat}/status"), "Charging\n");
+        assert_eq!(sensors.read(at(98)).charging, Some(true));
+        // A pack whose directory goes is unknown at once, not a minute later.
+        tree.remove(bat);
+        let r = sensors.read(at(100));
+        assert_eq!((r.battery, r.on_ac), (Some(10.0), Some(true)), "held as any short failure is");
+        assert_eq!(sensors.read(at(109)).battery, None);
+        let reads = sensors.power.reads;
+        for s in 110..200 {
+            sensors.read(at(s));
+        }
+        assert!(sensors.power.reads - reads <= 2, "no battery listed: nothing to read");
+    }
+
+    #[test]
+    fn a_status_that_lags_the_adapter_is_corrected_seconds_later() {
+        // Unplugged while charging: ADP1/online says 0 at once, but the
+        // first read of the gauge still says Charging. Before the follow-up
+        // read the senses said "charging" while unplugged for 20 s.
+        let tree = macbook_pro_9_2("poll-lag");
+        let bat = "sys/class/power_supply/BAT0";
+        tree.file(&format!("{bat}/status"), "Charging\n");
+        let mut sensors = Sensors::new(tree.0.clone());
+        let start = Instant::now();
+        let at = |s: u64| start + Duration::from_secs(s);
+        sensors.read(at(0));
+        tree.file("sys/class/power_supply/ADP1/online", "0\n");
+        let r = sensors.read(at(10));
+        assert_eq!((r.on_ac, r.charging), (Some(false), Some(true)), "the stale edge read");
+        tree.file(&format!("{bat}/status"), "Discharging\n");
+        assert_eq!(sensors.read(at(12)).charging, Some(true));
+        assert_eq!(sensors.read(at(14)).charging, Some(false), "fixed 4 s on");
+        assert_eq!(sensors.power.reads, 3);
+        // One follow-up only: then the 20 s cadence.
+        for s in (16..34).step_by(2) {
+            sensors.read(at(s));
+        }
+        assert_eq!(sensors.power.reads, 3);
+        assert_eq!(sensors.read(at(34)).charging, Some(false));
+        assert_eq!(sensors.power.reads, 4);
+    }
+
+    #[test]
+    fn a_pack_that_goes_while_bat0_stays_listed_is_seen_from_the_uevent() {
+        // The sbs driver keeps BAT0 and flips present to 0; the adapter does
+        // not change. 60-being-power.rules touches the stamp on the uevent.
+        let tree = macbook_pro_9_2("poll-uevent");
+        let bat = "sys/class/power_supply/BAT0";
+        let mut sensors = Sensors::new(tree.0.clone());
+        let start = Instant::now();
+        let at = |s: u64| start + Duration::from_secs(s);
+        assert_eq!(sensors.read(at(0)).battery, Some(87.0));
+        tree.file(&format!("{bat}/present"), "0\n");
+        assert_eq!(sensors.read(at(2)).battery, Some(87.0), "no uevent yet: not seen");
+        tree.file(sysfs::POWER_STAMP, "");
+        sensors.read(at(4));
+        assert_eq!(sensors.power.reads, 2, "read on the uevent");
+        assert_eq!(sensors.read(at(15)).battery, None, "unknown once the hold is over, not a minute later");
+        // One follow-up 4 s after the uevent read, then quiet.
+        let reads = sensors.power.reads;
+        for s in 16..60 {
+            sensors.read(at(s));
+        }
+        assert_eq!(reads, 3);
+        assert_eq!(sensors.power.reads, 3);
+    }
+
+    #[test]
+    fn a_battery_that_reports_no_charge_is_tried_again_soon_but_not_every_pass() {
+        let tree = macbook_pro_9_2("poll-retry");
+        let bat = "sys/class/power_supply/BAT0";
+        tree.remove(&format!("{bat}/energy_now"));
+        tree.file(&format!("{bat}/capacity"), "busy\n");
+        let mut sensors = Sensors::new(tree.0.clone());
+        let start = Instant::now();
+        assert_eq!(sensors.read(start).battery, None);
+        tree.file(&format!("{bat}/capacity"), "64\n");
+        assert_eq!(sensors.read(start + Duration::from_secs(4)).battery, None);
+        assert_eq!(sensors.read(start + Duration::from_secs(10)).battery, Some(64.0));
+        assert_eq!(sensors.power.reads, 2);
     }
 
     #[test]

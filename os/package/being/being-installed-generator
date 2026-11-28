@@ -8,13 +8,15 @@ trying=
 try_active=
 seen=
 invalid=
-esp= a= b= models= mind= root= slot= fstab= gpt_auto=
+esp= a= b= models= mind= mind_crypt= root= slot= fstab= gpt_auto=
 trial=
+local_text=
 
 for arg in $cmdline; do
     key=${arg%%=*}
     value=${arg#*=}
     case "$key" in
+        nomodeset) local_text=yes; continue ;;
         being.try)
             trying=yes
             if [ "$value" = 1 ]; then try_active=yes; fi
@@ -28,6 +30,10 @@ for arg in $cmdline; do
         being.slot_b) field=b; b=$value ;;
         being.models) field=models; models=$value ;;
         being.mind) field=mind; mind=$value ;;
+        being.mind_crypt)
+            field=mind_crypt
+            [ "$value" = 1 ] || invalid=yes
+            mind_crypt=$value ;;
         root) field=root; root=$value ;;
         rauc.slot) field=slot; slot=$value ;;
         fstab) field=fstab; fstab=$value ;;
@@ -120,7 +126,51 @@ for id in $validated; do
 done
 
 mind_path="/dev/disk/by-partuuid/$mind"
-check=$(systemd-escape --path --template=systemd-fsck@.service "$mind_path") || deny
+unlock=
+mount_path=$mind_path
+if [ "$mind_crypt" = 1 ]; then
+    unlock=being-mind-crypt.service
+    mount_path=/dev/mapper/pipos-mind
+    mapper=$(systemd-escape --path --suffix=device "$mount_path") || deny
+    mkdir -p "$early/$mapper.d"
+    cat > "$early/$mapper.d/being-mind-crypt.conf" <<EOF
+[Unit]
+JobTimeoutSec=infinity
+JobRunningTimeoutSec=infinity
+EOF
+    console=/usr/bin/being-console
+    if [ "$local_text" = yes ]; then console=; fi
+    cat > "$early/$unlock" <<EOF
+[Unit]
+Description=Unlock PipOS mind volume
+DefaultDependencies=no
+Requires=$binding
+Wants=systemd-udev-settle.service
+After=$binding systemd-udev-settle.service
+Before=local-fs-pre.target
+Conflicts=umount.target
+Before=umount.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=SDL_VIDEODRIVER=kmsdrm PYTHONPATH=/usr/lib/being BEING_CONSOLE_PRIVATE=1
+LimitCORE=0
+ExecStart=${console:+$console }/usr/bin/python3 -m mind.mind_encryption unlock $mind
+ExecStop=/usr/sbin/cryptsetup close pipos-mind
+TimeoutStartSec=infinity
+EOF
+    if [ "$local_text" = yes ]; then
+        cat >> "$early/$unlock" <<EOF
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+EOF
+    fi
+    ln -sf "../$unlock" "$requires/$unlock"
+fi
+check=$(systemd-escape --path --template=systemd-fsck@.service "$mount_path") || deny
 esp_path="/dev/disk/by-partuuid/$esp"
 esp_check=$(systemd-escape --path --template=systemd-fsck@.service "$esp_path") || deny
 mkdir -p "$early/being-installed" "$early/rauc.service.d" "$early/$check.d" "$early/$esp_check.d" \
@@ -151,6 +201,14 @@ Requires=$binding
 After=$binding
 EOF
 done
+if [ -n "$unlock" ]; then
+    mkdir -p "$early/$check.d"
+    cat > "$early/$check.d/being-mind-crypt.conf" <<EOF
+[Unit]
+Requires=$unlock
+After=$unlock
+EOF
+fi
 
 # A power cut can leave the FAT boot-state volume dirty. The kernel then
 # remounts it read-only on the first bad chain and RAUC and the boot health
@@ -165,7 +223,7 @@ EOF
 write_mount var tmpfs tmpfs mode=0755,nosuid,nodev
 write_mount bootstate "$esp_path" vfat rw,umask=0077,nodev,nosuid,noexec,nofail "$binding" wants
 write_mount models "/dev/disk/by-partuuid/$models" ext4 ro,noload,noatime,nodev,nosuid,noexec,nofail "$binding" wants
-write_mount mind "$mind_path" ext4 rw,noatime,nodev,nosuid,noexec,discard "$binding $check"
+write_mount mind "$mount_path" ext4 rw,noatime,nodev,nosuid,noexec,discard "$binding $check${unlock:+ $unlock}"
 
 # Logs that survive a reboot: the journal lives on /mind/log/journal (64 MB,
 # 30 days; 50-being-journal.conf) and every boot adds a line to boots.txt.

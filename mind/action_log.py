@@ -36,6 +36,8 @@ KINDS = {
     "dream": ("dreamed", "dreamed"),
     "repair.organ": ("restarted a stuck part of me", "restarted stuck parts of me {n} times"),
     "repair.audio": ("reset my microphone", "reset my microphone {n} times"),
+    "privacy.mic": ("caught microphone capture that outlived its permission",
+                    "caught microphone capture that outlived its permission {n} times"),
     "model.recheck": ("checked my model files", "checked my model files"),
     "update.install": ("installed an update", "installed {n} updates"),
     # Things done for the owner.
@@ -53,6 +55,11 @@ KINDS = {
     "note.add": ("made a note", "made {n} notes"),
     "note.delete": ("deleted a note", "deleted {n} notes"),
     "note.clear": ("cleared your notes", "cleared your notes {n} times"),
+    "habit.made": ("saved a habit", "saved {n} habits"),
+    "habit.run": ("ran a habit", "ran {n} habits"),
+    "habit.skipped": ("skipped a scheduled habit", "skipped {n} scheduled habits"),
+    "habit.stopped": ("stopped a phrase habit", "stopped {n} phrase habits"),
+    "habit.removed": ("forgot a phrase habit", "forgot {n} phrase habits"),
     "guest.start": ("had a guest", "had guests {n} times"),
     "guest.end": None,
     "workshop.open": ("opened my workshop", "opened my workshop {n} times"),
@@ -64,10 +71,11 @@ KINDS = {
 }
 # Told first when there is more than fits in one breath.
 PRIORITY = (
-    "forget.all", "update.install", "backup.failed", "repair.organ", "repair.audio", "backup.auto", "backup",
+    "forget.all", "privacy.mic", "update.install", "backup.failed", "repair.organ", "repair.audio", "backup.auto", "backup",
     "night.tidy", "dream", "forget", "reminder.rang", "alarm.set", "timer.set", "reminder.set", "list.add",
     "note.add", "memory.remember", "workshop.run", "workshop.open", "guest.start", "list.remove", "list.clear",
-    "list.delete", "note.delete", "note.clear", "mute", "reboot", "shutdown", "model.recheck",
+    "list.delete", "note.delete", "note.clear", "habit.made", "habit.run", "habit.skipped", "habit.stopped", "habit.removed",
+    "mute", "reboot", "shutdown", "model.recheck",
 )
 MOST_TOLD = 3
 NUMBER_WORDS = ("no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")

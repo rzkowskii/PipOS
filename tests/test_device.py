@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from mind import action_log, backup, device
+from mind import action_log, backup, device, update_slots
 
 
 class Ctx(SimpleNamespace):
@@ -145,30 +145,59 @@ class Updates(unittest.TestCase):
         self.mind.mkdir()
         self.cmdline = self.work / "cmdline"
         self.good = self.work / "slot-good"
+        self.warning = self.work / "continuity-warning"
         self.uptime = self.work / "uptime"
         self.now = 1_800_000_000
 
-    def line(self, cmdline, good=None, up=600.0):
+    def line(self, cmdline, good=None, up=600.0, environment=None):
         self.cmdline.write_text(cmdline)
         if good is None:
             self.good.unlink(missing_ok=True)
         else:
             self.good.write_text(good + "\n")
         self.uptime.write_text(f"{up} 1\n")
-        return device.update_line(self.mind, cmdline=self.cmdline, slot_good=self.good, uptime_path=self.uptime,
-                                  now=self.now)
+        return device.update_line(self.mind, cmdline=self.cmdline, slot_good=self.good, slot_warning=self.warning,
+                                  uptime_path=self.uptime, now=self.now, environment=environment)
 
     def test_did_your_update_work_answers_from_boot_health_and_the_log(self):
         self.assertIn("Try stick", self.line("quiet being.try=1"))
-        self.assertIn("haven't installed an update lately", self.line("rauc.slot=B quiet", "B"))
+        self.assertIn("don't have a record of the last update", self.line("rauc.slot=B quiet", "B"))
         action_log.record(self.mind, "update.install", now=self.now - 86400)
-        self.assertEqual(self.line("rauc.slot=B quiet", "B"),
-                         "[joy] Yes. I started on the new system and passed my health check. The update went in yesterday.")
+        self.assertIn("can't verify which slot", self.line("rauc.slot=B quiet", "B"))
         self.assertIn("still checking", self.line("rauc.slot=B", None, up=40))
         self.assertIn("Not yet", self.line("rauc.slot=B", None, up=900))
+        self.assertIn("go back", self.line("rauc.slot=B being.trial=1", None, up=900))
         self.assertIn("Not yet", self.line("rauc.slot=B", "A", up=900), "the good slot is the other one")
         self.assertIn("didn't come through", self.line("quiet", None, up=900))
         self.assertEqual(device.classify("Did your update work?"), ("update", None))
+
+    def test_distinguishes_staged_update_trial_success_and_fallback(self):
+        environment = {update_slots.LAST_UPDATE: "B", "GOOD": "A", "ORDER": "B A", "B_OK": "1",
+                       "B_TRY": "0", "B_LEFT": "0"}
+        self.assertIn("next restart", self.line("rauc.slot=A", "A", environment=environment))
+        environment.update(B_TRY="1", B_LEFT="2")
+        self.assertIn("still checking", self.line("rauc.slot=B being.trial=1", up=40, environment=environment))
+        environment.update(B_LEFT="0")
+        self.assertIn("running my previous system", self.line("rauc.slot=A", "A", environment=environment))
+        environment.update(GOOD="B", B_TRY="0")
+        self.assertIn("running the last update", self.line("rauc.slot=B", "B", environment=environment))
+        environment.update(GOOD="A", ORDER="A B")
+        self.assertIn("running a different system", self.line("rauc.slot=A", "A", environment=environment))
+
+    def test_continuity_warning_takes_precedence_over_waiting_or_success(self):
+        action_log.record(self.mind, "update.install", now=self.now - 60)
+        self.warning.write_text("B\n")
+        for good, uptime in ((None, 65), ("B", 90), (None, 900)):
+            with self.subTest(good=good, uptime=uptime):
+                reply = self.line("rauc.slot=B being.installed=1", good, up=uptime)
+                self.assertIn("I stayed on my current system", reply)
+                self.assertIn("needs attention", reply)
+        # A warning about slot B does not touch a boot on slot A: the normal health-check answer comes back.
+        other = self.line("rauc.slot=A being.installed=1", "A")
+        self.assertIn("passed its health check", other)
+        self.assertIn("can't verify which slot", other)
+        self.assertNotIn("I stayed on my current system", other)
+        self.assertNotIn("needs attention", other)
 
 
 class Backups(unittest.TestCase):

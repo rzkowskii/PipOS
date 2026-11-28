@@ -18,7 +18,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from lab import candidate_tests as gate
+from lab import candidate_tests as gate, hardware_image
 from tests.test_candidate_manifest import disk_image
 
 
@@ -31,7 +31,7 @@ class CandidateTests(unittest.TestCase):
             path.write_text(role)
             setattr(self.args, role, path)
 
-    def sealed_fixture(self):
+    def sealed_fixture(self, *, with_laptop=False, with_laptop_factory=False):
         manifest = gate.candidate_manifest
         source = self.root / "frozen"
         for scope in manifest.SCOPES:
@@ -51,6 +51,13 @@ class CandidateTests(unittest.TestCase):
         disk_image(self.args.factory, manifest.FACTORY, ids)
         disk_image(self.args.try_image, manifest.TRY)
         paths = {key: getattr(self.args, role) for role, key in gate.RELEASE_ROLES.items()}
+        if with_laptop:
+            disk_image(self.args.laptop_try, manifest.LAPTOP_TRY, changed_slot="try-system")
+            paths["laptop_try"] = self.args.laptop_try
+        if with_laptop_factory:
+            laptop_factory = self.root / "laptop_factory"
+            disk_image(laptop_factory, manifest.FACTORY, ids, changed_slot="all")
+            paths["laptop_factory"] = laptop_factory
         folder = self.root / "sealed"
         folder.mkdir()
         seal = folder / "release.json"
@@ -78,12 +85,98 @@ class CandidateTests(unittest.TestCase):
         source, seal = self.sealed_fixture()
         self.args.try_image.write_bytes(b"substituted media")
         for extra, reason in ((["--factory", str(self.args.factory)], "remove explicit"),
+                              (["--laptop-try", str(self.args.laptop_try)], "remove explicit laptop_try"),
                               ([], "try_image does not match")):
             with (patch.object(gate, "ROOT", source), patch.object(gate, "batch") as run,
                   redirect_stderr(io.StringIO()) as errors, self.assertRaises(SystemExit)):
                 gate.main(["--manifest", str(seal), *extra])
             self.assertIn(reason, errors.getvalue())
             run.assert_not_called()
+
+    def test_public_alba_gate_binds_every_packaged_image_report_to_the_seal(self):
+        source, seal = self.sealed_fixture(with_laptop=True, with_laptop_factory=True)
+        release, _ = gate.read_release(seal)
+        roles = ("laptop_try", "laptop_factory", "factory", "try_image")
+
+        def audit(command, env, log, timeout):
+            if command[2] == "lab.hardware_image":
+                role = Path(command[3]).name
+                artifact = release["artifacts"][role]
+                slots = {part["name"]: {} for part in artifact["partitions"] if "rootfs" in part}
+                log.write_text(json.dumps({"image_sha256": artifact["sha256"],
+                                           "alba_retrain": {"systems": slots}}))
+            return "passed"
+
+        output = self.root / "alba"
+        opts = ["--manifest", str(seal), "--require-alba-retrain", "--output", str(output)]
+        with (patch.object(gate, "ROOT", source), patch.object(gate, "batch", side_effect=audit) as run,
+              redirect_stdout(io.StringIO())):
+            self.assertEqual(gate.main(opts), 0)
+        commands = [call.args[0] for call in run.call_args_list[:len(roles)]]
+        self.assertEqual([Path(command[3]).name for command in commands], list(roles))
+        for role, command in zip(roles, commands):
+            self.assertEqual(command[2], "lab.hardware_image")
+            self.assertIn("--require-alba-retrain", command)
+            self.assertEqual("--require-ordinary" in command, role.startswith("laptop_"))
+        report = json.loads((output / "report.json").read_text())
+        self.assertEqual(report["alba_retrain_reports"], {role: f"inspect_{role}.log" for role in roles})
+
+    def test_public_alba_gate_stops_before_guest_tests_on_incomplete_evidence(self):
+        source, seal = self.sealed_fixture()
+        release, _ = gate.read_release(seal)
+        factory_digest = release["artifacts"]["factory"]["sha256"]
+        cases = [("sealed image digest", "0" * 64, {"system-a": {}, "system-b": {}}),
+                 ("every slot", factory_digest, {"system-a": {}})]
+        for reason, digest, slots in cases:
+            with self.subTest(reason=reason):
+                output = self.root / reason.replace(" ", "-")
+
+                def audit(command, env, log, timeout):
+                    log.write_text(json.dumps({"image_sha256": digest, "alba_retrain": {"systems": slots}}))
+                    return "passed"
+
+                opts = ["--manifest", str(seal), "--require-alba-retrain", "--output", str(output)]
+                with (patch.object(gate, "ROOT", source), patch.object(gate, "batch", side_effect=audit) as run,
+                      redirect_stdout(io.StringIO())):
+                    self.assertEqual(gate.main(opts), 1)
+                run.assert_called_once()
+                report = json.loads((output / "report.json").read_text())
+                self.assertIn(reason, report["suites"]["inspect_factory"])
+                self.assertEqual(report["suites"]["lab.tests.test_l0"], "pending")
+                self.assertEqual(report["alba_retrain_reports"], {})
+
+    def test_controller_checks_the_hashed_laptop_image_for_cable_files_before_boot(self):
+        source, seal = self.sealed_fixture(with_laptop=True)
+        path = self.args.laptop_try.resolve()
+        original = path.read_bytes()
+        output = self.root / "inspection"
+        with (patch.object(gate, "ROOT", source), patch.object(gate, "batch", return_value="failed with exit 1") as run,
+              redirect_stderr(io.StringIO()) as errors, redirect_stdout(io.StringIO())):
+            path.write_bytes(b"different")
+            with self.assertRaises(SystemExit):
+                gate.main(["--manifest", str(seal), "--output", str(output)])
+            self.assertIn("laptop_try does not match", errors.getvalue())
+            run.assert_not_called()
+            self.assertFalse(output.exists())
+
+            path.write_bytes(original)
+            self.assertEqual(gate.main(["--manifest", str(seal), "--output", str(output)]), 1)
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_args.args[0], [sys.executable, "-m", "lab.hardware_image",
+                                                     str(path), "--require-ordinary"])
+            report = json.loads((output / "report.json").read_text())
+            self.assertEqual(report["suites"]["inspect_laptop_try"], "failed with exit 1")
+            self.assertEqual(report["suites"]["lab.tests.test_laptop_smoke"], "pending")
+
+    def test_inspection_uses_the_shared_cable_check_only_in_candidate_mode(self):
+        entries = [{"Path": "usr/share/being/variant"}, {"Path": "usr/share/being/cable/host_key"}]
+        with (patch.object(hardware_image, "entries_for", return_value=entries) as listing,
+              patch.object(hardware_image, "member") as extract):
+            with self.assertRaisesRegex(ValueError, "try-system contains cable development files"):
+                hardware_image.root_report("7zz", self.args.laptop_try, ordinary_role="try-system")
+            listing.assert_called_once_with("7zz", "SquashFS", self.args.laptop_try)
+            extract.assert_not_called()
+            self.assertIn("build_id", hardware_image.root_report("7zz", self.args.laptop_try))
 
     def test_release_reports_source_or_manifest_changes_during_qualification(self):
         source, seal = self.sealed_fixture()
@@ -103,7 +196,9 @@ class CandidateTests(unittest.TestCase):
             target.write_bytes(original)
 
     def test_fresh_imports_bind_every_guest_to_the_selected_inputs(self):
-        env, records = gate.inputs(self.args)
+        with patch.dict(os.environ, BEING_LAPTOP_CABLE_TRY_IMAGE=str(self.args.laptop_try)):
+            env, records = gate.inputs(self.args)
+        self.assertNotIn("BEING_LAPTOP_CABLE_TRY_IMAGE", env)
         script = """
 import json, os
 from lab import vm
@@ -191,7 +286,7 @@ print(json.dumps([str(path) for path in [
     def test_failure_records_unrun_suites_and_never_reuses_evidence(self):
         out = self.root / "evidence"
         argv = ["--output", str(out)]
-        for role in gate.BINDINGS:
+        for role in gate.BINDINGS.keys() - {"laptop_try"}:
             argv.extend(["--" + role.replace("_", "-"), str(getattr(self.args, role))])
         with patch.object(gate, "batch", return_value="fixture failure") as run, redirect_stdout(io.StringIO()):
             self.assertEqual(gate.main(argv), 1)
@@ -242,7 +337,7 @@ while not Path(sys.argv[2]).exists() and time.monotonic() < deadline:
         out = self.root / "cancelled"
         ready = self.root / "ready"
         argv = ["--output", str(out)]
-        for role in gate.BINDINGS:
+        for role in gate.BINDINGS.keys() - {"laptop_try"}:
             argv.extend(["--" + role.replace("_", "-"), str(getattr(self.args, role))])
         fake_guest = """
 import json, os, socket, sys, time

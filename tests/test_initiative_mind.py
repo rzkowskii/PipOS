@@ -19,7 +19,8 @@ class InitiativeMind(MindCase):
         await asyncio.sleep(0)
 
     def report_presence(self, lid_seq):
-        self.bus.push("body.presence", present=True, lid_seq=lid_seq)
+        self.bus.push("camera.policy", allowed=True, seq=lid_seq)
+        self.bus.push("body.presence", present=True, lid_seq=lid_seq, camera_seq=lid_seq)
 
     async def offer(self, count=1):
         event = await self.bus.wait("mind.announce", count, timeout=1.0)
@@ -174,7 +175,7 @@ class InitiativeMind(MindCase):
             greeting = await self.offer(2)
             # Sydney 7 a.m.: a morning greeting in the owner's zone, not UTC's evening.
             self.assertEqual(await self.grant(greeting), "Morning. I was hoping you'd come by.")
-            self.assertEqual(self.bus.of("mind.emotion")[-1]["name"], "joy")
+            self.assertEqual([r["face_cue"] for r in self.bus.of("say.request") if r.get("face_cue")][-1], "joy")
             self.confirm(greeting)
             await self.stop_mind()
             await self.start_mind()
@@ -206,7 +207,7 @@ class InitiativeMind(MindCase):
         await self.heartbeat()
         token = await self.offer()
         self.assertEqual(await self.grant(token), "Oh. Hello. I'm Pip. You're the very first person I've met.")
-        self.assertEqual(self.bus.of("mind.emotion")[-1]["name"], "joy")
+        self.assertEqual([r["face_cue"] for r in self.bus.of("say.request") if r.get("face_cue")][-1], "joy")
         self.confirm(token)
         await asyncio.sleep(0.05)
         self.assertFalse(self.mind._newborn)

@@ -6,7 +6,8 @@ After=alsa-restore.service alsa-state.service sound.target
 # The owner's kept levels live in the mind (/mind/audio/asound.state). Without
 # the mind the defaults are set, so the mount is waited for, never required.
 After=local-fs.target
-Before=being-voice.service
+After=being-brainstem.service
+Before=being-ears.service being-voice.service
 # being.audio=keep on the kernel command line leaves the mixer as it is; the
 # script itself checks it and logs that it did.
 
@@ -14,7 +15,11 @@ Before=being-voice.service
 Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=-/etc/being/env
+# Load the explicit QEMU-only capture fixture before either unit's device
+# controller resolves its ALSA path allowances.
+ExecStartPre=-+/bin/sh -ec 'if [ -f /sys/firmware/qemu_fw_cfg/by_name/opt/beingos/loopback/raw ]; then exec /sbin/modprobe snd-aloop pcm_substreams=2; fi'
 ExecStart=/usr/libexec/being/being-audio-init
+ExecStopPost=-/bin/rm -f /run/being-audio/mic-test-active
 # Never holds the voice back for long, and never fails the boot.
 TimeoutStartSec=30
 SuccessExitStatus=0 1 2
@@ -22,6 +27,9 @@ SuccessExitStatus=0 1 2
 # under /var/lib/alsa when that is writable).
 PrivateNetwork=yes
 NoNewPrivileges=yes
+LimitCORE=0
+DevicePolicy=closed
+DeviceAllow=char-alsa rw
 
 [Install]
 WantedBy=multi-user.target

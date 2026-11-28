@@ -1,5 +1,5 @@
 """How Pip's body is, in plain words: battery health, warmth, fan, disk,
-working memory, uptime and hearing. Code answers only, from measured
+working memory, uptime, hearing and room light. Code answers only, from measured
 numbers: `ctx.body` (body.state from the brainstem plus body.care from
 bodycare), `ctx.voice` (voice.level) and the kernel's own files. When a
 number is missing, Pip says it cannot tell; it never guesses.
@@ -61,6 +61,8 @@ COOL_BELOW = 55.0
 HOT_FROM = 75.0
 VERY_HOT_FROM = 90.0
 LOW_DISK_SHARE = 0.10
+DARK_LUX = 5.0
+BRIGHT_LUX = 50.0
 
 _LEAD = r"^(?:(?:hey|hi|okay|ok)\s+pip\W*\s*)?(?:pip\W*\s*)?(?:so\s+|and\s+|please\s+)?(?:tell\s+me\s+)?"
 _END = r"(?:\s+(?:pip|please|now|right\s+now|at\s+the\s+moment|today))*\s*[?.!]*$"
@@ -96,11 +98,13 @@ PATTERNS = (
      r"|check\s+" + _YOUR + r"\s+(?:hearing|ears|microphone|mic)|how(?:['’]s|\s+is)\s+" + _YOUR + r"\s+(?:hearing|microphone|mic)"
      r"|how\s+(?:good|clear)\s+is\s+" + _YOUR + r"\s+(?:hearing|microphone|mic)|how\s+loud\s+am\s+i"
      r"|am\s+i\s+(?:too\s+)?(?:loud|quiet)\s+enough|am\s+i\s+(?:too\s+)?(?:quiet|far\s+away))" + _END),
+    ("light", _LEAD + r"(?:how\s+bright\s+is\s+it\s+in\s+here|is\s+it\s+dark\s+in\s+here"
+     r"|how\s+much\s+light\s+is\s+in\s+the\s+room|how\s+many\s+lux(?:\s+is\s+it)?(?:\s+in\s+here)?)" + _END),
 )
 COMPILED = tuple((name, re.compile(pattern, re.IGNORECASE)) for name, pattern in PATTERNS)
 _HINT = re.compile(
     r"\b(?:battery|cycles|warm|hot|cold|cool|overheating|temperature|temp|fans?|space|storage|disk|full|ram|memory|uptime"
-    r"|awake|running|started|restarted|booted|hear|hearing|ears|mic|microphone|loud|quiet)\b",
+    r"|awake|running|started|restarted|booted|hear|hearing|ears|mic|microphone|loud|quiet|bright|dark|light|lux)\b",
     re.IGNORECASE,
 )
 
@@ -305,6 +309,22 @@ def hearing_line(voice):
     return "[neutral] I can hear you, though not perfectly. A little closer would help."
 
 
+def light_line(body, explicit_lux=False):
+    lux = body.get("lux")
+    if type(lux) not in (int, float) or not 0 <= lux < float("inf"):
+        return "[neutral] I can't tell how much light is in the room right now."
+    if lux < DARK_LUX:
+        light = "dark"
+    elif lux < BRIGHT_LUX:
+        light = "dim"
+    else:
+        light = "bright"
+    line = f"[neutral] It's {light} in here."
+    if explicit_lux:
+        line += f" I'm reading approximately {round(lux)} lux."
+    return line
+
+
 # --- the handler -----------------------------------------------------------------
 
 async def handle(text, ctx):
@@ -324,6 +344,8 @@ async def handle(text, ctx):
         return Reply(memory_line())
     if kind == "uptime":
         return Reply(uptime_line())
+    if kind == "light":
+        return Reply(light_line(body, bool(re.search(r"\blux\b", said(text, ctx), re.IGNORECASE))))
     # Ask the voice for fresh levels for next time; answer from what is known now.
     send = getattr(ctx, "send", None)
     if send is not None:

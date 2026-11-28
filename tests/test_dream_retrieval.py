@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from mind.dream_store import DreamStore
 from mind.memory import Memory
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 
 def believe_any_clock(case):

@@ -8,8 +8,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mind.recognition import (
-    FRAME_BYTES, FRAME_SECONDS, SKIP, WAKE_DECODE_CAP_SECONDS, WAKE_PREROLL_FRAMES, WAKE_REPLAY_FRAMES,
-    Recognizer, RecognizerEngine, engine_choice, sherpa_onnx_missing,
+    FRAME_BYTES, FRAME_SECONDS, ONESHOT_SKIP_FRAMES, SKIP, WAKE_DECODE_CAP_SECONDS, WAKE_PREROLL_FRAMES,
+    WAKE_REPLAY_FRAMES, Recognizer, RecognizerEngine, engine_choice, name_like, sherpa_onnx_missing,
+    strip_name_remnant,
 )
 
 DICTATION = b"_default"
@@ -104,8 +105,9 @@ class OneBreath(unittest.TestCase):
         self.assertEqual(events[-1], ("hear.final", {"text": "what time is it", "oneshot": True}))
         self.assertIn("hear.partial", topics)
         dictated = [index for mode, index in recognizer.decoded if mode == DICTATION]
-        # Everything after the name's last frame, once, in order, through the segment's end.
-        self.assertEqual(dictated, list(range(61, 142)))
+        # Everything from ONESHOT_SKIP_FRAMES after the name's last frame, once,
+        # in order, through the segment's end.
+        self.assertEqual(dictated, list(range(61 + ONESHOT_SKIP_FRAMES, 142)))
         self.assertLessEqual(step, WAKE_REPLAY_FRAMES + 1)
         self.assertFalse(recognizer.oneshot)
         self.assertIsNone(recognizer.mode)
@@ -116,7 +118,30 @@ class OneBreath(unittest.TestCase):
             events, _ = run(recognizer, 160)
         self.assertEqual(events[-1], ("hear.final", {"text": "what time is it", "oneshot": True}))
         dictated = [index for mode, index in recognizer.decoded if mode == DICTATION]
-        self.assertEqual(dictated, list(range(61, 142)))
+        self.assertEqual(dictated, list(range(61 + ONESHOT_SKIP_FRAMES, 142)))
+
+    def test_the_replay_skips_the_measured_offset_after_the_name(self):
+        # 90 ms: measured on the laptop, later than that clips the first word.
+        self.assertEqual(ONESHOT_SKIP_FRAMES, 3)
+        self.assertAlmostEqual(ONESHOT_SKIP_FRAMES * FRAME_SECONDS, 0.09)
+
+    def test_a_skip_past_the_decoded_history_goes_on_into_the_waiting_frames(self):
+        recognizer = scripted(set(range(41, 141)), wake_frame=60)
+        run(recognizer, 90)
+        self.assertFalse(recognizer.oneshot)
+        recognizer.frames = len(recognizer.wake_history) + 5
+        recognizer.wake_end = recognizer.search_start + (recognizer.frames - 1) * FRAME_SECONDS
+        recognizer.wake_preroll.extend((b"p1", b"p2", b"p3", b"p4"))
+        recognizer.begin_oneshot()
+        # The replay would start with the last decoded frame, which holds the
+        # name's end; the skip of three passes it and the first two still waiting.
+        self.assertEqual(list(recognizer.oneshot_queue), [b"p3", b"p4"])
+
+    def test_a_one_breath_final_loses_a_misheard_name(self):
+        recognizer = scripted(set(range(41, 141)), wake_frame=60, hypothesis=b"pep open a terminal")
+        recognizer.wake_phrase = "Hey Pip"
+        events, _ = run(recognizer, 160)
+        self.assertEqual(events[-1], ("hear.final", {"text": "open a terminal", "oneshot": True}))
 
     def test_the_conversational_wake_rule_is_unchanged(self):
         recognizer = scripted(set(range(41, 66)), wake_frame=60, speech_end=60 * FRAME_SECONDS + 0.2)
@@ -162,6 +187,43 @@ class OneBreath(unittest.TestCase):
         self.assertFalse(recognizer.oneshot)
         self.assertIsNone(recognizer.mode)
         self.assertFalse(recognizer.oneshot_queue)
+
+
+class NameRemnant(unittest.TestCase):
+    def test_a_misheard_name_leading_the_words_goes(self):
+        cases = {
+            "Pep open a terminal.": "open a terminal.",
+            "Yep, close the terminal.": "close the terminal.",
+            "I ate pip, are you okay?": "are you okay?",
+            "Hey, what time is it?": "what time is it?",
+            "hey bit, open the clock": "open the clock",
+            "Pet, what time is it?": "what time is it?",
+            "okay kip what time is it": "what time is it",
+        }
+        for heard, expected in cases.items():
+            self.assertEqual(strip_name_remnant(heard), expected, heard)
+
+    def test_words_of_the_request_itself_stay(self):
+        for heard in ("Shake it openly terminal.", "No, close it", "In Paris, what time is it", "put the timer on",
+                      "keep going", "but why", "a terminal", "have open a terminal", "pip", "Pep.",
+                      "what time is it", "tell me about a pip in an apple core", "Stop, pep",
+                      # Real words that only sound like the name, in requests for the model.
+                      "a pot of tea takes how long to brew?", "I bet you cannot", "it beeps when I type",
+                      "hey bob is here", "a peek at the clock", "hey bit open the clock",
+                      "a hip replacement takes how long?", "clever people say so"):
+            self.assertEqual(strip_name_remnant(heard), heard, heard)
+
+    def test_name_like_words(self):
+        for word in ("pip", "Pep,", "bip", "kip", "pet", "yep", "hip", "peep", "bips"):
+            self.assertTrue(name_like(word), word)
+        for word in ("put", "keep", "open", "time", "but", "", "help", "pipe line"):
+            self.assertFalse(name_like(word), word)
+
+    def test_another_wake_name_is_matched_by_its_own_spelling(self):
+        self.assertEqual(strip_name_remnant("Clever, how are you", "clover"), "how are you")
+        self.assertEqual(strip_name_remnant("pep how are you", "clover"), "pep how are you")
+        self.assertEqual(strip_name_remnant("clover how are you", "clover"), "how are you")
+        self.assertEqual(strip_name_remnant("clever people say so", "clover"), "clever people say so")
 
 
 class Engines(unittest.TestCase):

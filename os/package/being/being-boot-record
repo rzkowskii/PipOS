@@ -12,6 +12,7 @@ mkdir -p -m 2755 "$log/journal"
 
 IFS= read -r cmdline </proc/cmdline || cmdline=
 IFS= read -r boot </proc/sys/kernel/random/boot_id || boot=unknown
+if IFS=' ' read -r uptime _ </proc/uptime; then uptime=${uptime}s; else uptime=unknown; fi
 fields=
 set -f
 for argument in $cmdline; do
@@ -19,7 +20,7 @@ for argument in $cmdline; do
         rauc.slot=*|being.trial=*|being.verbose=*|panic=*|nomodeset) fields="$fields $argument" ;;
     esac
 done
-printf '%s boot=%s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$boot" "$fields" >> "$log/boots.txt"
+printf '%s boot=%s recorded_at_uptime=%s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$boot" "$uptime" "$fields" >> "$log/boots.txt"
 
 # Keep the last 400 boots.
 lines=$(wc -l < "$log/boots.txt")

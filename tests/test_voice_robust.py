@@ -400,6 +400,7 @@ class Listening(unittest.IsolatedAsyncioTestCase):
         voice.recognizer.feed.return_value = []
         voice.state = "idle"
         voice.deaf_until = math.inf
+        voice.deaf_windows = [[-math.inf, math.inf]]
         await self.run_frames(voice)
         voice.recognizer.feed.assert_called_with(SILENCE, False, True)
 
@@ -452,7 +453,7 @@ class Volume(unittest.IsolatedAsyncioTestCase):
             voice = make_voice(settings_dir=Path(mind), mixer=mixer)
             async with asyncio.TaskGroup() as voice.tasks:
                 await voice.handle({"t": "voice.volume", "level": 40})
-            mixer.set.assert_awaited_once_with(40)
+            mixer.set.assert_awaited_once_with(40, switch=True)
             mixer.store.assert_awaited_once()
             self.assertEqual(voice.gain, 1.0)
             self.assertIn(("voice.volume_state", {"level": 40, "mixer": "hardware"}), sent(voice))
@@ -497,7 +498,7 @@ class Volume(unittest.IsolatedAsyncioTestCase):
         voice = make_voice(mixer=mixer)
         async with asyncio.TaskGroup() as voice.tasks:
             await voice.handle({"t": "voice.volume", "step": 10})
-        mixer.set.assert_awaited_once_with(50)
+        mixer.set.assert_awaited_once_with(50, switch=True)
         silent = make_voice(mixer=Mock(get=AsyncMock(return_value=None), set=AsyncMock(return_value=False)))
         await silent.handle({"t": "voice.volume", "step": 10})
         # Software volume from unscaled samples: "louder" can never make it quieter.
@@ -524,14 +525,14 @@ class Volume(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await Mixer("PCH").get())
 
     async def test_saved_level_is_applied_at_start(self):
-        mixer = Mock(set=AsyncMock(return_value=False))
+        mixer = Mock(set=AsyncMock(return_value=False), playback_muted=AsyncMock(return_value=False))
         voice = make_voice(settings={"volume": 30, "chirps": True}, mixer=mixer)
         voice.bus.start = AsyncMock()
         voice.bus.stop = AsyncMock()
         voice.bus.recv = AsyncMock(side_effect=asyncio.CancelledError)
         with self.assertRaises(asyncio.CancelledError):
             await voice.run()
-        mixer.set.assert_awaited_once_with(30)
+        mixer.set.assert_awaited_once_with(30, switch=False)
         self.assertAlmostEqual(voice.gain, 0.09)
 
     async def test_mixer_commands(self):

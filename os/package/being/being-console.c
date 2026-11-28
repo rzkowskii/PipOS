@@ -35,13 +35,16 @@
 
 #include "being-console-gl.h"
 #include "being-console-draw.h"
+#include "being-console-awakening.h"
+#include "being-console-awakening-gl.h"
+#include "being-console-hardware.h"
 #include "being-console-panel.h"
 
 /* The child's terminal. Escape sequences understood (the console contract with
  * mind/console_ui.py, which only sends them when BEING_CONSOLE_UI=1):
  * SGR 0 1 2 7 22 27 39 49 30-37 90-97 40-47 100-107; ED 2J (and 0J); EL K;
- * CUP H and row;colH; CUU/CUD/CUF/CUB; CHA G; DECTCEM ?25l / ?25h. Others are
- * consumed and ignored. Text is UTF-8. */
+ * CUP H and row;colH; CUU/CUD/CUF/CUB; CHA G; DECTCEM ?25l / ?25h;
+ * OSC 7772 installer artwork (local UI only). Text is UTF-8. */
 enum { COLUMNS = 200, HISTORY = 400, MAX_ROWS = HISTORY / 2 };
 enum { ATTR_BOLD = 1, ATTR_DIM = 2, ATTR_REVERSE = 4 };
 enum { GROUND, ESCAPE, ESCAPE_SKIP, CSI, OSC };
@@ -63,6 +66,8 @@ struct terminal {
     int utf8_tail;
     struct cell pen;
     bool cursor_hidden;
+    uint8_t install_eye; /* inactive at 0, otherwise 1 plus the last progress percent */
+    uint8_t hardware_map; /* inactive at 0, otherwise 1 plus the observation bits */
     /* Panel mode only (NULL otherwise): OSC 7770 from hands, a real ED 3. */
     struct panel_control *control;
     char osc[PANEL_OSC];
@@ -292,6 +297,7 @@ static void erase_display(struct terminal *terminal, int mode)
         return;
     }
     if (mode == 2 || mode == 3) {
+        terminal->hardware_map = 0;
         /* Keep what was on the screen in the scrollback, then start clean. */
         int used = 0;
         for (int row = 0; row < terminal->rows; ++row)
@@ -408,6 +414,33 @@ static void put_codepoint(struct terminal *terminal, uint32_t code)
     }
 }
 
+static void installer_control(struct terminal *terminal)
+{
+    static const char progress_prefix[] = "7772;install=", hardware_prefix[] = "7772;hardware=";
+    bool hardware = terminal->osc_length >= sizeof(hardware_prefix) - 1 &&
+                    memcmp(terminal->osc, hardware_prefix, sizeof(hardware_prefix) - 1) == 0;
+    size_t start = hardware ? sizeof(hardware_prefix) - 1 : sizeof(progress_prefix) - 1;
+    if (terminal->osc_length <= start || terminal->osc_length > start + 3 ||
+        (!hardware && memcmp(terminal->osc, progress_prefix, start) != 0))
+        return;
+    const char *value = terminal->osc + start;
+    size_t length = terminal->osc_length - start;
+    if (!hardware && length == 3 && memcmp(value, "off", 3) == 0) {
+        terminal->install_eye = 0;
+        return;
+    }
+    unsigned int number = 0;
+    for (size_t i = 0; i < length; ++i) {
+        if (value[i] < '0' || value[i] > '9')
+            return;
+        number = number * 10u + (unsigned int)(value[i] - '0');
+    }
+    if (hardware && number <= 127)
+        terminal->hardware_map = (uint8_t)(number + 1);
+    else if (!hardware && number <= 100)
+        terminal->install_eye = (uint8_t)(number + 1);
+}
+
 static void put_byte(struct terminal *terminal, unsigned char byte)
 {
     /* CAN and SUB cancel any sequence in progress (ECMA-48), so a control
@@ -443,27 +476,26 @@ static void put_byte(struct terminal *terminal, unsigned char byte)
         terminal->state = terminal->control && byte == '\033' ? ESCAPE : GROUND;
         return;
     case OSC:
-        if (terminal->control) {
-            /* 0x9c is no terminator here: it is a UTF-8 continuation byte in titles. */
-            if (byte == '\a' || byte == '\033') {
-                terminal->state = byte == '\033' ? ESCAPE : GROUND;
-                if (!terminal->osc_overflow)
-                    panel_osc(terminal->control, terminal->osc, terminal->osc_length);
-                if (terminal->control->wipe_request) {
-                    /* In stream order: what came before is gone, what follows stays. */
-                    wipe_terminal(terminal);
-                    terminal->control->wipe_request = false;
-                    terminal->control->wiped = true;
-                }
-            } else if (terminal->osc_length < sizeof(terminal->osc)) {
-                terminal->osc[terminal->osc_length++] = (char)byte;
-            } else {
-                terminal->osc_overflow = true;
-            }
-            return;
-        }
-        if (byte == '\a' || byte == '\033' || byte == 0x9c)
+        /* In the panel 0x9c is a UTF-8 continuation byte in titles. */
+        if (byte == '\a' || byte == '\033' || (!terminal->control && byte == 0x9c)) {
             terminal->state = byte == '\033' ? ESCAPE : GROUND;
+            if (!terminal->osc_overflow) {
+                if (terminal->control)
+                    panel_osc(terminal->control, terminal->osc, terminal->osc_length);
+                else if (byte == '\a')
+                    installer_control(terminal);
+            }
+            if (terminal->control && terminal->control->wipe_request) {
+                /* In stream order: what came before is gone, what follows stays. */
+                wipe_terminal(terminal);
+                terminal->control->wipe_request = false;
+                terminal->control->wiped = true;
+            }
+        } else if (terminal->osc_length < sizeof(terminal->osc)) {
+            terminal->osc[terminal->osc_length++] = (char)byte;
+        } else {
+            terminal->osc_overflow = true;
+        }
         return;
     case CSI:
         if (byte >= '0' && byte <= '9') {
@@ -551,7 +583,9 @@ static void send_input(struct session *session)
     if (sent > 0) {
         session->input_size -= (size_t)sent;
         memmove(session->input, session->input + sent, session->input_size);
+        SDL_memset(session->input + session->input_size, 0, (size_t)sent);
     } else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        SDL_memset(session->input, 0, session->input_size);
         session->input_size = 0;
     }
 }
@@ -701,6 +735,12 @@ static void draw_row(const struct canvas *canvas, struct terminal *terminal, con
 struct art {
     uint8_t *backdrop;
     int width, height, face;
+    SDL_Surface *awakening;
+    int awakening_percent;
+    bool awakening_card_only;
+    struct awakening_gl graph;
+    SDL_Rect graph_area;
+    Uint32 graph_started;
 };
 
 static bool prepare_backdrop(struct art *art, const struct layout *geometry, int pitch)
@@ -708,6 +748,8 @@ static bool prepare_backdrop(struct art *art, const struct layout *geometry, int
     if (art->backdrop && art->width == geometry->width && art->height == geometry->height && art->face == geometry->face)
         return true;
     free(art->backdrop);
+    SDL_FreeSurface(art->awakening);
+    art->awakening = NULL;
     art->backdrop = malloc((size_t)pitch * (size_t)geometry->height);
     if (!art->backdrop)
         return false;
@@ -719,10 +761,62 @@ static bool prepare_backdrop(struct art *art, const struct layout *geometry, int
     return true;
 }
 
+static SDL_Rect awakening_area(const struct layout *geometry)
+{
+    /* install_content_width in mind/installer.py reserves this column. */
+    if (geometry->columns < 80 || geometry->rows < 16)
+        return (SDL_Rect){0};
+    int x = geometry->x0 + 52 * geometry->cell_width;
+    int y = geometry->y0 + 3 * geometry->cell_height;
+    return (SDL_Rect){
+        x, y, geometry->width - geometry->pad_x - x, geometry->y0 + geometry->rows * geometry->cell_height - y,
+    };
+}
+
+static void draw_install_awakening(struct art *art, const struct canvas *canvas, SDL_Rect area,
+                                   int percent, bool card_only)
+{
+    int width = area.w, height = area.h;
+    if (!art->awakening) {
+        art->awakening = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32, SDL_PIXELFORMAT_RGBA32);
+        if (!art->awakening)
+            return;
+        art->awakening_percent = -1;
+    }
+    SDL_Surface *cache = art->awakening;
+    struct canvas image = { cache->pixels, cache->pitch, width, height };
+    size_t bytes = (size_t)width * 4;
+    if (art->awakening_percent != percent || art->awakening_card_only != card_only) {
+        for (int row = 0; row < height; ++row)
+            memcpy(pixel_at(&image, 0, row), pixel_at(canvas, area.x, area.y + row), bytes);
+        if (card_only)
+            draw_awakening_card(&image, 0, 0, width, height, percent);
+        else
+            draw_awakening(&image, 0, 0, width, height, percent);
+        art->awakening_percent = percent;
+        art->awakening_card_only = card_only;
+    }
+    for (int row = 0; row < height; ++row)
+        memcpy(pixel_at(canvas, area.x, area.y + row), pixel_at(&image, 0, row), bytes);
+}
+
+static void present_screen(struct display *display, const struct art *art, const struct layout *geometry,
+                           bool visible, int first_row, int last_row)
+{
+    if (!display->window)
+        return;
+    draw_frame(display, geometry->width, geometry->height, visible, first_row, last_row);
+    if (visible && art->graph_area.w > 0) {
+        float elapsed = (float)(SDL_GetTicks() - art->graph_started) / 1000.0f;
+        draw_live_awakening(display, &art->graph, art->graph_area, geometry->height, art->awakening_percent, elapsed);
+    }
+    SDL_GL_SwapWindow(display->window);
+}
+
 /* Draws the whole screen, or with header_only just the band with the eyes. */
 static bool draw_screen(struct display *display, struct art *art, struct terminal *terminal,
                         const struct layout *geometry, bool visible, bool panel_controls, float open, float look,
-                        bool header_only)
+                        bool header_only, bool allow_live_graph)
 {
     int first_row = 0, last_row = geometry->height;
     if (visible) {
@@ -734,6 +828,8 @@ static bool draw_screen(struct display *display, struct art *art, struct termina
         struct canvas canvas = { surface->pixels, surface->pitch, surface->w, surface->h };
         int rows = header_only ? SDL_min(geometry->header, geometry->height) : geometry->height;
         memcpy(surface->pixels, art->backdrop, (size_t)surface->pitch * (size_t)rows);
+        if (terminal->install_eye)
+            open *= 0.38f + 0.0062f * (terminal->install_eye - 1);
         draw_header_eyes(&canvas, geometry->header, geometry->pad_x, open, look);
         if (header_only) {
             last_row = rows;
@@ -742,6 +838,20 @@ static bool draw_screen(struct display *display, struct art *art, struct termina
             size_t view_top = terminal->top - (size_t)scroll;
             for (int row = 0; row < geometry->rows; ++row)
                 draw_row(&canvas, terminal, geometry, row, view_top);
+            SDL_Rect area = terminal->install_eye && !scroll ? awakening_area(geometry) : (SDL_Rect){0};
+            bool live_graph = false;
+            if (area.w >= 184 && area.h >= 116) {
+                if (allow_live_graph)
+                    prepare_awakening_gl(display, &art->graph);
+                live_graph = allow_live_graph && art->graph.program;
+                draw_install_awakening(art, &canvas, area, terminal->install_eye - 1, live_graph);
+                live_graph = live_graph && art->awakening;
+            }
+            if (live_graph && !art->graph_area.w)
+                art->graph_started = SDL_GetTicks();
+            art->graph_area = live_graph ? area : (SDL_Rect){0};
+            if (terminal->hardware_map && !scroll && geometry->rows >= 22)
+                draw_hardware_map(&canvas, awakening_area(geometry), terminal->hardware_map - 1);
             if (!scroll && !terminal->cursor_hidden && terminal->row < geometry->rows) {
                 int band = console_faces[geometry->face].cursor;
                 int column = SDL_min(terminal->column, geometry->columns - 1);
@@ -752,7 +862,7 @@ static bool draw_screen(struct display *display, struct art *art, struct termina
             draw_footer(&canvas, geometry->face, geometry->footer, geometry->pad_x, panel_controls, scroll > 0);
         }
     }
-    present_frame(display, geometry->width, geometry->height, visible, first_row, last_row);
+    present_screen(display, art, geometry, visible, first_row, last_row);
     return true;
 }
 
@@ -1051,7 +1161,7 @@ static bool run_console(struct display *display, struct session *session, int ga
         if (geometry.width > 0 && geometry.height > 0 &&
             (dirty || frames_left > 0 || unacknowledged || header_due)) {
             bool full = dirty || frames_left > 0 || unacknowledged;
-            if (!draw_screen(display, &art, terminal, &geometry, visible, gate >= 0, open, look, !full)) {
+            if (!draw_screen(display, &art, terminal, &geometry, visible, gate >= 0, open, look, !full, true)) {
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Console frame: %s", SDL_GetError());
                 ok = false;
                 break;
@@ -1063,22 +1173,29 @@ static bool run_console(struct display *display, struct session *session, int ga
                 if (unacknowledged && frames_left == 0)
                     acknowledged = publish_frame(gate, sequence);
             }
+        } else if (visible && art.graph_area.w > 0 && art.awakening_percent < 100) {
+            /* The cached text texture already contains the card and its legend. */
+            present_screen(display, &art, &geometry, true, 0, 0);
         }
         reap(session);
-        if (session->running && !quitting)
-            SDL_Delay(eyes_moving ? 16 : 20);
+        if (session->running && !quitting) {
+            /* Keep the installation graph and eyes below 30 Hz. */
+            Uint32 delay = terminal->install_eye ? 34 : (eyes_moving ? 16 : 20);
+            SDL_Delay(delay);
+        }
     }
     if (ok && options->snapshot) {
         while (read_output(session, terminal))
             ;
         float open = 1.0f, look = 0.0f;
         animate_eyes(&eyes, SDL_GetTicks(), &open, &look);
-        if (!draw_screen(display, &art, terminal, &geometry, true, gate >= 0, open, look, false) ||
+        if (!draw_screen(display, &art, terminal, &geometry, true, gate >= 0, open, look, false, false) ||
             !write_snapshot(display, options->snapshot)) {
             fprintf(stderr, "being-console: could not write %s\n", options->snapshot);
             ok = false;
         }
     }
+    SDL_FreeSurface(art.awakening);
     free(art.backdrop);
     return ok;
 }
@@ -1384,6 +1501,11 @@ static int run_panel(const struct panel_options *options)
     }
     struct canvas backdrop = { panel.backdrop, (int)pitch, options->width, options->height };
     paint_panel_backdrop(&backdrop);
+    if (strcmp(options->name, "mind") == 0 && geometry->width >= 1000 && geometry->rows >= 23) {
+        int left = geometry->width / 2;
+        draw_awakening(&backdrop, left, geometry->y0 + 4, geometry->width - left - geometry->pad_x,
+                       8 * geometry->cell_height - 8, 100);
+    }
 
     struct panel_header *header = &panel.header;
     *header = (struct panel_header){
@@ -1727,6 +1849,8 @@ int main(int argc, char **argv)
     }
 
     const char *screen = getenv("BEING_SCREEN_DIR");
+    const char *input_mode = getenv("BEING_CONSOLE_PRIVATE");
+    bool private_input = input_mode && strcmp(input_mode, "1") == 0;
     int gate = -1;
     if (screen && (gate = open(screen, O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0) {
         perror("being-console screen directory");
@@ -1739,10 +1863,12 @@ int main(int argc, char **argv)
     sigaction(SIGHUP, &action, NULL);
 #ifdef __linux__
     const char *video = getenv("SDL_VIDEODRIVER");
-    if (gate >= 0 && !options.snapshot && options.headless_width == 0 && video && strcmp(video, "kmsdrm") == 0) {
+    if ((gate >= 0 || private_input) && !options.snapshot && options.headless_width == 0 &&
+        video && strcmp(video, "kmsdrm") == 0) {
         hold_for_boot_messages();
         if (stopping) {
-            close(gate);
+            if (gate >= 0)
+                close(gate);
             return 1;
         }
     }
@@ -1776,6 +1902,8 @@ int main(int argc, char **argv)
     struct termios attributes;
     if (tcgetattr(session.master, &attributes) == 0) {
         attributes.c_cc[VERASE] = '\177';
+        if (private_input)
+            attributes.c_lflag &= ~(ECHO | ECHONL);
 #ifdef IUTF8
         attributes.c_iflag |= IUTF8;
 #endif

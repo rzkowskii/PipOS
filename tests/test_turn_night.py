@@ -4,11 +4,13 @@ import asyncio
 from datetime import datetime
 from unittest.mock import patch
 
+from mind.care import set_dreams
 from mind.cortex import Cortex
 from mind.dream_store import journal
 from mind.night_shift import Gate, NightShift
 from mind.turn import Config, Mind, RewarmJob
 from tests.test_mind import FakeBus, MindCase
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 
 class FakeShift:
@@ -54,11 +56,11 @@ class NightHooks(MindCase):
         self.mind.night_shift = self.shift
         (self.root / "dreams-enabled").touch()
 
-    def enter_sleep(self):
-        self.mind.skills.now = lambda: datetime(2026, 11, 21, 2, 30)
+    def enter_sleep(self, hour=2):
+        self.mind.skills.now = lambda: datetime(2026, 11, 21, hour, 30)
         self.bus.push("body.lid", closed=True, seq=2)
         self.bus.push("state.changed", state="asleep")
-        self.bus.push("body.state", hour=2, minute=30, temp=48.0, on_ac=True, lid_closed=True)
+        self.bus.push("body.state", hour=hour, minute=30, temp=48.0, on_ac=True, lid_closed=True)
         self.bus.push("stem.beat", state="asleep")
 
     async def test_the_mind_registers_its_morning_rewarm(self):
@@ -81,6 +83,23 @@ class NightHooks(MindCase):
         self.assertEqual(len(self.shift.steps), 1, "done for tonight: no more steps")
         self.assertEqual(self.cortex_server.chats, [])
 
+    async def test_daytime_dreaming_follows_live_care_window(self):
+        self.enter_sleep(hour=14)
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(self.shift.started.wait(), 0.1)
+
+        self.shift.hold = asyncio.Event()
+        set_dreams(self.root, True, "closed")
+        self.bus.push("stem.beat", state="asleep")
+        await asyncio.wait_for(self.shift.started.wait(), 2)
+        self.assertEqual(self.shift.steps, [(True, "2026-11-21")])
+
+        set_dreams(self.root, True, "night")
+        self.bus.push("body.state", hour=14, minute=30, temp=48.0, on_ac=True, lid_closed=True)
+        await asyncio.wait_for(self.mind._dream_task, 2)
+        self.assertGreaterEqual(self.shift.interrupts, 1)
+        self.assertEqual([event["active"] for event in self.bus.of("mind.dreaming")], [True, False])
+
     async def test_the_night_waits_while_the_embedding_pack_is_first_checked(self):
         # Started in the night: the vectors job must not find no embedder
         # and count itself done before the pack's check has answered.
@@ -89,6 +108,18 @@ class NightHooks(MindCase):
         await asyncio.sleep(0.1)
         self.assertEqual(self.shift.steps, [])
         self.mind._embedder_ok = True
+        self.bus.push("stem.beat", state="asleep")
+        await asyncio.wait_for(self.shift.started.wait(), 2)
+        self.assertEqual(self.shift.steps, [(True, "2026-11-21")])
+
+    async def test_night_work_waits_for_an_archive_opened_in_the_confirmed_format(self):
+        self.memory.format_ready = False
+        self.enter_sleep()
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(self.shift.started.wait(), 0.1)
+
+        # Model the archive reopened after confirmation.
+        self.memory.format_ready = True
         self.bus.push("stem.beat", state="asleep")
         await asyncio.wait_for(self.shift.started.wait(), 2)
         self.assertEqual(self.shift.steps, [(True, "2026-11-21")])
@@ -210,8 +241,10 @@ class RealNightShift(NightHooks):
         self.assertEqual(self.bus.of("mind.dream_committed"), [])
 
     # The fake-shift cases do not apply to the real one.
+    test_night_work_waits_for_an_archive_opened_in_the_confirmed_format = None
     test_without_dream_consent_the_upkeep_still_runs_and_is_not_called_dreaming = None
     test_an_eligible_night_steps_the_shift_and_reports_a_committed_dream = None
+    test_daytime_dreaming_follows_live_care_window = None
     test_opening_the_lid_interrupts_it = None
     test_night_work_is_bracketed_by_mind_dreaming = None
     test_a_finished_step_says_it_stopped_dreaming = None

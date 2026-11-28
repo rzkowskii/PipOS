@@ -87,6 +87,21 @@ pub struct Ink {
 }
 
 impl Font {
+    pub fn draw(&self, picture: &mut Picture, x: i32, y: i32, text: &str, color: [u8; 3], scale: i32) {
+        for (column, ch) in text.chars().enumerate() {
+            let Some(glyph) = self.glyphs.get(&ch).or_else(|| self.glyphs.get(&'?')) else { continue };
+            for (index, &alpha) in glyph.iter().enumerate().filter(|(_, alpha)| **alpha != 0) {
+                let gx = x + (column * self.w + index % self.w) as i32 * scale;
+                let gy = y + (index / self.w) as i32 * scale;
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        picture.blend(gx + dx, gy + dy, color, alpha);
+                    }
+                }
+            }
+        }
+    }
+
     /// Wrap `text` to at most `columns` characters a line, breaking at spaces
     /// where it can and keeping a hanging indent of `indent` spaces.
     pub fn wrap(text: &str, columns: usize, indent: usize) -> Vec<String> {

@@ -11,6 +11,7 @@ import unittest
 import uuid
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
+from unittest.mock import patch
 
 from lab import candidate_manifest as candidate
 from mind.install_apply import TYPES, gpt_records
@@ -36,7 +37,7 @@ def disk_image(path, names, fixed_ids=None, changed_slot=None):
                 payload = bytearray(110)
                 payload[:4] = b"hsqs"
                 struct.pack_into("<Q", payload, 40, len(payload))
-                if part["name"] == changed_slot:
+                if changed_slot in (part["name"], "all"):
                     payload[-1] = 1
                 output.seek(part["start_lba"] * sector)
                 output.write(payload)
@@ -84,9 +85,13 @@ class CandidateManifest(unittest.TestCase):
         return message.getvalue()
 
     def test_relocated_identical_tree_and_unborn_checkout_share_snapshot(self):
+        guide = self.root / "docs/manual/spoken-guide.json"
+        guide.parent.mkdir(parents=True)
+        guide.write_text("{}")
         self.run_cli(self.snapshot)
         source = json.loads(self.source.read_bytes())
         self.assertEqual(source["model"]["from"], "fixture.gguf")
+        self.assertIn("docs/manual/spoken-guide.json", source["files"])
         other = self.dir / "copied"
         shutil.copytree(self.root, other)
         os.utime(other / "Cargo.toml", (1, 1))
@@ -144,6 +149,30 @@ class CandidateManifest(unittest.TestCase):
         self.assertIn("payloads differ", self.run_cli(self.seal, ok=False))
         disk_image(self.factory, candidate.FACTORY)
         self.assertIn("factory slot IDs", self.run_cli(self.seal, ok=False))
+
+    def test_seal_and_verify_reject_cable_laptop_roots(self):
+        laptop = self.dir / "renamed-laptop.img"
+        disk_image(laptop, candidate.LAPTOP_TRY, changed_slot="try-system")
+        self.run_cli(self.snapshot)
+        normal = [{"Path": "usr/share/being/variant"}]
+        cable = [{"Path": "usr/share/being/cable"}, *normal]
+        # disk_image supplies real GPTs and a minimal SquashFS header. Use the
+        # 7-Zip path listing of a packaged root for its remaining metadata.
+        with (patch.object(candidate.shutil, "which", return_value="7zz"),
+              patch("lab.hardware_image.entries_for", return_value=cable) as inspect):
+            args = self.seal + ["--laptop-try", laptop]
+            self.assertIn("laptop_try contains cable development files", self.run_cli(args, ok=False))
+            self.assertFalse(self.release.exists())
+            self.assertEqual(inspect.call_args.args[:2], ("7zz", "SquashFS"))
+            inspect.return_value = [{"Path": "usr/bin/being-lab-access"}, *normal]
+            self.assertIn("laptop_try contains lab-only files: /usr/bin/being-lab-access",
+                          self.run_cli(args, ok=False))
+            self.assertFalse(self.release.exists())
+            inspect.return_value = normal
+            self.run_cli(args)
+            self.run_cli(self.verify)
+            inspect.return_value = [{"Path": "usr/lib/systemd/system/being-cable-workbench.service"}, *normal]
+            self.assertIn("laptop_try contains cable development files", self.run_cli(self.verify, ok=False))
 
     def test_duplicate_bundles_substituted_image_and_invalid_gpt_fail(self):
         self.run_cli(self.snapshot)

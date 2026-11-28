@@ -126,7 +126,8 @@ How to read the tables:
 | Snooze | "Snooze", "Five more minutes", "Snooze for ten minutes" | code | 0 | W2-L5 |
 | Morning brief | Your first words of the day ("Good morning", "Hey Pip", "How are you?") get a greeting, today's reminders, a body note if something matters, and one tentative dream remark | code | 0 tokens; about 4 s of speech once a day | W2-L5 (composer), W2-L3 (trigger) |
 | Quiet hours | Set in Care (Mission Control, or fn+F2) | code | 0 | today |
-| Weather (only online) | "What's the weather?" With no Internet mode it says so plainly | code | one web lookup, 0 tokens | today |
+| Weather and desktop weather widget | "What's the weather?" and "Show the weather widget." The widget shows the latest requested current reading for up to 15 minutes while Internet mode and web lookups are enabled. | Open-Meteo on request | 0 model tokens | implemented |
+| Text lookup | "Open the lookup" or "Search Wikipedia for platypus." In Internet mode with web lookups enabled, select **Look it up** from the Quick Menu, type a topic, and press Enter. | One plaintext Wikipedia article introduction and citation | 0 model tokens | implemented |
 
 ### 2.2 Memory, lists and notes
 
@@ -166,7 +167,8 @@ Lists and notes live in their own file on Pip's disk. They survive restarts, go 
 
 ### 2.4 Workshop and apps
 
-The workshop is built but cannot be reached by voice yet. Tonight's wiring fixes that.
+The Workshop accepts voice commands for the Terminal, Body Monitor and Clock. The
+current lab and physical evidence is in [STATUS.md](../STATUS.md).
 
 | What | Say | Runs in | Cost | State |
 |---|---|---|---|---|
@@ -195,7 +197,7 @@ The terminal is off in guest mode. Files there are RAM-only, and scripts run onl
 | Jokes and facts | "Tell me a joke", "Tell me a fun fact" | code; a bundled bank with no repeats | 0 | W2-L4 |
 | Games | "Let's play a game", "Guess the number", "Rock paper scissors", "Twenty questions", "I give up", "Stop the game" | code | 0 | W2-L4 |
 | A story | "Tell me a story" | model, with a longer budget (160 tokens), spoken clause by clause | about 160 tokens written, 10-20 s in total, speech starting after the first clause (estimate) | W2-L3 |
-| Look | "Take a look at this", "What do you see?" | code says honestly what its camera can do | 0 | today; describing what it sees is later |
+| Look | "Can you see me?", "Take a look at this", "What do you see?" | code reports fresh face presence from the current camera grant | 0 | face presence in source, object descriptions pending |
 
 ### 2.6 Autonomy (what it does without being asked)
 
@@ -206,7 +208,7 @@ The terminal is off in guest mode. Files there are RAM-only, and scripts run onl
 | Self-care | Charge cap, fan floor and CPU caps (bodycare); battery pleas; organ watchdogs; disk-full guard | code | about 0 | partly today; watchdogs and disk guard W2-L10, W2-L8 |
 | Morning continuity | "You're back. It's been three days." The brief, and one dream remark | code | 0 | today (welcome back); brief W2 |
 | Accountability | The action log; "what did you do?" | code | 0 | W2-L6 |
-| Curiosity | At most one question a day, at the end of a conversation you started, stored only after "Shall I remember that?", "yes" | code | 0 | later (after wave 2) |
+| Curiosity | Factory-off in Care. When enabled: at most one fixed gentle question on a trusted local day, at the end of an owner-started conversation; its bounded answer stays in RAM until the separate "Shall I remember that?", "yes" | code | 0 | implemented after wave 2; model-generated questions remain out of scope |
 | Follow-ups | Says "How did the dentist go?" the day after you mentioned it | code | 0 | later (after wave 2) |
 
 ---
@@ -234,14 +236,13 @@ The terminal is off in guest mode. Files there are RAM-only, and scripts run onl
 
 ### 3.2 A warm conversational turn: where the time goes
 
-| Step | Today (estimate) | Wave 2 target | How |
+| Step | MacBookPro9,2, archived v5 (three turns) | Wave 2 target | How |
 |---|---|---|---|
-| Notice the end of speech | 0.36-0.75 s | 0.4-0.6 s | Silero VAD, 300 ms of silence (L2) |
-| Final words | about 0.2 s (PocketSphinx) | ≤ 0.6 s (Moonshine tiny, estimate) | L2; Moonshine runs while the model is idle |
-| Read new tokens | about 50 × 44 ms = 2.2 s | ≤ 20 × 44 ms ≈ 0.9 s | A chat template so its own last reply is never re-read (22-27 tokens), priming the turn boundary while it speaks, keeping command exchanges out of history (L7, L3) |
-| Write the emotion tag and first clause | 11-14 tokens at 8-15 tok/s = 0.7-1.75 s | ≤ 8 tokens = 0.5-1.0 s | Shorter opening clause; single-token tags checked (L7) |
-| First audio | Flite under 0.1 s | Piper ≤ 0.4 s for a 4-word clause (estimate) | L2 |
-| **End of speech to first word** | **about 4-4.5 s** | **median ≤ 3.0 s on the laptop (the gate); stretch 2.5 s** | |
+| End of speech and final words | 1.0–1.6 s combined | 0.4–0.6 s endpoint plus at most 0.6 s final recognition | Silero VAD and the selected recognizer (L2) |
+| Read new tokens | About 1.5 s for roughly 30 tokens, with a stepped prefill cost | About 0.9 s for up to 20 tokens | Reuse the spoken reply prefix, prime the turn boundary and keep code exchanges out of history (L7, L3) |
+| Write the emotion tag and first clause | 17.4% of one captured turn | Up to 8 tokens, about 0.5–1.0 s | Shorten the first clause (L7) |
+| First audio | Flite took 2.1% of that turn | Piper within 0.4 s for a four-word clause | Synthesis and playback (L2) |
+| **End of speech to first word** | One decomposed turn spent 41.9% on endpoint and final recognition, then 38.6% on prefill | **Median at most 3.0 s on the laptop, with 2.5 s as the stretch goal** | |
 
 **A code answer** (time, timers, lists, sums, body): ≤ 1.2 s from end of speech to first audio, and 0 model tokens. The estimate today is 0.6-1.0 s.
 
@@ -254,7 +255,7 @@ The terminal is off in guest mode. Files there are RAM-only, and scripts run onl
 
 | Step | Today (measured) | Target | How |
 |---|---|---|---|
-| Code commands work (time, timers, typing) | 23.9 s, the mind waits for the model hash | ≤ 8 s after the kernel | Drop `After=being-cortex.service` from the mind (L10). The mind already copes with no model |
+| Code commands work (time, timers, typing) | The mind spoke at 8.4 s on the archived v5 MacBook boot | ≤ 8 s after the kernel | The mind starts after the brainstem and answers code commands while the model loads (L10) |
 | Model warm and ready | 49.1 s | ≤ 35 s on the Try stick | Start the warm-up on the first healthy reply, not the next 5 s tick (L3) |
 | Model hash on the installed SSD | about 1.5-3 s per boot (estimate) | about 0.1 s | Verdict cache keyed on partition, inode, size and times, with a full re-hash weekly in the night shift (L7). The Try stick still hashes, because it has nowhere to keep the verdict |
 | Python start-up of each organ | about 47 modules recompiled at every start | 1-2 s saved over a boot (estimate) | Ship precompiled `.pyc` (unchecked-hash), drop `PYTHONDONTWRITEBYTECODE` (L10, L1, L9) |
@@ -264,9 +265,10 @@ The terminal is off in guest mode. Files there are RAM-only, and scripts run onl
 
 | Lever | Expected gain (estimate) | Tonight | On the laptop |
 |---|---|---|---|
-| Quant with llama.cpp's AVX tinyBLAS path (Q4_0, IQ4_NL, Q8_0) instead of Q4_K_M | 1.3-2× prompt reading. Q4_K has no x86 tinyBLAS path, and its Q8_K activation packing runs scalar code on non-AVX2 CPUs | Build the candidate packs from the original weights, never from Q4_K_M (L7) | Bench; ship the fastest that passes the audition |
+| Quantization across the AVX1 tinyBLAS and tiled matrix kernels | The gain is pending a native bake-off. Batches of eight or more rows can use tiled AVX1 for K-quants. Single-token decode takes a different path, and Q8_K activation packing is scalar on x86. | Build candidates from the original weights (L7) | Compare native prefill and decode, then audition the candidates |
 | Prompt threads 2 vs 4; generation threads 2 vs 3; `--poll 0` | 0-25% | Bench flags (L7) | Bench |
-| Logical batch 512 (`LLAMA_ARG_BATCH=512`) | Cancel-to-release from 7.3 s to 1.75 s (measured in the lab, not on the laptop) | Set it (L7) | Confirm |
+| Batches 64/7 and flash attention off (`LLAMA_ARG_BATCH=64 LLAMA_ARG_UBATCH=7 LLAMA_ARG_FLASH_ATTN=off`) | Measured on the MacBookPro9,2 (25 Nov 2026): a cancelled cold read frees the slot in 1.8-1.9 s instead of 13.9-17.7 s at 512 (the lab's 1.75 s did not hold); the 0.65 s fixed cost on prompts of 12 tokens and more is gone, so the median first token fell from 1.41 s to 0.96 s; decode at a depth of 2000 tokens is 14.0 against 13.0 tok/s. Cold reads are 11% slower | Set (L7) | Measured; re-check flash attention if the KV cache is quantized |
+| Weights mapped, not locked (`LLAMA_ARG_LOAD_MODE=mmap`) | The packaged llama-server has no `--mlock` or `LLAMA_ARG_MLOCK`; the native MacBookPro9,2 generator selects `mmap+mlock`, protects 768 MiB for cortex and 256 MiB for voice beneath an explicit 1 GiB `system.slice` allowance, and leaves every other body on this portable default | Native profile is source-complete; portable default remains set (L7) | Confirm locked bytes, effective hierarchical `memory.min`, PSI and absence of page-ins under backup/night load on the physical laptop |
 | Second slot (`--parallel 2 --ctx-size 8192`) | The workshop can write code without evicting the conversation cache, which would otherwise cost a cold re-read of 8.5 s or more | Set it (L7); hands already uses slot 1 | Measure memory use and slot 0 `cache_n` after a code job |
 | `max_tokens` 96 to 64 | About a third off the longest replies; the CPU is free sooner | Set it (L7) | Audition |
 | Strict reply shape (a tag and 1-2 sentences) | More complete replies than today's 6 of 24 | Only if the audition on the Mac does not regress (L7) | Persona check |
@@ -362,7 +364,7 @@ A function is done when:
 | Brightness topic | **`being.brightness`**, not `body.brightness` | `body.*` is reserved for the brainstem |
 | Battery health phrase | **Handled by `body_talk`**; the `battery` pattern drops "health" | One owner for each phrase |
 | "Make a note" | **A durable note** unless it is inside a terminal task | The owner's notes should survive a restart |
-| Curiosity questions and follow-up threads | **After wave 2** | They touch what gets stored from conversation; ship the basics first |
+| Curiosity questions and follow-up threads | **After wave 2** | The factory-off fixed-question path and explicit answer consent now ship; model-generated questions remain gated. Dated bookmarked follow-ups are separate. |
 | Alarms with the lid closed | **Default: no sound.** A new open owner decision | The lid is the privacy switch |
 
 ### 5.2 Interfaces every lane codes against (frozen for tonight)
@@ -401,7 +403,28 @@ class Context:
 
 **Handler modules.** Each code-skill module exposes `may_match(text) -> bool`, a cheap regular expression that tells the mind not to start a speculative model read. It also exposes `async handle(text, ctx) -> Reply | None`, which returns None to pass the utterance on. `mind/everyday.py` (L4) imports them lazily in this order and skips any that are missing:
 
-`readback, calc, units, lists, play, body_talk, device, doctor, action_log, diary, voice_engines`
+`readback, calc, units, lists, play, body_talk, device, removable_media, doctor, action_log, diary, ponder, voice_engines, care_routes, library`
+
+`removable_media` is inert on insertion. Only the owner's explicit “what's on
+this stick?” starts its short-lived, networkless reader, and only with the lid
+open. It accepts one otherwise-unused USB disk, mounts FAT or exFAT read-only
+with `nodev,nosuid,noexec`, and validates diskseq plus the mounted dev_t. The
+root parent then forks a reader, chroots it into that read-only mount, closes
+every descriptor except a capped result pipe, drops groups, UID/GID and all
+Linux capabilities, and only that child counts bounded file metadata without
+following links. The parent unmounts before answering. “Eject the stick” opens no filesystem: it
+verifies that the one USB disk is not mounted or in use, flushes it, and says
+when it can be removed. Installer, restore, encrypted backup and Try-log media
+retain their existing explicit workflows.
+
+The Care backup picker is the enrollment boundary for writable media. It asks
+before first binding or replacement and stores only the selected partition's
+filesystem UUID in `/mind/backup-media.json`; it writes no enrollment marker to
+the stick. Once present, voice and night backups resolve and re-check that UUID
+instead of trusting a label. Existing labelled destinations remain compatible
+until the owner next makes an explicit menu backup. Restore remains read-only
+selection of any supported backup source and neither reads nor changes the
+destination binding.
 
 Handlers never call the model, and their lines are not archived unless `keep=True`.
 
@@ -432,7 +455,7 @@ The speculative-read gate is `commands.may_be_command(text) or app_commands.may_
 
 **Model pack layout (L7).**
 
-- Every role has a signed descriptor under `os/package/being/model-packs/<role>/pack.json`, with a sha256 for each file.
+- Every image role has a signed descriptor under `os/package/being/model-packs/<role>/pack.json`, with a sha256 for each file. Optional library media carries its generated descriptor beside the staged pack.
 - `model_pack.verify(role)` checks a role and `model_pack.root(role)` returns its directory.
 - Sources are `out/models` and `out/voice`, with the hashes in their DOWNLOADS.json files.
 
@@ -445,12 +468,130 @@ The speculative-read gate is `commands.may_be_command(text) or app_commands.may_
 | embeddings | `/models/embeddings/blink-8M/{model.safetensors, tokenizer.json}` |
 | speaker | `/models/speaker/campplus.onnx` (staged only; unused tonight) |
 | bench (bench stick only) | `/models/bench/*.gguf` |
+| library (owner-selected) | `/models/library/oewn/{dictionary.sqlite3, LICENSE}`; optional, signed separately, and inactive until `being-library enable` validates it and records consent |
+| library_simple (owner-selected preview) | `/models/library/simple-en/{articles.sqlite3, LICENSE, ATTRIBUTION}`; optional, signed separately, and inactive until `being-library enable-simple` records separate consent |
+
+The Tier 1 release input is the standard [Open English WordNet 2025 edition](https://github.com/globalwordnet/english-wordnet/releases/tag/2025-edition).
+Stage `english-wordnet-2025.xml.gz` from that release with `LICENSE.md` and
+`WNDB_License.txt` from the [release commit](https://github.com/globalwordnet/english-wordnet/tree/dc343f2683279ecbb13fab4e2fd778d7b162d287).
+Prepare the database and descriptor on the development Mac without a key.
+
+```sh
+python3 -m lab.package_dictionary --oewn-2025 SOURCE_DIR --prepare-only --output STAGE
+```
+
+To sign the official source, omit `--prepare-only` and supply the release credentials.
+
+```sh
+python3 -m lab.package_dictionary --oewn-2025 SOURCE_DIR \
+  --output STAGE --certificate RELEASE.pem --key RELEASE.key
+```
+
+The command checks all three source hashes and converts the exact WN-LMF
+release. The first staged database is 21,426,176 bytes. The pack carries
+written credit to the Open English WordNet team and Princeton University
+WordNet. Audition definitions and check live capacity before promoting the pack.
+**Care → Offline library** lists the signed source, licence, snapshot and credit
+and lets the owner change consent for each installed pack independently.
+The owner can also say “enable my dictionary” or “disable my dictionary”. Pip
+asks for confirmation before changing the setting. Guests
+can use an enabled dictionary but cannot change that setting.
+
+`lab/package_simple_english.py` is the capacity/licensing preview and offline
+import path for the official `simplewiki-20261101-pages-articles.xml.bz2`
+snapshot. It performs no download and checks the published 360,149,050-byte
+size, SHA-1 and MD5 before bounded decompression. It requires the exact CC
+BY-SA 4.0 licence plus written snapshot, contributor, dump-URL and modification
+attribution. The first prepared pack has 156,392 articles and 49,778 redirects
+in a 57,266,176-byte SQLite database. The packager retains bounded markup-free
+opening prose and redirects that resolve to retained articles. The signed
+pack uses the separate `library_simple` role. Lookup accepts “look up X in my
+Simple English library” and “what does [Simple English] Wikipedia say about
+X”, resolves an exact title or exact corpus redirect, and speaks Wikipedia
+attribution on every answer. When an exact base title has multiple
+parenthetical corpus titles, it offers at most four pack-recorded choices.
+Say “Simple English option two” within 75 seconds in the same wake to select
+one. Pip checks the speaker and consent again. “More from Simple English” reads one bounded
+verbatim continuation under the same constraints, with attribution repeated.
+Generic “look up” and “tell me about” language
+continues through the existing handlers/model. The owner must
+enable it separately from the dictionary.
+`--intake-check` verifies those small/local inputs without decompressing the
+dump and prints the 1 GiB conversion ceiling. The exact installed capacity
+decision remains `being-library import-simple --check` against the completed,
+signed pack and that installation's real ext4 free blocks and inodes. Fuzzy
+matching, corpus publication and a larger partition remain separate decisions.
+`--prepare-only --output STAGE` writes the checked database and descriptor
+without an envelope or signing key, matching the dictionary packager's review
+boundary. A legacy uncompressed XML input requires its caller-reviewed SHA-256,
+its own snapshot label and matching Wikimedia dump attribution. Conversion hashes and parses the same opened
+regular file descriptor, so replacing a path between those steps cannot swap
+in different bytes.
+
+On an already-installed system, root can explicitly import either offline
+pack from a packager-produced role directory with `being-library
+import-dictionary --source /mounted/stage/library/oewn` or `being-library
+import-simple --source /mounted/stage/library/simple-en`. This does not scan
+or mount media. The command authenticates and fully hashes the donor while the
+models partition is read-only, temporarily remounts that installed partition,
+copies into an exact-path staging tree, authenticates and hashes the copied
+bytes again, flushes them to disk, atomically publishes an absent role, and
+restores the read-only mount. After a power cut before publication, retry on
+the next boot. The importer reclaims its private staging tree and rechecks
+available space before copying. It refuses Try boots and replacement of an
+existing pack. Import never
+creates a consent marker: the owner must still enable that role separately.
+
+Add `--check` to either import command to authenticate the staged pack and
+report fit without remounting the installed models partition. The JSON includes
+free bytes and inodes, estimated space needed for the staged files, and whether
+an estimated copy of the currently occupied space would still fit afterwards.
+If `unfinished_stage` is set, these figures include its current disk use.
+The command exits with a failure status if the pack itself cannot fit. Save
+the report from the 256 GB installation alongside the actual pack size and
+spoken lookup evidence.
 
 **Night shift (L8).** `NightShift.register(name, job)`. A job has `async run_chunk(budget_s) -> bool`, which returns True when it is done for tonight. `step(eligible)` runs the jobs in the fixed order of section 2.6. `interrupt()` stops at the next chunk boundary within 2 s. Other lanes supply jobs:
 
 - `backup.auto_backup_job` (L6);
 - `model_pack.rehash_job` (L7);
 - the mind's `rewarm` job (L3).
+
+**Overnight speech.** The installed owner can say “Prepare my speech
+overnight” and confirm. After eligible night jobs finish, Voice can use the
+current Piper voice to prepare up to eight exact clauses from the morning
+brief, upcoming rings and a current Extract draft. The low-priority worker
+stops on wake or loss of eligible telemetry. Audio stays in a bounded RAM
+cache and only plays on an exact match from the normal reply path. Forgetting
+and source changes clear prepared audio. “Stop preparing my speech overnight”
+turns the setting off and clears the cache after confirmation.
+
+**The Keep.** On a confirmed persistent installation, the owner first says
+“Preserve my keep when I forget everything” or “Erase my keep when I forget
+everything” and confirms. “Keep the photos” and “Keep the file called boiler
+manual” confirm a particular USB stick before copying. “What's in my keep?”
+shows a count and recent names. “Read the notes from my keep” reads short
+UTF-8 text. “What does the boiler manual say about pressure?” quotes matching
+passages from an exact kept text, Markdown or text-based PDF file. PDF lookup
+reads at most the first 40 pages in a separate service. “Sleep on the boiler
+manual” asks for confirmation and queues an Extract from a short set of
+passages. Pip rechecks the kept file before the job and again before readback.
+“Give me the boiler manual
+from my keep” confirms the destination
+and copies without replacing an existing file. “Call kept file boiler
+manual by the name heating manual” saves a spoken name. “Forget kept file
+boiler manual” and “Empty my keep” require an exact selection and a plain yes.
+Photo copying runs while Pip is idle and pauses when you address it.
+“Resume copying the photos” asks you to confirm the same filesystem.
+“How far did you get keeping the photos?” reports its last completed
+position. File names and quoted text use local speech and captions.
+
+“Back up my keep” makes a separate incremental encrypted file backup on the
+enrolled backup stick. Normal archive backups carry the encrypted Keep
+catalog and bind its erasures and renamed items to the current proof.
+Selected-media Restore offers to recover any missing file contents for the
+restored catalog. A file backup can fill an existing entry without adding a
+new one.
 
 **Dream server (L8).** `being-dream-cortex.service` runs llama-server on 127.0.0.1:8081 with `--ctx-size 2048 --parallel 1 --threads 2 --threads-batch 2 --reasoning-budget 0 --cache-ram 0`, Nice 10 and CPUWeight 20. It is sandboxed like the cortex and keeps no slot path. It is started and stopped by the night shift through systemctl, and is never enabled at boot.
 
@@ -492,6 +633,7 @@ The speculative-read gate is `commands.may_be_command(text) or app_commands.may_
   - Accept: all the hotfix's tests pass on main, and `test_voice_robust` and `test_tts_chirps` still pass. The hotfix's `turn.py` and `test_mind.py` changes are handed to L3.
 - **L1.2 `being-audio-init` and its unit.**
   - Do: a oneshot unit with `Before=being-voice.service` and `After=sound.target`. It restores `/mind/audio/asound.state` if present. Otherwise it sets Capture to 85%, Mic Boost to 2 of 3 steps, Master to 85% and PCM to 100%. `being.audio=keep` skips it.
+  - The alternative Try microphone entries add `being.mic_test=1`. The level check runs before Voice and requires a confirmed open lid throughout capture. Ordinary Try boots skip it. `being.mic_test=0` overrides it on any Try boot. PIPLOGS records the result or reason for a skip.
   - Accept: `tests/test_audio_init.py` runs the script against a fake `amixer` that lists the CS4206 controls. It checks the boost step, that no analog input playback path is unmuted, and that a missing `amixer` exits 0.
 - **L1.3 `MicLevel` auto gain and channel choice.**
   - Do: the floor is lifted towards −60 dBFS, at most 8×, with −3 dBFS headroom. Add a ChannelPicker for `being.mic_channel=auto`. The gain cost is logged once per boot (µs per frame).
@@ -767,8 +909,14 @@ The speculative-read gate is `commands.may_be_command(text) or app_commands.may_
 **Tasks:**
 
 - **L7.1 Cortex unit.**
-  - Do: `LLAMA_ARG_BATCH=512` with ubatch 512, `--parallel 2 --ctx-size 8192`, CPUWeight=100, and an `--mlock` switch that defaults to off.
+  - Do: `LLAMA_ARG_BATCH=64` with ubatch 7 and `LLAMA_ARG_FLASH_ATTN=off` (measured on the laptop, 25 Nov 2026), `--parallel 2 --ctx-size 8192`, `--threads 2 --threads-batch 2`, CPUWeight=100, `LLAMA_ARG_LOAD_MODE=mmap` (a drop-in may set `mmap+mlock`; this llama-server has no `--mlock`), same-origin CORS only (`LLAMA_ARG_CORS_ORIGINS=localhost`) and OOMScoreAdjust=300.
   - Accept: a unit test parses `ExecStart`. A lab probe shows slot 0's `cache_n` is unchanged after a slot 1 job (pending if no image is built).
+  - Optional write trial: `defer_idle_slot_writes` is factory-off. When enabled,
+    settled idle housekeeping still saves `context.json` but leaves the warm
+    llama slot in RAM; the existing slot file is refreshed only on software
+    sleep, lid close or shutdown. Pending installed trials do not gain this
+    write path. Forget/privacy cancellation, generation stamps and the
+    existing cache-invalidated fingerprint remain authoritative.
 - **L7.2 Stable chat template.**
   - Do: past assistant turns render byte-identically to what was generated, including the empty think block. Set `LLAMA_ARG_CHAT_TEMPLATE_FILE` and expose `stream.raw`.
   - Accept: on the Mac, with the real `reflex.gguf`, `lab/turn_latency.py` shows `prompt_n` for turns 2-6 equal to the new user block ±2 tokens.
@@ -949,6 +1097,7 @@ The speculative-read gate is `commands.may_be_command(text) or app_commands.may_
 - Echo cancellation and barge-in.
 - Describing what the camera sees.
 - The persona LoRA.
-- Curiosity questions and follow-up threads.
+- Model-generated Curiosity questions and broader inferred follow-up threads (the fixed opt-in question and
+  explicit dated bookmark paths do not depend on these gates).
 - The face's own typing line.
 - Studio-assisted mode (owner's choice).

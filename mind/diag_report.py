@@ -20,7 +20,9 @@ PIPLOGS_STATE = Path("/run/being-usb-logs/folder")
 RUN_DIR = Path("/run/being-diag")
 LAST_RUN = RUN_DIR / "last-run.json"
 MAX_FILES = 400
-MAX_BYTES = 200 * 1024 * 1024
+# The Try stick's PIPLOGS partition is 126 MiB and keeps the last boots' logs too:
+# one run must leave room for the next (a full speaker run writes about 20 MB).
+MAX_BYTES = 40 * 1024 * 1024
 # Leave this much free on the stick for the boot's own logs.
 KEEP_FREE = 48 * 1024 * 1024
 EVIDENCE_LIMIT = 600
@@ -238,6 +240,7 @@ class Report:
         path = Path(path)
         if self.overflow is not None and path.parent == self.overflow:
             self.dropped += 1
+            self.meta["files_not_kept"] = self.not_kept()
             return
         try:
             self.bytes += path.stat().st_size
@@ -268,14 +271,17 @@ class Report:
             except OSError:
                 pass
 
+    def not_kept(self):
+        return (f"{self.dropped} evidence files over the {MAX_FILES}-file or {MAX_BYTES // 2 ** 20} MB cap, "
+                "or the stick was nearly full: their results are in this report, the files themselves are not")
+
     def finish(self):
         self.meta["finished_utc"] = utc_stamp()
         if self.overflow is not None:
             import shutil
 
             shutil.rmtree(self.overflow, ignore_errors=True)
-            self.meta["files_not_kept"] = f"{self.dropped} evidence files over the {MAX_FILES}-file or " \
-                                          f"{MAX_BYTES // 2 ** 20} MB cap, or the stick was nearly full"
+            self.meta["files_not_kept"] = self.not_kept()
         self.save()
         try:
             RUN_DIR.mkdir(parents=True, exist_ok=True)
@@ -325,6 +331,8 @@ def summary(data):
             lines.append(f"{key.replace('_', ' ')}: {data[key]}")
     counts = data.get("counts") or {}
     lines.append("result: " + ", ".join(f"{counts.get(status, 0)} {status}" for status in STATUSES))
+    if data.get("files_not_kept"):
+        lines.append(f"EVIDENCE NOT KEPT: {data['files_not_kept']}")
     lines.append("")
     problems = sorted((item for item in checks if item["status"] in ("fail", "warn")),
                       key=lambda item: -RANK[item["status"]])

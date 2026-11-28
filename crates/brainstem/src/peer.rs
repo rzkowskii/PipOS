@@ -15,6 +15,7 @@ pub const PROTECTED: &[(&str, &[&str])] = &[
     ("mind", &["being-mind.service"]),
     // The lab's simulated body stands in for the voice in the QEMU lab.
     ("voice", &["being-voice.service", "being-lab-body.service"]),
+    ("ears", &["being-ears.service"]),
     ("eyes", &["being-eyes.service"]),
     ("hands", &["being-hands.service"]),
     ("bodycare", &["being-bodycare.service"]),

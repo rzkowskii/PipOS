@@ -15,6 +15,11 @@ laptop gates of docs/PIP-FUNCTIONS.md 4.2: end of speech to first audio
 mind's route lines ("route {...}") are counted by route: which step answered
 each turn (the workshop, a command, an everyday skill, a greeting, the model).
 
+Content-free ``voice startup`` records are grouped by journal PID and the
+monotonic process start derived from each record. Service activation, startup
+phases, and first authorized capture are separate fields. A later diagnostic
+restart is therefore a new incarnation, and absent capture remains absent.
+
 Python standard library only. It never writes to the stick. The journal can
 hold what was said to the being: this script prints no transcript text.
 """
@@ -27,9 +32,11 @@ from pathlib import Path
 
 BOOT_DIR = re.compile(r"^boot-(\d+)-")
 # journalctl --output=short-monotonic: "[   12.345678] host ident[pid]: message"
-STAMP = re.compile(r"^\[\s*(\d+\.\d+)\]\s+(\S+)\s+([^:\[\s]+)(?:\[\d+\])?:\s?(.*)$")
+STAMP = re.compile(r"^\[\s*(\d+\.\d+)\]\s+(\S+)\s+([^:\[\s]+)(?:\[(\d+)\])?:\s?(.*)$")
 STATE = re.compile(r"brainstem: ([a-z]+) -> ([a-z]+)\s*$")
 DRAWN = re.compile(r"face: drawn by (.+)$")
+FACE_SWAP = re.compile(r"^face: first frame presented ([0-9]+\.[0-9]+) s after (face|process) start$")
+FACE_VISIBLE = re.compile(r"^face: first visible eye frame ([0-9]+\.[0-9]+) s after process start$")
 TASK = re.compile(r"\btask (\d+)\b")
 PROMPT = re.compile(r"prompt eval time =\s*([\d.]+) ms /\s*(\d+) tokens.*?([\d.]+) tokens per second")
 DECODE = re.compile(r"(?<!prompt )\beval time =\s*([\d.]+) ms /\s*(\d+) tokens.*?([\d.]+) tokens per second")
@@ -40,6 +47,13 @@ FAILED = re.compile(r"(\S+\.service): (?:Failed with result|Main process exited,
 RESTART = re.compile(r"(\S+\.service): Scheduled restart job, restart counter is at (\d+)")
 # One line of numbers per reply (mind/voice.py) and per model turn (mind/turn.py).
 TIMING = re.compile(r"\b(voice|turn) timing (\{.*\})\s*$")
+VOICE_STARTUP = re.compile(r"\bvoice startup (\{.*\})\s*$")
+ENDPOINT_EVIDENCE = re.compile(r"\bendpoint evidence (\{.*\})\s*$")
+VOICE_STARTED = re.compile(r"Started Being: local speech recognition and voice")
+STARTUP_STAGES = ("main_entered", "profile_ready", "wake_load_started", "audio_route_ready", "wake_ready",
+                  "organ_ready", "bus_connected", "engine_selection_started", "tts_ready", "asr_ready",
+                  "capture_open")
+ENDPOINT_NUMBERS = ("dictation_s", "voiced_s", "last_voice_to_final_s", "endpoint_to_final_s", "speech_span_s")
 VOICE_KEYS = ("eos_to_final_s", "final_to_audio_s", "eos_to_audio_s")
 # One line per turn (mind/turn.py _route): the step that answered it. A
 # voice-debug boot adds the words; they are never read here.
@@ -82,7 +96,83 @@ def journal_entries(text):
     for line in (text or "").splitlines():
         match = STAMP.match(line)
         if match:
-            yield float(match[1]), match[3], match[4]
+            yield float(match[1]), match[3], int(match[4]) if match[4] else None, match[5]
+
+
+def startup_fields(text):
+    """One content-free Voice startup record; reject unknown/unbounded fields."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("stage") not in STARTUP_STAGES:
+        return None
+    if type(data.get("mono_s")) not in (int, float) or type(data.get("elapsed_s")) not in (int, float):
+        return None
+    if data["elapsed_s"] < 0 or data["elapsed_s"] > 600:
+        return None
+    result = {"stage": data["stage"], "mono_s": data["mono_s"], "elapsed_s": data["elapsed_s"]}
+    if type(data.get("phase_s")) in (int, float) and 0 <= data["phase_s"] <= 600:
+        result["phase_s"] = data["phase_s"]
+    return result
+
+
+def startup_runs(records, activations):
+    """Group phases by journal PID and derived /proc start, never boot-wide."""
+    runs = []
+    for record in records[:256]:
+        derived = round(record["mono_s"] - record["elapsed_s"], 3)
+        run = next((item for item in reversed(runs)
+                    if item["pid"] == record["pid"] and abs(item["process_start_s"] - derived) <= 0.01), None)
+        if run is None:
+            activation = max((stamp for stamp in activations if stamp <= derived + 0.05), default=None)
+            run = {"pid": record["pid"], "process_start_s": derived, "service_activation_s": activation,
+                   "phases": {}, "first_authorized_capture_s": None}
+            runs.append(run)
+        stage = record["stage"]
+        if stage not in run["phases"]:
+            phase = {"journal_s": record["journal_s"], "elapsed_s": record["elapsed_s"]}
+            if "phase_s" in record:
+                phase["phase_s"] = record["phase_s"]
+            run["phases"][stage] = phase
+            if stage == "capture_open":
+                run["first_authorized_capture_s"] = record["mono_s"]
+    return runs[-16:]
+
+
+def endpoint_fields(text):
+    """Bounded content-free Try endpoint record; words and unknown fields stay out."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("engine") not in ("pocketsphinx", "moonshine"):
+        return None
+    if data.get("outcome") not in ("final", "missed", "room") or type(data.get("oneshot")) is not bool:
+        return None
+    result = {"engine": data["engine"], "outcome": data["outcome"], "oneshot": data["oneshot"]}
+    for key in ENDPOINT_NUMBERS:
+        value = data.get(key)
+        if value is None:
+            result[key] = None
+        elif type(value) in (int, float) and 0 <= value <= 120:
+            result[key] = value
+        else:
+            return None
+    return result
+
+
+def endpoint_summary(records):
+    by_engine = {}
+    for record in records:
+        group = by_engine.setdefault(record["engine"], {"turns": 0, "final": 0, "missed": 0, "room": 0})
+        group["turns"] += 1
+        group[record["outcome"]] += 1
+    for engine, group in by_engine.items():
+        rows = [record for record in records if record["engine"] == engine]
+        group["median_last_voice_to_final_s"] = median(row["last_voice_to_final_s"] for row in rows)
+        group["median_endpoint_to_final_s"] = median(row["endpoint_to_final_s"] for row in rows)
+    return by_engine
 
 
 def timing_fields(text):
@@ -125,7 +215,24 @@ def parse_journal(text):
     timings = {"voice": [], "turn": []}
     open_tasks = {}
     checkpoints_restored = None
-    for stamp, ident, message in journal_entries(text):
+    startup_records, voice_activations, endpoints = [], [], []
+    face_startup = {}
+    for stamp, ident, pid, message in journal_entries(text):
+        if (swap := FACE_SWAP.fullmatch(message)) is not None:
+            face_startup.setdefault("first_swap", {"boot_s": stamp, "pid": pid,
+                                    "process_s": float(swap[1]) if swap[2] == "process" else None})
+        if (visible := FACE_VISIBLE.fullmatch(message)) is not None:
+            face_startup.setdefault("first_visible", {"boot_s": stamp, "pid": pid, "process_s": float(visible[1])})
+        if ident == "systemd" and VOICE_STARTED.search(message):
+            voice_activations.append(stamp)
+        if (match := VOICE_STARTUP.search(message)) and pid is not None:
+            fields = startup_fields(match[1])
+            if fields is not None:
+                startup_records.append({"journal_s": stamp, "pid": pid, **fields})
+        if (match := ENDPOINT_EVIDENCE.search(message)):
+            fields = endpoint_fields(match[1])
+            if fields is not None and len(endpoints) < 256:
+                endpoints.append({"t": stamp, "pid": pid, **fields})
         if (match := STATE.search(message)):
             states.append({"t": stamp, "from": match[1], "to": match[2]})
         elif (match := DRAWN.search(message)) and renderer is None:
@@ -169,8 +276,10 @@ def parse_journal(text):
             requests.append(entry)
     requests.sort(key=lambda entry: entry["t"])
     return {"states": states, "requests": requests, "failed": failed, "restarts": restarts,
-            "renderer": renderer, "checkpoints_restored": checkpoints_restored, "timings": timings,
-            "routes": routes}
+            "renderer": renderer, "face_startup": face_startup,
+            "checkpoints_restored": checkpoints_restored, "timings": timings,
+            "routes": routes, "voice_startup": startup_runs(startup_records, voice_activations),
+            "endpoint_evidence": endpoints, "endpoint_summary": endpoint_summary(endpoints)}
 
 
 def classify(timings):
@@ -206,6 +315,14 @@ def timing_summary(timings):
     summary = {"voice_lines": len(timings.get("voice", [])), "turn_lines": len(timings.get("turn", []))}
     summary["voice"] = {key: median(line.get(key) for line in timings.get("voice", [])) for key in VOICE_KEYS}
     summary["turn"] = {key: median(line.get(key) for line in timings.get("turn", [])) for key in TURN_KEYS}
+    scaffold = [line for line in timings.get("turn", []) if "scaffold_attempted_n" in line]
+    if scaffold:
+        reuse = [line["scaffold_reused"] for line in scaffold if type(line.get("scaffold_reused")) is bool]
+        summary["scaffold"] = {
+            "attempts": len(scaffold), "verified_reuse": sum(reuse), "unverified": len(scaffold) - len(reuse),
+            "median_primed_tokens": median(line.get("scaffold_primed_n") for line in scaffold),
+            "median_tail_tokens": median(line.get("tail_n") for line in scaffold),
+        }
     for name, lines, gate in (("warm_model", groups["warm"], MODEL_GATE_S), ("code", groups["code"], CODE_GATE_S)):
         value = median(line.get("eos_to_audio_s") for line in lines)
         summary[name] = {"count": len(lines), "median_eos_to_audio_s": value, "gate_s": gate,
@@ -264,6 +381,7 @@ def read_boot(folder):
     if cmdline:
         entry = ("boot messages" if "being.verbose=1" in cmdline else
                  "safe graphics" if "nomodeset" in cmdline else
+                 "bench+" if "being.bench=2" in cmdline else
                  "bench" if "being.bench=1" in cmdline else "default")
     return {
         "folder": folder.name,
@@ -271,6 +389,7 @@ def read_boot(folder):
         "cable": bool(cmdline) and "being.cable=1" in cmdline.split() and "being.cable=0" not in cmdline.split(),
         "summary": summary,
         "renderer": journal["renderer"],
+        "face_startup": journal["face_startup"],
         "failed_units": journal["failed"],
         "failed_services": failed_services,
         "restarts": journal["restarts"],
@@ -280,6 +399,9 @@ def read_boot(folder):
         "checkpoints_restored": journal["checkpoints_restored"],
         "timing_lines": journal["timings"],
         "timing": timing_summary(journal["timings"]),
+        "voice_startup": journal["voice_startup"],
+        "endpoint_evidence": journal["endpoint_evidence"],
+        "endpoint_summary": journal["endpoint_summary"],
         "routes": journal["routes"],
         "route_counts": route_counts(journal["routes"]),
         "bench": bench_summaries(folder),
@@ -339,7 +461,14 @@ def render(data):
         soft = " (SOFTWARE rendering)" if re.search(r"llvmpipe|softpipe|swrast", drawn, re.I) else ""
         out.append(f"  Renderer:     {drawn}{soft}")
         if boot["renderer"]:
-            out.append(f"  Face drawn:   {boot['renderer']['t']:.1f} s after the kernel started")
+            out.append(f"  GL ready:     {boot['renderer']['t']:.1f} s after the kernel started")
+        for key, label in (("first_swap", "First swap"), ("first_visible", "Visible eyes")):
+            if timing := boot.get("face_startup", {}).get(key):
+                process = timing["process_s"]
+                detail = f", {process:.3f} s after process start" if process is not None else ""
+                if timing["pid"] is not None:
+                    detail += f", pid {timing['pid']}"
+                out.append(f"  {label + ':':<14}{timing['boot_s']:.3f} s after kernel start{detail}")
         for label in ("Audio", "Battery", "Lid switch", "Camera", "Memory"):
             if label in s:
                 out.append(f"  {label + ':':<14}{s[label]}")
@@ -347,6 +476,26 @@ def render(data):
         out.append(f"  Failed units: {', '.join(failed) if failed else s.get('Failed units', 'none')}")
         if boot["restarts"]:
             out.append("  Restarts:     " + ", ".join(f"{u} x{n}" for u, n in sorted(boot["restarts"].items())))
+        if boot.get("voice_startup"):
+            out.append(f"  Voice startup ({len(boot['voice_startup'])} process incarnation(s)):")
+            for run in boot["voice_startup"]:
+                activation = fmt(run.get("service_activation_s"), " s", 3)
+                capture = run.get("phases", {}).get("capture_open")
+                capture_text = (f"{capture['elapsed_s']:.3f} s after process start"
+                                if capture is not None else "not observed")
+                out.append(f"    pid {run['pid']}, process start {run['process_start_s']:.3f} s, "
+                           f"service activation {activation}, first authorized capture {capture_text}")
+                phases = run.get("phases", {})
+                ordered = [name for name in STARTUP_STAGES if name in phases and name != "capture_open"]
+                if ordered:
+                    out.append("      " + ", ".join(f"{name} {phases[name]['elapsed_s']:.3f}s" for name in ordered))
+        if boot.get("endpoint_summary"):
+            out.append("  Endpoint evidence (Try opt-in; content-free):")
+            for engine, item in sorted(boot["endpoint_summary"].items()):
+                out.append(f"    {engine}: {item['turns']} turns, {item['final']} final, "
+                           f"{item['missed']} missed, {item['room']} room; median last voice -> final "
+                           f"{fmt(item['median_last_voice_to_final_s'], ' s', 3)}, endpoint -> final "
+                           f"{fmt(item['median_endpoint_to_final_s'], ' s', 3)}")
         if boot["states"]:
             out.append(f"  State changes ({len(boot['states'])}):")
             for change in boot["states"][:60]:
@@ -361,6 +510,10 @@ def render(data):
                 out.append(f"    {number:2}. at {turn['end_of_speech']:9.1f}  {result}")
             out.append(f"    median {fmt(median(t['seconds'] for t in boot['turns']), ' s', 2)}")
         timing = boot.get("timing") or {}
+        if scaffold := timing.get("scaffold"):
+            out.append(f"  Listening scaffold: {scaffold['verified_reuse']} verified reuses across "
+                       f"{scaffold['attempts']} attempts, {scaffold['unverified']} unverified. "
+                       f"Median tail {fmt(scaffold['median_tail_tokens'], ' tokens', 1)}")
         if timing.get("voice_lines") or timing.get("turn_lines"):
             out.append(f"  Timing lines: {timing['voice_lines']} voice, {timing['turn_lines']} turn")
             voice = timing["voice"]

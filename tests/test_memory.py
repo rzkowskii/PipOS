@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from mind.consolidation import candidate_highlights, select_highlights, validate_selection
 from mind.memory import Memory, search_terms
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 
 def believe_any_clock(case):

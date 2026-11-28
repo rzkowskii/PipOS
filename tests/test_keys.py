@@ -89,7 +89,7 @@ class KeysTest(unittest.TestCase):
         self.assertFalse(self.press("hear.final", text="louder"))
         self.assertEqual(self.bus.sent, [])
         self.assertEqual(set(keys.TOPICS),
-                         {"key.brightness", "key.volume", "key.mute_speaker", "key.kbd_light", "key.apps"})
+                         {"key.brightness", "key.volume", "key.mute_speaker", "key.kbd_light", "key.apps", "ui.action"})
 
     def test_brightness_keys_step_the_panel_through_the_brainstem(self):
         self.assertTrue(self.press("key.brightness", dir="up"))
@@ -273,6 +273,22 @@ class KeysTest(unittest.TestCase):
                                 log=self.logged.append)
         asyncio.run(no_workshop.handle({"t": "key.apps"}))
         self.assertIn("no workshop", self.logged[-1])
+
+    def test_quick_menu_uses_only_registered_open_actions_and_the_workshop_guest_gate(self):
+        for app in ("terminal", "monitor", "clock", "calc"):
+            self.apps.view["terminal"] = "closed"
+            self.press("ui.action", id=f"app.{app}.open", via="key")
+            self.assertEqual((self.apps.handled[-1].kind, self.apps.handled[-1].app), ("open", app))
+        count = len(self.apps.handled)
+        for action in ("app.terminal.close", "app.shell.run", "look.glow", [], None):
+            self.press("ui.action", id=action, via="key")
+        self.press("ui.action", id="app.calc.open", via="click")
+        self.assertEqual(len(self.apps.handled), count)
+        self.guest = True
+        self.press("ui.action", id="app.monitor.open", via="key")
+        self.assertEqual(self.apps.handled[-1].kind, "say")
+        self.assertIn("guest", self.logged[-1])
+        self.assertEqual(self.bus.sent, [])
 
     def test_a_failing_bus_or_workshop_never_stops_the_mind(self):
         async def broken(topic, **fields):

@@ -1,5 +1,8 @@
 source "$BR2_EXTERNAL_BEINGOS_PATH/package/being/Config.in"
 source "$BR2_EXTERNAL_BEINGOS_PATH/package/being-backup-age/Config.in"
+source "$BR2_EXTERNAL_BEINGOS_PATH/package/being-turbostat/Config.in"
+source "$BR2_EXTERNAL_BEINGOS_PATH/package/stream-benchmark/Config.in"
 source "$BR2_EXTERNAL_BEINGOS_PATH/package/cortex/Config.in"
 source "$BR2_EXTERNAL_BEINGOS_PATH/package/pocketsphinx/Config.in"
 source "$BR2_EXTERNAL_BEINGOS_PATH/package/sherpa-onnx/Config.in"
+source "$BR2_EXTERNAL_BEINGOS_PATH/package/piper-phonemize/Config.in"

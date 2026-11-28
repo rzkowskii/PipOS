@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 import wave
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -39,7 +39,7 @@ class Senses(CareTestCase):
         with self.keys("2"):
             care.dreams_page(self.mind, False)
         self.assertEqual(care.dream_settings(self.mind), (True, "closed"))
-        self.assertTrue((self.mind / "dreams-enabled").is_file(), "turn.py checks is_file()")
+        self.assertTrue((self.mind / "dreams-enabled").is_file())
         self.assertEqual((self.mind / "dreams-enabled").stat().st_mode & 0o777, 0o600)
         policy = DreamPolicy(True, settings_dir=self.mind)
         self.assertEqual(policy.window, "closed")
@@ -51,6 +51,20 @@ class Senses(CareTestCase):
     def test_an_older_empty_consent_file_means_night(self):
         (self.mind / "dreams-enabled").write_text("")
         self.assertEqual(load_window(self.mind), "night")
+        self.assertEqual(care.dream_settings(self.mind), (True, "night"))
+
+    def test_invalid_consent_does_not_enable_dreams_or_widen_upkeep(self):
+        path = self.mind / care.DREAM_CONSENT
+        path.write_text('{"version":1,"window":"always"}')
+        self.assertEqual(care.dream_settings(self.mind), (False, "night"))
+        self.assertEqual(load_window(self.mind), "night")
+        care.set_dreams(self.mind, True, "closed")
+        path.chmod(0o666)
+        self.assertEqual(care.dream_settings(self.mind), (False, "night"))
+        old = path.rename(self.mind / "old-consent")
+        old.chmod(0o600)
+        path.symlink_to(old)
+        self.assertEqual(care.dream_settings(self.mind), (False, "night"))
 
     def test_camera_goes_through_being_camera(self):
         with (patch.object(care, "quiet", return_value=CompletedProcess([], 0, "Camera permission enabled.", ""))
@@ -219,13 +233,29 @@ class Sound(CareTestCase):
 
 
 class Sticks(CareTestCase):
+    compatible = "beingos-laptop-installed-v1"
+    manifest_hash = "34" * 32
+
     def setUp(self):
         super().setUp()
         self.stick = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(patch.object(care, "pick_stick", return_value="/dev/sdc1"))
+        self.enterContext(patch("mind.backup.media_identity", return_value="1234-ABCD"))
+        self.enterContext(patch("mind.backup.mounted_from", return_value=True))
+        from mind import backup
+        backup.save_media_binding(self.mind, "1234-ABCD")
         self.mount = self.enterContext(patch("mind.local_menu.mount_media", return_value=self.stick))
         self.unmount = self.enterContext(patch("mind.local_menu.unmount_media"))
+        self.update_media = self.enterContext(patch("mind.local_menu.update_media", return_value=nullcontext(self.stick)))
+        self.enterContext(patch("mind.local_menu.release_previous_update_media"))
         self.enterContext(patch.object(care.shutil, "which", return_value="/usr/bin/tool"))
+        config = self.mind / "installed-rauc.conf"
+        config.write_text(f"[system]\ncompatible={self.compatible}\n", encoding="utf-8")
+        self.enterContext(patch.object(care, "RAUC_INSTALLED_CONF", config))
+
+    def verified_manifest(self, compatible=None):
+        return json.dumps({"compatible": compatible or self.compatible, "version": "1.2",
+                           "format": "verity", "hash": self.manifest_hash})
 
     def test_update_is_read_only_checked_and_confirmed(self):
         (self.stick / "updates").mkdir()
@@ -235,17 +265,19 @@ class Sticks(CareTestCase):
 
         def fake(command, **_):
             calls.append(command)
-            if command[:2] == ["rauc", "info"]:
-                return CompletedProcess(command, 0, json.dumps({"compatible": "beingos-laptop-installed-v1",
-                                                                "version": "1.2"}), "")
+            if "info" in command:
+                return CompletedProcess(command, 0, self.verified_manifest(), "")
             return CompletedProcess(command, 0, "", "")
 
-        with patch.object(care, "quiet", side_effect=fake), patch.object(care, "run", side_effect=fake), \
+        with patch.object(care, "quiet", side_effect=fake), patch.object(care.subprocess, "run", side_effect=fake), \
                 self.keys("1", "y", "n"):
             care.update_menu(self.mind, try_boot=False)
-        self.mount.assert_called_once_with("/dev/sdc1")  # read-only: no writable flag
-        self.assertIn(["rauc", "install", str(bundle)], calls)
-        # "Did your update work?" reads this line: the menu, not a test, writes it.
+        self.update_media.assert_called_once_with("/dev/sdc1")
+        self.mount.assert_not_called()
+        self.unmount.assert_not_called()
+        self.assertIn(["rauc", f"--conf={care.RAUC_INSTALLED_CONF}", "install",
+                       f"--require-manifest-hash={self.manifest_hash}", str(bundle)], calls)
+        # The menu logs the installation. RAUC records the target separately.
         from mind import action_log, device
 
         self.assertEqual([entry["kind"] for entry in action_log.entries(self.mind)], ["update.install"])
@@ -253,38 +285,42 @@ class Sticks(CareTestCase):
         good.write_text("B\n")
         cmdline = self.mind / "cmdline"
         cmdline.write_text("rauc.slot=B quiet\n")
-        self.assertIn("I started on the new system", device.update_line(self.mind, cmdline=cmdline, slot_good=good))
-        self.assertTrue(self.unmount.called)
+        self.assertIn("can't verify which slot", device.update_line(self.mind, cmdline=cmdline, slot_good=good))
         self.assertNotIn(["systemctl", "reboot"], calls)
-        self.assertIn("beingos-laptop-installed-v1", self.out.getvalue())
+        self.assertIn(self.compatible, self.out.getvalue())
 
     def test_unsigned_update_never_installs(self):
         (self.stick / "bad.raucb").write_bytes(b"x")
-        calls = []
 
         def fake(command, **_):
-            calls.append(command)
             return CompletedProcess(command, 1, "", "signature verification failed")
 
-        with patch.object(care, "quiet", side_effect=fake), patch.object(care, "run", side_effect=fake), \
-                self.keys("1"), self.assertRaisesRegex(ValueError, "not signed"):
+        with (patch.object(care, "quiet", side_effect=fake), patch.object(care, "install_bundle") as install,
+              self.keys("1"), self.assertRaisesRegex(ValueError, "not signed")):
             care.update_menu(self.mind, try_boot=False)
-        self.assertFalse(any(command[:2] == ["rauc", "install"] for command in calls))
+        install.assert_not_called()
         from mind import action_log
 
         self.assertEqual(action_log.entries(self.mind), [], "an update that never went in is not logged")
 
+    def test_wrong_signed_channel_never_reaches_install_confirmation(self):
+        (self.stick / "factory.raucb").write_bytes(b"bundle")
+        result = CompletedProcess([], 0, self.verified_manifest("beingos-laptop-v1"), "")
+        with (patch.object(care, "quiet", return_value=result), patch.object(care, "yes") as confirm,
+              patch.object(care, "install_bundle") as install, self.keys("1"),
+              self.assertRaisesRegex(ValueError, "different PipOS system")):
+            care.update_menu(self.mind, try_boot=False)
+        confirm.assert_not_called()
+        install.assert_not_called()
+
     def test_a_failed_install_is_not_logged_as_an_update(self):
         (self.stick / "pipos-1.3.raucb").write_bytes(b"bundle")
 
-        def fake(command, **_):
-            if command[:2] == ["rauc", "info"]:
-                return CompletedProcess(command, 0, json.dumps({"compatible": "beingos-laptop-installed-v1",
-                                                                "version": "1.3"}), "")
-            return CompletedProcess(command, 1, "", "slot busy")
-
-        with patch.object(care, "quiet", side_effect=fake), patch.object(care, "run", side_effect=fake), \
-                self.keys("1", "y"), self.assertRaisesRegex(ValueError, "did not install"):
+        info = CompletedProcess([], 0, self.verified_manifest(), "")
+        failed = CompletedProcess([], 1, "", "slot busy")
+        with (patch.object(care, "quiet", return_value=info),
+              patch.object(care.subprocess, "run", return_value=failed),
+              self.keys("1", "y"), self.assertRaisesRegex(ValueError, "did not install")):
             care.update_menu(self.mind, try_boot=False)
         from mind import action_log
 
@@ -292,7 +328,7 @@ class Sticks(CareTestCase):
 
     def test_try_cannot_update(self):
         care.update_menu(try_boot=True)
-        self.mount.assert_not_called()
+        self.update_media.assert_not_called()
         self.assertIn("installed being", self.out.getvalue())
 
     def test_backup_writes_to_a_new_folder_and_shows_the_fingerprint(self):
@@ -304,6 +340,27 @@ class Sticks(CareTestCase):
         self.assertEqual(write.call_args.args[1], self.stick / care.BACKUP_FOLDER)
         self.assertIn("abababab…abababab", self.out.getvalue())
         self.assertTrue(self.unmount.called)
+
+    def test_backup_media_enrollment_and_replacement_are_explicit(self):
+        from mind import backup
+
+        (self.mind / backup.MEDIA_BINDING_FILE).unlink()
+        with self.keys("n"):
+            care.write_backup(self.mind, temporary=False)
+        self.assertIsNone(backup.media_binding(self.mind))
+        with self.keys("y"), patch.object(care, "write_locked_backup", side_effect=ValueError("write failed")), \
+                self.assertRaisesRegex(ValueError, "write failed"):
+            care.write_backup(self.mind, temporary=False)
+        self.assertIsNone(backup.media_binding(self.mind))
+        with self.keys("y"), patch.object(care, "write_locked_backup", return_value=(
+                {"snapshot": self.stick / "pip.age", "checkpoint": "ab" * 32}, False)), \
+                patch.object(care, "show_backup"):
+            care.write_backup(self.mind, temporary=False)
+        self.assertEqual(backup.media_binding(self.mind), "1234-ABCD")
+
+        with patch("mind.backup.media_identity", return_value="9876-DCBA"), self.keys("n"):
+            care.write_backup(self.mind, temporary=False)
+        self.assertEqual(backup.media_binding(self.mind), "1234-ABCD")
 
     def test_a_backup_tool_failure_is_a_sentence_not_a_crash(self):
         from mind.backup_crypto import BackupCryptoError
@@ -348,12 +405,34 @@ class Page(CareTestCase):
         try_rows = {label for _, label, _ in care.summary_rows(self.mind, True)}
         installed_rows = {label for _, label, _ in care.summary_rows(self.mind, False)}
         for label in ("Camera", "Dreams", "Memory", "What I remember", "Dream journal", "Date and time",
-                      "Time zone", "Workshop"):
+                      "Time zone", "Workshop", "Permissions"):
             self.assertIn(label, try_rows)
         self.assertNotIn("Network", try_rows)
         self.assertIn("Network", installed_rows)
         with self.keys("q"):
             self.assertEqual(care.care_menu(self.mind), 0)
+
+    def test_permissions_reads_live_choices_and_try_stays_offline(self):
+        from mind.initiative import InitiativePolicy, QuietHours, save_policy as save_initiative
+        from mind.network_policy import INTERNET, NetworkPolicy, save_policy as save_network
+        from mind.policy import load_capabilities
+
+        care.private_marker(self.mind / care.CAMERA_MARKER)
+        care.set_dreams(self.mind, True, "closed")
+        care.set_workshop(self.mind, False)
+        save_initiative(self.mind, InitiativePolicy(greetings=True, quiet_hours=QuietHours("22:00", "07:00")))
+        save_network(self.mind, NetworkPolicy(INTERNET, web_lookups=True, system_network=True))
+        rows = dict(load_capabilities(self.mind).rows())
+        self.assertEqual(rows, {
+            "Camera": "On", "Network": "Internet", "Web lookups": "Available", "Workshop": "Off",
+            "Reminders": "On", "Greetings": "On", "Morning brief": "On", "Quiet hours": "22:00 to 07:00",
+            "Dreams": "Whenever the lid is closed",
+        })
+        with self.keys("p", "q", "q"):
+            care.care_menu(self.mind, temporary=True)
+        self.assertIn("Quiet hours", self.out.getvalue())
+        try_rows = dict(load_capabilities(self.mind, temporary=True).rows())
+        self.assertEqual((try_rows["Network"], try_rows["Web lookups"]), ("Offline", "Off"))
 
     @staticmethod
     def health_machine():

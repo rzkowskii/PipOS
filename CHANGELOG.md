@@ -6,6 +6,41 @@ What changed in PipOS, newest first. Times are Australian Eastern
 release's notes say what was and was not checked. Try 2 and Try 3 were
 withdrawn on 25 November because they carry a natural voice whose licence does not allow public distribution (see below).
 
+## Unreleased: the `Dev` branch, checkpoint of 28 November 2026
+
+A checkpoint of four days of work since the cable and diagnostics
+snapshot below. It passes the host tests on the development Mac
+(28 November, on this branch: Rust 371 passed; Python 3,048 run, all
+passing, 64 skipped for tools, models and downloads a fresh checkout
+does not have; lab host checks 64 passed). It has not been reviewed as a whole yet, and none of it has
+been built into a published image or tried on the MacBook as a set.
+[STATUS.md](STATUS.md) has the hardware and QEMU evidence for the parts
+that were tried on their own. A review of the face code after this
+checkpoint found 20 faults, among them a brief link loss that silences
+the mouth for the rest of a reply; their fixes follow in a later update.
+
+- **Hearing and voice.** A separate Ears service owns the microphone and
+  hands the stream to Voice. If capture outlives a refusal, a privacy
+  latch turns hearing and voice off until restart. Speaker EQ for the
+  laptop's small speakers, prepared stock phrases, and a record of which
+  parts of a reply were actually played, so an interrupted reply keeps
+  only what you heard.
+- **Face.** The Face Lab expressions (89 poses, effects and scenes),
+  eleven Look palettes, optional brows and mouth (eyes only by default),
+  a quick menu, options and mouth shapes for speech.
+- **Everyday use.** The Keep for documents, an offline library and
+  spoken guide, habits and suggested routines, alarms with an optional
+  sleep (each needs its own yes), a calculator, a journal, lookups,
+  vitals, speaker and camera descriptions behind consent.
+- **Updates and storage.** An encrypted checkpoint before each update,
+  typed rollback to the previous system, optional full-disk encryption
+  of memory at install, archive integrity checks and a real partition
+  map in the installer.
+- **Body.** USB camera and device plug-in handling, the keyboard light,
+  body maps on the bus, and a night dream temperature limit of 80 °C.
+- **Lab.** Cable stick tooling, more `pip-diag` rounds, candidate image
+  manifests and parity checks, soak and recall benchmarks, auditions.
+
 ## Unreleased: the `Dev` branch (24 November 2026, evening)
 
 The first boots on the MacBook found two separate faults. The microphone

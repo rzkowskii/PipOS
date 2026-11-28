@@ -40,8 +40,9 @@ CORTEX_CONF_OPTS = \
 # The two UI options: no web interface is built, and none is downloaded from
 # llama.cpp's asset bucket during the build. The being has a face already.
 
-# Only the server is wanted.
-CORTEX_MAKE_OPTS = llama-server
+# Shipping images build only the server. The isolated WP-C8 diagnostic image
+# also carries the upstream benchmark executable; it is never in an update.
+CORTEX_MAKE_OPTS = llama-server $(if $(BR2_PACKAGE_BEING_DIAGNOSTIC),llama-bench)
 
 # The conversation model's chat template (config/chat-template.jinja): past
 # replies render byte for byte as they were generated, so the cache holds.
@@ -49,16 +50,20 @@ CORTEX_CHAT_TEMPLATE = $(BR2_EXTERNAL_BEINGOS_PATH)/../config/chat-template.jinj
 
 define CORTEX_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/buildroot-build/bin/llama-server $(TARGET_DIR)/usr/bin/llama-server
+	$(if $(BR2_PACKAGE_BEING_DIAGNOSTIC),$(INSTALL) -D -m 0755 $(@D)/buildroot-build/bin/llama-bench $(TARGET_DIR)/usr/bin/llama-bench)
 	$(INSTALL) -D -m 0644 $(CORTEX_CHAT_TEMPLATE) $(TARGET_DIR)/usr/share/being/chat-template.jinja
 endef
 
 # The dream model's server is started and stopped by the night shift only;
-# 50-being.preset keeps it disabled at boot.
+# 50-being.preset keeps it disabled at boot. being-model-check has no
+# [Install] section: being-cortex.service pulls it in, on Try boots only.
 define CORTEX_INSTALL_INIT_SYSTEMD
 	$(INSTALL) -D -m 0644 $(CORTEX_PKGDIR)/being-cortex.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/being-cortex.service
 	$(INSTALL) -D -m 0644 $(CORTEX_PKGDIR)/being-dream-cortex.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/being-dream-cortex.service
+	$(INSTALL) -D -m 0644 $(CORTEX_PKGDIR)/being-model-check.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/being-model-check.service
 endef
 
 $(eval $(cmake-package))

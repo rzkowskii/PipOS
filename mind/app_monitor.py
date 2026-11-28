@@ -1,12 +1,11 @@
-"""The body monitor: how Pip's body is doing, drawn on the workshop panel.
+"""Pip's Body and Processes views, drawn on the workshop panel.
 
 "Show me how you're feeling" opens it. hands (mind/hands.py) runs it: once a
 second it takes a Sampler reading in a worker thread and writes render()'s
 ANSI into `being-console --panel monitor`, which draws the frame the face
-shows below the eye strip. Everything here is read-only: /proc, /sys and
-statvfs, plus the body.state the brainstem already publishes (battery, its
-health, the temperature it judges by). Nothing is stored and nothing goes on
-the bus.
+shows below the eye strip. Body reads /proc, /sys, statvfs and the brainstem's
+latest body.state. Processes reads a fixed list of Pip services. The panel
+stores nothing and never restarts an organ. The doctor handles spoken requests.
 
 The picture is 107 columns by 23 rows (hands.GRID_COLUMNS, GRID_ROWS), drawn
 row by row with cursor positioning so it never scrolls, and only rows that
@@ -23,14 +22,17 @@ from . import hardware_metrics as metrics
 
 COLUMNS, ROWS = 107, 23
 TITLE = "How I'm feeling"
+PAGES = ("body", "processes")
+PROCESS_REFRESH = 5.0
 DISCOVER_EVERY = 30.0       # seconds between looks for fans and temperature sensors
 MAX_CPUS = 8                # rows of the picture are few; the laptop has 4 logical CPUs
-LABEL = 12                  # width of the left-hand labels
 BAR = 40                    # cells in a full bar
 
 # ANSI, in the 16 colours being-console draws.
-RESET, BOLD, DIM = "\x1b[0m", "\x1b[1m", "\x1b[2m"
+RESET = "\x1b[0m"
 GREEN, YELLOW, RED, CYAN, GREY = "\x1b[32m", "\x1b[33m", "\x1b[31m", "\x1b[36m", "\x1b[90m"
+RULE, CARD, BRIGHT = "\x1b[2;94m", "\x1b[40m", "\x1b[1;97m"
+SGR = re.compile(r"(\x1b\[[0-9;]*m)")
 EIGHTHS = " ▏▎▍▌▋▊▉█"
 TRACK = "░"
 
@@ -147,6 +149,43 @@ class Sampler:
         return reading
 
 
+class Monitor:
+    """The open panel owns its page, last body reading and process snapshot."""
+
+    def __init__(self, root, disk, *, system=None, clock=time.monotonic):
+        from .doctor import System
+
+        self.sampler = Sampler(root=root, disk=disk, clock=clock)
+        self.system = system or System()
+        self.clock = clock
+        self.page = "body"
+        self._previous = None
+        self._processes = None
+        self._process_at = float("-inf")
+
+    def select(self, page):
+        if page in PAGES:
+            self.page = page
+
+    def key(self, data):
+        if data == b"\t":
+            self.select("processes" if self.page == "body" else "body")
+
+    def frame(self, body, model, *, refresh=True):
+        from .doctor import ORGANS
+
+        if self.page == "processes":
+            now = self.clock()
+            if refresh and now - self._process_at >= PROCESS_REFRESH:
+                self._processes = self.system.units(tuple(ORGANS), timeout=1.0)
+                self._process_at = now
+            return render_processes(self._processes)
+        reading = self.sampler.sample()
+        frame = render(reading, self._previous, body, model)
+        self._previous = reading
+        return frame
+
+
 # -- drawing ----------------------------------------------------------------------------
 
 def bar(fraction, width=BAR, colour=GREEN):
@@ -160,7 +199,7 @@ def bar(fraction, width=BAR, colour=GREEN):
 
 
 def level(value, warm, hot):
-    return RED if value >= hot else YELLOW if value >= warm else GREEN
+    return RED if value >= hot else YELLOW if value >= warm else CYAN
 
 
 def gigabytes(count):
@@ -180,25 +219,34 @@ def duration(seconds):
     return f"{minutes} min"
 
 
-def _row(label, text=""):
-    return f"  {BOLD}{label:<{LABEL}}{RESET}{text}"
+def _fit(text, width):
+    """Pad or clip the card's styled cells without splitting an escape sequence."""
+    out = []
+    for index, part in enumerate(SGR.split(text.replace(RESET, RESET + CARD))):
+        if index % 2 == 0:
+            part = part[:width]
+            width -= len(part)
+        out.append(part)
+        if width == 0:
+            break
+    return "".join(out) + RESET + CARD + " " * width
 
 
 def _number(value):
     return type(value) in (int, float)
 
 
-def battery_lines(body):
+def _battery_readings(body, width):
     percent = body.get("battery")
     if not _number(percent):
-        return [_row("Battery", f"{GREY}no reading yet{RESET}")]
+        return "Battery     no reading yet", []
     colour = level(100 - percent, 70, 85)
     state = ("charging" if body.get("charging") else "plugged in" if body.get("on_ac") else "on battery")
-    text = f"{bar(percent / 100, colour=colour)}  {percent:3.0f} %  {state}"
+    text = f"{percent:.0f} %  {state}"
     left = body.get("minutes_left")
     if body.get("on_ac") is False and _number(left) and left > 0:
         text += f", about {duration(left * 60)} left"
-    lines = [_row("Battery", text)]
+    lines = [f"{BRIGHT}{text}{RESET}", bar(percent / 100, width=width, colour=colour)]
     health, cycles = body.get("health_pct"), body.get("cycles")
     if _number(health) or _number(cycles):
         parts = []
@@ -206,8 +254,33 @@ def battery_lines(body):
             parts.append(f"holds {health:.0f} % of what it did when new")
         if _number(cycles):
             parts.append(f"{cycles:.0f} charge cycles")
-        lines.append(_row("", GREY + ", ".join(parts) + RESET))
-    return lines
+        lines.append(GREY + ", ".join(parts) + RESET)
+    return "Battery", lines
+
+
+def _tabs(active, detail="", columns=COLUMNS):
+    tabs = []
+    for page, label in (("body", "Body"), ("processes", "Processes")):
+        ink = "\x1b[46;1;96m" if page == active else "\x1b[40;90m"
+        tabs.append(f"{ink} {label} {RESET}")
+    spacing = " " * max(2, columns - 26 - len(detail)) if detail else ""
+    return " " + " ".join(tabs) + f"  {GREY}Tab{spacing}{detail}{RESET}"
+
+
+def _cards(left, right, widths, height):
+    """Two framed readings, with a common baseline for their bottom edge."""
+    def card(title, readings, width):
+        inner = width - 4
+        label = title[:inner - 1]
+        top = f"{RULE}╭─{RESET}{BRIGHT} {label} {RESET}{RULE}{'─' * (inner - len(label) - 1)}╮{RESET}"
+        content = [
+            f"{RULE}│{RESET}{CARD} {_fit(line, inner)} {RESET}{RULE}│{RESET}"
+            for line in (readings + [""] * height)[:height]
+        ]
+        return [top, *content, f"{RULE}╰{'─' * (width - 2)}╯{RESET}"]
+
+    return [" " + lhs + "   " + rhs for lhs, rhs in
+            zip(card(*left, widths[0]), card(*right, widths[1]))]
 
 
 def render(reading, previous=None, body=None, model=None, *, columns=COLUMNS, rows=ROWS):
@@ -217,68 +290,71 @@ def render(reading, previous=None, body=None, model=None, *, columns=COLUMNS, ro
     `model` is {"state": brainstem state, "tok_s": writing speed or None}."""
     body = body or {}
     model = model or {}
-    lines = []
-    # The title is the panel's own (its status bar), so the first row only
-    # says how long Pip has been awake.
+    # The physical panel's fixed workspace has room for the two-column
+    # arrangement while keeping the battery's health reading together.
+    left = max(15, (columns - 5) * 3 // 5)
+    right = max(15, columns - 5 - left)
     up = reading.get("uptime_s")
     awake = f"awake {duration(up)}" if _number(up) else ""
-    lines.append(" " * max(1, columns - len(awake) - 2) + GREY + awake + RESET if awake else "")
-    lines.append("")
+    lines = [_tabs("body", awake, columns), ""]
 
     percents = cpu_percent((previous or {}).get("cpus"), reading.get("cpus"))
     cpus = reading.get("cpus") or []
-    for index in range(len(cpus)):
+    cpu_rows = []
+    cpu_meter_width = max(4, left - 20)
+    for index in range(min(len(cpus), MAX_CPUS)):
         value = percents[index] if percents else None
-        label = "Thinking" if index == 0 else ""
         if value is None:
-            text = f"{bar(None)}    …  CPU {index + 1}"
+            text = f"{bar(None, cpu_meter_width)}    …  CPU {index + 1}"
         else:
-            text = f"{bar(value / 100, colour=level(value, 60, 90))}  {value:3.0f} %  CPU {index + 1}"
-        lines.append(_row(label, text))
-    if not cpus:
-        lines.append(_row("Thinking", f"{GREY}no reading{RESET}"))
-    lines.append("")
+            text = f"{bar(value / 100, cpu_meter_width, level(value, 60, 90))}  {value:3.0f} %  CPU {index + 1}"
+        cpu_rows.append(text)
+    thinking = ("Thinking" if cpus else "Thinking    no reading", cpu_rows)
 
     temp = reading.get("package_c")
     if not _number(temp):
         temp = body.get("temp")
+    thermal = []
     if _number(temp):
-        text = f"{bar(max(0.0, temp - 30) / 70, colour=level(temp, 75, 90))}  {temp:3.0f} °C"
+        thermal.append(f"{bar(max(0.0, temp - 30) / 70, 16, level(temp, 75, 90))}  {BRIGHT}{temp:.0f} °C{RESET}")
         cores = reading.get("cores_c") or []
-        if cores:
-            text += "  " + GREY + "  ".join(f"core {label.split()[-1]} {value:.0f}°" for label, value in cores) + RESET
+        core_readings = [f"core {label.split()[-1]} {value:.0f}°" for label, value in cores[:MAX_CPUS]]
+        for index in range(0, len(core_readings), 2):
+            thermal.append(GREY + "  ".join(core_readings[index:index + 2]) + RESET)
     else:
-        text = f"{GREY}no reading{RESET}"
-    lines.append(_row("Warmth", text))
+        thermal.append(f"{GREY}No temperature reading{RESET}")
     fans = reading.get("fans") or []
     for index, (rpm, maximum) in enumerate(fans[:2]):
         fraction = rpm / maximum if maximum else None
         quiet = "quiet" if fraction is not None and fraction < 0.35 else "busy" if fraction is not None else ""
-        lines.append(_row("Fan" if index == 0 else "", f"{bar(fraction, colour=CYAN)}  {rpm:,} rpm  {GREY}{quiet}{RESET}"))
+        label = "Fan" if len(fans) == 1 else f"Fan {index + 1}"
+        thermal.append(f"{label}  {bar(fraction, 9, CYAN)}  {rpm:,} rpm  {GREY}{quiet}{RESET}")
     if not fans:
-        lines.append(_row("Fan", f"{GREY}no reading{RESET}"))
+        thermal.append(f"{GREY}No fan reading{RESET}")
+    widths = left, right
+    lines.extend(_cards(thinking, ("Warmth", thermal), widths, max(4, len(cpu_rows), len(thermal))))
     lines.append("")
 
-    lines += battery_lines(body)
+    battery = _battery_readings(body, left - 4)
     memory = reading.get("memory") or {}
     total, available = memory.get("total_kib"), memory.get("available_kib")
     if _number(total) and _number(available) and total > 0:
         used = max(0, total - available)
-        text = (f"{bar(used / total, colour=level(100 * used / total, 75, 90))}  "
-                f"{gigabytes(used * 1024)} of {gigabytes(total * 1024)} in use")
+        ram = ("Memory", [f"{BRIGHT}{gigabytes(used * 1024)} of {gigabytes(total * 1024)} in use{RESET}",
+                          bar(used / total, right - 4, level(100 * used / total, 75, 90))])
     else:
-        text = f"{GREY}no reading{RESET}"
-    lines.append(_row("Memory", text))
+        ram = ("Memory      no reading", [])
+    lines.extend(_cards(battery, ram, widths, 3))
+    lines.append("")
+
     disk = reading.get("disk")
     if disk and disk[0] > 0:
         size, free = disk
         used = max(0, size - free)
-        text = (f"{bar(used / size, colour=level(100 * used / size, 85, 95))}  "
-                f"{gigabytes(free)} free of {gigabytes(size)}")
+        storage = [f"{BRIGHT}{gigabytes(free)} free of {gigabytes(size)}{RESET}",
+                   bar(used / size, right - 4, level(100 * used / size, 85, 95))]
     else:
-        text = f"{GREY}no reading{RESET}"
-    lines.append(_row("Disk", text))
-    lines.append("")
+        storage = [f"{GREY}No reading{RESET}"]
 
     state = MODEL_STATES.get(model.get("state") or "", model.get("state") or "not heard from yet")
     speed = model.get("tok_s")
@@ -286,8 +362,43 @@ def render(reading, previous=None, body=None, model=None, *, columns=COLUMNS, ro
         speed_text = f"writes {speed:.1f} tokens a second (my last script)"
     else:
         speed_text = "writing speed not measured yet"
-    lines.append(_row("Model", f"{state}  {GREY}·  {speed_text}{RESET}"))
+    model_readings = [f"{BRIGHT}{state}{RESET}", f"{GREY}{speed_text}{RESET}"]
+    lines.extend(_cards(("Speed of thought", model_readings), ("Disk", storage), widths, 2))
 
+    return _frame(lines, rows)
+
+
+def render_processes(states, *, rows=ROWS):
+    from .doctor import ORGANS, stopped
+
+    lines = [_tabs("processes"), ""]
+    if states is None:
+        lines.append(f"  {GREY}No process reading yet.{RESET}")
+    else:
+        lines.append(f"  {GREY}{'Organ':<22}{'State':<16}{'Automatic restarts':<22}Unit{RESET}")
+        lines.append(f"  {RULE}{'─' * 96}{RESET}")
+        for index, (unit, organ) in enumerate(ORGANS.items()):
+            values = states.get(unit) or {}
+            if values.get("LoadState") != "loaded":
+                state, colour = "unavailable", GREY
+            elif stopped(values):
+                state, colour = "failed", RED
+            else:
+                state, colour = {
+                    "active": ("running", GREEN), "activating": ("starting", YELLOW),
+                    "reloading": ("reloading", YELLOW), "deactivating": ("stopping", YELLOW),
+                    "inactive": ("off", GREY),
+                }.get(values.get("ActiveState"), ("unknown", GREY))
+            repeat = str(values.get("NRestarts", ""))
+            count = repeat if re.fullmatch(r"[0-9]{1,9}", repeat) else "—"
+            backing = CARD if index % 2 == 0 else ""
+            lines.append(f"  {backing}{organ.capitalize():<22}{colour}{state:<16}{RESET}"
+                         f"{backing}{count:<22}{GREY}{unit:<36}{RESET}")
+        lines.extend(("", f"  {GREY}Voice · Ask to restart my face, ears and voice, thinking model, body care, or hands.{RESET}"))
+    return _frame(lines, rows)
+
+
+def _frame(lines, rows):
     lines = lines[:rows]
     lines += [""] * (rows - len(lines))
     return "\x1b[?25l" + "".join(f"\x1b[{number};1H{line}\x1b[0m\x1b[K" for number, line in enumerate(lines, 1))

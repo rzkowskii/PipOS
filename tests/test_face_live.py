@@ -84,9 +84,9 @@ class FaceLive(unittest.IsolatedAsyncioTestCase):
         await self.voice.send("hear.speech_start")
         await self.voice.send("hear.final", text="hello")
         await self.reach("thinking")
-        await self.mind.send("mind.emotion", name="joy", hold=30)
         await self.voice.send("say.started")
         await self.reach("speaking")
+        await self.voice.send("say.level", v=0.8, face_cue="joy")
         for _ in range(20):
             await self.voice.send("say.level", v=0.8)
             await asyncio.sleep(0.05)
@@ -105,6 +105,23 @@ class FaceLive(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.25)
         await self.voice.send("key.interrupt")
         await self.reach("attending")
+        self.assertEqual(await self.showing(), "attentive")
+
+    async def test_interruption_releases_a_playing_clause_and_drops_late_cues(self):
+        await self.mind.send("mind.ready", cortex=True)
+        await self.reach("idle")
+        await self.start_face(3.5, "interrupted-clause")
+        await asyncio.sleep(1.2)
+        await self.voice.send("hear.wake")
+        await self.voice.send("hear.speech_start")
+        await self.voice.send("hear.final", text="hello")
+        await self.reach("thinking")
+        await self.voice.send("say.started")
+        await self.reach("speaking")
+        await self.voice.send("say.level", v=0.8, face_cue="joy")
+        await self.voice.send("key.interrupt")
+        await self.reach("attending")
+        await self.voice.send("say.level", v=0.8, face_cue="concern")
         self.assertEqual(await self.showing(), "attentive")
 
     async def test_a_face_that_joins_late_catches_up(self):

@@ -1,0 +1,1171 @@
+{
+  "metric": "Intersection over union of sampled solid-eye silhouettes, without colour, light or motion",
+  "sampleSize": [
+    192,
+    120
+  ],
+  "sources": {
+    "preflight": "552cbf26b57461233020bdb868484878f3dc3d1400ed64a6a206f49ef6089304",
+    "pocData": "d413a5a066cbf8c0786165b92fe8a053760498468cd03383ad7681aaee358e17",
+    "productionPoses": "a21438fead2d08f85589fc6b48798189f07d35659c053c12df67535175bce67c",
+    "productionValidator": "f498ab2efb274b0e832636d0c15b3d385e1578dc54962932dbee2cf7dfabdc4c",
+    "shaderVertex": "0f1e6bc79642aab6829ff11126a1f931e79ca9bc41397a06705d03635b691f65",
+    "shaderFragment": "54e62fb4d66c1cc696dd7913d18b16eafd5fdfd2dc912525491e52518e89429b"
+  },
+  "channels": [
+    "x",
+    "y",
+    "w",
+    "h",
+    "round",
+    "tilt",
+    "top",
+    "top_slant",
+    "top_curve",
+    "bot",
+    "bot_slant",
+    "bot_curve",
+    "glow"
+  ],
+  "rows": 89,
+  "sourceFields": 95,
+  "clamped": [
+    {
+      "name": "p_glitch",
+      "side": "left",
+      "channel": "round",
+      "from": 1.8,
+      "to": 2
+    },
+    {
+      "name": "p_glitch",
+      "side": "right",
+      "channel": "round",
+      "from": 1.6,
+      "to": 2
+    },
+    {
+      "name": "p_scan",
+      "side": "left",
+      "channel": "round",
+      "from": 1.5,
+      "to": 2
+    },
+    {
+      "name": "p_scan",
+      "side": "right",
+      "channel": "round",
+      "from": 1.5,
+      "to": 2
+    },
+    {
+      "name": "p_sneeze",
+      "side": "left",
+      "channel": "round",
+      "from": 1.8,
+      "to": 2
+    },
+    {
+      "name": "p_sneeze",
+      "side": "right",
+      "channel": "round",
+      "from": 1.8,
+      "to": 2
+    }
+  ],
+  "candidates": [
+    {
+      "name": "sad",
+      "left": [
+        -0.72,
+        -0.14,
+        0.48,
+        0.36,
+        2.1,
+        0.26,
+        0.28,
+        0.7,
+        0.3,
+        -1.5,
+        0,
+        0,
+        0.85
+      ],
+      "right": [
+        0.72,
+        -0.14,
+        0.48,
+        0.36,
+        2.1,
+        -0.26,
+        0.28,
+        -0.7,
+        0.3,
+        -1.5,
+        0,
+        0,
+        0.85
+      ],
+      "area": {
+        "left": 1504,
+        "right": 1504
+      },
+      "outsideObserved": [
+        {
+          "side": "left",
+          "channel": "top_slant",
+          "value": 0.7,
+          "range": [
+            -0.17,
+            0.62
+          ]
+        },
+        {
+          "side": "right",
+          "channel": "top_slant",
+          "value": -0.7,
+          "range": [
+            -0.62,
+            0.17
+          ]
+        }
+      ],
+      "nearestProduction": [
+        {
+          "name": "concern",
+          "overlap": 0.917361
+        },
+        {
+          "name": "curiosity",
+          "overlap": 0.4878
+        }
+      ],
+      "nearestCandidates": [
+        {
+          "name": "scared",
+          "overlap": 0.498534
+        },
+        {
+          "name": "smug",
+          "overlap": 0.490374
+        }
+      ]
+    },
+    {
+      "name": "laugh",
+      "left": [
+        -0.72,
+        -0.12,
+        0.56,
+        0.4,
+        2,
+        0,
+        1.5,
+        0,
+        0,
+        -0.1,
+        0,
+        0.62,
+        1.08
+      ],
+      "right": [
+        0.72,
+        -0.12,
+        0.56,
+        0.4,
+        2,
+        0,
+        1.5,
+        0,
+        0,
+        -0.1,
+        0,
+        0.62,
+        1.08
+      ],
+      "area": {
+        "left": 762,
+        "right": 762
+      },
+      "outsideObserved": [
+        {
+          "side": "left",
+          "channel": "w",
+          "value": 0.56,
+          "range": [
+            0.3,
+            0.55
+          ]
+        },
+        {
+          "side": "left",
+          "channel": "bot_curve",
+          "value": 0.62,
+          "range": [
+            -0.55,
+            0.5
+          ]
+        },
+        {
+          "side": "right",
+          "channel": "w",
+          "value": 0.56,
+          "range": [
+            0.34,
+            0.55
+          ]
+        },
+        {
+          "side": "right",
+          "channel": "bot_curve",
+          "value": 0.62,
+          "range": [
+            -0.55,
+            0.5
+          ]
+        }
+      ],
+      "nearestProduction": [
+        {
+          "name": "joy",
+          "overlap": 0.792601
+        },
+        {
+          "name": "thinking",
+          "overlap": 0.307994
+        }
+      ],
+      "nearestCandidates": [
+        {
+          "name": "wink",
+          "overlap": 0.45234
+        },
+        {
+          "name": "love",
+          "overlap": 0.266293
+        }
+      ]
+    },
+    {
+      "name": "love",
+      "left": [
+        -0.78,
+        0,
+        0.5,
+        0.4,
+        2.1,
+        -0.34,
+        0.37,
+        -0.17,
+        0.63,
+        -0.45,
+        0.1,
+        -0.55,
+        1.1
+      ],
+      "right": [
+        0.78,
+        0,
+        0.5,
+        0.4,
+        2.1,
+        0.34,
+        0.37,
+        0.17,
+        0.63,
+        -0.45,
+        -0.1,
+        -0.55,
+        1.1
+      ],
+      "area": {
+        "left": 2172,
+        "right": 2172
+      },
+      "outsideObserved": [],
+      "nearestProduction": [
+        {
+          "name": "attentive",
+          "overlap": 0.845196
+        },
+        {
+          "name": "listening",
+          "overlap": 0.827309
+        }
+      ],
+      "nearestCandidates": [
+        {
+          "name": "scared",
+          "overlap": 0.655989
+        },
+        {
+          "name": "embarrassed",
+          "overlap": 0.617864
+        }
+      ]
+    },
+    {
+      "name": "embarrassed",
+      "left": [
+        -0.74,
+        -0.02,
+        0.44,
+        0.3,
+        2.1,
+        -0.34,
+        0.25,
+        -0.17,
+        0.63,
+        -0.45,
+        0.1,
+        -0.55,
+        0.95
+      ],
+      "right": [
+        0.74,
+        -0.02,
+        0.44,
+        0.3,
+        2.1,
+        0.34,
+        0.25,
+        0.17,
+        0.63,
+        -0.45,
+        -0.1,
+        -0.55,
+        0.95
+      ],
+      "area": {
+        "left": 1342,
+        "right": 1342
+      },
+      "outsideObserved": [],
+      "nearestProduction": [
+        {
+          "name": "loading",
+          "overlap": 0.781852
+        },
+        {
+          "name": "neutral",
+          "overlap": 0.718871
+        }
+      ],
+      "nearestCandidates": [
+        {
+          "name": "love",
+          "overlap": 0.617864
+        },
+        {
+          "name": "confused",
+          "overlap": 0.523432
+        }
+      ]
+    },
+    {
+      "name": "scared",
+      "left": [
+        -0.7,
+        0.02,
+        0.42,
+        0.54,
+        2.05,
+        0,
+        1.5,
+        0,
+        0,
+        -1.5,
+        0,
+        0,
+        1.15
+      ],
+      "right": [
+        0.7,
+        0.02,
+        0.42,
+        0.54,
+        2.05,
+        0,
+        1.5,
+        0,
+        0,
+        -1.5,
+        0,
+        0,
+        1.15
+      ],
+      "area": {
+        "left": 2584,
+        "right": 2584
+      },
+      "outsideObserved": [
+        {
+          "side": "left",
+          "channel": "glow",
+          "value": 1.15,
+          "range": [
+            0.3,
+            1.1
+          ]
+        },
+        {
+          "side": "right",
+          "channel": "glow",
+          "value": 1.15,
+          "range": [
+            0.3,
+            1.1
+          ]
+        }
+      ],
+      "nearestProduction": [
+        {
+          "name": "surprise",
+          "overlap": 0.899095
+        },
+        {
+          "name": "curiosity",
+          "overlap": 0.643896
+        }
+      ],
+      "nearestCandidates": [
+        {
+          "name": "love",
+          "overlap": 0.655989
+        },
+        {
+          "name": "confused",
+          "overlap": 0.570726
+        }
+      ]
+    },
+    {
+      "name": "annoyed",
+      "left": [
+        -0.72,
+        -0.1,
+        0.5,
+        0.3,
+        2.1,
+        0,
+        0.1,
+        -0.25,
+        0,
+        -1.5,
+        0,
+        0,
+        0.95
+      ],
+      "right": [
+        0.72,
+        -0.1,
+        0.5,
+        0.3,
+        2.1,
+        0,
+        0.1,
+        0.25,
+        0,
+        -1.5,
+        0,
+        0,
+        0.95
+      ],
+      "area": {
+        "left": 964,
+        "right": 964
+      },
+      "outsideObserved": [
+        {
+          "side": "left",
+          "channel": "top_slant",
+          "value": -0.25,
+          "range": [
+            -0.17,
+            0.62
+          ]
+        },
+        {
+          "side": "right",
+          "channel": "top_slant",
+          "value": 0.25,
+          "range": [
+            -0.62,
+            0.17
+          ]
+        }
+      ],
+      "nearestProduction": [
+        {
+          "name": "tired",
+          "overlap": 0.698712
+        },
+        {
+          "name": "concern",
+          "overlap": 0.445492
+        }
+      ],
+      "nearestCandidates": [
+        {
+          "name": "smug",
+          "overlap": 0.769882
+        },
+        {
+          "name": "bored",
+          "overlap": 0.76332
+        }
+      ]
+    },
+    {
+      "name": "smug",
+      "left": [
+        -0.72,
+        -0.08,
+        0.52,
+        0.3,
+        2.1,
+        0,
+        0.2,
+        0,
+        0,
+        -1.5,
+        0,
+        0,
+        1
+      ],
+      "right": [
+        0.72,
+        -0.08,
+        0.52,
+        0.3,
+        2.1,
+        0,
+        0.2,
+        0,
+        0,
+        -1.5,
+        0,
+        0,
+        1
+      ],
+      "area": {
+        "left": 1128,
+        "right": 1128
+      },
+      "outsideObserved": [],
+      "nearestProduction": [
+        {
+          "name": "tired",
+          "overlap": 0.732417
+        },
+        {
+          "name": "concern",
+          "overlap": 0.51097
+        }
+      ],
+      "nearestCandidates": [
+        {
+          "name": "annoyed",
+          "overlap": 0.769882
+        },
+        {
+          "name": "bored",
+          "overlap": 0.663725
+        }
+      ]
+    },
+    {
+      "name": "confused",
+      "left": [
+        -0.7,
+        0.03,
+        0.5,
+        0.44,
+        2.2,
+        -0.1,
+        1.5,
+        0,
+        0,
+        -1.5,
+        0,
+        0,
+        1.03
+      ],
+      "right": [
+        0.74,
+        -0.06,
+        0.42,
+        0.3,
+        2,
+        0.35,
+        0.2,
+        -0.15,
+        0,
+        -1.5,
+        0,
+        0,
+        1
+      ],
+      "area": {
+        "left": 2568,
+        "right": 892
+      },
+      "outsideObserved": [],
+      "nearestProduction": [
+        {
+          "name": "curiosity",
+          "overlap": 0.822772
+        },
+        {
+          "name": "surprise",
+          "overlap": 0.554355
+        }
+      ],
+      "nearestCandidates": [
+        {
+          "name": "love",
+          "overlap": 0.600492
+        },
+        {
+          "name": "scared",
+          "overlap": 0.570726
+        }
+      ]
+    },
+    {
+      "name": "wink",
+      "left": [
+        -0.72,
+        0.03,
+        0.49,
+        0.36,
+        2.2,
+        0,
+        1.5,
+        0,
+        0,
+        -1.5,
+        0,
+        0,
+        1.05
+      ],
+      "right": [
+        0.72,
+        -0.1,
+        0.52,
+        0.4,
+        2,
+        0,
+        1.5,
+        0,
+        0,
+        0,
+        0,
+        0.5,
+        1.05
+      ],
+      "area": {
+        "left": 2050,
+        "right": 677
+      },
+      "outsideObserved": [],
+      "nearestProduction": [
+        {
+          "name": "attentive",
+          "overlap": 0.530477
+        },
+        {
+          "name": "neutral",
+          "overlap": 0.527473
+        }
+      ],
+      "nearestCandidates": [
+        {
+          "name": "love",
+          "overlap": 0.51219
+        },
+        {
+          "name": "confused",
+          "overlap": 0.508289
+        }
+      ]
+    },
+    {
+      "name": "bored",
+      "left": [
+        -0.72,
+        -0.12,
+        0.5,
+        0.26,
+        2.1,
+        0,
+        0,
+        0,
+        0,
+        -1.5,
+        0,
+        0,
+        0.8
+      ],
+      "right": [
+        0.72,
+        -0.12,
+        0.5,
+        0.26,
+        2.1,
+        0,
+        0,
+        0,
+        0,
+        -1.5,
+        0,
+        0,
+        0.8
+      ],
+      "area": {
+        "left": 757,
+        "right": 757
+      },
+      "outsideObserved": [],
+      "nearestProduction": [
+        {
+          "name": "tired",
+          "overlap": 0.566755
+        },
+        {
+          "name": "sleepy",
+          "overlap": 0.489583
+        }
+      ],
+      "nearestCandidates": [
+        {
+          "name": "annoyed",
+          "overlap": 0.76332
+        },
+        {
+          "name": "smug",
+          "overlap": 0.663725
+        }
+      ]
+    },
+    {
+      "name": "relieved",
+      "left": [
+        -0.72,
+        -0.1,
+        0.5,
+        0.26,
+        2.1,
+        0.08,
+        0.1,
+        0.1,
+        0.35,
+        -0.2,
+        0,
+        0.25,
+        0.95
+      ],
+      "right": [
+        0.72,
+        -0.1,
+        0.5,
+        0.26,
+        2.1,
+        -0.08,
+        0.1,
+        -0.1,
+        0.35,
+        -0.2,
+        0,
+        0.25,
+        0.95
+      ],
+      "area": {
+        "left": 340,
+        "right": 340
+      },
+      "outsideObserved": [],
+      "nearestProduction": [
+        {
+          "name": "muted",
+          "overlap": 0.284404
+        },
+        {
+          "name": "skepticism",
+          "overlap": 0.22555
+        }
+      ],
+      "nearestCandidates": [
+        {
+          "name": "smug",
+          "overlap": 0.218257
+        },
+        {
+          "name": "embarrassed",
+          "overlap": 0.184507
+        }
+      ]
+    }
+  ],
+  "integrated": [
+    {
+      "name": "sad",
+      "area": {
+        "left": 1322,
+        "right": 1322
+      },
+      "nearestLegacy": [
+        {
+          "name": "concern",
+          "overlap": 0.597159
+        },
+        {
+          "name": "curiosity",
+          "overlap": 0.3716
+        }
+      ],
+      "nearestIntegrated": [
+        {
+          "name": "embarrassed",
+          "overlap": 0.355733
+        },
+        {
+          "name": "relieved",
+          "overlap": 0.343919
+        }
+      ]
+    },
+    {
+      "name": "laugh",
+      "area": {
+        "left": 1423,
+        "right": 1423
+      },
+      "nearestLegacy": [
+        {
+          "name": "thinking",
+          "overlap": 0.658265
+        },
+        {
+          "name": "neutral",
+          "overlap": 0.612038
+        }
+      ],
+      "nearestIntegrated": [
+        {
+          "name": "love",
+          "overlap": 0.636135
+        },
+        {
+          "name": "scared",
+          "overlap": 0.469444
+        }
+      ]
+    },
+    {
+      "name": "love",
+      "area": {
+        "left": 1828,
+        "right": 1828
+      },
+      "nearestLegacy": [
+        {
+          "name": "attentive",
+          "overlap": 0.585
+        },
+        {
+          "name": "surprise",
+          "overlap": 0.540629
+        }
+      ],
+      "nearestIntegrated": [
+        {
+          "name": "laugh",
+          "overlap": 0.636135
+        },
+        {
+          "name": "scared",
+          "overlap": 0.511402
+        }
+      ]
+    },
+    {
+      "name": "embarrassed",
+      "area": {
+        "left": 1220,
+        "right": 1220
+      },
+      "nearestLegacy": [
+        {
+          "name": "tired",
+          "overlap": 0.693182
+        },
+        {
+          "name": "curiosity",
+          "overlap": 0.494696
+        }
+      ],
+      "nearestIntegrated": [
+        {
+          "name": "annoyed",
+          "overlap": 0.571738
+        },
+        {
+          "name": "relieved",
+          "overlap": 0.498251
+        }
+      ]
+    },
+    {
+      "name": "scared",
+      "area": {
+        "left": 1751,
+        "right": 1751
+      },
+      "nearestLegacy": [
+        {
+          "name": "attentive",
+          "overlap": 0.642574
+        },
+        {
+          "name": "neutral",
+          "overlap": 0.634124
+        }
+      ],
+      "nearestIntegrated": [
+        {
+          "name": "love",
+          "overlap": 0.511402
+        },
+        {
+          "name": "laugh",
+          "overlap": 0.469444
+        }
+      ]
+    },
+    {
+      "name": "annoyed",
+      "area": {
+        "left": 960,
+        "right": 960
+      },
+      "nearestLegacy": [
+        {
+          "name": "loading",
+          "overlap": 0.599099
+        },
+        {
+          "name": "neutral",
+          "overlap": 0.526906
+        }
+      ],
+      "nearestIntegrated": [
+        {
+          "name": "embarrassed",
+          "overlap": 0.571738
+        },
+        {
+          "name": "relieved",
+          "overlap": 0.560996
+        }
+      ]
+    },
+    {
+      "name": "smug",
+      "area": {
+        "left": 1143,
+        "right": 779
+      },
+      "nearestLegacy": [
+        {
+          "name": "tired",
+          "overlap": 0.511281
+        },
+        {
+          "name": "curiosity",
+          "overlap": 0.426563
+        }
+      ],
+      "nearestIntegrated": [
+        {
+          "name": "relieved",
+          "overlap": 0.58551
+        },
+        {
+          "name": "annoyed",
+          "overlap": 0.466412
+        }
+      ]
+    },
+    {
+      "name": "confused",
+      "area": {
+        "left": 673,
+        "right": 1766
+      },
+      "nearestLegacy": [
+        {
+          "name": "neutral",
+          "overlap": 0.540666
+        },
+        {
+          "name": "speaking",
+          "overlap": 0.540666
+        }
+      ],
+      "nearestIntegrated": [
+        {
+          "name": "embarrassed",
+          "overlap": 0.492962
+        },
+        {
+          "name": "annoyed",
+          "overlap": 0.472138
+        }
+      ]
+    },
+    {
+      "name": "wink",
+      "area": {
+        "left": 2050,
+        "right": 180
+      },
+      "nearestLegacy": [
+        {
+          "name": "curiosity",
+          "overlap": 0.565195
+        },
+        {
+          "name": "thinking",
+          "overlap": 0.467404
+        }
+      ],
+      "nearestIntegrated": [
+        {
+          "name": "laugh",
+          "overlap": 0.444508
+        },
+        {
+          "name": "love",
+          "overlap": 0.389518
+        }
+      ]
+    },
+    {
+      "name": "bored",
+      "area": {
+        "left": 545,
+        "right": 545
+      },
+      "nearestLegacy": [
+        {
+          "name": "sleepy",
+          "overlap": 0.537954
+        },
+        {
+          "name": "tired",
+          "overlap": 0.363636
+        }
+      ],
+      "nearestIntegrated": [
+        {
+          "name": "embarrassed",
+          "overlap": 0.346301
+        },
+        {
+          "name": "sad",
+          "overlap": 0.286699
+        }
+      ]
+    },
+    {
+      "name": "relieved",
+      "area": {
+        "left": 921,
+        "right": 921
+      },
+      "nearestLegacy": [
+        {
+          "name": "tired",
+          "overlap": 0.602649
+        },
+        {
+          "name": "skepticism",
+          "overlap": 0.533252
+        }
+      ],
+      "nearestIntegrated": [
+        {
+          "name": "smug",
+          "overlap": 0.58551
+        },
+        {
+          "name": "annoyed",
+          "overlap": 0.560996
+        }
+      ]
+    }
+  ],
+  "referencePairs": [
+    {
+      "left": "sad",
+      "right": "concern",
+      "original": 0.917361,
+      "tuned": 0.597159
+    },
+    {
+      "left": "scared",
+      "right": "surprise",
+      "original": 0.899095,
+      "tuned": 0.574736
+    },
+    {
+      "left": "love",
+      "right": "attentive",
+      "original": 0.845196,
+      "tuned": 0.585
+    },
+    {
+      "left": "confused",
+      "right": "curiosity",
+      "original": 0.822772,
+      "tuned": 0.391158
+    },
+    {
+      "left": "laugh",
+      "right": "joy",
+      "original": 0.792601,
+      "tuned": 0.516779
+    },
+    {
+      "left": "embarrassed",
+      "right": "loading",
+      "original": 0.781852,
+      "tuned": 0.424494
+    },
+    {
+      "left": "annoyed",
+      "right": "smug",
+      "original": 0.769882,
+      "tuned": 0.466412
+    },
+    {
+      "left": "annoyed",
+      "right": "bored",
+      "original": 0.76332,
+      "tuned": 0.123134
+    },
+    {
+      "left": "annoyed",
+      "right": "tired",
+      "original": 0.698712,
+      "tuned": 0.526275
+    },
+    {
+      "left": "wink",
+      "right": "confused",
+      "original": 0.508289,
+      "tuned": 0.199949
+    }
+  ]
+}

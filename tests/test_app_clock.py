@@ -100,7 +100,7 @@ class ClockTest(unittest.TestCase):
 
     def test_a_doubted_clock_says_so(self):
         text = "\n".join(lines(render(NOW, {"entries": [], "zone": SYDNEY, "zone_known": True, "doubted": True})))
-        self.assertIn("My clock may be wrong. Tell me the time to fix it.", text)
+        self.assertIn("My clock may be wrong. Check the date and time in Setup.", text)
         from mind import clock_epoch
         with mock.patch.object(clock_epoch, "doubted", lambda: True):
             self.assertTrue(app_clock.clock_doubted())

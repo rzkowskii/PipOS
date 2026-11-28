@@ -11,13 +11,15 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
 from lab import console_preview as preview
-from mind import hands
+from mind import app_calc, app_organizer, hands
+from mind.lists import Lists
 
 BUILD = None
 SKIP = None
@@ -48,6 +50,28 @@ def wait_for(predicate, timeout=5.0):
             return value
         time.sleep(0.01)
     raise AssertionError("timed out")
+
+
+class ConsoleInstallEyes(unittest.TestCase):
+    def test_eyes_open_with_bounded_install_progress_and_reset_afterward(self):
+        if SKIP:
+            self.skipTest(SKIP)
+
+        def header(control):
+            command = [sys.executable, "-c", f"import os, time; os.write(1, {control!r}); time.sleep(1)"]
+            width, _, pixels = preview.capture(command, size=(640, 400), wait=0.25, build_dir=BUILD.name, panel=False)
+            return pixels[:width * 48 * 3]
+
+        def cyan(pixels):
+            return sum(green >= 140 and blue >= 170 for green, blue in zip(pixels[1::3], pixels[2::3]))
+
+        initial = header(b"")
+        early = header(b"\x1b]7772;install=20\x07")
+        late = header(b"\x1b]7772;install=80\x07")
+        self.assertLess(cyan(early), cyan(late))
+        self.assertLess(cyan(late), cyan(initial))
+        self.assertEqual(header(b"\x1b]7772;install=20\x07\x1b]7772;install=101\x07"), early)
+        self.assertEqual(header(b"\x1b]7772;install=20\x07\x1b]7772;install=off\x07"), initial)
 
 
 class PanelTest(unittest.TestCase):
@@ -95,6 +119,37 @@ class PanelTest(unittest.TestCase):
         session.control("title=" + "x" * 40, "status=Running 0:12 · Esc stops")
         header, _ = wait_for(lambda: (lambda h: h if h[0]["title"].startswith("xx") else None)(session.read()))
         self.assertEqual(header["title"], "x" * 31)
+
+    def test_calculator_changes_native_bpn_pixels_and_accepts_focus(self):
+        session = self.session("--title", "Calculator", name="calc")
+        calc = app_calc.Calculator()
+        session.send(calc.render())
+        before, pixels = wait_for(lambda: (lambda frame: frame if frame[0]["sequence"] > 2 else None)(session.read()))
+        self.assertEqual(before["flags"], {"visible", "focus"})
+        self.assertEqual(before["title"], "Calculator")
+        for key in b"17*23\r":
+            calc.key(bytes((key,)))
+        session.send(calc.render())
+        after, pixels_after = wait_for(
+            lambda: (lambda frame: frame if frame[0]["sequence"] > before["sequence"] and frame[1] != pixels else None)(
+                session.read()))
+        self.assertEqual(calc.last, ("17*23", "391", False))
+        self.assertIn("focus", after["flags"])
+        self.assertNotEqual(pixels, pixels_after)
+
+    def test_lists_wipes_the_native_frame_and_has_focus(self):
+        with tempfile.TemporaryDirectory() as state:
+            Lists(state).add("shopping", ["Synthetic owner item"])
+            session = self.session("--title", "Lists", name="lists")
+            initial, blank = session.read()
+            session.send(app_organizer.render("lists", app_organizer.read_page(state, "lists")))
+            shown, pixels = wait_for(lambda: (lambda frame: frame if frame[1] != blank else None)(session.read()))
+        self.assertEqual(shown["title"], "Lists")
+        self.assertIn("focus", shown["flags"])
+        self.assertGreater(shown["sequence"], initial["sequence"])
+        session.control("wipe=1")
+        _, cleared = wait_for(lambda: (lambda frame: frame if frame[1] != pixels else None)(session.read()))
+        self.assertEqual(cleared, blank)
 
     def test_a_program_cannot_reach_the_control_channel(self):
         state = {"osc": False, "escape": False}

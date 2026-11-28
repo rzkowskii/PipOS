@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from mind import embed
 from mind.memory import Memory, search_terms
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 MODEL = Path(__file__).resolve().parents[1] / "out" / "models" / "embeddings" / "blink-8M"
 HAVE_MODEL = (MODEL / "model.safetensors").is_file()
@@ -339,16 +340,18 @@ class StaleVectors(unittest.TestCase):
     def test_vectors_of_another_model_of_the_same_size_are_not_scored(self):
         self.memory.embedder = Hashed(8, name="other")
         vector = self.memory._query_vector("my dog Biscuit")
-        self.assertEqual(self.memory._cosines("fact_vec", "fact_id", "", "1", (), vector), {})
+        # _cosines returns (scores, how many rows held this model's vectors).
+        self.assertEqual(self.memory._cosines("fact_vec", "fact_id", "", "1", (), vector), ({}, 0))
         self.assertEqual(self.memory._cosines("episode_vec", "episode_id", "JOIN episodes e ON e.id = v.episode_id",
-                                              "1", (), vector), {})
+                                              "1", (), vector), ({}, 0))
 
     def test_once_remade_the_rows_are_found_by_meaning_again(self):
         self.memory.embedder = Hashed(6)
         while self.memory.backfill_vectors(100):
             pass
         vector = self.memory._query_vector("my dog Biscuit")
-        self.assertIn(self.fact, self.memory._cosines("fact_vec", "fact_id", "", "1", (), vector))
+        scores, _ = self.memory._cosines("fact_vec", "fact_id", "", "1", (), vector)
+        self.assertIn(self.fact, scores)
 
 
 class Counting:

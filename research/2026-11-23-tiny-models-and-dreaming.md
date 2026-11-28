@@ -269,6 +269,44 @@ It should include all of them, but confirm locally. A possible vision-encode reg
 
 ---
 
+### 4.3 CAM++ speaker qualification
+
+Use [the local audition](../lab/speaker_audition.py) on the MacBook with
+the staged CAM++ pack and the pinned Sherpa library. The tool reads consented
+clips from a private directory, checks the weights against the source pack
+descriptor and keeps the reference voiceprint in RAM for the run. Pip's
+live speech path does not use these results.
+
+Create a JSON manifest with `kind` set to `pipos-speaker-clips-v1`. Set
+`enrollment` to five to ten relative WAV paths from the owner. Set
+`held_out` to separate objects such as
+`{"kind": "owner", "file": "check/owner-01.wav"}`. Include the owner,
+other consenting speakers, silence and owner speech played back into the
+microphone. Record the owner and other speakers saying some of the same
+phrases. Record the held-out owner clips in a separate session. Use 16 kHz
+mono 16-bit PCM files, one to twelve seconds long. Set `thresholds` to
+the cosine thresholds to compare.
+
+From the source checkout in the private qualification environment:
+
+```sh
+python3 -m lab.speaker_audition /path/to/private/clips.json \
+    --model /models/speaker/campplus.onnx
+```
+
+Run separate idle and combined face-and-inference comparisons on the
+target. Keep the image and recording conditions beside each aggregate
+report. The tool reports how many clips matched at each threshold, how
+many could be scored, and the 95th percentile extraction time across
+all attempts in each condition. A match in the
+other-speaker, replay or silence group is a false accept. To estimate an
+owner's match rate among scorable clips, divide owner matches by owner
+clips scored. Also review the failures and unscorable clips against the
+full attempted count. The report omits clip names, audio and embeddings.
+Production enrollment and privileges still require a separate decision
+based on native evidence, including handling replay and deleting an
+enrollment.
+
 ## 5. Semantic recall
 
 ### 5.1 Comparison table
@@ -341,6 +379,72 @@ It should include all of them, but confirm locally. A possible vision-encode reg
   - "Looking at me" from YuNet landmarks.
 - **Build without AVX2.** OpenCV with `CPU_BASELINE=SSE4_2`, `CPU_DISPATCH=SSE4_1;SSE4_2;AVX;FP16`, and only the core, imgproc, dnn and objdetect modules.
 - **Expression.** If used at all: smile/neutral only, driving the eyes briefly, never stored, never spoken as fact. Its scientific validity is contested (Barrett et al. 2019).
+
+### 6.3 Single-frame screening
+
+The saved ARM runs gave Qwen the same three frames at 64–128 and 1024 image
+tokens. Both runs named the red circle, missed the blue triangle's colour,
+and described a white shape in the blank frame. The larger budget raised
+the observed wall time from 1.47–1.59 s to 13.75–15.39 s. SmolVLM correctly
+named the subjects in the NASA swap but labelled the blank as a circle.
+A different prompt got SmolVLM to abstain on the blank while omitting both
+shapes. These are development-Mac results from the mtmd CLI; the raw comparisons are kept locally under `out/vision-lab/`.
+
+The next comparison uses the `llama-server` built by the pinned PipOS cortex
+recipe. Its `--host` option accepts a private Unix socket ending in `.sock`.
+The [lab runner](../lab/vision_audition.py) starts a separate server, submits
+each synthetic or pinned NASA frame as a RAM-backed image in one request,
+and stops the server. It checks colour and shape on the synthetic swap,
+subject on the photo swap, and explicit abstention on both a light and a
+dark empty frame. Each run records the runtime and model digests, startup,
+per-request wall time and the server's timing fields when available.
+
+```sh
+python3 -m lab.vision_audition --server "$LLAMA_SERVER" \
+  --model "$GGUF" --model-sha256 "$GGUF_SHA256" \
+  --projector "$PROJECTOR" --projector-sha256 "$PROJECTOR_SHA256" \
+  --photos out/vision-lab/alternate --profile reference --output out/vision-reference.json
+```
+
+Use `small` for the 64–128-token arm and a new output path per run. Artifact
+hashing reads the weights before startup, so these timings are warm-cache
+candidates. Review the saved descriptions for invented details and repeat
+with household objects on Ivy Bridge before choosing a runtime and budget.
+The on-device gate also covers one explicitly requested frame, capture
+revocation during acquisition and inference, and discarding the frame
+after the private answer.
+
+The native snapshot decoder from the staged deliberate-look work now uses
+the current V4L2 device and USB authorization checks. Under a current Eyes
+grant, the supervisor can temporarily hand the device from the presence
+detector to the snapshot child. The child returns one RGB frame with a
+320-pixel maximum side through its pipe and releases the device before the
+write. The supervisor discards incomplete, oversized and revoked frames.
+“Look at this” can now request that snapshot through a directed brainstem
+route. Eyes feeds it through a pipe to an explicitly configured local
+describer and returns only validated text. The packaged
+`/usr/libexec/being/being-vision-describer` uses the same runtime and prompt as
+the audition. It requires the system's canonical vision descriptor and the
+signed files in `/models/vision`. It can share `reflex.gguf` when the vision
+descriptor pins the exact conversation SHA-256. A dedicated language model
+goes beside the projector as `vision.gguf`. One process serves each request
+on a private Unix socket, and Eyes owns the temporary socket directory.
+
+For a private qualification image, stage a v2 descriptor at
+`os/package/being/model-packs/vision/pack.json` in the qualification checkout.
+Set `role` and `dir` to `vision`. Set `vision_profile` to `small` or
+`reference`, and list `mmproj.gguf` with its exact length and SHA-256. Set
+`vision_weights` to `conversation` and include `conversation_sha256` for a
+shared-model candidate. Otherwise, set `vision_weights` to `vision.gguf` and
+list that file with its own length and digest. Use the existing
+`python3 -m lab.package_model describe --role vision` command to populate the file list
+from the pinned source records. The normal image signer signs the descriptor.
+
+Add `vision` to the roles in `BEING_PACK_ROLES` for the private build. Run the
+Eyes service with `--describer /usr/libexec/being/being-vision-describer` in the
+isolated qualification session. The shipping unit has no describer configured.
+The paired model, packaged path and target timings still need qualification
+on the MacBook before enabling object descriptions in a release.
 
 ---
 

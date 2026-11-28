@@ -32,8 +32,13 @@ Usage: lab/build.sh [command]
                    (with no ARGS it rebuilds the being package first, then everything)
   laptop-try       build the laptop Try USB (local screen menu) as out/images/beingos-laptop-try.img
                    With BEING_TRY_BENCH=1 the Try commands build a bench stick instead
-                   (every entry runs bench mode; /models/bench holds out/models/bench),
+                   (entries other than bench+ run bench mode;
+                   /models/bench holds out/models/bench),
                    named with a -bench suffix, e.g. beingos-laptop-try-bench.img.
+                   With BEING_LAPTOP_DIAGNOSTIC=1 it instead uses a separate
+                   maintenance tree and writes beingos-laptop-diagnostic-try.img.
+                   That image has a tty2 root console and diagnostic tools,
+                   cannot install, and cannot be signed or exported as a product.
   laptop-config    re-apply beingos_laptop_defconfig in the laptop output tree
   laptop-make ARGS...
                    run make in the laptop output tree
@@ -59,6 +64,9 @@ Usage: lab/build.sh [command]
   laptop-bundle KEY [VERSION]
                    sign the laptop rootfs as an update for installed laptops, with the
                    owner's release key (asks for its passphrase)
+  laptop-rotation-bundle OLD_KEY OLD_CERT VERSION
+                   sign a laptop rootfs that trusts the replacement certificate
+                   using the current installed certificate and key
   bundle           sign a lab update for the current build
   installed-bundle sign an update for systems installed from Try media
   test-media       build a disk of signed update fixtures for L3 tests
@@ -83,7 +91,7 @@ laptop-try, and build or laptop given being-rebuild) first clean its build
 directory, so every source file is copied in again: Buildroot copies a local
 source tree with rsync --update, which keeps a build-directory file that is
 newer than its source. BEING_FAST_REBUILD=1 skips the clean (an incremental
-rebuild that may keep such files).
+rebuild that may keep such files and therefore records no source id).
 EOF
 }
 
@@ -94,6 +102,7 @@ docker_() { docker --context "colima-$PROFILE" "$@"; }
 # taken afterwards could name code the image never contained. Empty when it
 # cannot be taken; the image then carries no id and BEING_GATE=1 refuses it.
 SOURCE_ID=""
+BUILD_EMBED_SOURCE_ID=""
 take_source_id() {
     local ident
     if ident=$(python3 -m lab.source_id 2>/dev/null) && printf '%s\n' "$ident" | grep -Eqx '[0-9a-f]{64}'; then
@@ -109,11 +118,39 @@ take_source_id() {
 # last finished build there came from (lab/make-iso.sh reads it). Removed
 # before a build starts, so a build that stops part way leaves no id behind.
 BUILD_SOURCE_ID=being-source-id
+CORTEX_UNITS=(being-cortex.service being-dream-cortex.service being-model-check.service)
 forget_build_source_id() {
     run rm -f "$OUT/images/$BUILD_SOURCE_ID"
 }
+
+verify_packaged_cortex() {
+    run bash -euo pipefail -c '
+        out=$1 expected=$2
+        shift 2
+        dump() { "$out/host/bin/unsquashfs" -cat "$out/images/rootfs.squashfs" "$1"; }
+        compare() {
+            if ! dump "$1" | cmp -s "$2" -; then
+                echo "Packaged /$1 differs from $2" >&2
+                exit 1
+            fi
+        }
+        if [ "$(dump etc/being/source-id)" != "$expected" ]; then
+            echo "The packaged rootfs has a missing or different source ID" >&2
+            exit 1
+        fi
+        compare usr/share/being/spoken-guide.json /src/docs/manual/spoken-guide.json
+        if grep -qx BR2_PACKAGE_CORTEX=y "$out/.config"; then
+            for unit in "$@"; do
+                compare "usr/lib/systemd/system/$unit" "/src/os/package/cortex/$unit"
+            done
+            compare usr/share/being/chat-template.jinja /src/config/chat-template.jinja
+        fi
+    ' verify-packaged-cortex "$OUT" "$SOURCE_ID" "${CORTEX_UNITS[@]}"
+}
+
 record_build_source_id() {
     [ -n "$SOURCE_ID" ] && [ "$BEING_FRESH" = 1 ] || return 0
+    verify_packaged_cortex
     run sh -euc 'printf "%s\n" "$2" > "$1/images/$3"' record-source-id "$OUT" "$SOURCE_ID" "$BUILD_SOURCE_ID"
 }
 
@@ -132,10 +169,6 @@ stamp_image() {
         echo "Note: $1 has no source id: this run did not rebuild the being package and then the image," \
             "so the image may hold older code (lab/build.sh $cmd being-rebuild all records one)." >&2
         return 0
-    fi
-    if fast_rebuild; then
-        echo "Note: BEING_FAST_REBUILD=1: $1 is recorded as built from ${SOURCE_ID:0:12}, but an in-place rebuild" \
-            "may have kept older files." >&2
     fi
     python3 -m lab.source_id stamp "$1" "$SOURCE_ID" >/dev/null ||
         { echo "Note: could not write $1.source-id." >&2; return 0; }
@@ -174,7 +207,7 @@ run() {
         -e BEINGOS_RELEASE_CERT="${BEINGOS_RELEASE_CERT:-}" \
         -e BEINGOS_REQUIRE_RELEASE_KEY="${BEINGOS_REQUIRE_RELEASE_KEY:-0}" \
         -e BEINGOS_CABLE_KEYS="$CABLE_DIR" \
-        -e BEING_SOURCE_ID="$SOURCE_ID" \
+        -e BEING_SOURCE_ID="${BUILD_EMBED_SOURCE_ID:-}" \
         "$IMAGE" "$@"
 }
 
@@ -266,7 +299,7 @@ check_fast_rebuild() {
 }
 being_clean() {
     if fast_rebuild; then
-        echo "BEING_FAST_REBUILD=1: the being package is rebuilt in place (rsync --update may keep newer files)."
+        echo "BEING_FAST_REBUILD=1: the being package is rebuilt in place and may keep older files." >&2
     else
         echo "Cleaning the being package so its sources are copied in afresh (BEING_FAST_REBUILD=1 skips this)."
         br_make being-dirclean
@@ -286,53 +319,60 @@ being_rebuild() {
 # The being package from a fresh copy, then the images from it.
 being_rebuild_all() {
     being_rebuild
-    br_make all
-    BEING_FRESH=1
+    if ! fast_rebuild; then BEING_FRESH=1; fi
+    br_make_recorded all
 }
-# make with these targets. A being-rebuild among them cleans the package
-# first and runs on its own, after the targets before it and before the ones
-# after it: with per-package directories a parallel "being-rebuild all" can
-# assemble the image before the rebuild has installed.
-br_make_targets() {
-    local target before=() after=() found=0
-    for target in "$@"; do
-        if [ "$found" = 0 ] && [ "$target" = being-rebuild ]; then
-            found=1
-        elif [ "$found" = 0 ]; then
-            before+=("$target")
-        else
-            after+=("$target")
-        fi
-    done
-    if [ "$found" = 0 ]; then
+
+# Keep the on-device source ID and the host sidecar under the same rules.
+br_make_recorded() {
+    if [ "$BEING_FRESH" = 1 ]; then
+        BUILD_EMBED_SOURCE_ID="$SOURCE_ID" br_make "$@"
+    else
         br_make "$@"
-        # An explicit being-dirclean before "all": all builds being afresh.
-        local cleaned=0
-        for target in "$@"; do
-            case "$target" in
-                being-dirclean) cleaned=1 ;;
-                all) [ "$cleaned" = 0 ] || BEING_FRESH=1 ;;
-            esac
-        done
-        return 0
     fi
-    [ "${#before[@]}" -eq 0 ] || br_make "${before[@]}"
-    being_rebuild
-    if [ "${#after[@]}" -gt 0 ]; then
-        br_make "${after[@]}"
-        for target in "${after[@]}"; do
-            [ "$target" != all ] || BEING_FRESH=1
-        done
+}
+# Run local package cleans and rebuilds separately so a parallel make cannot
+# assemble the image before they finish.
+br_make_targets() {
+    local target pending=() cleaned=0
+    for target in "$@"; do
+        case "$target" in
+            being-dirclean|being-rebuild)
+                if [ "${#pending[@]}" -gt 0 ]; then
+                    br_make_recorded "${pending[@]}"
+                    pending=()
+                fi
+                if [ "$target" = being-dirclean ]; then
+                    br_make being-dirclean
+                    cleaned=1
+                else
+                    being_rebuild
+                    if ! fast_rebuild; then cleaned=1; fi
+                fi
+                ;;
+            all)
+                if [ "$cleaned" = 1 ]; then BEING_FRESH=1; fi
+                pending+=("$target")
+                ;;
+            *) pending+=("$target") ;;
+        esac
+    done
+    if [ "${#pending[@]}" -gt 0 ]; then
+        br_make_recorded "${pending[@]}"
+    elif [ "$#" -eq 0 ]; then
+        br_make_recorded
     fi
 }
 
-refresh_python_ssl() {
+refresh_python_extensions() {
     # Enabling a Python extension in the defconfig need not rebuild a cached package.
     if run bash -c '
-        grep -qx BR2_PACKAGE_PYTHON3_SSL=y "$1/.config" &&
         compgen -G "$1/build/python3-*/.stamp_target_installed" >/dev/null &&
-        ! compgen -G "$1/target/usr/lib/python*/lib-dynload/_ssl.*.so" >/dev/null
-    ' python-ssl "$OUT"; then
+        { grep -qx BR2_PACKAGE_PYTHON3_SSL=y "$1/.config" &&
+          ! compgen -G "$1/target/usr/lib/python*/lib-dynload/_ssl.*.so" >/dev/null ||
+          grep -qx BR2_PACKAGE_PYTHON3_ZLIB=y "$1/.config" &&
+          ! compgen -G "$1/target/usr/lib/python*/lib-dynload/zlib.*.so" >/dev/null; }
+    ' python-extensions "$OUT"; then
         br_make python3-reconfigure
     fi
 }
@@ -345,6 +385,7 @@ refresh_stale() {
     local targets
     targets=$(run bash -c '
         o=$1 out=
+        shift
         kernel=$(ls -d "$o"/build/linux-[0-9]* 2>/dev/null | head -n 1)
         if [ -n "$kernel" ] && [ -f /src/os/patches/linux/0001-hwmon-applesmc-battery-charge-limit.patch ] &&
             ! grep -q battery_charge_limit "$kernel/drivers/hwmon/applesmc.c" 2>/dev/null; then
@@ -356,8 +397,25 @@ refresh_stale() {
                 break
             done
         fi
+        if grep -qx BR2_PACKAGE_CORTEX=y "$o/.config" 2>/dev/null &&
+            compgen -G "$o/build/cortex-*/.stamp_target_installed" >/dev/null; then
+            cortex="$o/target"
+            if grep -qx BR2_PER_PACKAGE_DIRECTORIES=y "$o/.config"; then
+                cortex="$o/per-package/cortex/target"
+            fi
+            stale=
+            for unit in "$@"; do
+                if ! cmp -s "/src/os/package/cortex/$unit" "$cortex/usr/lib/systemd/system/$unit"; then
+                    stale=1
+                    break
+                fi
+            done
+            if [ "$stale" = 1 ] || ! cmp -s /src/config/chat-template.jinja "$cortex/usr/share/being/chat-template.jinja"; then
+                out="$out cortex-reinstall"
+            fi
+        fi
         echo $out
-    ' refresh-stale "$OUT")
+    ' refresh-stale "$OUT" "${CORTEX_UNITS[@]}")
     if [ -n "$targets" ]; then
         echo "Refreshing packages whose configuration changed: $targets"
         # shellcheck disable=SC2086
@@ -384,9 +442,14 @@ laptop_select() {
         *) echo "BEING_LAPTOP_MAINTENANCE must be 0 or 1" >&2; exit 2 ;;
     esac
     check_cable
+    check_diagnostic
     if [ "$CABLE" = 1 ]; then
         OUT="/work/output/laptop-cable"
         LAPTOP_NAME=beingos-laptop-cable
+    fi
+    if [ "$DIAGNOSTIC" = 1 ]; then
+        OUT="/work/output/laptop-diagnostic"
+        LAPTOP_NAME=beingos-laptop-diagnostic
     fi
 }
 
@@ -408,6 +471,28 @@ check_cable() {
         echo "Refusing: a cable development stick is never installed, so it cannot be a BEINGOS_REQUIRE_RELEASE_KEY=1 build." >&2
         exit 2
     fi
+}
+
+# BEING_LAPTOP_DIAGNOSTIC=1: an owner-local, Try-only WP-C8 measurement image.
+DIAGNOSTIC="${BEING_LAPTOP_DIAGNOSTIC:-0}"
+check_diagnostic() {
+    case "$DIAGNOSTIC" in
+        0) return 0 ;;
+        1) ;;
+        *) echo "BEING_LAPTOP_DIAGNOSTIC must be 0 or 1" >&2; exit 2 ;;
+    esac
+    if [ "${BEING_LAPTOP_MAINTENANCE:-0}" != 0 ] || [ "$CABLE" != 0 ]; then
+        echo "Refusing: diagnostic, cable and LAN-maintenance images are separate builds." >&2
+        exit 2
+    fi
+    if [ "${BEINGOS_REQUIRE_RELEASE_KEY:-0}" = 1 ]; then
+        echo "Refusing: a diagnostic stick is never installed or release-signed." >&2
+        exit 2
+    fi
+    case "${cmd:-}" in
+        laptop-config|laptop-make|laptop-try) ;;
+        *) echo "Refusing: BEING_LAPTOP_DIAGNOSTIC=1 supports only laptop-config, laptop-make and laptop-try." >&2; exit 2 ;;
+    esac
 }
 
 # Set options in the laptop .config, then let Kconfig resolve them.
@@ -436,6 +521,13 @@ cable_kernel_fragments() {
     printf '%s' "$fragments \$(BR2_EXTERNAL_BEINGOS_PATH)/board/beingos/linux-cable.config"
 }
 
+diagnostic_kernel_fragments() {
+    local fragments
+    fragments=$(sed -n 's/^BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="\(.*\)"$/\1/p' "os/configs/$DEFCONFIG")
+    [ -n "$fragments" ] || { echo "os/configs/$DEFCONFIG names no kernel fragment" >&2; exit 1; }
+    printf '%s' "$fragments \$(BR2_EXTERNAL_BEINGOS_PATH)/board/beingos/linux-diagnostic.config"
+}
+
 laptop_config() {
     br_make "$DEFCONFIG"
     if [ "${BEING_LAPTOP_MAINTENANCE:-0}" = 1 ]; then
@@ -453,6 +545,22 @@ laptop_config() {
             "BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=\"$fragments\"" \
             'BR2_ROOTFS_POST_SCRIPT_ARGS="laptop cable"'
     fi
+    if [ "$DIAGNOSTIC" = 1 ]; then
+        local fragments
+        fragments=$(diagnostic_kernel_fragments)
+        laptop_set BR2_PACKAGE_BEING_DIAGNOSTIC=y \
+            BR2_PACKAGE_LINUX_TOOLS_PERF=y BR2_PACKAGE_LINUX_TOOLS_PERF_NEEDS_HOST_PYTHON3=y \
+            BR2_PACKAGE_FIO=y BR2_PACKAGE_SMARTMONTOOLS=y \
+            BR2_PACKAGE_DMIDECODE=y BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y BR2_PACKAGE_HDPARM=y \
+            BR2_PACKAGE_RT_TESTS=y BR2_PACKAGE_LIBV4L=y BR2_PACKAGE_LIBV4L_UTILS=y \
+            BR2_PACKAGE_MSR_TOOLS=y BR2_PACKAGE_EDID_DECODE=y \
+            BR2_PACKAGE_BEING_TURBOSTAT=y BR2_GCC_ENABLE_OPENMP=y BR2_PACKAGE_STREAM_BENCHMARK=y \
+            BR2_PACKAGE_ALSA_UTILS_APLAY=y BR2_PACKAGE_ALSA_UTILS_BAT=y \
+            BR2_TARGET_ENABLE_ROOT_LOGIN=y BR2_TARGET_GENERIC_GETTY=y \
+            'BR2_TARGET_GENERIC_GETTY_PORT="tty2"' \
+            "BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES=\"$fragments\"" \
+            'BR2_ROOTFS_POST_SCRIPT_ARGS="laptop diagnostic"'
+    fi
     # The b43 firmware is owner-sourced and staged with lab/b43_firmware.py.
     if [ -d out/firmware-overlay/usr/lib/firmware/b43 ]; then
         laptop_set 'BR2_ROOTFS_OVERLAY="/src/out/firmware-overlay"'
@@ -462,9 +570,9 @@ laptop_config() {
     # Refuse a laptop configuration that carries lab access, and the cable
     # link anywhere but the cable tree.
     run bash -euo pipefail -c '
-        cfg=$1/.config maintenance=$2 cable=$3
+        cfg=$1/.config maintenance=$2 cable=$3 diagnostic=$4
         for key in BR2_PACKAGE_BEING_LAB_BODY BR2_TARGET_ENABLE_ROOT_LOGIN BR2_TARGET_GENERIC_GETTY; do
-            if grep -qx "$key=y" "$cfg"; then echo "Laptop config has lab-only $key=y" >&2; exit 1; fi
+            if [ "$diagnostic" != 1 ] && grep -qx "$key=y" "$cfg"; then echo "Laptop config has lab-only $key=y" >&2; exit 1; fi
         done
         if [ "$maintenance" != 1 ] && [ "$cable" != 1 ] && grep -qx "BR2_PACKAGE_OPENSSH=y" "$cfg"; then
             echo "Laptop config has OpenSSH without BEING_LAPTOP_MAINTENANCE=1" >&2; exit 1
@@ -486,7 +594,22 @@ laptop_config() {
         elif grep -q "linux-cable.config\|^BR2_ROOTFS_POST_SCRIPT_ARGS=.*cable" "$cfg"; then
             echo "Laptop config has the cable kernel fragment or board option without BEING_LAPTOP_CABLE=1" >&2; exit 1
         fi
-    ' laptop-check "$OUT" "${BEING_LAPTOP_MAINTENANCE:-0}" "$CABLE"
+        if [ "$diagnostic" = 1 ]; then
+            for key in BR2_PACKAGE_BEING_DIAGNOSTIC BR2_PACKAGE_LINUX_TOOLS_PERF \
+                       BR2_PACKAGE_LINUX_TOOLS_PERF_NEEDS_HOST_PYTHON3 BR2_PACKAGE_FIO \
+                       BR2_PACKAGE_SMARTMONTOOLS BR2_PACKAGE_DMIDECODE BR2_PACKAGE_HDPARM \
+                       BR2_PACKAGE_RT_TESTS BR2_PACKAGE_LIBV4L_UTILS BR2_PACKAGE_MSR_TOOLS \
+                       BR2_PACKAGE_EDID_DECODE BR2_PACKAGE_BEING_TURBOSTAT \
+                       BR2_GCC_ENABLE_OPENMP BR2_PACKAGE_STREAM_BENCHMARK BR2_PACKAGE_ALSA_UTILS_BAT \
+                       BR2_TARGET_ENABLE_ROOT_LOGIN BR2_TARGET_GENERIC_GETTY; do
+                grep -qx "$key=y" "$cfg" || { echo "Diagnostic config lacks $key=y" >&2; exit 1; }
+            done
+            grep -q "linux-diagnostic.config" "$cfg" || { echo "Diagnostic config lacks its kernel fragment" >&2; exit 1; }
+            grep -qx 'BR2_ROOTFS_POST_SCRIPT_ARGS="laptop diagnostic"' "$cfg" || exit 1
+        elif grep -q "linux-diagnostic.config\|^BR2_PACKAGE_BEING_DIAGNOSTIC=y\|diagnostic" "$cfg"; then
+            echo "Laptop config has diagnostic options without BEING_LAPTOP_DIAGNOSTIC=1" >&2; exit 1
+        fi
+    ' laptop-check "$OUT" "${BEING_LAPTOP_MAINTENANCE:-0}" "$CABLE" "$DIAGNOSTIC"
 }
 
 # Refuse a laptop tree that still holds lab-only files, then a lab boot config.
@@ -494,42 +617,54 @@ laptop_config() {
 # and cable trees.
 laptop_verify() {
     run bash -euo pipefail -c '
-        t=$1/target bad=0 maintenance=$2 cable=$3
-        lab="usr/lib/systemd/system/being-lab-body.service usr/lib/being/sim/body.py"
+        out=$1 t=$1/target bad=0 maintenance=$2 cable=$3 diagnostic=$4
         units=usr/lib/systemd/system
         cable_files="usr/share/being/cable $units/being-cable-link.service $units/being-cable-ssh.service $units/being-cable-workbench.service"
-        [ "$maintenance" = 1 ] || lab="$lab usr/sbin/being-lab-access $units/being-lab-observe.service $units/being-lab-dev.service"
-        [ "$maintenance" = 1 ] || [ "$cable" = 1 ] || lab="$lab usr/sbin/sshd"
-        for f in $lab; do
-            if [ -e "$t/$f" ]; then echo "Laptop image contains lab-only /$f" >&2; bad=1; fi
-        done
-        if [ "$cable" != 1 ]; then
-            for f in $cable_files; do
-                if [ -e "$t/$f" ]; then echo "Laptop image contains /$f, which only BEING_LAPTOP_CABLE=1 builds may" >&2; bad=1; fi
-            done
-        else
+        [ -x "$t/usr/sbin/smartctl" ] || { echo "Laptop image lacks /usr/sbin/smartctl" >&2; bad=1; }
+        set --
+        [ "$maintenance" != 1 ] || set -- "$@" --maintenance
+        [ "$cable" != 1 ] || set -- "$@" --cable
+        if [ "$diagnostic" != 1 ]; then
+            python3 /src/lab/candidate_parity.py laptop-check "$t" "$@" || bad=1
+        fi
+        if [ "$cable" = 1 ]; then
             for f in usr/sbin/sshd $cable_files usr/share/being/cable/authorized_keys usr/share/being/cable/sshd_config \
                      usr/share/being/cable/ssh_host_ed25519_key usr/share/being/cable/ssh_host_ed25519_key.pub; do
                 if [ ! -e "$t/$f" ]; then echo "The cable development image lacks /$f" >&2; bad=1; fi
             done
         fi
-        if grep -q "ttyS0\|^serial " "$1/images/efi-part/EFI/BOOT/grub.cfg" "$t/usr/share/being/installed-grub.cfg"; then
+        if grep -q "ttyS0\|^serial " "$out/images/efi-part/EFI/BOOT/grub.cfg" "$t/usr/share/being/installed-grub.cfg"; then
             echo "Laptop boot configuration still names the serial console" >&2; bad=1
         fi
-        if grep -q "oops=panic\|BEING_[A-Z]*_ARGS" "$1/images/efi-part/EFI/BOOT/grub.cfg" "$t/usr/share/being/installed-grub.cfg"; then
+        if grep -q "oops=panic\|BEING_[A-Z]*_ARGS" "$out/images/efi-part/EFI/BOOT/grub.cfg" "$t/usr/share/being/installed-grub.cfg"; then
             echo "Laptop boot configuration panics on an oops or holds an unexpanded token" >&2; bad=1
         fi
-        # Its own update identity, so no lab bundle can ever install on it.
-        grep -qx compatible=beingos-laptop-v1 "$t/etc/rauc/system.conf" &&
-            grep -qx compatible=beingos-laptop-installed-v1 "$t/usr/share/being/installed-rauc.conf" &&
-            grep -qx laptop "$t/usr/share/being/variant" || {
-            echo "Laptop image does not carry the laptop update identity" >&2; bad=1
-        }
+        if [ "$diagnostic" = 1 ]; then
+            for f in usr/share/being/diagnostic usr/bin/perf usr/bin/llama-bench usr/bin/fio \
+                     usr/sbin/smartctl usr/sbin/dmidecode sbin/hdparm usr/bin/cyclictest \
+                     usr/bin/v4l2-ctl usr/sbin/rdmsr usr/bin/edid-decode usr/bin/arecord usr/bin/alsabat \
+                     usr/bin/turbostat usr/bin/stream usr/share/being/stream-5.10.c; do
+                [ -e "$t/$f" ] || { echo "Diagnostic image lacks /$f" >&2; bad=1; }
+            done
+            [ ! -e "$t/usr/sbin/being-installer" ] || { echo "Diagnostic image still carries the installer" >&2; bad=1; }
+            [ ! -e "$t/usr/share/being/install" ] || { echo "Diagnostic image still carries installer payloads" >&2; bad=1; }
+            [ ! -e "$t/usr/share/being/installed-rauc.conf" ] || { echo "Diagnostic image carries installed RAUC metadata" >&2; bad=1; }
+            grep -qx compatible=beingos-diagnostic-never-install "$t/etc/rauc/system.conf" || {
+                echo "Diagnostic image lacks its non-installable identity" >&2; bad=1;
+            }
+        else
+            # Its own update identity, so no lab bundle can ever install on it.
+            grep -qx compatible=beingos-laptop-v1 "$t/etc/rauc/system.conf" &&
+                grep -qx compatible=beingos-laptop-installed-v1 "$t/usr/share/being/installed-rauc.conf" &&
+                grep -qx laptop "$t/usr/share/being/variant" || {
+                echo "Laptop image does not carry the laptop update identity" >&2; bad=1
+            }
+        fi
         if grep -qx trust=lab "$t/usr/share/being/update-trust" 2>/dev/null; then
             echo "Note: this laptop image trusts the lab key for updates (no release certificate imported). Use it for Try only." >&2
         fi
         exit $bad
-    ' laptop-verify "$OUT" "${BEING_LAPTOP_MAINTENANCE:-0}" "$CABLE"
+    ' laptop-verify "$OUT" "${BEING_LAPTOP_MAINTENANCE:-0}" "$CABLE" "$DIAGNOSTIC"
 }
 
 # release-key DIR [DIR2], on the Mac (not in the builder): the owner's update
@@ -643,6 +778,8 @@ release_cert() {
         new=$(mktemp "$dir/.cert.XXXXXX")
         trap "rm -f \"$new\"" EXIT
         cat > "$new"
+        [ "$(grep -c -- "-----BEGIN CERTIFICATE-----" "$new")" = 1 ] ||
+            { echo "Refusing: import exactly one release certificate." >&2; exit 1; }
         subject=$(openssl x509 -in "$new" -noout -subject -nameopt RFC2253)
         [ "$subject" = "subject=CN=$cn" ] || { echo "Refusing: the certificate is $subject, not CN=$cn" >&2; exit 1; }
         if [ -s "$dir/cert.pem" ] && ! cmp -s "$new" "$dir/cert.pem" && [ "$REPLACE" != 1 ]; then
@@ -740,46 +877,85 @@ except ValueError:
     printf 'pip,169.254.77.1,fe80::77:1 %s\n' "$host_pub"
 }
 
-# laptop-bundle KEY [VERSION]: sign the laptop rootfs for installed laptops.
+# Sign the laptop rootfs for installed laptops. The optional rotation PEM is
+# the public certificate of the old signer. The root always trusts the
+# imported certificate, which is the replacement certificate during rotation.
 # The encrypted key and the passphrase reach the builder only on stdin, into
 # a RAM file inside a throwaway container; neither is written to the volume.
 laptop_bundle() {
-    local key="${1:?usage: lab/build.sh laptop-bundle KEY [VERSION]}" version="${2:-}"
+    local key="${1:?usage: lab/build.sh laptop-bundle KEY [VERSION]}" version="${2:-}" rotation_pem="${3:-}"
     if [ "$CABLE" = 1 ]; then
         echo "Refusing: a cable development build is never signed as an update (unset BEING_LAPTOP_CABLE)." >&2
         exit 1
     fi
     [ -f "$key" ] || { echo "No such key file: $key" >&2; exit 1; }
-    case "$(cd "$(dirname "$key")" && pwd -P)/" in
+    key=$(real_path "$key")
+    case "$key" in
         "$(cd "$ROOT" && pwd -P)/"*) echo "Refusing: the release key must not be inside the repository." >&2; exit 1 ;;
     esac
     [ -n "$version" ] || version="laptop-$(date -u +%Y%m%d%H%M)"
     printf '%s' "$version" | LC_ALL=C grep -Eq '^[A-Za-z0-9._+-]{1,64}$' ||
         { echo "The version may hold only letters, digits and . _ + -" >&2; exit 2; }
-    local passphrase
+    local output=beingos-laptop-update.raucb path
+    if [ -n "$rotation_pem" ]; then
+        output="beingos-laptop-key-rotation-$version.raucb"
+        for path in "out/images/$output" "out/images/$output.provenance.json"; do
+            if [ -e "$path" ] || [ -L "$path" ]; then
+                echo "A rotation bundle or receipt already uses this version. Choose a new version." >&2
+                exit 1
+            fi
+        done
+    fi
+    local passphrase prompt="Release key passphrase: "
+    if [ -n "$rotation_pem" ]; then
+        prompt="Current release key passphrase: "
+    fi
     if [ -n "${BEING_RELEASE_PASS_FILE:-}" ]; then
         IFS= read -r passphrase < "$BEING_RELEASE_PASS_FILE"
     else
-        IFS= read -rs -p "Release key passphrase: " passphrase < /dev/tty; echo >&2
+        IFS= read -rs -p "$prompt" passphrase < /dev/tty; echo >&2
     fi
     mkdir -p out/images
     { printf '%s\n' "$passphrase"; cat "$key"; } | docker_ run --rm -i \
-        -v "$VOLUME:/work" -v "$ROOT:/src" "$IMAGE" bash -euo pipefail -c '
-        out=$1 dir=$2 version=$3
+        -e "BEING_ROTATION_CERT=$rotation_pem" -v "$VOLUME:/work" -v "$ROOT:/src" "$IMAGE" bash -euo pipefail -c '
+        out=$1 dir=$2 version=$3 output=$4 cn=$5
         IFS= read -r passphrase
-        work=$(mktemp -d /dev/shm/pipos-bundle.XXXXXX 2>/dev/null || mktemp -d)
-        trap "rm -rf \"$work\"" EXIT
-        (umask 077; cat > "$work/key.pem")
+        key_dir=$(mktemp -d /dev/shm/pipos-signing.XXXXXX)
+        trap "rm -rf \"$key_dir\"" EXIT
+        work=$(mktemp -d "$out/.pipos-bundle.XXXXXX")
+        trap "rm -rf \"$key_dir\" \"$work\"" EXIT
+        (umask 077; cat > "$key_dir/key.pem")
         export PATH="$out/host/bin:$out/host/sbin:$PATH"
         image="$out/images/rootfs.squashfs"
-        cert="$dir/cert.pem"
+        cert="$work/installed-cert.pem"
         test -f "$image" || { echo "Build the laptop image first (lab/build.sh laptop-try)." >&2; exit 1; }
-        test -s "$cert" || { echo "Import the release certificate first (lab/build.sh release-cert)." >&2; exit 1; }
-        # The key must match the certificate the image trusts.
-        RAUC_KEY_PASSPHRASE="$passphrase" openssl pkey -in "$work/key.pem" -passin env:RAUC_KEY_PASSPHRASE -pubout > "$work/key.pub"
-        openssl x509 -in "$cert" -noout -pubkey > "$work/cert.pub"
-        cmp -s "$work/key.pub" "$work/cert.pub" || { echo "This key does not belong to the imported release certificate." >&2; exit 1; }
-        # Only a laptop rootfs that trusts this certificate is signed.
+        test -s "$dir/cert.pem" || { echo "Import the release certificate first (lab/build.sh release-cert)." >&2; exit 1; }
+        cp "$dir/cert.pem" "$cert"
+        mkdir "$work/payload"
+        cp "$image" "$work/payload/rootfs.img"
+        image="$work/payload/rootfs.img"
+        [ "$(grep -c -- "-----BEGIN CERTIFICATE-----" "$cert")" = 1 ] ||
+            { echo "Expected exactly one imported release certificate." >&2; exit 1; }
+        signer="$cert"
+        if [ -n "$BEING_ROTATION_CERT" ]; then
+            signer="$work/previous-cert.pem"
+            printf "%s\n" "$BEING_ROTATION_CERT" > "$signer"
+            for certificate in "$signer" "$cert"; do
+                subject=$(openssl x509 -in "$certificate" -noout -subject -nameopt RFC2253)
+                [ "$subject" = "subject=CN=$cn" ] ||
+                    { echo "Both rotation certificates must identify the PipOS laptop release." >&2; exit 1; }
+            done
+            openssl verify -CAfile "$cert" "$cert" >/dev/null
+            openssl x509 -in "$cert" -noout -pubkey > "$work/replacement.pub"
+        fi
+        RAUC_KEY_PASSPHRASE="$passphrase" openssl pkey -in "$key_dir/key.pem" -passin env:RAUC_KEY_PASSPHRASE -pubout > "$work/key.pub"
+        openssl x509 -in "$signer" -noout -pubkey > "$work/signer.pub"
+        cmp -s "$work/key.pub" "$work/signer.pub" ||
+            { echo "The supplied private key does not match the signing certificate." >&2; exit 1; }
+        if [ -n "$BEING_ROTATION_CERT" ] && cmp -s "$work/signer.pub" "$work/replacement.pub"; then
+            echo "A rotation needs a distinct replacement key." >&2; exit 1
+        fi
+        # Only a laptop rootfs that trusts the imported certificate is signed.
         unsquashfs -cat "$image" usr/share/being/installed-rauc.conf | grep -qx compatible=beingos-laptop-installed-v1 ||
             { echo "This rootfs is not a laptop image." >&2; exit 1; }
         unsquashfs -cat "$image" usr/share/being/update-trust | grep -qx trust=release ||
@@ -791,9 +967,13 @@ laptop_bundle() {
         fi
         unsquashfs -cat "$image" etc/rauc/keyring.pem > "$work/keyring.pem"
         cmp -s "$work/keyring.pem" "$cert" || { echo "This rootfs trusts a different certificate." >&2; exit 1; }
-        build=$(unsquashfs -cat "$image" etc/being/build-id 2>/dev/null | head -c 64 || true)
-        mkdir "$work/payload"
-        cp "$image" "$work/payload/rootfs.img"
+        build=$(unsquashfs -cat "$image" etc/being/build-id)
+        source=$(unsquashfs -cat "$image" etc/being/source-id)
+        for id in "$build" "$source"; do
+            printf "%s\n" "$id" | grep -Eqx "[a-f0-9]{64}" &&
+                test "${#id}" -eq 64 ||
+                { echo "The laptop payload needs valid build and source IDs." >&2; exit 1; }
+        done
         cat > "$work/payload/manifest.raucm" <<EOF
 [update]
 compatible=beingos-laptop-installed-v1
@@ -806,13 +986,94 @@ format=verity
 [image.rootfs]
 filename=rootfs.img
 EOF
-        RAUC_KEY_PASSPHRASE="$passphrase" rauc bundle --cert="$cert" --key="$work/key.pem" \
-            "$work/payload" "$work/beingos-laptop-update.raucb"
-        rauc info --keyring="$cert" "$work/beingos-laptop-update.raucb" >/dev/null
-        cp "$work/beingos-laptop-update.raucb" /src/out/images/.beingos-laptop-update.raucb.new
-        mv -f /src/out/images/.beingos-laptop-update.raucb.new /src/out/images/beingos-laptop-update.raucb
-    ' laptop-bundle "$OUT" "$RELEASE_DIR" "$version"
-    ls -lh out/images/beingos-laptop-update.raucb
+        bundle="$work/$output"
+        RAUC_KEY_PASSPHRASE="$passphrase" rauc bundle --cert="$signer" --key="$key_dir/key.pem" \
+            "$work/payload" "$bundle"
+        rauc info --keyring="$signer" "$bundle" >/dev/null
+        if [ -n "$BEING_ROTATION_CERT" ]; then
+            status=0
+            rauc info --keyring="$cert" "$bundle" >/dev/null 2>&1 || status=$?
+            # RAUC info returns 1 when check_bundle fails. A terminated or
+            # missing verifier has a different status.
+            if [ "$status" != 1 ]; then
+                echo "Could not establish that RAUC rejects the rotation bridge with the replacement certificate." >&2
+                exit 1
+            fi
+        fi
+        root_hash=$(sha256sum "$image" | cut -d" " -f1)
+        squashfs_hash=$(PYTHONPATH=/src PYTHONDONTWRITEBYTECODE=1 python3 -c "
+import sys
+from pathlib import Path
+from lab.hardware_image import copy_partition
+path = Path(sys.argv[1])
+print(copy_partition(path, dict(Offset=0, Size=path.stat().st_size, Path=path.name), None, squashfs=True))
+" "$image")
+        rm -f "$image"
+        # Extract through RAUC with signature verification enabled. Compare
+        # what a receiver gets with the filesystem inspected before signing.
+        rauc extract --keyring="$signer" "$bundle" "$work/extracted"
+        extracted_hash=$(sha256sum "$work/extracted/rootfs.img" | cut -d" " -f1)
+        test "$extracted_hash" = "$root_hash" ||
+            { echo "The signed bundle contains a different root filesystem." >&2; exit 1; }
+        bundle_hash=$(sha256sum "$bundle" | cut -d" " -f1)
+        openssl x509 -in "$signer" -outform DER > "$work/signer.der"
+        signer_hash=$(sha256sum "$work/signer.der" | cut -d" " -f1)
+        result="/src/out/images/$output"
+        publish=$(mktemp -d /src/out/images/.pipos-output.XXXXXX)
+        trap "rm -rf \"$key_dir\" \"$work\" \"$publish\"" EXIT
+        {
+            printf "%s\n" \
+                "{" \
+                "  \"channel\": \"beingos-laptop-installed-v1\"," \
+                "  \"version\": \"$version\"," \
+                "  \"source_id\": \"$source\"," \
+                "  \"build_id\": \"$build\"," \
+                "  \"rootfs_sha256\": \"$root_hash\"," \
+                "  \"payload_verified_at_signing\": true," \
+                "  \"squashfs_bytes_sha256\": \"$squashfs_hash\"," \
+                "  \"bundle_sha256\": \"$bundle_hash\","
+            if [ -n "$BEING_ROTATION_CERT" ]; then
+                openssl x509 -in "$cert" -outform DER > "$work/replacement.der"
+                replacement_hash=$(sha256sum "$work/replacement.der" | cut -d" " -f1)
+                printf "%s\n" "  \"rotation\": {\"from_der_sha256\": \"$signer_hash\", \"to_der_sha256\": \"$replacement_hash\"},"
+            fi
+            printf "%s\n" "  \"signer_der_sha256\": \"$signer_hash\"" "}"
+        } > "$publish/receipt.json"
+        cp "$bundle" "$publish/$output"
+        exec 9>"$dir/.laptop-bundle-output.lock"
+        flock -n 9 || { echo "Another laptop bundle is being published." >&2; exit 1; }
+        if [ -n "$BEING_ROTATION_CERT" ]; then
+            for path in "$result" "$result.provenance.json"; do
+                if [ -e "$path" ] || [ -L "$path" ]; then
+                    echo "A rotation bundle or receipt already uses this version." >&2; exit 1
+                fi
+            done
+        fi
+        mv -f "$publish/$output" "$result"
+        mv -f "$publish/receipt.json" "$result.provenance.json"
+    ' laptop-bundle "$OUT" "$RELEASE_DIR" "$version" "$output" "$RELEASE_CN"
+    ls -lh "out/images/$output"{,.provenance.json}
+}
+
+laptop_rotation_bundle() {
+    if [ "$#" -ne 3 ] || [ -z "$3" ]; then
+        echo "usage: lab/build.sh laptop-rotation-bundle OLD_KEY OLD_CERT VERSION" >&2
+        exit 2
+    fi
+    laptop_select
+    if [ "$CABLE" = 1 ]; then
+        echo "Refusing: a cable development build is never signed as an update." >&2
+        exit 1
+    fi
+    local previous_pem
+    if [ ! -f "$2" ] || grep -q "PRIVATE KEY" "$2" ||
+        [ "$(grep -c -- '-----BEGIN CERTIFICATE-----' "$2")" != 1 ]; then
+        echo "Provide exactly one public certificate for the installed signing key." >&2
+        exit 1
+    fi
+    previous_pem=$(openssl x509 -in "$2" -outform PEM)
+    up
+    laptop_bundle "$1" "$3" "$previous_pem"
 }
 
 # BEING_TRY_BENCH=1 makes the Try commands build a bench stick. run() does
@@ -834,8 +1095,8 @@ cmd="${1:-build}"
 [ $# -gt 0 ] && shift
 case "$cmd" in
     candidate)
-        if [ "${BEING_LAPTOP_CABLE:-0}" != 0 ]; then
-            echo "Refusing: a release candidate never carries the cable development link (unset BEING_LAPTOP_CABLE)." >&2
+        if [ "${BEING_LAPTOP_CABLE:-0}" != 0 ] || [ "${BEING_LAPTOP_DIAGNOSTIC:-0}" != 0 ]; then
+            echo "Refusing: a release candidate never carries cable or diagnostic development tooling." >&2
             exit 2
         fi
         . lab/candidate-build.sh
@@ -862,7 +1123,7 @@ case "$cmd" in
         # Apply the defconfig when there is no configuration yet, or it changed.
         run bash -c "[ -f $OUT/.config ] && [ $OUT/.config -nt /src/os/configs/$DEFCONFIG ]" || br_make "$DEFCONFIG"
         check_space
-        refresh_python_ssl
+        refresh_python_extensions
         refresh_stale
         forget_build_source_id
         br_make_targets "$@"
@@ -880,7 +1141,7 @@ case "$cmd" in
         up
         run bash -c "[ -f $OUT/.config ] && [ $OUT/.config -nt /src/os/configs/$DEFCONFIG ]" || br_make "$DEFCONFIG"
         check_space
-        refresh_python_ssl
+        refresh_python_extensions
         refresh_stale
         forget_build_source_id
         # Two steps: with per-package directories a parallel "being-rebuild all"
@@ -919,7 +1180,7 @@ case "$cmd" in
         up
         laptop_config
         check_space
-        refresh_python_ssl
+        refresh_python_extensions
         refresh_stale
         forget_build_source_id
         # The being package is a local source tree: rebuild it so the image
@@ -947,7 +1208,7 @@ case "$cmd" in
         up
         laptop_config
         check_space
-        refresh_python_ssl
+        refresh_python_extensions
         refresh_stale
         forget_build_source_id
         # Two steps: with per-package directories a parallel "being-rebuild all"
@@ -962,11 +1223,14 @@ case "$cmd" in
             stage=$(mktemp -d /src/out/images/.laptop-try.XXXXXX)
             trap "rm -rf \"\$stage\"" EXIT
             BEING_TRY_SCREEN=1 BEING_TRY_LAPTOP=1 BEING_TRY_BENCH="$3" BEING_TRY_CABLE="$5" \
+                BEING_TRY_DIAGNOSTIC="$6" \
                 sh /src/os/board/beingos/try-image.sh \
                 "$1/host" "$1/images/efi-part/EFI/BOOT/bootx64.efi" \
                 "$1/images/rootfs.squashfs" "$1/images/models.ext4" "$stage"
-            mv -f "$stage/beingos-laptop-try$4.img" "/src/out/images/$2-try$4.img"
-        ' laptop-try "$OUT" "$LAPTOP_NAME" "$TRY_BENCH" "$(try_bench_suffix)" "$CABLE"
+            source=beingos-laptop-try$4.img
+            [ "$6" != 1 ] || source=beingos-laptop-diagnostic-try$4.img
+            mv -f "$stage/$source" "/src/out/images/$2-try$4.img"
+        ' laptop-try "$OUT" "$LAPTOP_NAME" "$TRY_BENCH" "$(try_bench_suffix)" "$CABLE" "$DIAGNOSTIC"
         stamp_image "out/images/$LAPTOP_NAME-try$(try_bench_suffix).img"
         ls -lh "out/images/$LAPTOP_NAME-try$(try_bench_suffix).img"
         ;;
@@ -989,9 +1253,16 @@ case "$cmd" in
         cable_key "$@"
         ;;
     laptop-bundle)
+        if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+            echo "usage: lab/build.sh laptop-bundle KEY [VERSION]" >&2
+            exit 2
+        fi
         laptop_select
         up
         laptop_bundle "$@"
+        ;;
+    laptop-rotation-bundle)
+        laptop_rotation_bundle "$@"
         ;;
     bundle|installed-bundle|test-media)
         up

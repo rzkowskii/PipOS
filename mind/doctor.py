@@ -7,7 +7,7 @@ Every check reads a measured fact, through a `System` that tests replace:
   against the 22.5 tok/s measured on the laptop (23 November);
 - hearing: the microphone floor and how long since speech was understood;
 - the memory disk's free space, and `PRAGMA quick_check` of each database;
-- backup age, battery, temperature and the clock.
+- backup age, battery, temperature, recent overnight power and the clock.
 
 Pip says at most three findings, worst first. The Care Health page shows
 every row. Safe repairs only, each logged in the action log:
@@ -29,13 +29,16 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import threading
 import time
 from contextlib import closing
 from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from . import action_log
 from .body_talk import Reply, degrees, is_guest, number, said
+from .reply import Confirm, clean
 
 BASELINE_TPS = 22.5          # measured prompt reading on the laptop
 SLOW_SHARE = 0.6             # below 60% of it is worth saying
@@ -53,6 +56,7 @@ AUDIO_RESETS_PER_START = 3
 MIN_JUDGED_PROMPT = 16
 MOST_SPOKEN = 3
 AUDIO_INIT = Path("/usr/libexec/being/being-audio-init")
+AUDIO_UNIT = "being-audio-init.service"
 DATABASES = {"mind.db": "memory", "lists.db": "lists", "reminders.db": "reminders"}
 # "Are you okay?" waits for the check-up, and a full quick_check reads the
 # whole archive, which grows for years. By voice each database gets this long;
@@ -64,6 +68,7 @@ UNFINISHED = "unfinished"
 ORGANS = {
     "being-brainstem.service": "brainstem",
     "being-face.service": "face",
+    "being-ears.service": "microphone capture",
     "being-voice.service": "ears and voice",
     "being-cortex.service": "thinking model",
     "being-eyes.service": "eyes",
@@ -72,10 +77,24 @@ ORGANS = {
     "being-mind.service": "mind",
 }
 NEVER_RESTART = {"being-mind.service"}
+MANUAL_RESTARTS = {
+    "face": "being-face.service",
+    "ears": "being-ears.service",
+    "microphone": "being-ears.service",
+    "ears and voice": "being-voice.service",
+    "voice": "being-voice.service",
+    "thinking model": "being-cortex.service",
+    "body care": "being-bodycare.service",
+    "hands": "being-hands.service",
+}
+_MANUAL_NAMES = (*MANUAL_RESTARTS, "mind", "brainstem", "camera", "eyes")
+_MANUAL_RESTART = re.compile(r"^restart (?:your |the )?(?P<organ>"
+                             + "|".join(re.escape(name) for name in _MANUAL_NAMES) + r")$")
 BAD, WARN, NOTE, OK = 3, 2, 1, 0
 
 # Repairs made in this run of the mind (RAM only): unit or "audio" -> time.
 _repaired = {}
+_restart_lock = threading.Lock()
 # The last turn's speed, told by the mind after each model reply (RAM only).
 _last_speed = {}
 
@@ -118,11 +137,12 @@ class System:
         except (OSError, subprocess.SubprocessError):
             return None
 
-    def units(self, names):
+    def units(self, names, *, timeout=10):
         if not self.systemctl:
             return None
         result = self._run([self.systemctl, "show",
-                            "--property=Id,LoadState,ActiveState,SubState,NRestarts,Result,ConditionResult", *names])
+                            "--property=Id,LoadState,ActiveState,SubState,NRestarts,Result,ConditionResult", *names],
+                           timeout=timeout)
         if result is None or result.returncode:
             return None
         found = {}
@@ -140,16 +160,37 @@ class System:
             return None
         return [line.split()[0] for line in result.stdout.splitlines() if line.split()]
 
+    def kernel_faults(self):
+        """Count a few fixed, recent kernel messages without publishing their text."""
+        result = self._run(("journalctl", "-k", "-b", "-n", "250", "-o", "cat", "--no-pager"),
+                           timeout=4)
+        if result is None or result.returncode:
+            return {}
+        patterns = {
+            "disk": re.compile(r"^(?:ata[0-9]+: (?:hard resetting link|COMRESET failed)|I/O error, dev )"),
+            "filesystem": re.compile(r"^(?:EXT4-fs error \(|BTRFS error \(|FAT-fs \([^)]+\): error)"),
+            "machine": re.compile(r"^(?:mce: \[Hardware Error\]|Machine check events logged)"),
+        }
+        lines = result.stdout.splitlines()
+        return {kind: sum(bool(pattern.search(line)) for line in lines)
+                for kind, pattern in patterns.items()}
+
+    def microphone_latched(self):
+        return Path("/run/being/mic-policy-breach").is_file()
+
     def restart(self, unit):
-        if not self.systemctl:
+        if not self.systemctl or (
+            unit in ("being-ears.service", "being-voice.service") and self.microphone_latched()
+        ):
             return False
         result = self._run([self.systemctl, "--no-block", "restart", unit], timeout=15)
         return result is not None and result.returncode == 0
 
     def audio_init(self):
-        if not AUDIO_INIT.is_file():
+        if not self.systemctl or self.microphone_latched() or not AUDIO_INIT.is_file():
             return False
-        result = self._run([str(AUDIO_INIT)], timeout=20)
+        # Use the existing device-scoped unit. The Mind never opens ALSA.
+        result = self._run([self.systemctl, "restart", AUDIO_UNIT], timeout=20)
         return result is not None and result.returncode == 0
 
     def disk(self, path):
@@ -213,6 +254,11 @@ class System:
         from . import backup
 
         return backup.last_backup(state_dir)
+
+    def continuity_warning(self):
+        from .try_mode import continuity_warning_slot
+
+        return continuity_warning_slot() is not None
 
 
 @dataclass
@@ -315,9 +361,17 @@ def check_cortex(system, facts):
 
 
 def check_hearing(system, facts):
+    latched = getattr(system, "microphone_latched", None)
+    if latched and latched():
+        return [Finding(BAD, "hearing", "My microphone stayed open after I closed it, so I requested an audio shutdown.",
+                        "microphone privacy latch: reboot to recover")]
     floor = number(facts.voice.get("floor_dbfs"), -200, 10)
     heard = number(facts.voice.get("heard_ago_s"), 0, 10 * 365 * 86400)
     found = []
+    overruns = facts.voice.get("capture_overruns")
+    if type(overruns) is int and overruns > 0:
+        found.append(Finding(WARN, "hearing", "My ears have been cutting out under load.",
+                             f"microphone capture overruns: {overruns}"))
     if floor is None:
         found.append(Finding(OK, "hearing", "", "microphone: no reading yet"))
     elif floor <= SILENT_FLOOR and facts.ears_closed:
@@ -368,6 +422,13 @@ def check_databases(system, facts):
     return found
 
 
+def check_continuity(system, facts):
+    if system.continuity_warning():
+        return [Finding(WARN, "continuity", "A startup check for my saved memory or thinking model needs attention.",
+                        "startup continuity: check the archive and model slots")]
+    return []
+
+
 def check_backup(system, facts):
     stamp = system.last_backup(facts.state_dir)
     now = time.time() if facts.now is None else facts.now
@@ -412,14 +473,136 @@ def check_temperature(system, facts):
     return [Finding(OK, "temperature", "", row)]
 
 
+def check_kernel_health(system, facts):
+    found = []
+    strain = number(facts.body.get("reflex_strain_pct"), 5, 100)
+    if strain is not None:
+        found.append(Finding(WARN, "reflex_pressure", "My face, hearing or speech has been waiting for the processor.",
+                             f"reflex organs: sustained CPU stalls up to {strain:.1f}%"))
+    throttles = facts.body.get("thermal_throttles")
+    if type(throttles) is int and throttles > 0:
+        found.append(Finding(WARN, "thermal_throttle", "I got hot enough to slow down since I started.",
+                             f"processor package throttle events this boot: {throttles}"))
+    killed = facts.body.get("oom_organs")
+    if type(killed) is int and 0 < killed < 16:
+        organs = ", ".join(label for index, label in enumerate(("face", "voice", "brainstem", "mind"))
+                           if killed & (1 << index))
+        found.append(Finding(BAD, "memory_pressure", f"I ran out of memory while running my {organs}.",
+                             f"organs with kernel out-of-memory kills: {organs}"))
+    reader = getattr(system, "kernel_faults", None)
+    faults = reader() if reader else {}
+    for kind, text in (("disk", "My kernel reported a disk reset or input-output error."),
+                       ("filesystem", "My kernel reported a filesystem error."),
+                       ("machine", "My processor reported a hardware error.")):
+        if faults.get(kind):
+            found.append(Finding(BAD, f"kernel_{kind}", text, f"recent kernel {kind} reports: {faults[kind]}"))
+    return found
+
+
+def check_overnight_power(system, facts):
+    from .vitals import hardware_epoch, latest, package_power_trend
+
+    if not facts.clock_trusted:
+        return []
+    vital = latest(facts.state_dir)
+    if vital is None:
+        return []
+    night, _ = vital
+    # Night labels use the owner's local date. Allow for the date boundary
+    # between that zone and UTC when deciding whether the reading is recent.
+    now = time.time() if facts.now is None else facts.now
+    age = (datetime.fromtimestamp(now, UTC).date() - date.fromisoformat(night)).days
+    if not -1 <= age <= 2:
+        return []
+    change = package_power_trend(facts.state_dir, night, expected_epoch=hardware_epoch())
+    if change is None:
+        return []
+    direction = "higher" if change > 0 else "lower"
+    watts = abs(change)
+    return [Finding(NOTE, "overnight_power",
+                    f"My median overnight processor power was {watts:.1f} watts {direction} "
+                    "over the last seven measured nights than over the previous twenty-eight.",
+                    f"overnight package power: {watts:.1f} W {direction} ({night})")]
+
+
+def check_active_vitals(system, facts):
+    from .vitals import active_trend, hardware_epoch, latest
+
+    if not facts.clock_trusted:
+        return []
+    vital = latest(facts.state_dir)
+    if vital is None:
+        return []
+    night, _ = vital
+    now = time.time() if facts.now is None else facts.now
+    age = (datetime.fromtimestamp(now, UTC).date() - date.fromisoformat(night)).days
+    if not -1 <= age <= 2:
+        return []
+    changes = active_trend(facts.state_dir, night, expected_epoch=hardware_epoch())
+    if not changes:
+        return []
+    if changes.get("peak_c", 0) >= 6:
+        amount = round(changes["peak_c"])
+        return [Finding(NOTE, "active_vitals",
+                        f"For the same measured work I ran {amount} degrees hotter than a month ago; my vents may need cleaning.",
+                        f"active workload: peak temperature {amount} C higher ({night})")]
+    labels = (("read_tps", "reading", True), ("write_tps", "writing", True),
+              ("disk_sync_ms", "disk writes", False), ("joules_per_token", "energy per token", False))
+    for key, label, higher_is_better in labels:
+        change = changes.get(key)
+        if change is None:
+            continue
+        slower = change < 0 if higher_is_better else change > 0
+        direction = "slower" if slower else "faster" if higher_is_better else "lower"
+        return [Finding(NOTE, "active_vitals",
+                        f"My measured {label} was {abs(change) * 100:.0f} percent {direction} than a month ago.",
+                        f"active workload: {label} {abs(change) * 100:.0f}% {direction} ({night})")]
+    return []
+
+
+def check_smart(system, facts):
+    """The latest weekly, no-wake SMART evidence for the disk holding the archive."""
+    from .vitals import latest_smart
+
+    if not facts.clock_trusted:
+        return []
+    sample = latest_smart(facts.state_dir)
+    if sample is None:
+        return []
+    night, smart, delta = sample
+    now = time.time() if facts.now is None else facts.now
+    age = (datetime.fromtimestamp(now, UTC).date() - date.fromisoformat(night)).days
+    if not -1 <= age <= 10:
+        return []
+    attributes = smart.get("attributes", {})
+    if not isinstance(attributes, dict):
+        return []
+    changes = delta.get("attributes", {}) if isinstance(delta, dict) else {}
+
+    def increase(key):
+        change = changes.get(str(key)) if isinstance(changes, dict) else None
+        return change.get("raw") if isinstance(change, dict) and type(change.get("raw")) is int else 0
+
+    row = f"archive disk SMART ({night}): " + ", ".join(
+        f"{key}={value['raw']}" for key, value in attributes.items()
+        if (isinstance(value, dict) and type(value.get("raw")) is int
+            and (key in {"5", "187", "199", "241"} or value.get("wear") is True)))
+    if smart.get("passed") is False or increase(5) or increase(187):
+        return [Finding(BAD, "smart", "My archive disk reported new damaged or uncorrectable sectors.", row)]
+    if increase(199):
+        return [Finding(WARN, "smart", "My archive disk reported new link errors.", row)]
+    return [Finding(OK, "smart", "", row)]
+
+
 def check_clock(system, facts):
     if facts.clock_trusted:
         return [Finding(OK, "clock", "", "clock: trusted")]
     return [Finding(WARN, "clock", "I'm not sure of the time; tell me what time it is.", "clock: not trusted")]
 
 
-CHECKS = (check_organs, check_failed, check_cortex, check_hearing, check_disk, check_databases, check_backup,
-          check_battery, check_temperature, check_clock)
+CHECKS = (check_organs, check_failed, check_cortex, check_hearing, check_disk, check_databases, check_continuity, check_backup,
+          check_battery, check_temperature, check_kernel_health, check_clock, check_overnight_power,
+          check_active_vitals, check_smart)
 # The automatic pass reads only what a safe repair can act on: a systemctl
 # call and the voice's last levels, no database reads every ten minutes.
 REPAIR_CHECKS = (check_organs, check_hearing)
@@ -437,6 +620,14 @@ def check(system, facts, checks=CHECKS):
     return sorted(found, key=lambda finding: -finding.severity)
 
 
+def _reserve_restart(unit, now):
+    with _restart_lock:
+        if now - _repaired.get(unit, -REPAIR_GAP_S) < REPAIR_GAP_S:
+            return False
+        _repaired[unit] = now
+        return True
+
+
 def repair(system, facts, findings, *, now=None, done=None):
     """The safe repairs, at most one organ and one audio reset. Returns lines said.
 
@@ -452,8 +643,7 @@ def repair(system, facts, findings, *, now=None, done=None):
 
     organ = next((f for f in findings if f.repair and f.repair != "audio" and due(f.repair)
                   and not (f.repair == "being-cortex.service" and facts.cortex_busy)), None)
-    if organ is not None:
-        _repaired[organ.repair] = now
+    if organ is not None and _reserve_restart(organ.repair, now):
         if system.restart(organ.repair):
             action_log.record(facts.state_dir, "repair.organ")
             said.append(f"I restarted my {ORGANS[organ.repair]}.")
@@ -498,10 +688,14 @@ PATTERN = re.compile(
     r"|is\s+everything\s+(?:okay|ok|alright|all\s+right)(?:\s+with\s+you)?|how\s+are\s+your\s+(?:parts|systems|organs)"
     r"|are\s+all\s+your\s+parts\s+(?:okay|ok|working))" + _END, re.IGNORECASE)
 _HINT = re.compile(r"\b(?:okay|ok|alright|right|well|check|checkup|diagnostics?|wrong|parts|systems|organs)\b", re.IGNORECASE)
+_FIREWALL = ("firewall drops", "how many packets did you block", "how many packets did your firewall drop")
 
 
 def may_match(text):
-    return bool(_HINT.search(text or "")) and bool(PATTERN.match(said(text)))
+    candidate = text or ""
+    cleaned = clean(candidate).casefold()
+    return (bool(_MANUAL_RESTART.fullmatch(cleaned)) or cleaned in _FIREWALL
+            or (bool(_HINT.search(candidate)) and bool(PATTERN.match(said(candidate)))))
 
 
 def facts_from(ctx):
@@ -520,7 +714,55 @@ def examine(system, facts, checks=CHECKS):
     return [f for f in findings if f.repair not in done], repairs
 
 
+def _manual_restart(ctx, system, unit):
+    if is_guest(ctx) or ctx.speaker != ctx.owner:
+        return Reply("[neutral] Only the person I live with can ask me to restart an organ.")
+    if unit is None:
+        return Reply("[neutral] I can restart my face, microphone, voice, thinking model, body care, or hands.")
+    if unit in ("being-ears.service", "being-voice.service") and getattr(
+        system, "microphone_latched", lambda: False
+    )():
+        return Reply("[concern] My microphone safety latch is active. It stays on until I reboot.")
+    organ = ORGANS[unit]
+
+    async def yes():
+        read_body = getattr(ctx, "current_body", None)
+        if read_body is None:
+            return Reply("[concern] I couldn't check whether it's safe to restart.")
+        states = await asyncio.to_thread(system.units, (unit,))
+        state = (states or {}).get(unit, {})
+        if (state.get("LoadState") != "loaded" or state.get("ConditionResult") == "no"
+                or (state.get("ActiveState") != "active" and not stopped(state))):
+            return Reply(f"[neutral] My {organ} isn't running or in a failed state.")
+        body = read_body()
+        if body is None or body.get("lid_closed") is not False:
+            return Reply("[neutral] I couldn't restart it in this session.")
+        if unit in ("being-cortex.service", "being-hands.service") and body.get("cortex_busy"):
+            return Reply(f"[neutral] My {organ} is busy. Ask again after the work finishes.")
+        if not _reserve_restart(unit, time.monotonic()):
+            return Reply(f"[neutral] I tried restarting my {organ} recently. Give it a few minutes.")
+        if not await asyncio.to_thread(system.restart, unit):
+            return Reply(f"[concern] I couldn't request a restart for my {organ}.")
+        action_log.record(ctx.state_dir, "repair.organ")
+        return Reply(f"[neutral] I requested a restart for my {organ}.")
+
+    return Reply(f"[neutral] Restart my {organ}? Say yes to go ahead.", confirm=Confirm(yes, strict=True))
+
+
 async def handle(text, ctx, system=None):
+    cleaned = clean(text, getattr(ctx, "name", "pip")).casefold()
+    if requested := _MANUAL_RESTART.fullmatch(cleaned):
+        return _manual_restart(ctx, system or System(), MANUAL_RESTARTS.get(requested["organ"]))
+    if cleaned in _FIREWALL:
+        if is_guest(ctx) or ctx.speaker != ctx.owner:
+            return Reply("[neutral] My owner can ask about my firewall.")
+        from .network_enforce import dropped_packets
+
+        count = await asyncio.to_thread(dropped_packets)
+        if count is None:
+            return Reply("[neutral] I can't read my firewall counter right now.")
+        packets = "packet" if count == 1 else "packets"
+        return Reply(f"[neutral] I blocked {count:,} {packets} since I loaded my current network policy.")
     if not PATTERN.match(said(text, ctx)):
         return None
     if is_guest(ctx):

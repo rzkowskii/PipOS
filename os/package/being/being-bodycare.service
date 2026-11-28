@@ -34,6 +34,7 @@ Nice=-5
 # save parameter) and, only in battery-out mode, /dev/cpu/*/msr. Nothing else.
 # ProtectKernelTunables is deliberately off: it would make /sys read-only.
 NoNewPrivileges=yes
+LimitCORE=0
 CapabilityBoundingSet=CAP_SYS_RAWIO
 ProtectSystem=strict
 ProtectHome=yes

@@ -43,9 +43,7 @@ RUN_DIR=${BEING_AUDIO_RUN:-/run/being-audio}
 CMDLINE=${BEING_AUDIO_CMDLINE:-/proc/cmdline}
 WAIT=${BEING_AUDIO_WAIT:-5}
 STATE_DIR=${BEING_AUDIO_STATE_DIR:-/var/lib/alsa}
-MIC_TEST=${BEING_AUDIO_MIC_TEST:-/usr/sbin/being-usb-logs}
 MIND_STATE=${BEING_AUDIO_MIND_STATE:-/mind/audio/asound.state}
-PROC_ASOUND=${BEING_AUDIO_PROC:-/proc/asound}
 
 say() {
     printf '%s\n' "being-audio-init: $*"
@@ -239,18 +237,37 @@ if [ -d "$STATE_DIR" ] && [ -w "$STATE_DIR" ] && command -v alsactl >/dev/null 2
     fi
 fi
 
-# On a Try boot, measure the microphone once while nothing else is listening.
-# Only levels are kept; the sound itself never leaves memory.
+# This startup-critical script never opens capture. Diagnostic entries with
+# being.mic_test=1 are measured later by being-audio-measure.service; ordinary
+# Try and cable boots retain an immediate skipped result for summary.txt.
+mic_skip() {
+    say "microphone not measured: $1"
+    if mkdir -p "$RUN_DIR" 2>/dev/null; then
+        printf '{"detail": "%s", "status": "skipped"}\n' "$1" > "$RUN_DIR/mic-level.json.new" 2>/dev/null &&
+            mv -f "$RUN_DIR/mic-level.json.new" "$RUN_DIR/mic-level.json" 2>/dev/null
+    fi
+}
+
 case " $cmdline " in
     *" being.try=1 "*)
-        card_id=$(cat "$PROC_ASOUND/card$CARD/id" 2>/dev/null)
-        if [ "$card_id" = Loopback ]; then
-            # The lab's virtual cable, not a microphone: recording from it here
-            # would only hold the cable's rate for the lab's own tests.
-            say "card $CARD is the Loopback cable; no microphone to measure"
-        elif [ -x "$MIC_TEST" ]; then
-            "$MIC_TEST" mic-test --card "$CARD" --out "$RUN_DIR/mic-level.json" 2>&1 |
-                sed 's/^being-usb-logs: /being-audio-init: /'
+        mic_test=default
+        # being.cable=0, the cable's kill switch, wins over being.cable=1.
+        case " $cmdline " in
+            *" being.cable=0 "*) ;;
+            *" being.cable=1 "*) mic_test=cable ;;
+        esac
+        case " $cmdline " in
+            *" being.mic_test=0 "*) mic_test=0 ;;
+            *" being.mic_test=1 "*) mic_test=1 ;;
+        esac
+        if [ "$mic_test" = 0 ]; then
+            mic_skip "being.mic_test=0 on the kernel command line"
+        elif [ "$mic_test" = cable ]; then
+            mic_skip "a cable development boot; run pip-diag mic over the cable (being.mic_test=1 measures at boot)"
+        elif [ "$mic_test" = default ]; then
+            mic_skip "use a microphone diagnostic boot entry or set being.mic_test=1"
+        else
+            say "microphone measurement deferred until after the voice starts"
         fi ;;
 esac
 

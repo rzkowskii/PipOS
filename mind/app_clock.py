@@ -84,7 +84,7 @@ def owner_zone(state_dir="/mind"):
         return None
 
 
-def clock_doubted():
+def clock_doubted(*, now=None, state_dir=None):
     """True when the wall clock cannot be believed (mind/clock_epoch.py: it
     was reset at boot, or reads before this software existed), else False."""
     try:
@@ -92,8 +92,13 @@ def clock_doubted():
     except ImportError:
         return False
     check = getattr(clock_epoch, "doubted", None) or getattr(clock_epoch, "epoch_advanced", None)
+    given = {}
+    if now is not None:
+        given["now"] = now
+    if state_dir is not None and check is getattr(clock_epoch, "doubted", None):
+        given["state_dir"] = state_dir
     try:
-        return bool(check()) if check is not None else False
+        return bool(check(**given)) if check is not None else False
     except Exception:
         return False
 
@@ -153,7 +158,7 @@ class Reader:
             self.zone_known = self.zone is not None
             self._zone_at = self.clock()
         return {"entries": read_entries(self.state_dir, now), "zone": self.zone, "zone_known": self.zone_known,
-                "doubted": clock_doubted()}
+                "doubted": clock_doubted(now=now, state_dir=self.state_dir)}
 
 
 # -- drawing ----------------------------------------------------------------------------------
@@ -220,8 +225,8 @@ def render(now_ts, data=None, *, columns=COLUMNS, rows=ROWS):
         lines.append(_centre(f"{BOLD}{row}{RESET}{tail}", columns, width))
     note = ""
     if data.get("doubted"):
-        note = f"{YELLOW}My clock may be wrong. Tell me the time to fix it.{RESET}"
-        visible = 50
+        note = f"{YELLOW}My clock may be wrong. Check the date and time in Setup.{RESET}"
+        visible = 56
     elif not data.get("zone_known", zone is not None):
         note = f"{GREY}My time zone isn't set, so this is my own clock's time.{RESET}"
         visible = 54
@@ -261,7 +266,7 @@ def render(now_ts, data=None, *, columns=COLUMNS, rows=ROWS):
             due = datetime.fromtimestamp(entry["due_at"], zone) if zone is not None else datetime.fromtimestamp(entry["due_at"])
             label = "Next reminder" if index == 0 else ""
             late = entry["due_at"] <= now_ts
-            moment = "now" if late else when(due, now)
+            moment = "waiting for the clock" if data.get("doubted") else "now" if late else when(due, now)
             lines.append(f"  {BOLD}{label:<16}{RESET}{entry['text']}  {GREY}{moment}{RESET}")
         if alarm is not None:
             # The soonest alarm (a repeating one shows its next time). Its
@@ -269,7 +274,10 @@ def render(now_ts, data=None, *, columns=COLUMNS, rows=ROWS):
             if timers or reminders:
                 lines.append("")
             due = datetime.fromtimestamp(alarm["due_at"], zone) if zone is not None else datetime.fromtimestamp(alarm["due_at"])
-            moment = "ringing now" if alarm["due_at"] <= now_ts else when(due, now)
+            if data.get("doubted"):
+                moment = "waiting for the clock"
+            else:
+                moment = "ringing now" if alarm["due_at"] <= now_ts else when(due, now)
             words = alarm["text"] if alarm["text"] and alarm["text"].casefold() not in ("alarm", "an alarm") else ""
             lines.append(f"  {BOLD}{'Next alarm':<16}{RESET}{moment}" + (f"  {GREY}{words}{RESET}" if words else ""))
 

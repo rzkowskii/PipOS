@@ -10,7 +10,7 @@ BEING_SITE_METHOD = local
 BEING_LICENSE = GPL-3.0 (PipOS), MIT (pico face detector), OFL-1.1 (console font), Apache-2.0 (default model)
 BEING_LICENSE_FILES = LICENSE
 # host-python3 is the target's own Python version, so it compiles the mind.
-BEING_DEPENDENCIES = host-rustc host-pkgconf host-python3 sdl2 python3 jpeg
+BEING_DEPENDENCIES = host-rustc host-pkgconf host-python3 sdl2 python3 jpeg alsa-lib poppler
 
 # '*' is an unusable password hash. A locked '!' account also blocks SSH keys.
 # being-shell runs the caged workshop shell and being-panel its renderers
@@ -19,12 +19,14 @@ ifeq ($(BR2_PACKAGE_BEING_LAN_MAINTENANCE),y)
 define BEING_USERS
 	being-shell -1 being-shell -1 ! /workshop /bin/sh - PipOS workshop shell
 	being-panel -1 being-panel -1 ! - /bin/false - PipOS workshop renderer
+	being-pdf -1 being-pdf -1 ! - /bin/false - PipOS confined PDF parser
 	being-observe -1 being-observe -1 * - /bin/sh - PipOS hardware observation
 endef
 else
 define BEING_USERS
 	being-shell -1 being-shell -1 ! /workshop /bin/sh - PipOS workshop shell
 	being-panel -1 being-panel -1 ! - /bin/false - PipOS workshop renderer
+	being-pdf -1 being-pdf -1 ! - /bin/false - PipOS confined PDF parser
 endef
 endif
 
@@ -54,13 +56,15 @@ BEING_CARGO_ENV = \
 
 define BEING_BUILD_CMDS
 	cd $(@D) && $(BEING_CARGO_ENV) \
-		cargo build --release --locked -p face -p brainstem $(if $(BEING_HAS_BODYCARE),-p bodycare)
+		cargo build --release --locked -p face -p brainstem -p ears $(if $(BEING_HAS_BODYCARE),-p bodycare)
 	$(TARGET_CC) $(TARGET_CFLAGS) -std=c99 -fno-strict-aliasing -c \
 		-o $(@D)/picornt.o $(BEING_PKGDIR)/picornt.c
 	$(TARGET_CXX) $(TARGET_CXXFLAGS) $(TARGET_LDFLAGS) -std=c++17 \
 		-o $(@D)/eyes-capture $(BEING_PKGDIR)/eyes-capture.cpp $(@D)/picornt.o -ljpeg
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -std=c11 -I$(STAGING_DIR)/usr/include/SDL2 \
 		-o $(@D)/being-console $(BEING_PKGDIR)/being-console.c -lSDL2 -lutil
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) -std=c11 \
+		-o $(@D)/being-audio-duplex $(BEING_PKGDIR)/being-audio-duplex.c -lasound -lm
 endef
 
 BEING_BIN = $(@D)/target/$(RUSTC_TARGET_NAME)/release
@@ -150,10 +154,13 @@ endif
 ifneq ($(BEING_HAS_AUDIO_INIT),)
 define BEING_INSTALL_AUDIO_INIT
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-audio-init $(TARGET_DIR)/usr/libexec/being/being-audio-init
+	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-audio-measure $(TARGET_DIR)/usr/libexec/being/being-audio-measure
 endef
 define BEING_INSTALL_AUDIO_INIT_UNIT
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-audio-init.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/being-audio-init.service
+	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-audio-measure.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/being-audio-measure.service
 endef
 endif
 
@@ -194,7 +201,9 @@ define BEING_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/share/being/diag $(TARGET_DIR)/usr/share/being/cable
 	$(INSTALL) -D -m 0755 $(BEING_BIN)/face $(TARGET_DIR)/usr/bin/being-face
 	$(INSTALL) -D -m 0755 $(BEING_BIN)/brainstem $(TARGET_DIR)/usr/bin/being-brainstem
+	$(INSTALL) -D -m 0755 $(BEING_BIN)/ears $(TARGET_DIR)/usr/bin/being-ears
 	$(INSTALL) -D -m 0755 $(@D)/being-console $(TARGET_DIR)/usr/bin/being-console
+	$(INSTALL) -D -m 0755 $(@D)/being-audio-duplex $(TARGET_DIR)/usr/libexec/being/being-audio-duplex
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-screen-mode $(TARGET_DIR)/usr/libexec/being-screen-mode
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-setup $(TARGET_DIR)/usr/sbin/being-setup
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-backup $(TARGET_DIR)/usr/sbin/being-backup
@@ -206,12 +215,20 @@ define BEING_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-camera $(TARGET_DIR)/usr/sbin/being-camera
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-usb-logs $(TARGET_DIR)/usr/sbin/being-usb-logs
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-hardware-report $(TARGET_DIR)/usr/sbin/being-hardware-report
+	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-media $(TARGET_DIR)/usr/sbin/being-media
+	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-keep-file-backup $(TARGET_DIR)/usr/sbin/being-keep-file-backup
+	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-keep-pdf $(TARGET_DIR)/usr/sbin/being-keep-pdf
+	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-library $(TARGET_DIR)/usr/sbin/being-library
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-boot-record $(TARGET_DIR)/usr/libexec/being-boot-record
+	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-health-watch $(TARGET_DIR)/usr/libexec/being/being-health-watch
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/pip-diag $(TARGET_DIR)/usr/sbin/pip-diag
 	$(BEING_INSTALL_DIAG_DATA)
 	$(INSTALL) -D -m 0755 $(@D)/eyes-capture $(TARGET_DIR)/usr/libexec/being/eyes-capture
+	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-vision-describer $(TARGET_DIR)/usr/libexec/being/being-vision-describer
 	$(BEING_INSTALL_AUDIO_INIT)
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/facefinder $(TARGET_DIR)/usr/share/being/facefinder
+	$(INSTALL) -D -m 0644 $(@D)/config/body-maps.json $(TARGET_DIR)/usr/share/being/body-maps.json
+	$(INSTALL) -D -m 0644 $(BEING_SITE)/docs/manual/spoken-guide.json $(TARGET_DIR)/usr/share/being/spoken-guide.json
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/PICO-LICENSE $(TARGET_DIR)/usr/share/being/PICO-LICENSE
 	$(BEING_INSTALL_LAN_MAINTENANCE)
 	$(BEING_INSTALL_CABLE_DEV)
@@ -232,16 +249,25 @@ define BEING_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/lib/sysctl.d/50-being-hardening.conf
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/60-being-power.rules \
 		$(TARGET_DIR)/usr/lib/udev/rules.d/60-being-power.rules
+	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/60-being-camera.rules $(TARGET_DIR)/usr/lib/udev/rules.d/60-being-camera.rules
 	$(BEING_COMPILE_PYTHON)
 endef
 
 define BEING_INSTALL_INIT_SYSTEMD
+	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-context-storage.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/being-context-storage.service
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/30-model-pack.conf \
 		$(TARGET_DIR)/usr/lib/systemd/system/being-cortex.service.d/30-model-pack.conf
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-try-generator \
 		$(TARGET_DIR)/usr/lib/systemd/system-generators/being-try-generator
 	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-installed-generator \
 		$(TARGET_DIR)/usr/lib/systemd/system-generators/being-installed-generator
+	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-residency-generator \
+		$(TARGET_DIR)/usr/lib/systemd/system-generators/being-residency-generator
+	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-model-warm.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/being-model-warm.service
+	$(INSTALL) -D -m 0755 $(BEING_PKGDIR)/being-prepare-mesa-cache \
+		$(TARGET_DIR)/usr/libexec/being/being-prepare-mesa-cache
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-lid.conf \
 		$(TARGET_DIR)/etc/systemd/logind.conf.d/50-being-lid.conf
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-brainstem.service \
@@ -256,6 +282,8 @@ define BEING_INSTALL_INIT_SYSTEMD
 		$(TARGET_DIR)/usr/lib/systemd/system/being-mind.service
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-voice.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/being-voice.service
+	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-ears.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/being-ears.service
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-eyes.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/being-eyes.service
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-wifi.service \
@@ -286,6 +314,10 @@ define BEING_INSTALL_INIT_SYSTEMD
 	$(BEING_INSTALL_CABLE_DEV_UNITS)
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-boot-health.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/being-boot-health.service
+	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-health-watch.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/being-health-watch.service
+	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-native-soak.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/being-native-soak.service
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-trial-reboot.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/being-trial-reboot.service
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-usb-logs.service \

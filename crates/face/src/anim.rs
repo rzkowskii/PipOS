@@ -1,7 +1,8 @@
 //! Eye acting lives here. Expression springs provide the shape, while gaze,
 //! blinks and the speech envelope have their own timing.
 
-use crate::eye::{self, Eye, Pose, M};
+use crate::{audition, decor, emote};
+use crate::eye::{self, ExprId, Eye, Kick, Pose, M};
 use crate::pace::Activity;
 use std::f64::consts::TAU;
 
@@ -24,9 +25,13 @@ impl Rng {
 struct Spring {
     x: [f32; M],
     v: [f32; M],
-    name: &'static str,
+    expression: ExprId,
+    intensity: f32,
+    blend: Option<(ExprId, f32)>,
+    source_pose: bool,
     target: [f32; M],
     settled: bool,
+    guarded: bool,
     /// Lively arrivals use a looser spring, so they overshoot a little.
     damping: f32,
     /// Head for the preset reflected left to right (set before a step).
@@ -41,17 +46,28 @@ fn reflect(p: Pose) -> Pose {
 }
 
 impl Spring {
-    fn new(name: &'static str) -> Self {
-        let target = eye::preset(name).unwrap().to_array();
-        Self { x: target, v: [0.0; M], name, target, settled: true, damping: CALM, flip: false, flipped: false }
+    fn new(expression: ExprId) -> Self {
+        let target = expression.pose().to_array();
+        Self { x: target, v: [0.0; M], expression, intensity: 1.0, blend: None, source_pose: false, target, settled: true, guarded: false,
+               damping: eye::DEFAULT_DAMPING, flip: false, flipped: false }
     }
 
-    fn step(&mut self, name: &'static str, dt: f32, omega: f32) {
-        if self.name != name || self.flip != self.flipped {
-            self.name = name;
+    fn step(&mut self, expression: ExprId, intensity: f32, blend: Option<(ExprId, f32)>, dt: f32, omega: f32) {
+        if self.expression != expression || self.intensity != intensity || self.blend != blend || self.flip != self.flipped {
+            self.guarded |= expression.is_audition() || intensity != 1.0 || blend.is_some();
+            self.expression = expression;
+            self.intensity = intensity;
+            self.blend = blend;
             self.flipped = self.flip;
-            let pose = eye::preset(name).unwrap();
-            self.target = if self.flip { reflect(pose) } else { pose }.to_array();
+            let pose_for = if self.source_pose { ExprId::concept_pose } else { ExprId::pose };
+            let pose = pose_for(expression);
+            let pose = blend.map_or(pose, |(other, weight)| blend_pose(pose, pose_for(other), weight));
+            let pose = if self.flip { reflect(pose) } else { pose };
+            self.target = if intensity != 1.0 {
+                blend_pose(pose_for(ExprId::Neutral), pose, intensity).to_array()
+            } else {
+                pose.to_array()
+            };
             self.settled = false;
         }
         if self.settled || dt == 0.0 {
@@ -78,6 +94,7 @@ impl Spring {
         if self.settled {
             self.x = self.target;
             self.v = [0.0; M];
+            self.guarded = self.expression.is_audition() || self.intensity != 1.0 || self.blend.is_some();
         }
     }
 }
@@ -95,8 +112,6 @@ const BIRTH_PENDING: f64 = 600.0;
 const REUNION_GAP: f64 = 600.0;
 /// How long a yawn holds the eyes open before the squeeze.
 const YAWN_STRETCH: f32 = 0.9;
-/// Spring damping for ordinary moves; lively arrivals overshoot a touch.
-const CALM: f32 = 0.82;
 const CENTER: [f32; 2] = [0.0, 0.0];
 /// How long the "pardon?" squint lasts after words it could not make out.
 pub const MISSED_HOLD: f64 = 1.1;
@@ -264,9 +279,7 @@ impl Drives {
     /// Lid weight from a flat battery or a hot body, alone at idle. It stays
     /// under the yawn threshold: tiredness is not sleepiness.
     fn tiredness(self) -> f32 {
-        let flat = self.energy.map_or(0.0, |e| ((0.6 - e) / 0.5).clamp(0.0, 1.0));
-        let hot = self.comfort.map_or(0.0, |c| ((0.6 - c) / 0.6).clamp(0.0, 1.0));
-        (0.20 * flat + 0.08 * hot).min(0.26)
+        bus::body_drives::tiredness(self.energy, self.comfort)
     }
 
     /// How long idle looks linger: slower after a long quiet, brisker just
@@ -278,7 +291,7 @@ impl Drives {
     /// How keen it is to see someone again: zero after recent company,
     /// rising after about half an hour alone.
     fn eagerness(self) -> f32 {
-        self.social.map_or(0.0, |s| ((0.6 - s) / 0.6).clamp(0.0, 1.0))
+        bus::body_drives::eagerness(self.social)
     }
 }
 
@@ -323,8 +336,8 @@ fn flicker(t: f32) -> f32 {
 /// looks slowly one way and the other, tilts curiously, and settles into
 /// the live face (`ready`).
 fn birth_pose(t: f32, ready: Pose) -> Pose {
-    let sleepy = eye::preset("sleepy").unwrap();
-    let curious = eye::preset("curiosity").unwrap();
+    let sleepy = ExprId::Sleepy.pose();
+    let curious = ExprId::Curiosity.pose();
     let line = Eye { h: 0.016 + 0.012 * ease(t, 0.3, 2.4), glow: 0.42 * flicker(t), ..Eye::OPEN };
     let lines = Pose::sym(line);
     let mut out = [lines.l, lines.r];
@@ -380,17 +393,8 @@ fn anticipation(age: f32) -> f32 {
     ease(age, 0.0, 0.05) * (1.0 - ease(age, 0.05, 0.15))
 }
 
-/// Expressions that arrive with a little acting rather than a plain glide.
-fn lively(name: &str) -> bool {
-    matches!(name, "attentive" | "listening" | "thinking" | "joy" | "curiosity" | "surprise" | "skepticism" | "concern")
-}
-
-fn damping_for(name: &str) -> f32 {
-    match name {
-        "joy" | "surprise" => 0.64,
-        "attentive" | "curiosity" | "skepticism" => 0.72,
-        _ => CALM,
-    }
+fn pulse(age: f32, start: f32, peak: f32, end: f32) -> f32 {
+    ease(age, start, peak) * (1.0 - ease(age, peak, end))
 }
 
 /// Small self-contained performances layered over the expression.
@@ -400,6 +404,9 @@ enum Gesture {
     Content,
     /// A stretch up, a scrunched squeeze, and a slow release.
     Yawn,
+    Nod,
+    Acknowledge,
+    Shake,
 }
 
 impl Gesture {
@@ -407,6 +414,9 @@ impl Gesture {
         match self {
             Gesture::Content => 2.3,
             Gesture::Yawn => 2.6,
+            Gesture::Nod => 0.68,
+            Gesture::Acknowledge => 0.56,
+            Gesture::Shake => 0.82,
         }
     }
 }
@@ -416,6 +426,9 @@ struct Life {
     tuck: f32,
     bounce: f32,
     pop: f32,
+    recoil: f32,
+    nod: f32,
+    shake: f32,
     content: f32,
     inhale: f32,
     squeeze: f32,
@@ -425,7 +438,7 @@ struct Life {
 
 impl Life {
     fn apply(&self, e: &mut Eye, side: f32, heaviness: f32, head: f32) {
-        let Life { tuck, bounce, pop, content, inhale, squeeze, smile } = *self;
+        let Life { tuck, bounce, pop, recoil, nod, shake, content, inhale, squeeze, smile } = *self;
         // The big breath of a yawn opens even heavy lids wide for a moment.
         let heaviness = heaviness * (1.0 - 0.85 * inhale);
         // A tuck before a lively move, hops of delight, and the surprise pop.
@@ -433,6 +446,13 @@ impl Life {
         e.w *= 1.0 + 0.025 * tuck - 0.25 * bounce + 0.06 * pop - 0.05 * inhale;
         e.y += bounce - 0.008 * tuck + 0.04 * inhale - 0.015 * squeeze + 0.012 * content - 0.012 * heaviness;
         e.glow *= (1.0 + 1.2 * bounce + 0.08 * pop + 0.06 * inhale) * (1.0 - 0.10 * squeeze) * (1.0 - 0.12 * heaviness);
+        if recoil != 0.0 || nod != 0.0 || shake != 0.0 {
+            e.x += 0.11 * shake;
+            e.y += nod - 0.047 * recoil;
+            e.h *= 1.0 - 0.09 * recoil + 0.3 * nod;
+            e.w *= 1.0 - 0.05 * recoil + 0.035 * side * shake;
+            e.tilt += 0.035 * shake;
+        }
         if let Some(smile) = smile {
             // A pleased squint: borrow joy's smiling lower lid part of the way.
             let joy = if side < 0.0 { smile.l } else { smile.r };
@@ -478,9 +498,9 @@ impl Life {
 /// The lid wake plays once, regardless of which organs are ready.
 fn lid_wake_pose(t: f32, ready: Pose, dreamed: bool) -> Pose {
     let closed = Pose::sym(Eye { h: 0.016, glow: 0.34, ..Eye::OPEN });
-    let sleepy = eye::preset("sleepy").unwrap();
-    let curious = eye::preset("curiosity").unwrap();
-    let neutral = eye::preset("neutral").unwrap();
+    let sleepy = ExprId::Sleepy.pose();
+    let curious = ExprId::Curiosity.pose();
+    let neutral = ExprId::Neutral.pose();
     let mut l = blend_eye(closed.l, sleepy.l, ease(t, 0.09, 0.44));
     let mut r = blend_eye(closed.r, sleepy.r, ease(t, 0.18, 0.53));
 
@@ -508,6 +528,13 @@ fn lid_wake_pose(t: f32, ready: Pose, dreamed: bool) -> Pose {
     Pose { l: blend_eye(l, ready.l, settle), r: blend_eye(r, ready.r, settle) }
 }
 
+struct HeldExpression {
+    id: ExprId,
+    until: f64,
+    intensity: f32,
+    blend: Option<(ExprId, f32)>,
+}
+
 pub struct Anim {
     t: f64,
     rng: Rng,
@@ -516,21 +543,35 @@ pub struct Anim {
 
     state: String,
     state_at: f64,
+    reply_ladder: bool,
+    speech_end: Option<f64>,
     muted: bool,
     unwell: bool,
     /// The brainstem has gone quiet; the face shows it without being told.
     link_lost: bool,
-    emotion: Option<(&'static str, f64)>,
+    emotion: Option<HeldExpression>,
+    speech_cue: Option<ExprId>,
+    speech_ended: bool,
+    screen_concern_until: f64,
+    unheard_until: f64,
     battery_cue: Option<BatteryCue>,
     preview_dream: bool,
+    concept_preview: bool,
+    preview_effects: [bool; emote::CHANNELS],
+    preview_flash: Option<(ExprId, f64)>,
+    preview_burst: Option<f64>,
+    preview_gesture: Option<(audition::Gesture, f64)>,
+    preview_gaze: [f32; 2],
     lid_open: bool,
     panel_blank: bool,
     lid_wake: Option<LidWake>,
 
     gaze: Gaze,
+    gaze_bias: [f32; 2],
     fixation: [f32; 2],
     gaze_next: f64,
     gaze_away: bool,
+    idle_glances: bool,
     thought_side: f32,
     presence: Option<([f32; 2], f64)>,
     touch: Option<([f32; 2], f64)>,
@@ -538,21 +579,29 @@ pub struct Anim {
     blink: Option<Blink>,
     blink_next: f64,
     blink_repeat: bool,
+    /// Offline audition scenes may own every blink for measured cadence.
+    preview_blink_manual: bool,
     /// Kept in f64 and advanced by real elapsed time, so breathing stays
     /// smooth after days awake and in step after a slow frame.
     breath_phase: f64,
     breath_depth: f32,
+    breath_scale: f32,
+    breath_experiment: bool,
+    breath_effort: f32,
+    breath_effort_target: f32,
 
     level: f32,
     level_target: f32,
     level_at: f64,
 
     /// The expression last seen arriving, where it came from, and when.
-    acting: &'static str,
-    acted_from: &'static str,
+    acting: ExprId,
+    acting_intensity: f32,
+    acted_from: ExprId,
     acted_at: f64,
     /// The next blink is a quick double, as after a surprise.
     double_blink: bool,
+    startle_followup: bool,
     /// A whole-face roll (radians), as if the head tilted.
     head: f32,
     head_v: f32,
@@ -594,38 +643,59 @@ impl Anim {
         Anim {
             t: 0.0,
             rng: Rng(seed | 1),
-            spring: Spring::new("asleep"),
+            spring: Spring::new(ExprId::Asleep),
             omega: 2.5,
             state: "waking".to_string(),
             state_at: 0.0,
+            reply_ladder: false,
+            speech_end: None,
             muted: false,
             unwell: false,
             link_lost: false,
             emotion: None,
+            speech_cue: None,
+            speech_ended: true,
+            screen_concern_until: 0.0,
+            unheard_until: 0.0,
             battery_cue: None,
             preview_dream: false,
+            concept_preview: false,
+            preview_effects: [false; emote::CHANNELS],
+            preview_flash: None,
+            preview_burst: None,
+            preview_gesture: None,
+            preview_gaze: CENTER,
             lid_open: false,
             panel_blank: false,
             lid_wake: None,
             gaze: Gaze::new(),
+            gaze_bias: CENTER,
             fixation: CENTER,
             gaze_next: 2.2,
             gaze_away: false,
+            idle_glances: true,
             thought_side: 1.0,
             presence: None,
             touch: None,
             blink: None,
             blink_next: 3.0,
             blink_repeat: false,
+            preview_blink_manual: false,
             breath_phase: 0.0,
             breath_depth: 0.0,
+            breath_scale: 1.0,
+            breath_experiment: false,
+            breath_effort: 0.0,
+            breath_effort_target: 0.0,
             level: 0.0,
             level_target: 0.0,
             level_at: -10.0,
-            acting: "asleep",
-            acted_from: "asleep",
+            acting: ExprId::Asleep,
+            acting_intensity: 1.0,
+            acted_from: ExprId::Asleep,
             acted_at: -10.0,
             double_blink: false,
+            startle_followup: false,
             head: 0.0,
             head_v: 0.0,
             listen_side: 1.0,
@@ -685,6 +755,14 @@ impl Anim {
         self.drives = drives;
     }
 
+    pub fn enable_effort_breathing(&mut self) {
+        self.breath_experiment = true;
+    }
+
+    pub fn set_breath_effort(&mut self, effort: Option<f32>) {
+        self.breath_effort_target = effort.unwrap_or(0.0);
+    }
+
     /// The brainstem has never answered since the face started on the
     /// appliance: look like waiting, not like illness.
     pub fn set_loading(&mut self, loading: bool) {
@@ -706,6 +784,41 @@ impl Anim {
         self.typing_hidden = on;
     }
 
+    pub fn enable_concept_preview(&mut self, effects: [bool; emote::CHANNELS], source_pose: bool) {
+        self.concept_preview = true;
+        self.preview_effects = effects;
+        self.spring.source_pose = source_pose;
+        if source_pose {
+            self.spring.x = self.spring.expression.concept_pose().to_array();
+            self.spring.target = self.spring.x;
+        }
+    }
+
+    pub fn preview_flash(&mut self, expression: ExprId, seconds: f64) {
+        self.preview_flash = Some((expression, self.t + seconds));
+    }
+
+    pub fn preview_startle_burst(&mut self) {
+        self.preview_burst = Some(self.t);
+    }
+
+    pub fn perform_preview(&mut self, gesture: audition::Gesture) {
+        self.preview_gesture = Some((gesture, self.t));
+    }
+
+    pub fn preview_blink(&mut self) {
+        self.blink = Some(Blink {
+            start: self.t, close: 0.075, hold: 0.035, open: 0.12,
+            stagger: 0.0, depth: 1.0, repeat: false,
+        });
+    }
+
+    pub fn enable_manual_preview_blinks(&mut self) {
+        self.preview_blink_manual = true;
+        self.blink_repeat = false;
+        self.double_blink = false;
+    }
+
     /// How fast the face needs drawing right now (task 2.1).
     pub fn activity(&self) -> Activity {
         if self.panel_blank {
@@ -716,11 +829,17 @@ impl Anim {
             || self.birth.is_some()
             || self.blink.is_some()
             || self.gesture.is_some()
+            || self.preview_gesture.is_some()
+            || self.preview_gaze != CENTER
             || !self.spring.settled
             || self.level > 0.0
             || self.touch.is_some()
             || gaze_moving
             || self.head_v.abs() > 0.002
+            || (self.acting.is_audition() && self.acting.motion().kick != Kick::None && self.t - self.acted_at < 0.86)
+            || (self.concept_preview && !self.dazed() && !self.muted && self.acting_intensity > 0.0
+                && (self.preview_effect_values(self.acting)[emote::SHIVER..=emote::SWAY].iter().any(|value| *value > 0.0)
+                    || (self.acting.is_concept_only() && self.acting.visual().kick.pop > 0.0 && self.t - self.acted_at < 0.7)))
             || (self.engaged() && !self.muted);
         if busy {
             Activity::Active
@@ -731,16 +850,51 @@ impl Anim {
         }
     }
 
+    /// The optional idle pacing experiment never slows an expression or a turn.
+    pub fn trial_idle(&self) -> bool {
+        self.state == "idle" && self.emotion.is_none() && !self.dazed() && self.activity() == Activity::Calm
+    }
+
+    pub fn enable_reply_ladder(&mut self) {
+        self.reply_ladder = true;
+    }
+
+    /// Start only from a newly accepted utterance. A recognizer that takes
+    /// longer than a stage skips that stage instead of replaying it late.
+    fn acknowledge_speech(&mut self, age_ms: u64) {
+        if !self.reply_ladder || age_ms >= 2000 || self.state != "thinking"
+            || self.panel_blank || self.muted || self.dazed() || self.speech_end.is_some()
+        {
+            return;
+        }
+        self.speech_end = Some(self.t - age_ms as f64 / 1000.0);
+        self.thought_spot = [0.57 * self.thought_side, 0.44];
+        if age_ms <= 250 && self.blink.is_none() {
+            self.blink_next = self.t;
+        }
+    }
+
     pub fn set_state(&mut self, state: &str, muted: bool, unwell: bool) {
+        self.set_state_at_speech_age(state, muted, unwell, None);
+    }
+
+    pub fn set_state_at_speech_age(&mut self, state: &str, muted: bool, unwell: bool, speech_age: Option<u64>) {
         self.preview_dream = false;
         let changed = state != self.state;
+        let heard = self.state == "listening" && state == "thinking";
         if changed {
+            self.speech_end = None;
             if state == "waking" && self.asleep() {
                 self.omega = 2.5;
             }
             if self.state == "speaking" {
-                self.emotion = None; // a reply's emotion lasts as long as the reply
-                self.level_target = 0.0;
+                self.end_reply();
+            }
+            if state == "speaking" {
+                self.speech_ended = false;
+            }
+            if matches!(state, "attending" | "listening" | "speaking") {
+                self.screen_concern_until = 0.0;
             }
             if state == "asleep" {
                 self.touch = None;
@@ -793,12 +947,26 @@ impl Anim {
         let status_changed = muted != self.muted || unwell != self.unwell;
         self.muted = muted;
         self.unwell = unwell;
+        if muted || unwell || self.asleep() {
+            self.end_reply();
+            self.speech_end = None;
+            self.screen_concern_until = 0.0;
+            self.unheard_until = 0.0;
+        }
+        if heard && self.layers_visible() && !(self.reply_ladder && speech_age.is_some()) {
+            self.start_gesture(Gesture::Acknowledge);
+        }
         if changed || status_changed {
             self.reset_fixation();
             // Give the first visible look on acknowledging someone time to land.
             if self.engaged() {
                 self.blink_next = self.blink_next.max(self.t + 0.9);
                 self.blink_repeat = false;
+            }
+        }
+        if changed {
+            if let Some(age) = speech_age {
+                self.acknowledge_speech(age);
             }
         }
     }
@@ -824,14 +992,31 @@ impl Anim {
     }
 
     pub fn express(&mut self, name: &str, hold: f64) {
-        if !self.panel_blank && !self.asleep() && name != "dreaming" {
-            if let Some(name) = eye::NAMES.iter().copied().find(|&preset| preset == name) {
-                self.emotion = Some((name, self.t + hold.clamp(0.2, 600.0)));
-                self.quiet_since = self.t;
-                if self.gesture.is_some_and(|(g, _, _)| g == Gesture::Content) {
-                    self.gesture = None;
-                }
-            }
+        let Some(expression) = ExprId::PUBLIC.iter().copied().find(|id| id.name() == name) else {
+            return;
+        };
+        if expression == ExprId::Dreaming {
+            return;
+        }
+        self.audition(expression, 1.0, hold);
+    }
+
+    /// Show a typed pose from the local visual audition, with its strength
+    /// measured from the neutral pose. Live model expressions arrive at full strength.
+    pub fn audition(&mut self, id: ExprId, intensity: f32, hold: f64) {
+        self.audition_blend(id, intensity, hold, None);
+    }
+
+    pub fn audition_blend(&mut self, id: ExprId, intensity: f32, hold: f64, blend: Option<(ExprId, f32)>) {
+        if self.panel_blank || self.asleep() || !intensity.is_finite() || !hold.is_finite() {
+            return;
+        }
+        self.emotion = Some(HeldExpression {
+            id, until: self.t + hold.clamp(0.2, 600.0), intensity: intensity.clamp(0.0, 1.5), blend,
+        });
+        self.quiet_since = self.t;
+        if self.gesture.is_some_and(|(g, _, _)| g == Gesture::Content) {
+            self.gesture = None;
         }
     }
 
@@ -851,6 +1036,8 @@ impl Anim {
     }
 
     pub fn end_reply(&mut self) {
+        self.speech_cue = None;
+        self.speech_ended = true;
         if matches!(self.state.as_str(), "thinking" | "speaking") {
             self.emotion = None;
             self.level_target = 0.0;
@@ -906,8 +1093,11 @@ impl Anim {
             self.lit_at = self.t;
         }
         if self.panel_blank {
+            self.end_reply();
+            self.screen_concern_until = 0.0;
+            self.unheard_until = 0.0;
             if !was_blank {
-                self.spring = Spring::new("asleep");
+                self.spring = Spring::new(ExprId::Asleep);
             }
             self.lid_wake = None;
             self.level = 0.0;
@@ -956,12 +1146,13 @@ impl Anim {
         }
     }
 
-    /// Play an idle gesture now: `content`, `yawn`, or `survey` (a slow look
-    /// around the room). Returns whether it is one the face knows.
+    /// Play an idle gesture now. Returns whether it is one the face knows.
     pub fn perform(&mut self, name: &str) -> bool {
         let gesture = match name {
             "content" => Gesture::Content,
             "yawn" => Gesture::Yawn,
+            "nod" => Gesture::Nod,
+            "shake" => Gesture::Shake,
             "survey" => {
                 if !self.panel_blank && self.state == "idle" && self.presence.is_none() {
                     self.survey();
@@ -970,7 +1161,10 @@ impl Anim {
             }
             _ => return false,
         };
-        if !self.panel_blank && !self.asleep() {
+        let head_gesture = matches!(gesture, Gesture::Nod | Gesture::Shake);
+        if !self.panel_blank && !self.asleep()
+            && (!head_gesture || (!self.muted && !self.dazed() && self.lid_wake.is_none() && self.birth.is_none()))
+        {
             self.start_gesture(gesture);
         }
         true
@@ -1004,6 +1198,14 @@ impl Anim {
         if self.panel_blank {
             return;
         }
+        if !v.is_finite() {
+            return;
+        }
+        if self.state == "speaking" && self.level_target > 0.35 && v <= 0.06
+            && self.blink.is_none() && self.blink_next - self.t < 0.75
+        {
+            self.blink_next = self.blink_next.min(self.t + 0.16);
+        }
         self.level_target = ((v - 0.06) / 0.94).clamp(0.0, 1.0).sqrt();
         self.level_at = self.t;
         if self.level_target > 0.0 {
@@ -1011,9 +1213,54 @@ impl Anim {
         }
     }
 
+    pub fn speech_level(&mut self, level: f32, cue: Option<&str>) {
+        if self.state == "speaking" && self.speech_ended {
+            return;
+        }
+        self.set_level(level);
+        if self.state != "speaking" || self.panel_blank || self.muted || self.dazed()
+            || !level.is_finite() || level < 0.015
+        {
+            return;
+        }
+        let expression = match cue {
+            Some("neutral") => None,
+            Some("concern") => Some(ExprId::Concern),
+            Some("joy") => Some(ExprId::Joy),
+            Some("curiosity") => Some(ExprId::Curiosity),
+            Some("surprise") => Some(ExprId::Surprise),
+            Some("skepticism") => Some(ExprId::Skepticism),
+            Some("sleepy") => Some(ExprId::Sleepy),
+            _ => return,
+        };
+        self.emotion = None;
+        self.speech_cue = expression;
+    }
+
+    /// React once to a confirmed outcome, in the eye strip as well as full screen.
+    pub fn screen_outcome(&mut self, success: bool) {
+        if !self.layers_visible() || !self.follows_focus() {
+            return;
+        }
+        if success {
+            self.screen_concern_until = 0.0;
+            self.glance(0.0, -0.65, 0.50);
+            self.start_gesture(Gesture::Acknowledge);
+        } else {
+            self.glance(0.0, 0.12, 0.72);
+            self.screen_concern_until = self.t + 0.72;
+        }
+    }
+
     pub fn set_link_lost(&mut self, lost: bool) {
         if self.link_lost != lost {
             self.link_lost = lost;
+            if lost {
+                self.end_reply();
+                self.screen_concern_until = 0.0;
+                self.unheard_until = 0.0;
+                self.set_breath_effort(None);
+            }
             self.reset_fixation();
         }
     }
@@ -1024,6 +1271,71 @@ impl Anim {
 
     pub fn muted(&self) -> bool {
         self.muted
+    }
+
+    fn layers_visible(&self) -> bool {
+        !self.panel_blank && !self.muted && !self.dazed() && self.lid_wake.is_none()
+            && self.birth.is_none() && !self.loading && self.state != "waking"
+    }
+
+    pub fn decor_motion(&self, preview: bool) -> Option<decor::Motion> {
+        let expression = self.target_expression();
+        let speaking = self.state == "speaking" && !self.speech_ended;
+        if !self.layers_visible()
+            || (!preview && (self.battery_cue.is_some() || self.state == "drowsy"
+                || (!decor::allowed(expression) && !speaking)))
+        {
+            return None;
+        }
+        let strength = self.intensity(expression);
+        let age = (self.t - self.acted_at) as f32;
+        Some(decor::Motion {
+            expression,
+            blend: self.blend(expression),
+            strength,
+            viseme: crate::viseme::Sample::default(),
+            pupil_kick: if preview { expression.visual().kick.pupil * strength * pulse(age, 0.0, 0.10, 0.48) } else { 0.0 },
+            speech: if self.state == "speaking" { self.level } else { 0.0 },
+            time: self.t,
+            reflected: self.facing_left(),
+        })
+    }
+
+    pub fn emote_motion(&self, preview: bool) -> Option<([f32; emote::CHANNELS], f32, f64)> {
+        if !self.layers_visible() {
+            return None;
+        }
+        let age = (self.t - self.acted_at).max(0.0);
+        if preview {
+            let expression = self.target_expression();
+            let strength = self.intensity(expression);
+            let visual = expression.visual();
+            let burst = visual.kick.burst * strength * pulse(age as f32, 0.0, 0.12, 0.95);
+            let manual_burst = self.preview_burst.map_or(0.0, |at| pulse((self.t - at) as f32, 0.0, 0.12, 0.95));
+            let release = self.emotion.as_ref().filter(|held| held.id == expression)
+                .map_or(1.0, |held| ease((held.until - self.t) as f32, 0.0, 0.18));
+            let fade = ease(age as f32, 0.0, 0.15) * release;
+            let mut effects = self.preview_effect_values(expression);
+            for (value, manual) in effects.iter_mut().zip(self.preview_effects) {
+                if !manual {
+                    *value *= fade;
+                }
+            }
+            return Some((effects, (burst * release).max(manual_burst), age));
+        }
+        let mut effects = [0.0; emote::CHANNELS];
+        if matches!(self.state.as_str(), "attending" | "listening") && self.t < self.unheard_until {
+            effects[emote::QUESTION] = 0.68 * ease((self.unheard_until - self.t) as f32, 0.0, 0.25);
+        } else if self.state == "thinking" {
+            effects[emote::DOTS] = 0.8;
+        } else if self.state == "idle" && self.target_expression() == ExprId::Tired
+            && self.battery_cue.as_ref().is_some_and(|cue| self.t < cue.until)
+        {
+            effects[emote::BATTERY] = 0.8;
+        } else {
+            return None;
+        }
+        Some((effects, 0.0, age))
     }
 
     /// The eyes are resting: lit, listening for their name, not dazed and not
@@ -1041,57 +1353,116 @@ impl Anim {
         }
     }
 
+    pub fn unclear_hearing(&mut self) {
+        if self.layers_visible() && matches!(self.state.as_str(), "attending" | "listening") {
+            self.unheard_until = self.t + MISSED_HOLD;
+        }
+    }
+
     fn dazed(&self) -> bool {
         self.unwell || self.link_lost
     }
 
     /// The expression the face is heading toward right now.
     pub fn target_name(&self) -> &'static str {
+        self.target_expression().name()
+    }
+
+    fn target_expression(&self) -> ExprId {
         if self.asleep() {
-            return if self.preview_dream { "dreaming" } else { "asleep" };
+            return if self.preview_dream { ExprId::Dreaming } else { ExprId::Asleep };
         }
         if self.dazed() {
-            return if self.loading && !self.unwell { "loading" } else { "dazed" };
+            return if self.loading && !self.unwell { ExprId::Loading } else { ExprId::Dazed };
         }
         if self.muted {
-            return "muted";
+            return ExprId::Muted;
         }
-        if let Some((name, until)) = self.emotion {
-            if self.t < until {
-                return name;
+        if let Some((expression, _)) = self.preview_flash.filter(|(_, until)| self.t < *until) {
+            return expression;
+        }
+        if let Some(held) = &self.emotion {
+            if self.t < held.until {
+                return held.id;
             }
         }
+        if self.state == "speaking" {
+            return self.speech_cue.unwrap_or(ExprId::Speaking);
+        }
+        if self.follows_focus() && self.t < self.screen_concern_until {
+            return ExprId::Concern;
+        }
         if self.state == "idle" && self.battery_cue.as_ref().is_some_and(|cue| self.t < cue.until) {
-            return "tired";
+            return ExprId::Tired;
         }
         match self.state.as_str() {
-            "attending" => "attentive",
-            "listening" => "listening",
-            "thinking" => "thinking",
-            "speaking" => "speaking",
-            "drowsy" => "sleepy",
-            _ => "neutral",
+            "attending" => ExprId::Attentive,
+            "listening" => ExprId::Listening,
+            "thinking" => ExprId::Thinking,
+            "speaking" => ExprId::Speaking,
+            "drowsy" => ExprId::Sleepy,
+            _ => ExprId::Neutral,
         }
     }
 
     /// The shape the spring heads for. A yawn keeps the eyes open for its
     /// stretch, and the drowsy shape arrives behind the squeeze.
-    fn shape_name(&self) -> &'static str {
-        let name = self.target_name();
+    fn shape_expression(&self) -> ExprId {
+        let expression = self.target_expression();
         let stretching =
             self.gesture.is_some_and(|(g, at, _)| g == Gesture::Yawn && ((self.t - at) as f32) < YAWN_STRETCH);
-        if stretching && matches!(name, "sleepy" | "asleep") {
-            "neutral"
+        if stretching && matches!(expression, ExprId::Sleepy | ExprId::Asleep) {
+            ExprId::Neutral
         } else {
-            name
+            expression
         }
+    }
+
+    fn held(&self, id: ExprId) -> Option<&HeldExpression> {
+        if self.preview_flash.is_some_and(|(_, until)| self.t < until) {
+            return None;
+        }
+        self.emotion.as_ref().filter(|held| held.id == id && self.t < held.until)
+    }
+
+    fn intensity(&self, id: ExprId) -> f32 {
+        self.held(id).map_or_else(|| {
+            if self.state == "speaking" && self.speech_cue == Some(id) {
+                0.55
+            } else if id == ExprId::Concern && self.follows_focus() && self.t < self.screen_concern_until {
+                0.52
+            } else {
+                1.0
+            }
+        }, |held| held.intensity)
+    }
+
+    fn blend(&self, id: ExprId) -> Option<(ExprId, f32)> {
+        self.held(id).and_then(|held| held.blend)
+    }
+
+    fn preview_effect_values(&self, expression: ExprId) -> [f32; emote::CHANNELS] {
+        let blend = self.blend(expression);
+        let neutral = &ExprId::Neutral.visual().effects;
+        let intensity = self.intensity(expression);
+        let primary = &expression.visual().effects;
+        std::array::from_fn(|index| {
+            let target = blend.map_or(primary[index], |(other, amount)| {
+                mix(primary[index], other.visual().effects[index], amount)
+            });
+            let value = mix(neutral[index], target, intensity).max(0.0);
+            if self.preview_effects[index] { value.max(if index == emote::BREATH { 1.8 } else { 1.0 }) } else { value }
+        })
     }
 
     /// The thinking preset leans to one side. A thought off to the other
     /// side reflects it, so the look away reads the same either way.
     fn facing_left(&self) -> bool {
-        self.shape_name() == "thinking"
-            && eye::preset("thinking").is_some_and(|p| (p.l.x + p.r.x) * self.thought_side < -0.01)
+        if self.shape_expression() != ExprId::Thinking {
+            return false;
+        }
+        let pose = ExprId::Thinking.pose();
+        (pose.l.x + pose.r.x) * self.thought_side < -0.01
     }
 
     /// Catch up to the current frame before stamping newly received events.
@@ -1109,15 +1480,17 @@ impl Anim {
             };
             let speed = if self.state == "waking" { 0.8 } else { 4.5 };
             self.omega += (tempo - self.omega) * (dt * speed).min(1.0);
-            let held = self.emotion.map_or(elapsed, |(_, until)| ((until - previous) as f32).clamp(0.0, elapsed));
-            self.spring.damping = damping_for(self.target_name());
+            let held = self.emotion.as_ref().map_or(elapsed, |held| ((held.until - previous) as f32).clamp(0.0, elapsed));
+            self.spring.damping = self.target_expression().damping();
             self.spring.flip = self.facing_left();
-            self.spring.step(self.shape_name(), held, self.omega);
+            let expression = self.shape_expression();
+            self.spring.step(expression, self.intensity(expression), self.blend(expression), held, self.omega);
             if held < elapsed {
                 self.emotion = None;
-                self.spring.damping = damping_for(self.target_name());
+                self.spring.damping = self.target_expression().damping();
                 self.spring.flip = self.facing_left();
-                self.spring.step(self.shape_name(), elapsed - held, self.omega);
+                let expression = self.shape_expression();
+                self.spring.step(expression, self.intensity(expression), self.blend(expression), elapsed - held, self.omega);
             }
             self.step_voice(elapsed);
         }
@@ -1125,12 +1498,24 @@ impl Anim {
         receive(self);
 
         // Notice a new expression arriving, so its entrance can be acted.
-        let arriving = self.target_name();
-        if arriving != self.acting {
+        let arriving = self.target_expression();
+        let intensity = self.intensity(arriving);
+        if arriving != self.acting || intensity != self.acting_intensity {
+            let old_interval = self.blink_interval();
+            let new_expression = arriving != self.acting;
             self.acted_from = self.acting;
             self.acting = arriving;
-            self.acted_at = self.t;
-            if arriving == "surprise" && !self.panel_blank && self.lid_wake.is_none() {
+            self.acting_intensity = intensity;
+            if new_expression {
+                self.acted_at = self.t;
+            }
+            let interval = self.blink_interval();
+            if interval != old_interval && !self.blink_repeat && !self.double_blink && self.blink_next > self.t {
+                self.blink_next = self.t + (self.blink_next - self.t) * f64::from(interval / old_interval);
+            }
+            if new_expression && arriving.motion().kick == Kick::Startle && intensity >= 0.55
+                && !self.panel_blank && self.lid_wake.is_none()
+            {
                 // Eyes pop wide, then a quick blink-blink.
                 self.double_blink = true;
                 if self.blink.is_none() {
@@ -1148,7 +1533,22 @@ impl Anim {
 
         let asleep = self.asleep();
         let t = self.t;
-        let gaze = self.step_gaze();
+        let mut gaze = self.step_gaze();
+        let movement = self.preview_gesture.and_then(|(gesture, at)| gesture.motion((t - at) as f32));
+        if movement.is_none() {
+            self.preview_gesture = None;
+        }
+        if movement.is_some() || self.preview_gaze != CENTER {
+            let target = movement.map_or(CENTER, |movement| movement.gaze);
+            let step = 1.0 - (-16.0 * dt).exp();
+            for ((offset, axis), target) in self.preview_gaze.iter_mut().zip(&mut gaze).zip(target) {
+                *offset = mix(*offset, target, step);
+                if target == 0.0 && offset.abs() < 0.001 {
+                    *offset = 0.0;
+                }
+                *axis = (*axis + *offset).clamp(-1.2, 1.2);
+            }
+        }
         let wake = self
             .lid_wake
             .as_ref()
@@ -1185,7 +1585,11 @@ impl Anim {
         // Carry phase across state changes so a breath never jumps mid-cycle.
         let depth = if asleep { 1.0 } else { 0.0 };
         self.breath_depth += (depth - self.breath_depth) * dt;
-        let rate = f64::from(mix(0.22, 0.13, self.breath_depth));
+        if self.breath_experiment {
+            let effort = if asleep { 0.0 } else { self.breath_effort_target };
+            self.breath_effort += (effort - self.breath_effort) * dt;
+        }
+        let rate = f64::from(mix(0.22, 0.13, self.breath_depth) + 0.07 * self.breath_effort);
         self.breath_phase = (self.breath_phase + TAU * rate * f64::from(elapsed)) % TAU;
         let mut breath = self.breath_phase.sin() as f32;
         // Unwell in its sleep: an uneven, unsettled breath.
@@ -1195,17 +1599,39 @@ impl Anim {
         }
 
         let expressive = !asleep && !self.muted && !self.dazed();
+        let motion = self.acting.motion();
+        let concept = self.concept_preview.then(|| self.preview_effect_values(self.acting));
+        let strength = if expressive && wake.is_none() && birth.is_none() { self.acting_intensity } else { 0.0 };
+        let smooth = 1.0 - (-dt * 9.0).exp();
+        let free_gaze = self.touch.is_none() && self.presence.is_none() && !(self.focus.is_some() && self.follows_focus());
+        for (i, axis) in gaze.iter_mut().enumerate() {
+            let bias = &mut self.gaze_bias[i];
+            *bias += (motion.gaze[i] * (if free_gaze { strength } else { 0.0 }) - *bias) * smooth;
+            if free_gaze && bias.abs() > 0.0001 {
+                *axis = (*axis + *bias).clamp(-1.0, 1.0);
+            }
+        }
+        let breathing = concept.map_or_else(|| mix(1.0, motion.breath, strength), |effects| effects[emote::BREATH].clamp(0.3, 2.5));
+        self.breath_scale += (breathing - self.breath_scale) * smooth;
+        breath *= self.breath_scale;
         let life = self.step_life(elapsed, dt, expressive, wake.is_none());
         let engaged = self.engaged() && expressive;
         let speech = if expressive { self.level } else { 0.0 };
         let age = (self.t - self.state_at) as f32;
         let drift = [0.006 * (t * 0.081).sin() as f32, 0.004 * (t * 0.107 + 1.0).sin() as f32];
         let wave = |rate: f64, phase: f64| (rate * t + phase).sin() as f32;
+        let shiver = concept.map_or(0.0, |effects| {
+            effects[emote::SHIVER] * ease((t - self.acted_at) as f32, 0.0, 0.14)
+        });
         for (side, e) in [(-1.0f32, &mut p.l), (1.0f32, &mut p.r)] {
             e.h *= 1.0 + mix(0.011, 0.045, self.breath_depth) * breath;
             e.y += mix(0.003, 0.012, self.breath_depth) * breath;
             e.x += gaze[0] * 0.137 + drift[0];
             e.y += gaze[1] * 0.083 + drift[1];
+            if shiver > 0.0 {
+                e.x += 0.010 * shiver * wave(39.0, 0.0);
+                e.y += 0.007 * shiver * wave(47.0, 1.1);
+            }
             let near = 1.0 + 0.045 * side * gaze[0];
             e.w *= near;
             e.h *= near;
@@ -1221,7 +1647,12 @@ impl Anim {
             e.h *= 1.0 + 0.086 * accent;
             e.y += 0.012 * accent;
             e.glow *= 1.0 + 0.105 * speech;
-            life.apply(e, side, self.heaviness, self.head);
+            let roll = movement.map_or(0.0, |movement| movement.roll);
+            life.apply(e, side, self.heaviness, self.head + roll);
+            if let Some(movement) = movement {
+                e.x += movement.x;
+                e.y += movement.y;
+            }
 
             if !asleep && self.dazed() {
                 if self.loading && !self.unwell {
@@ -1250,6 +1681,22 @@ impl Anim {
             e.h = e.h.max(0.012);
             if let Some(blink) = &self.blink {
                 close_lids(e, blink.closure(self.t, side));
+            }
+            if self.spring.guarded || self.concept_preview {
+                // Audit poses may take larger paths between lids, gaze and
+                // roll. Keep the oriented eye inside the existing safe area.
+                e.w = e.w.clamp(0.012, 1.45);
+                e.h = e.h.clamp(0.012, 0.85);
+                e.round = e.round.max(if self.spring.source_pose { 1.5 } else { 2.0 });
+                e.glow = e.glow.clamp(0.0, 1.3);
+                let (sin, cos) = e.tilt.sin_cos();
+                let bulge = (2.0_f32.powf(0.5 - 1.0 / e.round) - 1.0) * e.w.min(e.h);
+                let reach_x = (e.w * cos).hypot(e.h * sin) + bulge;
+                let reach_y = (e.w * sin).hypot(e.h * cos) + bulge;
+                let edge_x = (1.499 - e.w.max(reach_x)).max(0.0);
+                let edge_y = (0.899 - e.h.max(reach_y)).max(0.0);
+                e.x = e.x.clamp(-edge_x, edge_x);
+                e.y = e.y.clamp(-edge_y, edge_y);
             }
         }
         let p = wake.map_or(p, |(elapsed, dreamed)| lid_wake_pose(elapsed, p, dreamed));
@@ -1316,14 +1763,21 @@ impl Anim {
         // The head rolls a little with curiosity, listening and thought.
         let mut roll = if expressive {
             match self.acting {
-                "curiosity" => -0.075,
-                "listening" => 0.028 * self.listen_side,
-                "thinking" => 0.04 * self.thought_side,
-                _ => 0.0,
+                ExprId::Curiosity => -0.075 * self.acting_intensity,
+                ExprId::Listening => 0.028 * self.listen_side * self.acting_intensity,
+                ExprId::Thinking => 0.04 * self.thought_side * self.acting_intensity,
+                _ => self.acting.motion().roll * self.acting_intensity,
             }
         } else {
             0.0
         };
+        let age = (self.t - self.acted_at) as f32;
+        let concept = (self.concept_preview && expressive && awake).then(|| self.preview_effect_values(self.acting));
+        let visual_kick = self.acting.visual().kick;
+        if let Some(effects) = concept {
+            roll += 0.12 * effects[emote::SWAY] * (2.6 * self.t).sin() as f32
+                + self.acting_intensity * visual_kick.roll * pulse(age, 0.02, 0.14, 0.56);
+        }
         roll += gesture_side * (0.035 * content + 0.05 * squeeze);
         let steps = (dt / 0.02).ceil().max(1.0);
         let h = dt / steps;
@@ -1332,27 +1786,59 @@ impl Anim {
             self.head += self.head_v * h;
         }
 
-        let age = (self.t - self.acted_at) as f32;
-        let tuck = if expressive && lively(self.acting) {
-            anticipation(age) * if self.acting == "surprise" { 1.6 } else { 1.0 }
+        let kick = self.acting.motion().kick;
+        let strength = if expressive { self.acting_intensity } else { 0.0 };
+        let tuck = if expressive && self.acting.lively() {
+            anticipation(age) * (if kick == Kick::Startle { 1.6 } else { 1.0 }) * strength
         } else {
             0.0
         };
-        let bounce = match self.acting {
+        let mut bounce = match self.acting {
             _ if !expressive => 0.0,
-            "joy" => 0.042 * hop(age - 0.07, 0.24, 2.0),
-            "attentive" if matches!(self.acted_from, "neutral" | "sleepy" | "tired") => {
+            ExprId::Joy => 0.042 * hop(age - 0.07, 0.24, 2.0),
+            ExprId::Attentive if matches!(self.acted_from, ExprId::Neutral | ExprId::Sleepy | ExprId::Tired) => {
                 0.036 * (1.0 + 1.2 * self.reunion) * hop(age - 0.04, 0.26, 1.0)
             }
+            _ if kick == Kick::Laugh => 0.055 * hop(age - 0.07, 0.215, 2.0),
+            _ if kick == Kick::Relief => -0.026 * pulse(age, 0.12, 0.48, 0.86),
             _ => 0.0,
-        };
-        let pop = if expressive && self.acting == "surprise" {
+        } * strength;
+        let mut pop = if kick == Kick::Startle {
             ease(age, 0.04, 0.11) * (1.0 - ease(age, 0.13, 0.45))
         } else {
             0.0
+        } * strength;
+        let mut recoil = match kick {
+            Kick::Startle => 0.9 * pulse(age, 0.14, 0.24, 0.55),
+            Kick::Flinch => 0.72 * pulse(age, 0.03, 0.15, 0.48),
+            _ => 0.0,
+        } * strength;
+        if let Some(effects) = concept {
+            let envelope = ease(age, 0.0, 0.18);
+            bounce += 0.04 * effects[emote::BOUNCE] * envelope * (9.0 * age).sin().abs();
+            if self.acting.is_concept_only() && kick == Kick::None {
+                pop += 1.5 * visual_kick.pop * pulse(age, 0.0, 0.08, 0.32) * strength;
+                recoil += 13.0 * visual_kick.recoil * pulse(age, 0.05, 0.16, 0.59) * strength;
+            }
+        }
+        let nod = if expressive && kind == Some(Gesture::Nod) {
+            0.024 * pulse(gesture_age, 0.0, 0.10, 0.23)
+                - 0.089 * pulse(gesture_age, 0.10, 0.32, 0.68)
+        } else if expressive && kind == Some(Gesture::Acknowledge) {
+            0.020 * pulse(gesture_age, 0.0, 0.10, 0.20)
+                - 0.024 * pulse(gesture_age, 0.14, 0.27, 0.55)
+        } else {
+            0.0
         };
-        let smile = if content > 0.0 { eye::preset("joy") } else { None };
-        Life { tuck, bounce, pop, content, inhale, squeeze, smile }
+        let shake = if expressive && kind == Some(Gesture::Shake) {
+            gesture_side * (pulse(gesture_age, 0.0, 0.18, 0.38)
+                - 0.95 * pulse(gesture_age, 0.18, 0.46, 0.72)
+                + 0.32 * pulse(gesture_age, 0.46, 0.68, 0.82))
+        } else {
+            0.0
+        };
+        let smile = (content > 0.0).then(|| ExprId::Joy.pose());
+        Life { tuck, bounce, pop, recoil, nod, shake, content, inhale, squeeze, smile }
     }
 
     fn step_voice(&mut self, elapsed: f32) {
@@ -1372,6 +1858,15 @@ impl Anim {
         }
     }
 
+    pub fn set_idle_glances(&mut self, enabled: bool) {
+        if self.idle_glances != enabled {
+            self.idle_glances = enabled;
+            if self.state == "idle" && self.presence.is_none() {
+                self.gaze_next = self.t;
+            }
+        }
+    }
+
     fn step_gaze(&mut self) -> [f32; 2] {
         if self.presence.is_some_and(|(_, until)| self.t >= until) {
             self.presence = None;
@@ -1384,6 +1879,31 @@ impl Anim {
             return self.step_focus(focus);
         }
 
+        if let Some(end) = self.speech_end {
+            let age = self.t - end;
+            if age >= 2.0 || self.state != "thinking" || self.muted || self.dazed() {
+                self.speech_end = None;
+                self.gaze_next = self.t;
+            } else if self.touch.is_none() {
+                let subject = self.presence.map_or(CENTER, |(point, _)| point);
+                let [x, y] = self.thought_spot;
+                self.gaze_away = age >= 0.30;
+                self.fixation = if !self.gaze_away {
+                    subject
+                } else if age < 1.0 {
+                    [x, y]
+                } else {
+                    match ((age - 1.0) / 0.25) as u32 {
+                        0 => [x + 0.08 * self.thought_side, y + 0.06],
+                        1 => [x - 0.06 * self.thought_side, y],
+                        2 => [x + 0.07 * self.thought_side, y - 0.07],
+                        _ => [x, y],
+                    }
+                };
+                return self.gaze.track(self.fixation, self.t, 0.0);
+            }
+        }
+
         if self.t >= self.gaze_next {
             let subject = self.presence.map_or(CENTER, |(point, _)| point);
             let returning = self.surveying && self.gaze_away;
@@ -1393,7 +1913,12 @@ impl Anim {
             } else if self.engaged() || (self.state == "idle" && self.presence.is_some()) {
                 self.gaze_away = false;
                 let correction = [self.rng.range(-0.027, 0.027), self.rng.range(-0.018, 0.018)];
-                ([subject[0] + correction[0], subject[1] + correction[1]], self.rng.range(0.9, 2.0))
+                let wait = if self.state == "listening" {
+                    self.rng.range(2.2, 3.8)
+                } else {
+                    self.rng.range(0.9, 2.0)
+                };
+                ([subject[0] + correction[0], subject[1] + correction[1]], wait)
             } else if self.state == "drowsy" {
                 ([0.0, -0.22], 3.0)
             } else if self.state == "thinking" {
@@ -1407,6 +1932,9 @@ impl Anim {
                     // Briefly check back with the listener during a long pause.
                     ([0.65 * subject[0], 0.65 * subject[1]], self.rng.range(0.55, 0.90))
                 }
+            } else if self.state == "idle" && !self.idle_glances {
+                self.gaze_away = false;
+                (CENTER, 2.0)
             } else if self.gaze_away {
                 self.gaze_away = false;
                 // Come back from a look around the room as unhurriedly.
@@ -1482,7 +2010,17 @@ impl Anim {
         self.gaze.track(self.touch.map_or(self.fixation, |(point, _)| point), self.t, 0.0)
     }
 
+    fn blink_interval(&self) -> f32 {
+        mix(1.0, self.acting.motion().blink_interval, self.acting_intensity)
+    }
+
     fn step_blink(&mut self) {
+        if self.preview_blink_manual {
+            if self.blink.as_ref().is_some_and(|blink| blink.done(self.t)) {
+                self.blink = None;
+            }
+            return;
+        }
         if self.asleep() {
             if self.blink.as_ref().is_some_and(|blink| blink.done(self.t)) {
                 self.blink = None;
@@ -1490,7 +2028,7 @@ impl Anim {
             self.blink_next = self.t + 2.0;
             return;
         }
-        let drowsy = matches!(self.target_name(), "sleepy" | "tired") || self.heaviness > 0.22;
+        let drowsy = matches!(self.target_expression(), ExprId::Sleepy | ExprId::Tired) || self.heaviness > 0.22;
         if let Some(blink) = &self.blink {
             if !blink.done(self.t) {
                 return;
@@ -1509,7 +2047,8 @@ impl Anim {
             } else {
                 self.rng.range(2.5, 5.6)
             };
-            self.blink_next = self.t + f64::from(wait);
+            let interval = if self.blink_repeat || self.double_blink { 1.0 } else { self.blink_interval() };
+            self.blink_next = self.t + f64::from(wait * interval);
         }
         if self.t < self.blink_next {
             return;
@@ -1523,9 +2062,11 @@ impl Anim {
         }
         self.double_blink = false;
         let secondary = self.blink_repeat;
-        let soft = !drowsy && !double && self.rng.next() < 0.22;
+        let startle = double || (secondary && self.startle_followup);
+        self.startle_followup = double;
+        let soft = !drowsy && !startle && self.rng.next() < 0.22;
         let depth = if soft { self.rng.range(0.55, 0.78) } else { 1.0 };
-        let pace = if double {
+        let pace = if startle {
             0.8
         } else if drowsy {
             1.55
@@ -1568,16 +2109,16 @@ mod tests {
 
     #[test]
     fn spring_is_consistent_at_twenty_and_sixty_hz() {
-        let mut fast = Spring::new("neutral");
-        let mut slow = Spring::new("neutral");
-        let mut hitch = Spring::new("neutral");
+        let mut fast = Spring::new(ExprId::Neutral);
+        let mut slow = Spring::new(ExprId::Neutral);
+        let mut hitch = Spring::new(ExprId::Neutral);
         for _ in 0..18 {
-            fast.step("joy", 1.0 / 60.0, 14.0);
+            fast.step(ExprId::Joy, 1.0, None, 1.0 / 60.0, 14.0);
         }
         for _ in 0..6 {
-            slow.step("joy", 1.0 / 20.0, 14.0);
+            slow.step(ExprId::Joy, 1.0, None, 1.0 / 20.0, 14.0);
         }
-        hitch.step("joy", 0.3, 14.0);
+        hitch.step(ExprId::Joy, 1.0, None, 0.3, 14.0);
         for (i, x) in fast.x.into_iter().enumerate() {
             assert!((x - slow.x[i]).abs() < 0.00002);
             assert!((x - hitch.x[i]).abs() < 0.00002);
@@ -1760,8 +2301,9 @@ mod tests {
 
     #[test]
     fn a_blink_closes_from_above_in_each_expression() {
-        for &name in eye::NAMES {
-            let pose = eye::preset(name).unwrap();
+        for &id in ExprId::PUBLIC {
+            let name = id.name();
+            let pose = id.pose();
             for open in [pose.l, pose.r] {
                 for x in [-0.7, -0.35, 0.0, 0.35, 0.7] {
                     let mut last = aperture(open, x);
@@ -2123,6 +2665,124 @@ mod tests {
     }
 
     #[test]
+    fn the_startle_recoils_and_both_blinks_close_regardless_of_seed() {
+        for seed in 1..=16 {
+            let mut a = awake(seed);
+            a.blink_next = a.t + 10.0;
+            a.express("surprise", 3.0);
+            let mut full_blinks = 0;
+            let mut shut = false;
+            let mut pop: f32 = 0.0;
+            let mut recoil: f32 = 0.0;
+            for _ in 0..60 {
+                a.frame(1.0 / 60.0, |_| {});
+                let life = a.step_life(0.0, 0.0, true, true);
+                pop = pop.max(life.pop);
+                recoil = recoil.max(life.recoil);
+                let closed = a.blink.as_ref().is_some_and(|b| b.closure(a.t, 0.0) > 0.9);
+                full_blinks += usize::from(closed && !shut);
+                shut = closed;
+            }
+            assert!(pop > 0.95 && recoil > 0.85, "seed {seed}: pop {pop}, recoil {recoil}");
+            assert_eq!(full_blinks, 2, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn audited_motion_yields_to_engagement_and_scales_with_intensity() {
+        let mut a = awake(3);
+        a.gaze_next = a.t + 20.0;
+        a.blink_next = a.t + 10.0;
+        a.express("embarrassed", 3.0);
+        assert_eq!(a.target_name(), "neutral");
+        a.audition(ExprId::Embarrassed, 0.5, 3.0);
+        run(&mut a, 0.8);
+        assert_eq!(a.target_name(), "embarrassed");
+        assert!((a.gaze_bias[0] + 0.195).abs() < 0.002);
+        assert!((a.head - 0.0355).abs() < 0.01);
+        assert!((a.breath_scale - 0.89).abs() < 0.001);
+        assert!((a.blink_interval() - 0.88).abs() < 0.001);
+        assert!((a.blink_next - a.t) < 8.2);
+        let half = blend_pose(ExprId::Neutral.pose(), ExprId::Embarrassed.pose(), 0.5);
+        assert_eq!(a.spring.target, half.to_array());
+        a.glance(0.9, 0.0, 0.7);
+        run(&mut a, 0.55);
+        assert!(a.gaze_bias[0].abs() < 0.003);
+        assert!(a.gaze.position(a.t)[0] > 0.8);
+        run(&mut a, 2.2);
+        assert_eq!(a.target_name(), "neutral");
+        assert_eq!(a.spring.target, ExprId::Neutral.pose().to_array());
+        assert!((a.breath_scale - 1.0).abs() < 0.03);
+    }
+
+    #[test]
+    fn audition_render_inputs_are_seeded_and_safe_through_transitions() {
+        for &id in ExprId::AUDITIONS {
+            let trace = |dts: &[f32]| {
+                let mut a = awake(21);
+                a.audition(id, 1.0, 0.9);
+                (0..120).map(|i| {
+                    let dt = dts[i % dts.len()];
+                    let p = a.frame(dt, |a| {
+                        if i == 5 {
+                            a.glance(1.0, 1.0, 0.3);
+                        }
+                    });
+                    for e in [p.l, p.r] {
+                        assert!(e.w > 0.0 && e.h > 0.0, "{id:?}: {e:?}");
+                        assert!(e.x.abs() + e.w < 1.5 && e.y.abs() + e.h < 0.9, "{id:?}: {e:?}");
+                        if a.spring.guarded {
+                            assert!(e.round >= 2.0, "{id:?}: {e:?}");
+                        }
+                    }
+                    let uniforms = p.uniforms();
+                    assert!(uniforms.iter().all(|value| value.is_finite()), "{id:?}: {uniforms:?}");
+                    uniforms.map(f32::to_bits)
+                }).collect::<Vec<_>>()
+            };
+            let uneven = [1.0 / 60.0, 1.0 / 20.0, 1.0 / 60.0, 0.2];
+            assert_eq!(trace(&uneven), trace(&uneven), "{id:?}");
+            let sixty = trace(&[1.0 / 60.0]);
+            assert_ne!(sixty[40], sixty[119], "{id:?}");
+        }
+    }
+
+    #[test]
+    fn a_nod_moves_down_a_shake_swings_both_ways_and_private_states_quiet_them() {
+        let mut reference = awake(6);
+        let mut nod = awake(6);
+        let mut shake = awake(6);
+        for a in [&mut reference, &mut nod, &mut shake] {
+            a.gaze_next = a.t + 20.0;
+            a.blink_next = a.t + 20.0;
+        }
+        assert!(nod.perform("nod"));
+        assert!(shake.perform("shake"));
+        assert_eq!(nod.activity(), Activity::Active);
+        let mut minimum_shake: f32 = 0.0;
+        let mut maximum_shake: f32 = 0.0;
+        let mut lowest_nod: f32 = 0.0;
+        for _ in 0..65 {
+            let center = reference.frame(1.0 / 60.0, |_| {});
+            let nod_pose = nod.frame(1.0 / 60.0, |_| {});
+            let shake_pose = shake.frame(1.0 / 60.0, |_| {});
+            let n = 0.5 * (nod_pose.l.y + nod_pose.r.y - center.l.y - center.r.y);
+            let s = 0.5 * (shake_pose.l.x + shake_pose.r.x - center.l.x - center.r.x);
+            lowest_nod = lowest_nod.min(n);
+            minimum_shake = minimum_shake.min(s);
+            maximum_shake = maximum_shake.max(s);
+        }
+        assert!(lowest_nod < -0.08 && minimum_shake < -0.09 && maximum_shake > 0.09);
+        assert!(nod.gesture.is_none() && shake.gesture.is_none());
+        shake.set_state("idle", true, false);
+        assert!(shake.perform("shake"));
+        assert!(shake.gesture.is_none());
+        nod.set_state("idle", false, true);
+        assert!(nod.perform("nod"));
+        assert!(nod.gesture.is_none());
+    }
+
+    #[test]
     fn thinking_searches_in_small_hops_on_one_side() {
         let mut a = awake(11);
         a.set_state("thinking", false, false);
@@ -2191,7 +2851,10 @@ mod tests {
 
     #[test]
     fn heavy_lids_fade_in_without_a_pop() {
-        let life = Life { tuck: 0.0, bounce: 0.0, pop: 0.0, content: 0.0, inhale: 0.0, squeeze: 0.0, smile: None };
+        let life = Life {
+            tuck: 0.0, bounce: 0.0, pop: 0.0, recoil: 0.0, nod: 0.0, shake: 0.0,
+            content: 0.0, inhale: 0.0, squeeze: 0.0, smile: None,
+        };
         let open = eye::preset("neutral").unwrap().l;
         let mut last = aperture(open, 0.0);
         for step in 1..=60 {
@@ -2301,6 +2964,62 @@ mod tests {
         c.frame(0.0, |c| c.born());
         let p = c.frame(1.0 / 60.0, |_| {});
         assert!(p.l.h > 0.2, "no drop back to a line of light");
+    }
+
+    #[test]
+    fn spoken_expression_follows_clause_onsets_and_stops_on_interrupt() {
+        let mut a = awake(41);
+        a.set_state("thinking", false, false);
+        a.speech_level(0.55, Some("joy"));
+        assert_eq!(a.target_name(), "thinking");
+
+        a.set_state("speaking", false, false);
+        a.speech_level(0.0, Some("joy"));
+        assert_eq!(a.target_name(), "speaking");
+        a.speech_level(0.55, Some("joy"));
+        assert_eq!(a.target_name(), "joy");
+        a.speech_level(0.0, None);
+        assert_eq!(a.target_name(), "joy");
+        a.speech_level(0.38, Some("concern"));
+        assert_eq!(a.target_name(), "concern");
+
+        a.end_reply();
+        a.speech_level(0.55, Some("joy"));
+        assert_eq!(a.target_name(), "speaking");
+        assert_eq!(a.level_target, 0.0);
+        a.set_state("listening", false, false);
+        a.speech_level(0.55, Some("joy"));
+        assert_eq!(a.target_name(), "listening");
+
+        a.set_state("thinking", false, false);
+        a.set_state("speaking", false, false);
+        a.speech_level(0.38, Some("concern"));
+        assert_eq!(a.target_name(), "concern");
+        a.set_lid(Some(true), false, false);
+        assert_eq!(a.speech_cue, None);
+    }
+
+    #[test]
+    fn listening_acknowledges_once_and_screen_outcomes_yield_to_conversation() {
+        let mut a = awake(42);
+        a.set_state("listening", false, false);
+        a.screen_outcome(false);
+        assert_eq!(a.target_name(), "listening");
+        a.unclear_hearing();
+        assert!(a.unheard_until > a.t);
+        a.set_state("thinking", false, false);
+        assert!(matches!(a.gesture, Some((Gesture::Acknowledge, _, _))));
+        let heard = a.gesture;
+        a.set_state("thinking", false, false);
+        assert_eq!(a.gesture, heard);
+
+        a.set_state("idle", false, false);
+        a.screen_outcome(false);
+        assert_eq!(a.target_name(), "concern");
+        run(&mut a, 0.8);
+        assert_eq!(a.target_name(), "neutral");
+        a.screen_outcome(true);
+        assert!(matches!(a.gesture, Some((Gesture::Acknowledge, _, _))));
     }
 
     #[test]

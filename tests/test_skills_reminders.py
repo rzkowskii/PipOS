@@ -164,7 +164,7 @@ class Replies(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(line.endswith(", in about two hours and one minute: call your sister."), line)
 
     async def test_alarms_are_created_held_and_listed(self):
-        line = await self.say("Wake me up at 7", clock_trusted=True)
+        line = await self.say("Wake me up at 7 am", clock_trusted=True)
         self.assertRegex(line, r"^Okay, your alarm is set for (today|tomorrow) at 7:00 in the morning\. "
                                r"Leave my lid open so I can ring\.$")
         held = await self.say("Set an alarm for 6:30 tomorrow", clock_trusted=False)

@@ -4,7 +4,9 @@ stand-in hands organ on the bus."""
 import asyncio
 import json
 
+from mind import actions
 from tests.test_mind import MindCase
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 
 class Hands:
@@ -32,7 +34,7 @@ class Hands:
         elif topic == "app.minimise":
             self.bus.push("app.state", req=req, app="terminal", view="minimised", job=None)
         elif topic == "app.close":
-            self.bus.push("app.state", req=req, app="terminal", view="closed", job=None)
+            self.bus.push("app.state", req=req, app=fields.get("app", "terminal"), view="closed", job=None)
         elif topic == "term.task":
             self.bus.push("term.status", req=req, id=fields.get("id"), phase="writing", source="recipe",
                           describe="a countdown")
@@ -91,6 +93,62 @@ class Workshop(MindCase):
         self.assertEqual([r["t"] for r in self.hands.requests], ["app.privacy"])
         self.assertEqual(self.cortex_server.chats, [])
 
+    async def test_calculator_opens_in_code_and_only_projects_sums_while_available(self):
+        self.assertIn("forty-two", await self.ask("What is six times seven?"))
+        self.assertEqual(self.bus.of("app.calc_display"), [])
+        self.assertIn("Here's my calculator", await self.ask("Open the calculator."))
+        self.assertEqual(self.bus.of("app.open")[-1]["app"], "calc")
+        self.assertIn("twenty-one", await self.ask("What is seven times three?"))
+        self.assertEqual(self.bus.of("app.calc_display"), [
+            {"t": "app.calc_display", "expression": "seven times three", "result": "21", "error": False}
+        ])
+        await self.ask("Start guest mode.")
+        self.assertIn("stays closed in guest mode", await self.ask("Open the calculator."))
+        self.assertIn("nine", await self.ask("What is one plus eight?"))
+        self.assertEqual(len(self.bus.of("app.calc_display")), 1)
+        self.assertEqual(self.cortex_server.chats, [])
+        self.assertFalse(self.memory.contains("seven times three"))
+
+    async def test_organizer_open_and_close_are_code_and_guest_cannot_open(self):
+        help_text = await self.ask("What can I say about screen apps?")
+        self.assertIn("Open the lists", help_text)
+        self.assertIn("Open the memory", help_text)
+        self.assertIn("Open the journal", help_text)
+        self.assertIn("Open the mind", help_text)
+        for app in ("lists", "memory", "journal", "mind"):
+            await self.ask(f"Open the {app}.")
+            self.assertEqual(self.bus.of("app.open")[-1]["app"], app)
+            self.assertEqual(self.bus.of("mind.route")[-1]["via"], "code")
+            self.assertEqual(await self.ask(f"Close the {app}."), "Closed.")
+            self.assertEqual(self.bus.of("app.close")[-1]["app"], app)
+        await self.ask("Start guest mode.")
+        opens = self.bus.of("app.open")
+        for app in ("lists", "memory", "journal", "mind"):
+            self.assertIn("guest mode", await self.ask(f"Open the {app}."))
+        self.assertEqual(self.bus.of("app.open"), opens)
+        self.assertEqual(self.cortex_server.chats, [])
+
+    async def test_voice_help_examples_route_through_the_mind_and_respect_guest_mode(self):
+        summary = await self.ask("Hey Pip, what can I say?")
+        self.assertIn("Make your eyes blue", summary)
+        self.assertIn("Open the calculator", summary)
+        self.assertEqual(self.bus.of("mind.route")[-1], {"t": "mind.route", "via": "code"})
+        appearance = await self.ask("What can I say about appearance?")
+        for field in actions.LOOK_FIELDS.values():
+            self.assertIn(field.phrases[0], appearance)
+            for phrase in field.phrases:
+                self.assertIn("saved", await self.ask(phrase))
+        self.assertIn("current look", await self.ask("What can I say about eyes?"))
+        self.assertIn("calculator", await self.ask("What can I say about screen apps?"))
+        await self.ask("Start guest mode")
+        previous_routes = self.bus.of("mind.route")
+        self.assertNotIn("Make your eyes", await self.ask("What can I say about appearance?"))
+        guest_math = await self.ask("What can I say about the calculator?")
+        self.assertIn("six times seven", guest_math)
+        self.assertNotIn("Open", guest_math)
+        self.assertEqual(self.bus.of("mind.route"), previous_routes)
+        self.assertEqual(self.cortex_server.chats, [])
+
     async def test_a_model_turn_parks_a_script_the_model_is_writing_and_is_told_about_it(self):
         self.bus.push("term.status", id="job1", phase="writing", source="model", describe="a spiral")
         await asyncio.sleep(0)
@@ -122,6 +180,7 @@ class Workshop(MindCase):
         self.assertEqual(await self.ask("forget that script"), "Should I forget that script and every copy of it?")
         self.assertTrue(self.memory.contains("countdown.py"), "nothing goes before the yes")
         self.assertEqual(await self.ask("yes"), "Okay. That script is forgotten.")
+        await asyncio.wait_for(asyncio.shield(self.mind._turn), 3)
         self.assertFalse(self.memory.contains("countdown.py"))
         self.assertIn("forget", self.actions())
         self.assertEqual(self.cortex_server.chats, [])

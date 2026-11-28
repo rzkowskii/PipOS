@@ -13,7 +13,7 @@ BEING_LAPTOP_PATIENCE multiplies every wait (default 1; the CPU is emulated).
 Screenshots land in out/lab/laptop-smoke-*.png.
 
 The target design these tests check (other tracks implement it):
-  * GRUB shows a menu on the panel with six entries, in this order: Try
+  * GRUB shows a menu on the panel with seven entries, in this order: Try
     PipOS (the default), one that shows boot messages, one with safe
     graphics, two with alternative microphone set-ups (the default entry plus
     snd_hda_intel.model=mbp81 being.mic_channel=auto, hotkey m, and plus
@@ -46,7 +46,8 @@ from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
-from lab.tests.test_local_screen import console_lines, console_screen, visible_eyes
+from lab.source_id import stamp_verified_install
+from lab.tests.test_local_screen import SCREEN_IMAGE, console_lines, console_screen, visible_eyes
 from lab.try_timings import parse_journal
 from lab.vm import LAB_OUTPUT, ROOT, VM, machine_args, png
 
@@ -54,8 +55,8 @@ LAPTOP_TRY_IMAGE = Path(os.environ.get(
     "BEING_LAPTOP_TRY_IMAGE", ROOT / "out/images/beingos-laptop-try.img")).resolve()
 PATIENCE = float(os.environ.get("BEING_LAPTOP_PATIENCE", "1") or 1)
 SHOTS = LAB_OUTPUT
-# Sparse, so it costs nothing: large enough for the installer's model reserve
-# (24 GiB) plus every staged pack, as on the MacBook's 256 GB SSD.
+# Sparse and large enough for the installer to reserve replacement space for
+# all staged model packs, as on the MacBook's 256 GB SSD.
 TARGET_BYTES = 64 << 30
 TARGET_MODEL = "BEINGOS LAPTOP SSD"
 LOG_LABEL = "PIPLOGS"
@@ -78,8 +79,9 @@ EXTRA_ENTRIES = (
     (re.compile(r"alternative microphone\)", re.I), "m", ["snd_hda_intel.model=mbp81", "being.mic_channel=auto"]),
     (re.compile(r"alternative microphone 2\)", re.I), "n", ["snd_hda_intel.model=mbp101"]),
     (re.compile(r"measure speed", re.I), "b", ["being.bench=1"]),
+    (re.compile(r"measure boot and idle", re.I), "i", ["being.bench=2"]),
 )
-LAPTOP_ENTRIES = 6
+LAPTOP_ENTRIES = 7
 LOGIN_PROMPT = re.compile(r"login:|Password:")
 SHELL_PROMPT = re.compile(r"^[^\n]{0,40}[#$] ?\r?$", re.M)
 # The firmware (OVMF) mirrors its console, and so GRUB's menu, to the serial
@@ -476,7 +478,7 @@ def try_menu_lines(frame):
     return None
 
 
-LAB_TRY_IMAGE = ROOT / "out/images/beingos-try-screen.img"
+LAB_TRY_IMAGE = SCREEN_IMAGE
 
 
 @unittest.skipUnless(LAB_TRY_IMAGE.exists(), "needs any lab Try image to check the FAT reader against")
@@ -621,13 +623,14 @@ class LaptopSmoke(unittest.TestCase):
         self.key(choice)
         self.key("ret")
 
-    def type_line(self, text):
+    def type_line(self, text, *, submit=True):
         for char in text:
             key = {" ": "spc", "/": "slash", ":": "semicolon"}.get(char, char.lower())
             names = ["shift", key] if char.isupper() or char == ":" else [key]
             self.vm.qmp("send-key", keys=[{"type": "qcode", "data": name} for name in names], **{"hold-time": 45})
             time.sleep(0.09)
-        self.key("ret")
+        if submit:
+            self.key("ret")
 
     def power_off(self):
         """The power button, as the owner would press it; then wait for it to go."""
@@ -926,7 +929,7 @@ class LaptopSmoke(unittest.TestCase):
                             "a power cut was recorded as a clean end")
 
     def test_grub_has_six_entries_and_boot_messages_show_kernel_text(self):
-        """(1) six entries in the GRUB menu; (4) the boot-messages entry puts
+        """(1) seven entries in the GRUB menu; (4) the boot-messages entry puts
         kernel text on the panel, and the boot still reaches the being."""
         target = self.blank_target()
         before = target.stat()
@@ -982,6 +985,14 @@ class LaptopSmoke(unittest.TestCase):
 
         A cable development stick never installs: Install says so before any
         disk is listed, returns to the Try menu, and the disk stays untouched."""
+        self.install_through_screen()
+
+    def test_encrypted_install_hides_pin_and_unlocks_local_memory(self):
+        if cable_image():
+            self.skipTest("Cable development media cannot install")
+        self.install_through_screen(pin="386047195275")
+
+    def install_through_screen(self, pin=None):
         target = self.blank_target()
         before = target.stat()
         cable = cable_image()
@@ -1013,8 +1024,35 @@ class LaptopSmoke(unittest.TestCase):
             return match[1] if match else None
 
         device, _ = self.wait_screen("33-confirm-install", challenge, 240)
+        if pin is not None:
+            self.select("e")
+            self.wait_screen("encrypted-choose-pin", lambda frame: any(
+                "New PIN" in line for line in console_lines(frame)), 30)
+            self.type_line(pin)
+            self.wait_screen("encrypted-confirm-pin", lambda frame: any(
+                "Enter the PIN again" in line for line in console_lines(frame)), 30)
+            self.type_line(pin)
+            checked, _ = self.wait_screen("encrypted-review", challenge, 30)
+            self.assertEqual(checked, device)
         self.type_line(f"ERASE {device}")
         deadline = time.monotonic() + patient(INSTALL_WRITE)
+
+        def progress(frame):
+            lines = console_lines(frame)
+            if not lines or "Installing PipOS" not in lines[0]:
+                return None
+            for line in lines:
+                if match := re.match(r"\s*(?:Copied|Checked) (\d[\d,]*)\s*/\s*(\d[\d,]*) bytes\b", line):
+                    moved, total = (int(value.replace(",", "")) for value in match.groups())
+                    if moved:
+                        return moved, total, lines
+            return None
+
+        (moved, total, lines), _ = self.wait_screen("34-install-progress", progress, INSTALL_WRITE)
+        self.assertLessEqual(moved, total)
+        self.assertTrue(any("Overall estimate" in line for line in lines))
+        self.assertTrue(any("Making the disk startable" in line for line in lines))
+
         with target.open("rb", buffering=0) as disk:
             while time.monotonic() < deadline:
                 disk.seek(SECTOR)
@@ -1026,7 +1064,9 @@ class LaptopSmoke(unittest.TestCase):
 
         def finished(frame):
             lines = console_lines(frame)
-            return bool(lines) and "Press Enter to return to PipOS." in lines[-1]
+            # The awakening card can extend below the prompt in the other column.
+            return (any("Installation complete." in line for line in lines)
+                    and any("Press Enter to return to PipOS." in line for line in lines))
 
         self.wait_screen("34-installed", finished, INSTALL_WRITE)
         self.key("ret")
@@ -1034,16 +1074,41 @@ class LaptopSmoke(unittest.TestCase):
         self.power_off()
 
         with target.open("rb") as disk:
-            self.assertTrue(gpt_partitions(disk), "the installed disk has no readable GPT")
+            partitions = gpt_partitions(disk)
+            self.assertTrue(partitions, "the installed disk has no readable GPT")
             installed = grub_config(disk)
+            if pin is not None:
+                mind_offset = next(start for _, name, start, _ in partitions if name == "mind")
+                disk.seek(mind_offset)
+                self.assertEqual(disk.read(8), b"LUKS\xba\xbe\x00\x02")
         self.assertIsNotNone(installed, "no EFI/BOOT/grub.cfg on the installed disk's EFI partition")
         self.assertNotIn("console=ttyS0", installed, "the installed boot points its console at serial")
         self.assertNotRegex(installed, r"(?m)^\s*terminal_output\s+serial\s*$")
 
+        if pin is None:
+            stamp_verified_install(LAPTOP_TRY_IMAGE, target, role="laptop_try")
+        else:
+            self.assertIn("being.mind_crypt=1", installed)
+            self.assertNotIn(pin, installed)
         self.vm = VM(image=target)
         self.addCleanup(self.vm.destroy)
         self.last_lit = None
         self.vm.start()
+        if pin is not None:
+            self.wait_screen("encrypted-locked", lambda frame: any(
+                "Unlock memory" in line for line in console_lines(frame)), 120)
+            wrong = "386047195276"
+            self.type_line(wrong, submit=False)
+            self.assertNotIn(wrong, "\n".join(console_lines(self.vm.screen())))
+            self.key("ret")
+
+            def refused(frame):
+                lines = console_lines(frame)
+                return lines if any("did not unlock" in line for line in lines) else None
+
+            rejected, _ = self.wait_screen("encrypted-refuses-wrong-pin", refused, 60)
+            self.assertNotIn(wrong, "\n".join(rejected))
+            self.type_line(pin)
         self.reach_eyes("36-installed-eyes")
         self.assert_no_serial_login("installed disk")
 

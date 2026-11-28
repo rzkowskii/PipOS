@@ -10,6 +10,10 @@ DefaultDependencies=no
 After=systemd-journald.service run-beinglogs.mount
 Before=sysinit.target shutdown.target
 Conflicts=shutdown.target
+# Up to three restarts a minute. These are [Unit] keys: under [Service]
+# systemd ignored StartLimitIntervalSec ("Unknown key ... ignoring").
+StartLimitBurst=3
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple
@@ -20,8 +24,6 @@ KillMode=mixed
 TimeoutStopSec=20
 Restart=on-failure
 RestartSec=2
-StartLimitBurst=3
-StartLimitIntervalSec=60
 
 [Install]
 WantedBy=sysinit.target

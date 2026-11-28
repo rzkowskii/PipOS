@@ -97,7 +97,7 @@ class AudioHarness(unittest.TestCase):
 import json, socket, time
 bus = socket.socket(socket.AF_UNIX)
 bus.connect('/run/being/bus.sock')
-bus.sendall(b'{"t":"hello","name":"audio-test","sub":["state.changed","hear.*","say.*","voice.mute"]}\\n')
+bus.sendall(b'{"t":"hello","name":"audio-test","sub":["app.privacy","organ.up","state.changed","hear.*","say.*","voice.mute"]}\\n')
 positive = False
 for line in bus.makefile():
     event = json.loads(line)
@@ -147,6 +147,53 @@ with subprocess.Popen(command, stdout=subprocess.PIPE) as capture:
 @unittest.skipUnless(IMAGE.exists(), "no image: run lab/build.sh first")
 @unittest.skipUnless(shutil.which("say") and shutil.which("ffmpeg"), "needs macOS say and ffmpeg")
 class Audio(AudioHarness):
+    def test_restarted_voice_keeps_guest_transcripts_private_with_debug_enabled(self):
+        self.start_audio()
+        # The lab bus supplies only the exact privacy command. The canary
+        # below still enters through the restarted Voice's ALSA input.
+        self.vm.put("/run/enter-audio-guest.py", """\
+import json
+import socket
+
+with socket.socket(socket.AF_UNIX) as bus:
+    bus.connect('/run/being/bus.sock')
+    for event in ({'t': 'hello', 'name': 'audio-guest-fixture', 'sub': []}, {'t': 'hear.wake'},
+                  {'t': 'hear.speech_start'}, {'t': 'hear.final', 'text': 'Start guest mode'}):
+        bus.sendall((json.dumps(event) + '\\n').encode())
+""")
+        mark = len(self.events())
+        self.sh("python3 /run/enter-audio-guest.py")
+        self.event("app.privacy", after=mark, guest=True)
+        self.event("say.done", after=mark, final=True)
+        self.key("m")
+        self.event("voice.mute", after=mark, on=True)
+
+        dropin = "/run/systemd/system/being-voice.service.d"
+        self.sh(f"mkdir -p {dropin}")
+        self.vm.put(f"{dropin}/privacy-fixture.conf", "[Service]\nEnvironment=BEING_VOICE_DEBUG=1\n")
+        old_pid = self.sh("systemctl show -p MainPID --value being-voice")
+        mark = len(self.events())
+        self.sh("systemctl daemon-reload && systemctl restart being-voice", timeout=60)
+        self.event("organ.up", after=mark, name="voice")
+        self.event("app.privacy", after=mark, guest=True)
+        pid = self.sh("systemctl show -p MainPID --value being-voice")
+        self.assertRegex(pid, r"^[1-9][0-9]*$")
+        self.assertNotEqual(pid, old_pid)
+        journal = f"journalctl -b -u being-voice _PID={pid} --no-pager -o cat"
+        self.wait(journal, lambda output: "transcript text in the log on" in output)
+        self.sh("! pidof arecord")
+
+        self.key("m")
+        self.event("voice.mute", after=mark, on=False)
+        self.wait("pidof arecord", bool)
+        self.play("pip")
+        self.event("state.changed", after=mark, state="attending")
+        self.play("time")
+        self.event("hear.final", after=mark, text="what time is it")
+        self.wait(journal, lambda output: "final transcript of" in output)
+        self.assertNotIn("what time is it", self.sh(journal).lower())
+        self.assertNotIn("what time is it", self.sh("journalctl -b --no-pager -o cat").lower())
+
     def test_pip_hears_decodes_speaks_and_honors_keyboard_controls(self):
         self.start_audio()
         self.play("time")

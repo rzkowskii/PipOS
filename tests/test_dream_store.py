@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from mind.dream_store import DreamStore, MAX_BATCH_ROWS, MAX_NIGHT_BATCHES, journal
 from mind.memory import Memory
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 
 OWNER = "Richard"

@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from . import clock_epoch
 from .keys import MENU_KEYS
-from .network_policy import INTERNET, load_policy
+from .policy import announcement_policy, web_lookup_ready
 from .reminder_language import spoken_rule
 from .reminders import Reminders
 from .storage import atomic_write
@@ -407,14 +407,7 @@ class Skills:
         self._reminders = None
 
     def _web_lookups_permitted(self):
-        policy = load_policy(self.path.parent)
-        if not policy.permits_web_lookup:
-            return False
-        if self.path.parent == Path("/mind"):
-            from .network_enforce import runtime_state
-
-            return policy.effective_mode == INTERNET and runtime_state()["mode"] == INTERNET
-        return True
+        return web_lookup_ready(self.path.parent)
 
     @property
     def reminders(self):
@@ -484,6 +477,9 @@ class Skills:
         if kind == "date_tomorrow":
             tomorrow = self.now().date() + timedelta(days=1)
             return f"Tomorrow is {speakable_date(tomorrow)}."
+        if kind in ("reminders_today", "reminders_tomorrow"):
+            trusted = (not self.clock_doubted()) if clock_trusted is None else clock_trusted
+            return self._day_reminders(0 if kind.endswith("today") else 1, trusted)
         if kind in ("skills", "skills_more", "skills_group"):
             return help_reply(kind, arg)
         if kind in ("world_time", "time_difference"):
@@ -621,9 +617,7 @@ class Skills:
 
     def _delivery_note(self, due_at, kind="reminder"):
         """Say at creation if the item will not be spoken when it is due."""
-        from .initiative import load_policy as load_initiative
-
-        policy = load_initiative(self.path.parent)
+        policy = announcement_policy(self.path.parent)
         if kind == "alarm":
             return " Leave my lid open so I can ring."
         if not policy.reminders:
@@ -639,6 +633,26 @@ class Skills:
             hour, minute = (int(part) for part in entry.at_local.split(":"))
             return f"{spoken_rule(entry.rule)} at {speakable_time(hour, minute)}"
         return self._due_description(entry.due_at)
+
+    def _day_reminders(self, offset, clock_trusted):
+        """Read one local day's pending reminders without changing their state."""
+        label = "today" if offset == 0 else "tomorrow"
+        if not clock_trusted:
+            return f"I'm not sure of the date right now, so I can't read {label}'s reminders. Tell me the time first."
+        now = self.now()
+        day = now.date() + timedelta(days=offset)
+        start = datetime.combine(day, datetime.min.time(), tzinfo=now.tzinfo)
+        end = datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=now.tzinfo)
+        entries = self.reminders.between(start.timestamp(), end.timestamp(), kinds=("reminder",), limit=6)
+        if not entries:
+            return f"You have no pending reminders for {label}."
+        parts = []
+        for entry in entries[:5]:
+            due = datetime.fromtimestamp(entry.due_at, self.zone)
+            parts.append(f"Reminder {entry.id}, {_task(entry.text)}, {speakable_time(due.hour, due.minute)}.")
+        if len(entries) > 5:
+            parts.append("There are more pending.")
+        return " ".join(parts)
 
     def _reminder_reply(self, request, *, clock_trusted=True):
         if request.kind == "clarify":
@@ -705,6 +719,17 @@ class Skills:
         if entry_id is not None and self.reminders.cancel(entry_id, kind=kind):
             return f"Cancelled {kind or 'reminder'} {entry_id}."
         return f"I couldn't find that pending {kind or 'reminder'}."
+
+    def create_recipe_alarm(self, request, *, clock_trusted=True):
+        """Synchronously insert one already-resolved recipe alarm.
+
+        Turn uses this while holding the phrase-habit row lock, so this helper
+        must never await or reinterpret the pinned due instant.
+        """
+        if (request is None or request.kind != "alarm" or request.relative
+                or request.rule is not None or request.due_at is None):
+            raise ValueError("recipe alarm must be one resolved non-repeating instant")
+        return self._reminder_reply(request, clock_trusted=clock_trusted)
 
     def _targets(self, task, kind):
         """The entries a spoken cancel means: an exact task, then its words ("the reminder about Mum")."""

@@ -139,35 +139,159 @@ impl Pose {
     }
 }
 
-/// Every expression the face knows, in display order.
-pub const NAMES: &[&str] = &[
-    "neutral",
-    "attentive",
-    "listening",
-    "thinking",
-    "speaking",
-    "joy",
-    "curiosity",
-    "surprise",
-    "skepticism",
-    "concern",
-    "sleepy",
-    "asleep",
-    "dreaming",
-    "tired",
-    "muted",
-    "dazed",
-];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kick {
+    None,
+    Startle,
+    Laugh,
+    Flinch,
+    Relief,
+}
 
-/// Looks the face uses on its own that are not expressions the brainstem
-/// can ask for (so they are not in NAMES, `--list` or the demo).
-#[cfg_attr(not(test), allow(dead_code))]
-pub const OWN: &[&str] = &["loading"];
+#[derive(Clone, Copy)]
+pub struct Motion {
+    pub gaze: [f32; 2],
+    pub roll: f32,
+    pub blink_interval: f32,
+    pub breath: f32,
+    pub kick: Kick,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Brow {
+    pub y: f32,
+    pub dx: f32,
+    pub len: f32,
+    pub tilt: f32,
+    pub curve: f32,
+    pub th: f32,
+    pub alpha: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Mouth {
+    pub x: f32,
+    pub w: f32,
+    pub y: f32,
+    pub corner: f32,
+    pub skew: f32,
+    pub arc: f32,
+    pub open: f32,
+    pub round: f32,
+    pub cat: f32,
+    pub wave: f32,
+    pub zig: f32,
+    pub tongue: f32,
+    pub low: f32,
+    pub alpha: f32,
+    pub talk: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EyeDetails {
+    pub heart: f32,
+    pub cross: f32,
+    pub spiral: f32,
+    pub star: f32,
+    pub pupil: f32,
+    pub shine: f32,
+    pub wet: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct VisualKick {
+    pub pop: f32,
+    pub recoil: f32,
+    pub roll: f32,
+    pub burst: f32,
+    pub pupil: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MoodTint {
+    pub amount: f32,
+    pub colour: [f32; 3],
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Visual {
+    eyes: [f32; M],
+    pub brows: [Brow; 2],
+    pub mouth: Mouth,
+    /// The order of Face Lab's FX_KEYS, checked against the exported schema at build time.
+    pub effects: [f32; 26],
+    pub details: EyeDetails,
+    pub kick: VisualKick,
+    pub tint: MoodTint,
+}
+
+struct Expression {
+    name: &'static str,
+    eyes: [f32; M],
+    lively: bool,
+    damping: f32,
+    audition: bool,
+    concept_only: bool,
+    motion: Motion,
+    visual: Visual,
+}
+
+// Built from the native expressions and the exported Face Lab catalogue.
+include!(concat!(env!("OUT_DIR"), "/expressions.rs"));
+
+impl ExprId {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|id| id.name() == name)
+    }
+
+    pub fn name(self) -> &'static str {
+        EXPRESSIONS[self as usize].name
+    }
+
+    pub fn pose(self) -> Pose {
+        Pose::from_array(&EXPRESSIONS[self as usize].eyes)
+    }
+
+    pub fn concept_pose(self) -> Pose {
+        Pose::from_array(&self.visual().eyes)
+    }
+
+    pub fn lively(self) -> bool {
+        EXPRESSIONS[self as usize].lively
+    }
+
+    pub fn damping(self) -> f32 {
+        EXPRESSIONS[self as usize].damping
+    }
+
+    pub fn is_audition(self) -> bool {
+        EXPRESSIONS[self as usize].audition
+    }
+
+    pub fn is_concept_only(self) -> bool {
+        EXPRESSIONS[self as usize].concept_only
+    }
+
+    pub fn motion(self) -> Motion {
+        EXPRESSIONS[self as usize].motion
+    }
+
+    pub fn visual(self) -> &'static Visual {
+        &EXPRESSIONS[self as usize].visual
+    }
+}
 
 /// The six from the original expression sheet, in its order.
 pub const SHEET: &[&str] = &["joy", "curiosity", "surprise", "skepticism", "concern", "sleepy"];
 
+#[cfg(test)]
 pub fn preset(name: &str) -> Option<Pose> {
+    ExprId::from_name(name).map(ExprId::pose)
+}
+
+// Keep the previous renderer's source as the golden during the migration.
+#[cfg(test)]
+fn legacy_preset(name: &str) -> Option<Pose> {
     let o = Eye::OPEN;
     let rest = rest();
     Some(match name {
@@ -221,6 +345,7 @@ pub fn preset(name: &str) -> Option<Pose> {
 /// in its own frame the two lids are near-tangent parabolas that pinch only
 /// the inner half, which is what turns the ellipse into an egg. It sits where
 /// Eye::OPEN does, so eyes closing from or opening to OPEN do not slide.
+#[cfg(test)]
 fn rest() -> Eye {
     Eye {
         x: -0.80,
@@ -244,18 +369,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_name_has_a_preset() {
-        for name in NAMES.iter().chain(SHEET).chain(OWN) {
-            assert!(preset(name).is_some(), "missing preset: {name}");
+    fn the_existing_expressions_keep_every_channel_and_their_public_order() {
+        let public = ["neutral", "attentive", "listening", "thinking", "speaking", "joy", "curiosity",
+                      "surprise", "skepticism", "concern", "sleepy", "asleep", "dreaming", "tired", "muted", "dazed"];
+        assert!(ExprId::PUBLIC.iter().map(|id| id.name()).eq(public));
+        let legacy: Vec<_> = public.into_iter().chain(["loading"]).collect();
+        assert!(ExprId::ALL.iter().take(legacy.len()).map(|id| id.name()).eq(legacy.iter().copied()));
+        for name in legacy {
+            let id = ExprId::from_name(name).unwrap();
+            let old = legacy_preset(id.name()).unwrap();
+            assert_eq!(id.pose().to_array().map(f32::to_bits), old.to_array().map(f32::to_bits),
+                       "{}", id.name());
         }
+        assert!(SHEET.iter().all(|name| preset(name).is_some()));
         assert!(preset("nonsense").is_none());
+    }
+
+    #[test]
+    fn the_audition_catalogue_keeps_its_tuned_poses_before_the_concept_poses() {
+        let names = ["sad", "laugh", "love", "embarrassed", "scared", "annoyed", "smug",
+                     "confused", "wink", "bored", "relieved"];
+        let (tuned, concepts) = ExprId::AUDITIONS.split_at(names.len());
+        assert!(tuned.iter().map(|id| id.name()).eq(names));
+        assert!(tuned.iter().all(|id| !id.is_concept_only()));
+        assert!(concepts.iter().all(|id| id.is_concept_only()));
+        assert_eq!(concepts.len(), 63);
+        for &id in ExprId::AUDITIONS {
+            assert!(id.is_audition() && !ExprId::PUBLIC.contains(&id));
+            assert_eq!(ExprId::from_name(id.name()), Some(id));
+            let pose = id.pose();
+            assert_eq!(Pose::from_array(&pose.to_array()), pose);
+            assert_eq!(pose.l.mirror().mirror(), pose.l);
+            assert_eq!(pose.r.mirror().mirror(), pose.r);
+        }
+    }
+
+    #[test]
+    fn visuals_keep_authored_asymmetry_speech_shapes_and_entrance_values() {
+        let thinking = ExprId::Thinking.visual();
+        assert_eq!(thinking.brows[1].y - thinking.brows[0].y, 0.8_f32 - 0.6);
+        assert_eq!(thinking.effects[12], 1.0);
+        assert_eq!(ExprId::Surprise.visual().kick.burst, 1.0);
+        assert_eq!(ExprId::PScan.visual().effects[21], 1.0);
+        assert_eq!(ExprId::Speaking.visual().mouth.talk, 1.0);
     }
 
     #[test]
     fn presets_stay_on_screen() {
         // A 16:10 screen spans x in [-1.6, 1.6] and y in [-1, 1].
-        for name in NAMES.iter().chain(OWN) {
-            let p = preset(name).unwrap();
+        for &id in ExprId::ALL {
+            let name = id.name();
+            let p = id.pose();
             for e in [p.l, p.r] {
                 assert!(e.x.abs() + e.w < 1.5, "{name} too wide");
                 assert!(e.y.abs() + e.h < 0.9, "{name} too tall");

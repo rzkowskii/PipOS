@@ -20,8 +20,8 @@ case "${BEING_TRY_SCREEN:-0}" in
     1) screen_option=being.screen=1; output_name=beingos-try-screen.img ;;
     *) echo "BEING_TRY_SCREEN must be 0 or 1" >&2; exit 2 ;;
 esac
-# BEING_TRY_BENCH=1: a bench stick. Every entry boots with being.bench=1
-# (being-bench.service), and the models partition also carries the quant
+# BEING_TRY_BENCH=1: a bench stick. Other than the read-only bench+ entry,
+# each entry boots with being.bench=1, and the models partition carries the quant
 # candidates in out/models/bench as the signed bench pack (/models/bench).
 bench_option=
 case "${BEING_TRY_BENCH:-0}" in
@@ -51,6 +51,23 @@ case "${BEING_TRY_CABLE:-0}" in
         cable_option="being.cable=1 being.voice_debug=1"
         ;;
     *) echo "BEING_TRY_CABLE must be 0 or 1" >&2; exit 2 ;;
+esac
+# BEING_TRY_DIAGNOSTIC=1 names and validates the isolated WP-C8 rootfs. It is
+# a laptop Try image with no installer; normal and cable media refuse it.
+diagnostic=
+case "${BEING_TRY_DIAGNOSTIC:-0}" in
+    0) ;;
+    1)
+        [ "$BEINGOS_VARIANT" = laptop ] || {
+            echo "BEING_TRY_DIAGNOSTIC=1 needs BEING_TRY_LAPTOP=1" >&2; exit 2;
+        }
+        [ -z "$cable_option" ] || {
+            echo "diagnostic and cable Try images are separate" >&2; exit 2;
+        }
+        diagnostic=1
+        output_name=beingos-laptop-diagnostic-try.img
+        ;;
+    *) echo "BEING_TRY_DIAGNOSTIC must be 0 or 1" >&2; exit 2 ;;
 esac
 try_options=$(printf '%s ' $screen_option $bench_option $cable_option)
 try_options=${try_options% }
@@ -85,6 +102,14 @@ elif [ -n "$cable_option" ]; then
     echo "BEING_TRY_CABLE=1, but this rootfs has no cable development link" >&2
     exit 1
 fi
+if grep -qx 'squashfs-root/usr/share/being/diagnostic' "$stage/rootfs-listing"; then
+    [ -n "$diagnostic" ] || {
+        echo "This rootfs is diagnostic-only: build it with BEING_LAPTOP_DIAGNOSTIC=1" >&2; exit 1;
+    }
+elif [ -n "$diagnostic" ]; then
+    echo "BEING_TRY_DIAGNOSTIC=1, but this rootfs is not diagnostic-only" >&2
+    exit 1
+fi
 rm -f "$stage/rootfs-listing"
 
 read -r disk_uuid < /proc/sys/kernel/random/uuid
@@ -96,7 +121,8 @@ read -r logs_uuid < /proc/sys/kernel/random/uuid
 insert_ids() {
     sed -e "s/TRY_DISK_UUID/$disk_uuid/g" -e "s/TRY_ESP_UUID/$esp_uuid/g" \
         -e "s/TRY_ROOT_UUID/$root_uuid/g" -e "s/TRY_MODELS_UUID/$models_uuid/g" \
-        -e "s/TRY_LOGS_UUID/$logs_uuid/g" -e "s/TRY_SCREEN/$try_options/g" "$1"
+        -e "s/TRY_LOGS_UUID/$logs_uuid/g" -e "s/TRY_SCREEN/$try_options/g" \
+        -e '/being[.]bench=2/s/ being[.]bench=1//g' "$1"
 }
 
 # Laptop Try media carries a FAT32 PIPLOGS partition for first-boot

@@ -1,7 +1,7 @@
 //! Drawing: the eye shader on one triangle, and a textured quad for the
 //! workshop panel and the text overlays.
 
-use crate::panel::Rect;
+use crate::{emote, panel::Rect};
 use glow::HasContext;
 
 const VERT: &str = include_str!("eye.vert");
@@ -70,6 +70,10 @@ pub struct Look {
     /// How far the bloom reaches, in screen units (the screen is 2 high).
     pub glow_r: f32,
     pub marks: Marks,
+    pub decor: crate::decor::Decor,
+    pub emotes: emote::Sprites,
+    pub accent_emotes: bool,
+    pub glitch: [f32; 4],
 }
 
 impl Default for Look {
@@ -81,6 +85,10 @@ impl Default for Look {
             grid: 0.16,
             glow_r: 0.22,
             marks: Marks::default(),
+            decor: crate::decor::Decor::default(),
+            emotes: emote::Sprites::default(),
+            accent_emotes: false,
+            glitch: [0.0; 4],
         }
     }
 }
@@ -219,10 +227,18 @@ pub unsafe fn capture(
     Ok(out)
 }
 
-pub struct Renderer {
-    canvas: Option<Canvas>,
+struct EmoteProgram {
     program: glow::Program,
-    vao: glow::VertexArray,
+    res: Option<glow::UniformLocation>,
+    sprites: Option<glow::UniformLocation>,
+    fill: Option<glow::UniformLocation>,
+    core: Option<glow::UniformLocation>,
+    halo: Option<glow::UniformLocation>,
+    accent: Option<glow::UniformLocation>,
+}
+
+struct EyeProgram {
+    program: glow::Program,
     u_res: Option<glow::UniformLocation>,
     u_origin: Option<glow::UniformLocation>,
     u_e: Option<glow::UniformLocation>,
@@ -233,6 +249,16 @@ pub struct Renderer {
     u_pitch: Option<glow::UniformLocation>,
     u_glow_r: Option<glow::UniformLocation>,
     u_marks: Option<glow::UniformLocation>,
+    u_decor: Option<glow::UniformLocation>,
+    u_glitch: Option<glow::UniformLocation>,
+}
+
+pub struct Renderer {
+    canvas: Option<Canvas>,
+    emote: Option<EmoteProgram>,
+    eye: EyeProgram,
+    decorated: Option<EyeProgram>,
+    vao: glow::VertexArray,
     quad: glow::Program,
     u_rect: Option<glow::UniformLocation>,
     u_tex: Option<glow::UniformLocation>,
@@ -281,38 +307,88 @@ pub fn clip(rect: Rect, w: i32, h: i32) -> [f32; 4] {
     ]
 }
 
+fn shader_header(gl: &glow::Context) -> &'static str {
+    if gl.version().is_embedded {
+        "#version 300 es\nprecision highp float;\nprecision highp int;\n"
+    } else {
+        "#version 330 core\n"
+    }
+}
+
+impl EyeProgram {
+    unsafe fn new(gl: &glow::Context, decorated: bool) -> Result<Self, String> {
+        let header = shader_header(gl);
+        let program = if decorated {
+            let header = format!("{header}#define FACE_DECOR\n");
+            program(gl, &header, VERT, FRAG)?
+        } else {
+            program(gl, header, VERT, FRAG)?
+        };
+        let loc = |name: &str| gl.get_uniform_location(program, name);
+        Ok(Self {
+            program,
+            u_res: loc("uRes"),
+            u_origin: loc("uOrigin"),
+            u_e: loc("uE"),
+            u_fill: loc("uFill"),
+            u_core: loc("uCore"),
+            u_halo: loc("uHalo"),
+            u_grid: loc("uGrid"),
+            u_pitch: loc("uPitch"),
+            u_glow_r: loc("uGlowR"),
+            u_marks: loc("uMarks"),
+            u_decor: loc("uDecor[0]"),
+            u_glitch: loc("uGlitch"),
+        })
+    }
+}
+
 impl Renderer {
     /// # Safety
     /// Needs a current GL context of at least OpenGL 3.3 or GLES 3.0.
     pub unsafe fn new(gl: &glow::Context) -> Result<Renderer, String> {
-        let header = if gl.version().is_embedded {
-            "#version 300 es\nprecision highp float;\nprecision highp int;\n"
-        } else {
-            "#version 330 core\n"
-        };
-        let eyes = program(gl, header, VERT, FRAG)?;
+        let header = shader_header(gl);
+        let eye = EyeProgram::new(gl, false)?;
         let quad = program(gl, header, QUAD_VERT, QUAD_FRAG)?;
         let vao = gl.create_vertex_array()?;
         let loc = |program, name: &str| gl.get_uniform_location(program, name);
         Ok(Renderer {
             canvas: None,
-            program: eyes,
+            emote: None,
+            eye,
+            decorated: None,
             vao,
-            u_res: loc(eyes, "uRes"),
-            u_origin: loc(eyes, "uOrigin"),
-            u_e: loc(eyes, "uE"),
-            u_fill: loc(eyes, "uFill"),
-            u_core: loc(eyes, "uCore"),
-            u_halo: loc(eyes, "uHalo"),
-            u_grid: loc(eyes, "uGrid"),
-            u_pitch: loc(eyes, "uPitch"),
-            u_glow_r: loc(eyes, "uGlowR"),
-            u_marks: loc(eyes, "uMarks"),
             quad,
             u_rect: loc(quad, "uRect"),
             u_tex: loc(quad, "uTex"),
             u_alpha: loc(quad, "uAlpha"),
         })
+    }
+
+    /// Keep the eyes-only startup path on the small base shader.
+    pub unsafe fn enable_decor(&mut self, gl: &glow::Context) -> Result<(), String> {
+        if self.decorated.is_none() {
+            self.decorated = Some(EyeProgram::new(gl, true)?);
+        }
+        Ok(())
+    }
+
+    /// Compile the optional sprite pass when effects are requested.
+    pub unsafe fn enable_emotes(&mut self, gl: &glow::Context) -> Result<(), String> {
+        if self.emote.is_some() {
+            return Ok(());
+        }
+        let program = program(gl, shader_header(gl), emote::VERT, emote::FRAG)?;
+        self.emote = Some(EmoteProgram {
+            program,
+            res: gl.get_uniform_location(program, "uRes"),
+            sprites: gl.get_uniform_location(program, "uSprites[0]"),
+            fill: gl.get_uniform_location(program, "uFill"),
+            core: gl.get_uniform_location(program, "uCore"),
+            halo: gl.get_uniform_location(program, "uHalo"),
+            accent: gl.get_uniform_location(program, "uAccentEmotes"),
+        });
+        Ok(())
     }
 
     /// Draw the eyes into `rect` of whatever framebuffer is bound.
@@ -321,22 +397,42 @@ impl Renderer {
     /// Needs the GL context this renderer was made with to be current.
     pub unsafe fn draw_in(&self, gl: &glow::Context, rect: Rect, eyes: &[f32; 32], look: &Look) {
         let Rect { x, y, w, h } = rect;
+        let decorated = self.decorated.as_ref().filter(|_| look.decor.active() || look.glitch[3] > 0.0);
+        let eye = decorated.unwrap_or(&self.eye);
         gl.viewport(x, y, w, h);
-        gl.use_program(Some(self.program));
+        gl.use_program(Some(eye.program));
         gl.bind_vertex_array(Some(self.vao));
-        gl.uniform_2_f32(self.u_res.as_ref(), w as f32, h as f32);
-        gl.uniform_2_f32(self.u_origin.as_ref(), x as f32, y as f32);
-        gl.uniform_4_f32_slice(self.u_e.as_ref(), eyes);
-        for (at, c) in [(&self.u_fill, look.fill), (&self.u_core, look.core), (&self.u_halo, look.halo)] {
+        gl.uniform_2_f32(eye.u_res.as_ref(), w as f32, h as f32);
+        gl.uniform_2_f32(eye.u_origin.as_ref(), x as f32, y as f32);
+        gl.uniform_4_f32_slice(eye.u_e.as_ref(), eyes);
+        for (at, c) in [(&eye.u_fill, look.fill), (&eye.u_core, look.core), (&eye.u_halo, look.halo)] {
             let [r, g, b] = linear(c);
             gl.uniform_3_f32(at.as_ref(), r, g, b);
         }
         let (pitch, depth) = grid(h, look.grid);
-        gl.uniform_1_f32(self.u_grid.as_ref(), depth);
-        gl.uniform_1_f32(self.u_pitch.as_ref(), pitch);
-        gl.uniform_1_f32(self.u_glow_r.as_ref(), look.glow_r);
-        gl.uniform_4_f32_slice(self.u_marks.as_ref(), &look.marks.uniforms());
+        gl.uniform_1_f32(eye.u_grid.as_ref(), depth);
+        gl.uniform_1_f32(eye.u_pitch.as_ref(), pitch);
+        gl.uniform_1_f32(eye.u_glow_r.as_ref(), look.glow_r);
+        gl.uniform_4_f32_slice(eye.u_marks.as_ref(), &look.marks.uniforms());
+        if decorated.is_some() {
+            gl.uniform_4_f32_slice(eye.u_decor.as_ref(), look.decor.uniforms());
+            gl.uniform_4_f32_slice(eye.u_glitch.as_ref(), &look.glitch);
+        }
         gl.draw_arrays(glow::TRIANGLES, 0, 3);
+        if let Some(emote) = self.emote.as_ref().filter(|_| look.emotes.len() > 0) {
+            gl.use_program(Some(emote.program));
+            gl.uniform_2_f32(emote.res.as_ref(), w as f32, h as f32);
+            gl.uniform_4_f32_slice(emote.sprites.as_ref(), look.emotes.uniforms());
+            gl.uniform_1_f32(emote.accent.as_ref(), if look.accent_emotes { 1.0 } else { 0.0 });
+            for (location, color) in [(&emote.fill, look.fill), (&emote.core, look.core), (&emote.halo, look.halo)] {
+                let [r, g, b] = linear(color);
+                gl.uniform_3_f32(location.as_ref(), r, g, b);
+            }
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+            gl.draw_arrays_instanced(glow::TRIANGLES, 0, 6, look.emotes.len());
+            gl.disable(glow::BLEND);
+        }
     }
 
     /// Draw into whatever framebuffer is bound, `w` by `h` pixels.

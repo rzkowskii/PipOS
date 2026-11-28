@@ -12,6 +12,7 @@ from mind.cortex import CONVERSATION_SLOT, IDENTITY_SLOT, Cortex
 
 ROOT = Path(__file__).resolve().parent.parent
 SERVICE = ROOT / "os/package/cortex/being-cortex.service"
+DREAM_SERVICE = SERVICE.with_name("being-dream-cortex.service")
 RECIPE = ROOT / "os/package/cortex/cortex.mk"
 TEMPLATE = ROOT / "config/chat-template.jinja"
 GGUF = ROOT / "out/models/reflex.gguf"
@@ -56,16 +57,42 @@ class CortexUnit(unittest.TestCase):
         self.assertEqual(flag(argv, "--host"), "127.0.0.1")
         for kept in ("--cache-ram", "--no-cache-idle-slots", "--reasoning-budget", "--slot-save-path", "--no-webui"):
             self.assertIn(kept, argv)
-        self.assertNotIn("--mlock", argv, "mlock is a switch in the environment, off by default")
+        self.assertNotIn("--mlock", argv, "this llama-server has no --mlock; the load mode is in the environment")
+        # Two generation and two prompt threads: more were only 1-3% faster at
+        # idle and collapsed beside Piper (DEEP-DIVE item 20).
+        self.assertEqual((flag(argv, "--threads"), flag(argv, "--threads-batch")),
+                         ("${BEING_CORTEX_THREADS}", "${BEING_CORTEX_PROMPT_THREADS}"))
+        self.assertEqual((environment()["BEING_CORTEX_THREADS"], environment()["BEING_CORTEX_PROMPT_THREADS"]),
+                         ("2", "2"))
 
-    def test_batches_weight_and_mlock_switch(self):
+    def test_batches_attention_weight_and_load_mode(self):
         env = environment()
-        self.assertEqual((env["LLAMA_ARG_BATCH"], env["LLAMA_ARG_UBATCH"]), ("512", "512"))
-        self.assertEqual(env["LLAMA_ARG_MLOCK"], "0")
+        # Measured on the MacBookPro9,2: 64/7 removes the 0.65 s fixed prompt
+        # cost and releases a cancelled slot in about 1.9 s; flash attention
+        # off decodes faster at depth.
+        self.assertEqual((env["LLAMA_ARG_BATCH"], env["LLAMA_ARG_UBATCH"]), ("64", "7"))
+        self.assertEqual(env["LLAMA_ARG_FLASH_ATTN"], "off")
+        self.assertEqual(env["LLAMA_ARG_LOAD_MODE"], "mmap")
+        self.assertNotIn("LLAMA_ARG_MLOCK", env, "not an option of the packaged llama-server")
         self.assertEqual(env["LLAMA_ARG_CTX_CHECKPOINTS"], "6")
         self.assertEqual(values("CPUWeight"), ["100"])
         self.assertEqual(values("LimitMEMLOCK"), ["infinity"])
         self.assertIn("CAP_IPC_LOCK", values("CapabilityBoundingSet")[0])
+        self.assertEqual(values("OOMScoreAdjust"), ["300"])
+
+    def test_oom_prefers_the_optional_dream_worker(self):
+        (conversation_score,) = values("OOMScoreAdjust")
+        (dream_score,) = values("OOMScoreAdjust", DREAM_SERVICE)
+        self.assertGreater(int(dream_score), int(conversation_score))
+
+    def test_both_model_servers_allow_same_origin_requests_only(self):
+        for path in (SERVICE, DREAM_SERVICE):
+            self.assertEqual(environment(path)["LLAMA_ARG_CORS_ORIGINS"], "localhost", path.name)
+
+    def test_the_cancel_comment_is_the_laptop_measurement(self):
+        text = SERVICE.read_text()
+        self.assertNotIn("7.3 s to 1.75 s", text)
+        self.assertIn("1.8-1.9 s", text)
 
     def test_chat_template_file_is_installed_where_the_unit_reads_it(self):
         path = environment()["LLAMA_ARG_CHAT_TEMPLATE_FILE"]

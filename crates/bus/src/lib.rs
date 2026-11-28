@@ -1,6 +1,8 @@
 //! The being's nervous system: one JSON object per line over a Unix socket.
 //! See docs/PROTOCOL.md for the topics.
 
+pub mod body_drives;
+pub mod body_map;
 pub mod notify;
 
 use serde_json::{Map, Value};
@@ -14,6 +16,24 @@ use std::time::{Duration, Instant};
 
 /// Longest line either end of the bus accepts. Longer lines are dropped whole.
 pub const MAX_LINE: usize = 64 * 1024;
+
+/// Same-boot timestamp for events exchanged between Linux processes.
+#[cfg(target_os = "linux")]
+pub fn monotonic_millis() -> Option<u64> {
+    let mut value = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: the writable timespec remains valid for this clock call.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) } != 0 {
+        return None;
+    }
+    let seconds = u64::try_from(value.tv_sec).ok()?;
+    let millis = u64::try_from(value.tv_nsec).ok()? / 1_000_000;
+    seconds.checked_mul(1_000)?.checked_add(millis)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn monotonic_millis() -> Option<u64> {
+    None
+}
 
 /// What one capped read found.
 #[derive(Debug, PartialEq, Eq)]

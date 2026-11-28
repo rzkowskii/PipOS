@@ -1,0 +1,43 @@
+[Unit]
+Description=Being: health watch (restarts an installed Pip whose brainstem or face cannot come back)
+# The organs' own watchdogs restart a stuck loop; the system watchdog catches
+# a stuck PID 1. This catches what is left: an organ systemd cannot bring
+# back, such as a process stuck in the kernel that outlives SIGKILL. On Try
+# and verbose boots it only logs. See /usr/libexec/being/being-health-watch.
+DefaultDependencies=no
+After=being-brainstem.service being-face.service
+# Restarted for as long as it takes, like the organs it watches.
+StartLimitIntervalSec=0
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+ExecStart=/usr/libexec/being/being-health-watch
+Restart=always
+RestartSec=10s
+# Its findings (<unit>.good, <unit>.stuck) live here, kept across its own
+# restarts so a restart does not reset how long an organ has been down.
+RuntimeDirectory=being-health
+RuntimeDirectoryPreserve=yes
+# It reads unit states from systemd and /proc, and asks systemd to reboot.
+# Nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+MemoryMax=16M
+
+[Install]
+WantedBy=sysinit.target

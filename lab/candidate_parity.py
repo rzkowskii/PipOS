@@ -25,39 +25,70 @@ from pathlib import Path
 
 KIND = "pipos-rootfs-listing-v1"
 
+# Buildroot's executable symlinks are /bin -> usr/bin, /sbin -> usr/sbin,
+# and /usr/sbin -> bin. The pathname in the report stays as recorded.
+ALIASES = {
+    "bin": "usr/bin",
+    "sbin": "usr/bin",
+    "usr/sbin": "usr/bin",
+    "lib": "usr/lib",
+    "lib64": "usr/lib",
+    "usr/lib64": "usr/lib",
+}
+LAB_BODY = (
+    "usr/lib/being/sim", "usr/lib/being/sim/*",
+    "usr/lib/systemd/system/being-lab-body.service", "etc/systemd/system/*being-lab-body.service",
+)
+LAB_ACCESS = (
+    "usr/bin/being-lab-access", "usr/lib/systemd/system/being-lab-*", "etc/systemd/system/*being-lab-*",
+)
+OPENSSH = (
+    *(f"usr/bin/{binary}" for binary in
+      ("scp", "sftp", "ssh", "ssh-add", "ssh-agent", "ssh-keygen", "ssh-keyscan", "ssh-pkcs11-helper", "sshd")),
+    *(f"usr/libexec/{binary}" for binary in
+      ("sftp-server", "ssh-keysign", "ssh-pkcs11-helper", "ssh-sk-helper", "sshd-auth", "sshd-session")),
+    # systemd installs its own shared ssh_config.d proxy entry even without
+    # the OpenSSH package. Keep that directory and proxy under normal parity.
+    "etc/ssh/moduli", "etc/ssh/ssh_config", "etc/ssh/sshd_config",
+    "etc/ssh/sshd_config.d", "etc/ssh/sshd_config.d/*", "etc/ssh/ssh_host_*",
+    "usr/lib/systemd/system/sshd*", "etc/systemd/system/*.wants/sshd*",
+)
+CABLE = (
+    "usr/share/being/cable", "usr/share/being/cable/*",
+    "usr/lib/systemd/system/being-cable-*", "etc/systemd/system/*being-cable-*",
+)
+LAB_LOGIN = (
+    "etc/systemd/system/getty.target.wants", "etc/systemd/system/getty.target.wants/*",
+    "usr/lib/systemd/system/getty@.service.d/buildroot-console.conf",
+    "usr/lib/systemd/system/serial-getty@.service.d/buildroot-console.conf",
+)
+
 # (pattern, which side may have it: "lab", "laptop" or "both", reason).
 # "lab" means the path may exist only in the lab image; "both" means it exists
 # in both but its content may differ.
 ALLOWED = (
-    ("usr/lib/systemd/system/being-lab-*", "lab", "lab body and lab access units"),
-    ("etc/systemd/system/*.wants/being-lab-*", "lab", "lab unit enablement"),
-    ("usr/lib/being/sim/*", "lab", "the simulated lab body"),
-    ("usr/lib/being/sim", "lab", "the simulated lab body"),
-    ("usr/sbin/being-lab-access", "lab", "LAN maintenance access"),
-    ("usr/sbin/sshd", "lab", "OpenSSH server"),
-    ("usr/bin/ssh*", "lab", "OpenSSH tools"),
-    ("usr/libexec/ssh*", "lab", "OpenSSH helpers"),
-    ("usr/libexec/sftp-server", "lab", "OpenSSH helpers"),
-    ("etc/ssh", "lab", "OpenSSH configuration"),
-    ("etc/ssh/*", "lab", "OpenSSH configuration"),
-    ("usr/lib/systemd/system/sshd*", "lab", "OpenSSH units"),
-    ("etc/systemd/system/*.wants/sshd*", "lab", "OpenSSH enablement"),
-    ("etc/systemd/system/getty.target.wants/*", "lab", "login gettys"),
-    ("etc/systemd/system/getty.target.wants", "lab", "login gettys"),
-    ("usr/lib/systemd/system/serial-getty@*", "lab", "serial login"),
-    ("etc/systemd/system/serial-getty@*", "lab", "serial login"),
+    *((pattern, "lab", "the simulated lab body") for pattern in LAB_BODY),
+    *((pattern, "lab", "LAN maintenance access") for pattern in LAB_ACCESS),
+    *((pattern, "lab", "OpenSSH") for pattern in OPENSSH),
+    *((pattern, "lab", "lab login configuration") for pattern in LAB_LOGIN),
+    ("etc/systemd/system/autovt@.service", "laptop", "mask the laptop's login consoles"),
+    ("etc/systemd/system/console-getty.service", "laptop", "mask the laptop's login consoles"),
+    ("etc/systemd/system/container-getty@.service", "laptop", "mask the laptop's login consoles"),
+    ("etc/systemd/system/getty@.service", "laptop", "mask the laptop's login consoles"),
+    ("etc/systemd/system/serial-getty@.service", "laptop", "mask the laptop's login consoles"),
     ("etc/shadow", "both", "root is locked on the laptop"),
     ("etc/inittab", "both", "no consoles on the laptop"),
     ("boot/bzImage", "both", "the laptop kernel (linux-laptop.config)"),
     ("boot/*", "both", "the laptop kernel"),
-    ("lib/modules/*", "both", "laptop kernel modules"),
     ("usr/lib/modules/*", "both", "laptop kernel modules"),
+    ("usr/lib/modules-load.d/being-msr.conf", "laptop", "read-only CPU registers for laptop body care"),
     ("usr/lib/firmware/b43/*", "laptop", "owner-staged b43 firmware (laptop only)"),
     ("usr/lib/firmware/b43", "laptop", "owner-staged b43 firmware (laptop only)"),
-    ("lib/firmware/b43/*", "laptop", "owner-staged b43 firmware (laptop only)"),
-    ("lib/firmware/b43", "laptop", "owner-staged b43 firmware (laptop only)"),
     ("usr/share/being/variant", "both", "lab or laptop"),
     ("usr/share/being/installed-grub.cfg", "both", "no serial console on the laptop"),
+    ("usr/share/being/install/bootx64.efi", "both", "no serial module in the laptop bootloader"),
+    ("usr/share/being/installed-rauc.conf", "both", "separate laptop installed update channel"),
+    ("usr/share/being/update-trust", "both", "variant-specific update channel and certificate metadata"),
     ("etc/being/build-id", "both", "names the defconfig it was built from"),
     ("etc/rauc/system.conf", "both", "laptop RAUC compatible strings (plan 1.2)"),
     ("etc/rauc/*.pem", "both", "the laptop ships only the release certificate (plan 1.2)"),
@@ -84,13 +115,42 @@ def file_record(path):
 
 def listing(root):
     root = Path(root)
-    entries = {}
-    for directory, dirs, files in os.walk(root):
-        dirs.sort()
-        for name in sorted(dirs) + sorted(files):
-            path = Path(directory) / name
-            entries[path.relative_to(root).as_posix()] = file_record(path)
-    return {"kind": KIND, "entries": entries}
+    return {"kind": KIND, "entries": {path.relative_to(root).as_posix(): file_record(path)
+                                     for path in tree_paths(root)}}
+
+
+def canonical(path):
+    for prefix, destination in ALIASES.items():
+        if path.startswith(prefix + "/"):
+            return destination + path[len(prefix):]
+    return path
+
+
+def laptop_violations(paths, *, maintenance=False, cable=False):
+    rules = (
+        (LAB_BODY, "lab-only"),
+        (LAB_LOGIN, "lab-only"),
+        (() if maintenance else LAB_ACCESS, "lab-only"),
+        (() if maintenance or cable else OPENSSH, "lab-only"),
+        (() if cable else CABLE, "cable development"),
+    )
+    bad = {}
+    for path in sorted(paths):
+        name = canonical(path)
+        for patterns, reason in rules:
+            if any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns):
+                bad[path] = reason
+                break
+    return bad
+
+
+def tree_paths(root):
+    def fail(error):
+        raise error
+
+    for directory, dirs, files in os.walk(root, onerror=fail):
+        for name in dirs + files:
+            yield Path(directory) / name
 
 
 def rule_for(path, side):
@@ -100,8 +160,9 @@ def rule_for(path, side):
     or "both" (in both, with different content). A "both" rule also covers a
     path present on one side only (laptop kernel modules, for example).
     """
+    name = canonical(path)
     for pattern, allowed, reason in ALLOWED:
-        if fnmatch.fnmatchcase(path, pattern) and allowed in (side, "both"):
+        if fnmatch.fnmatchcase(name, pattern) and allowed in (side, "both"):
             return f"{pattern}: {reason}"
     return None
 
@@ -112,8 +173,14 @@ def compare(lab, laptop):
             raise ValueError("expected two rootfs listings from lab.candidate_parity listing")
     a, b = lab["entries"], laptop["entries"]
     explained, unexplained = [], []
+    forbidden = laptop_violations(b)
+    same = 0
     for path in sorted(a.keys() | b.keys()):
+        if path in forbidden:
+            unexplained.append({"path": path, "forbidden": forbidden[path]})
+            continue
         if a.get(path) == b.get(path):
+            same += 1
             continue
         side = "lab" if path not in b else "laptop" if path not in a else "both"
         rule = rule_for(path, side)
@@ -123,7 +190,7 @@ def compare(lab, laptop):
         else:
             unexplained.append(row)
     # A folder on one side only is fine when everything inside it is allowed.
-    for row in list(unexplained):
+    for row in reversed(unexplained.copy()):
         side = row.get("only_in")
         entries = a if side == "lab" else b if side == "laptop" else None
         if entries is None or entries[row["path"]].get("type") != "dir":
@@ -133,7 +200,6 @@ def compare(lab, laptop):
         if inside and all(other in explained for other in inside):
             unexplained.remove(row)
             explained.append(dict(row, rule="holds only allowed differences"))
-    same = sum(1 for path in a.keys() & b.keys() if a[path] == b[path])
     return {"kind": "pipos-rootfs-parity-v1", "same": same, "explained": explained,
             "unexplained": unexplained, "ok": not unexplained}
 
@@ -147,11 +213,25 @@ def main(argv=None):
     check.add_argument("lab", type=Path)
     check.add_argument("laptop", type=Path)
     check.add_argument("--output", type=Path)
+    target = commands.add_parser("laptop-check", help="find lab/cable paths in a laptop target before hashing")
+    target.add_argument("root", type=Path)
+    target.add_argument("--maintenance", action="store_true")
+    target.add_argument("--cable", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "listing":
         json.dump(listing(args.root), sys.stdout, sort_keys=True)
         sys.stdout.write("\n")
         return 0
+    if args.command == "laptop-check":
+        try:
+            paths = (path.relative_to(args.root).as_posix() for path in tree_paths(args.root))
+            bad = laptop_violations(paths, maintenance=args.maintenance, cable=args.cable)
+        except OSError as error:
+            print(f"Laptop target scan failed: {error}", file=sys.stderr)
+            return 1
+        for path, reason in bad.items():
+            print(f"Laptop image contains {reason} /{path}", file=sys.stderr)
+        return int(bool(bad))
     try:
         result = compare(json.loads(args.lab.read_text()), json.loads(args.laptop.read_text()))
     except (OSError, ValueError) as error:

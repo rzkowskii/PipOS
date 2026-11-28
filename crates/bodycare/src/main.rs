@@ -16,7 +16,7 @@ being-bodycare: one fail-safe owner of the charge limit, fan floor and CPU caps
   being-bodycare --charge-limit N   keep the battery at N% (60-100; 100 lifts the cap;
                                     or BEING_CHARGE_LIMIT). Unset: never touched
   being-bodycare --dream-target C   hold the package at C while dreaming (or
-                                    BEING_DREAM_TARGET_C; default 70)
+                                    BEING_DREAM_TARGET_C; default 80)
   being-bodycare --restore          put back every control it changed, but keep the
                                     owner's charge limit (systemd ExecStopPost)
   being-bodycare --restore --charge-limit-too
@@ -41,7 +41,10 @@ fn die(msg: &str) -> ! {
 /// Topics bodycare listens to. `mind.dreaming` (`active`) is sent by the mind
 /// while the dream cortex works.
 const SUBS: &[&str] = &["state.changed", "body.lid", "mind.dreaming", "organ.down"];
+/// One pass a second for the cheap readings (fan, package, adapter); the
+/// battery's own files are read far less often (`policy::battery_due`).
 const PERIOD: Duration = Duration::from_secs(1);
+const STOP_CHECK: Duration = Duration::from_millis(500);
 const REPORT_EVERY: f64 = 10.0;
 const RECONNECT: Duration = Duration::from_secs(2);
 /// With the bus gone this long, the being's state is unknown.
@@ -153,6 +156,12 @@ fn main() {
         if client.is_none() && Instant::now() >= next_connect {
             next_connect = Instant::now() + RECONNECT;
             client = Client::connect(&bus_path, "bodycare", SUBS).ok();
+            // A profile from an earlier connection is never authority for a
+            // new brainstem. Wait for this connection's state snapshot.
+            if client.is_some() {
+                being.state_fresh = false;
+                being.state_epoch = None;
+            }
         }
         let mut lost = false;
         if let Some(c) = &client {
@@ -190,7 +199,7 @@ fn main() {
         // Publish on a change of what matters, and every ten seconds.
         let key = {
             let mut quiet = report.clone();
-            for k in ["package_c", "battery_c", "fan_rpm"] {
+            for k in ["package_c", "battery_c", "fan_rpm", "cpu_busy"] {
                 quiet.data.remove(k);
             }
             quiet.to_line()
@@ -215,10 +224,15 @@ fn main() {
             notifier.ready();
         }
         notifier.kick();
-        // Sleep in short pieces so a stop is answered quickly.
+        // Sleep in pieces so a stop is answered within half a second, but
+        // without waking the CPU ten times a second for nothing.
         let until = Instant::now() + PERIOD;
-        while Instant::now() < until && !STOP.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(100));
+        while !STOP.load(Ordering::SeqCst) {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            std::thread::sleep(left.min(STOP_CHECK));
         }
     }
 
@@ -246,8 +260,10 @@ fn default_journal(runtime_dir: Option<std::ffi::OsString>) -> PathBuf {
 fn take(being: &mut Being, ev: &Event) {
     match ev.topic.as_str() {
         "state.changed" => {
-            if let Some(state) = ev.str("state") {
+            if let (Some(state), Some(epoch)) = (ev.str("state"), ev.data.get("state_epoch").and_then(serde_json::Value::as_u64)) {
                 being.state = Some(state.to_string());
+                being.state_fresh = true;
+                being.state_epoch = Some(epoch);
                 if state != "asleep" {
                     being.dreaming = false;
                 }
@@ -272,7 +288,7 @@ mod tests {
     #[test]
     fn the_being_is_followed_from_the_bus() {
         let mut b = Being::default();
-        take(&mut b, &Event::new("state.changed").with("state", "asleep"));
+        take(&mut b, &Event::new("state.changed").with("state", "asleep").with("state_epoch", 1));
         take(&mut b, &Event::new("body.lid").with("closed", true));
         take(&mut b, &Event::new("mind.dreaming").with("active", true));
         assert!(b.dreaming && b.asleep());
@@ -282,7 +298,7 @@ mod tests {
         take(&mut b, &Event::new("body.lid").with("closed", serde_json::Value::Null));
         assert!(!b.dreaming && b.lid_closed.is_none());
         take(&mut b, &Event::new("mind.dreaming").with("active", true));
-        take(&mut b, &Event::new("state.changed").with("state", "waking"));
+        take(&mut b, &Event::new("state.changed").with("state", "waking").with("state_epoch", 2));
         assert!(!b.dreaming);
     }
 
@@ -305,7 +321,7 @@ mod tests {
         // The mind sends no `mind.dreaming`: asleep with the lid closed is
         // enough for the dream loop to hold the package at the target.
         let mut b = Being::default();
-        take(&mut b, &Event::new("state.changed").with("state", "asleep"));
+        take(&mut b, &Event::new("state.changed").with("state", "asleep").with("state_epoch", 1));
         take(&mut b, &Event::new("body.lid").with("closed", true));
         assert!(!b.dreaming && b.night());
         take(&mut b, &Event::new("body.lid").with("closed", false));

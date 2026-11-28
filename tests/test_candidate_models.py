@@ -25,8 +25,9 @@ class CandidateModelTests(unittest.TestCase):
                                  "out/models/manifest.json": audit.digest(self.metadata)}}
         # The pipe exercises the real streaming code over several blocks. The
         # listing fixtures expose a models partition occupying each dummy disk.
+        # Called as: tool x -so -spd -tExt -- PARTITION MEMBER (lab.hardware_image.member_fingerprint).
         self.tool = root / "fake-extractor"
-        self.tool.write_text('#!/bin/sh\ncat "$5"\n')
+        self.tool.write_text('#!/bin/sh\ncat "$6"\n')
         self.tool.chmod(0o700)
         self.cms = b"signed envelope fixture"
         self.cms_reads = []
@@ -96,10 +97,10 @@ class CandidateModelTests(unittest.TestCase):
             self.compare()
         self.claimed_size += 1
         self.factory.write_bytes(self.weights + b"x")
-        with self.assertRaisesRegex(ValueError, "larger"):
+        with self.assertRaisesRegex(ValueError, "Oversized extraction"):
             self.compare()
         self.factory.write_bytes(self.weights)
-        self.tool.write_text('#!/bin/sh\ncat "$5"\nexit 2\n')
+        self.tool.write_text('#!/bin/sh\ncat "$6"\nexit 2\n')
         with self.assertRaisesRegex(ValueError, "did not finish"):
             self.compare()
 

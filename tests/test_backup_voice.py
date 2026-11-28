@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import tarfile
 import tempfile
 import threading
@@ -25,6 +26,7 @@ from mind import action_log, backup
 from mind.memory import Memory
 from mind.profile import Profile, save_profile
 from mind.retention import MemoryPolicy, save_policy
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 LIFE = {"id": "3c" * 16, "born": 1_723_000_000, "wakes": 2}
 CANARY = "canary-91be-spare-key-in-the-blue-pot"
@@ -217,6 +219,48 @@ class Stick(unittest.TestCase):
         self.assertEqual(backup.find_stick(self.labels), str(self.device.resolve()))
         self.assertIsNone(backup.find_stick(self.work / "no-such-dir"))
 
+    def test_enrolled_uuid_overrides_a_matching_label(self):
+        (self.mind / backup.RECIPIENT_FILE).write_text(RECIPIENT + "\n")
+        self.label("being-backup")
+        backup.save_media_binding(self.mind, "1234-ABCD")
+        which = {"age": "/usr/bin/age", "age-keygen": "/usr/bin/age-keygen"}.get
+        enrolled = "/dev/disk/by-uuid/1234-ABCD"
+        with patch.object(backup, "bound_device", return_value=enrolled):
+            self.assertEqual(backup.readiness(self.mind, which=which, by_label=self.labels),
+                             (enrolled, RECIPIENT))
+
+    def test_binding_metadata_is_strict_and_contains_no_device_name(self):
+        backup.save_media_binding(self.mind, "1234-ABCD")
+        self.assertEqual(backup.media_binding(self.mind), "1234-ABCD")
+        self.assertEqual(json.loads((self.mind / backup.MEDIA_BINDING_FILE).read_text()),
+                         {"version": 1, "uuid": "1234-ABCD"})
+        (self.mind / backup.MEDIA_BINDING_FILE).write_text('{"version":1,"uuid":"../../sda"}')
+        self.assertIsNone(backup.media_binding(self.mind))
+
+    def test_restore_inputs_are_staged_as_bounded_regular_files(self):
+        media = self.work / "restore-media"
+        stage = self.work / "restore-stage"
+        media.mkdir()
+        stage.mkdir()
+        media = media.resolve()  # the writer resolves the root; macOS temp dirs sit behind a symlink
+        snapshot = media / "pip-20261126-010203.age"
+        identity = media / "pip-backup-key.key"
+        snapshot.write_bytes(b"encrypted snapshot")
+        identity.write_bytes(b"AGE-SECRET-KEY-1\n")
+        selected = [("snapshot", snapshot), ("identity", identity)]
+        with patch.object(backup, "media_identity", return_value="1234-ABCD"), \
+                patch.object(backup, "mounted_from", return_value=True):
+            staged = backup.stage_restore_artifacts(media, "/dev/sdc1", "1234-ABCD", selected, stage)
+        self.assertEqual(staged["snapshot"].read_bytes(), b"encrypted snapshot")
+        self.assertEqual(staged["identity"].read_bytes(), b"AGE-SECRET-KEY-1\n")
+        self.assertEqual(stat.S_IMODE(staged["snapshot"].stat().st_mode), 0o600)
+
+        (media / "linked.age").symlink_to(snapshot)
+        with patch.object(backup, "media_identity", return_value="1234-ABCD"), \
+                patch.object(backup, "mounted_from", return_value=True), self.assertRaises(OSError):
+            backup.stage_restore_artifacts(media, "/dev/sdc1", "1234-ABCD",
+                                           [("snapshot", media / "linked.age")], self.work / "other-stage")
+
     def test_readiness_names_what_is_missing(self):
         which = {"age": "/usr/bin/age", "age-keygen": "/usr/bin/age-keygen"}.get
         for found, reason in ((lambda name: None, "no_tool"), (which, "no_key")):
@@ -287,12 +331,15 @@ class Stick(unittest.TestCase):
         folder.mkdir(parents=True)
         self.sets(folder, *[f"202611{day:02d}-030000" for day in range(10, 15)])
 
-        def fake_folder(mind_dir, folder, recipient, now=None):
+        def fake_folder(mind_dir, folder, recipient, now=None, **_identity):
             stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(now))
             self.sets(folder, stamp)
             return {"checkpoint": "0" * 64, "snapshot": folder / f"pip-{stamp}.age"}
         behind = 1_704_067_512  # 2024-01-01 00:05:12 UTC
-        with patch("mind.backup.backup_to_folder", fake_folder):
+        # The stick here is a plain file: give it the block-device identity the writer requires.
+        with patch("mind.backup.backup_to_folder", fake_folder), \
+                patch("mind.backup.media_identity", return_value="1234-ABCD"), \
+                patch("mind.backup.mounted_from", return_value=True):
             result = backup.stick_backup(self.mind, "voice", mount=self.mount, unmount=self.unmount, which=which,
                                          by_label=self.labels, now=behind)
         self.assertIn("20240101-000512", self.stamps(folder))
@@ -304,11 +351,14 @@ class Stick(unittest.TestCase):
         which = {"age": "/usr/bin/age", "age-keygen": "/usr/bin/age-keygen"}.get
         written = []
 
-        def fake_folder(mind_dir, folder, recipient, now=None):
+        def fake_folder(mind_dir, folder, recipient, now=None, **_identity):
             written.append((folder, recipient))
             (folder / "pip-20261124-030000.age").write_text("x")
             return {"checkpoint": "0" * 64}
-        with patch("mind.backup.backup_to_folder", fake_folder):
+        # The stick here is a plain file: give it the block-device identity the writer requires.
+        with patch("mind.backup.backup_to_folder", fake_folder), \
+                patch("mind.backup.media_identity", return_value="1234-ABCD"), \
+                patch("mind.backup.mounted_from", return_value=True):
             result = backup.stick_backup(self.mind, "voice", mount=self.mount, unmount=self.unmount, which=which,
                                          by_label=self.labels, now=1_800_000_000)
         self.assertEqual(written, [(self.mounted / backup.BACKUP_FOLDER, RECIPIENT)])

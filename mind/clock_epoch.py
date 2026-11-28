@@ -11,15 +11,20 @@ time. `epoch_advanced()` is true when the RTC's `since_epoch` is before
 systemd's clock epoch (by more than an hour, so a clock file touched a moment
 ago by timesyncd does not count), or, when the epoch is the one compiled into systemd
 and so has no file, when the RTC is more than a day behind the system clock.
-A time synchronised over the network, or an RTC set right again (setting the
-time writes the hardware clock too), makes it false.
+A time synchronised over the network, an owner's confirmed date this boot,
+or a working RTC makes it false. A trusted floor survives power loss in /mind.
 
 Reading it costs one small sysfs read and a few stats.
 """
 
+import fcntl
+import math
 import os
+import stat
 import time
 from pathlib import Path
+
+from .storage import atomic_write
 
 RTC_SINCE_EPOCH = Path("/sys/class/rtc/rtc0/since_epoch")
 # systemd's own clock epoch: the newest of these modification times.
@@ -28,6 +33,9 @@ EPOCH_FILES = (Path("/usr/lib/clock-epoch"), Path("/var/lib/systemd/timesync/clo
 SYNCHRONISED = Path("/run/systemd/timesync/synchronized")
 # Before this the clock has certainly been reset: this software did not exist.
 CLOCK_FLOOR = 1_767_225_600  # 2026-01-01 UTC
+MAX_CLOCK = 4_133_980_799  # 2100-12-31 UTC, the date Setup supports
+FLOOR_FILE = "clock-floor"
+CONFIRMED = Path("/run/being/clock-confirmed")
 # An RTC this far behind the system clock was not the clock's source. Wider
 # than any time zone offset, for an RTC kept in local time.
 BEHIND_SLACK = 86_400.0
@@ -36,6 +44,80 @@ BEHIND_SLACK = 86_400.0
 EPOCH_SLACK = 3_600.0
 
 LOST_CLOCK_LINE = "[concern] I lost track of time. What time is it?"
+
+
+def floor(state_dir=None):
+    """Read the separately stored system clock floor without creating state."""
+    if state_dir is not None:
+        try:
+            fd = os.open(Path(state_dir) / FLOOR_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                if stat.S_ISREG(info.st_mode) and not info.st_mode & 0o077 and info.st_uid == os.geteuid():
+                    raw = handle.read(16).strip()
+                    if raw.isdigit():
+                        stamp = int(raw)
+                        if CLOCK_FLOOR <= stamp <= MAX_CLOCK:
+                            return stamp
+        except OSError:
+            pass
+    return CLOCK_FLOOR
+
+
+def remember(state_dir, stamp, *, correct_date=False, wait=0):
+    """Advance the trusted floor, or replace it after a confirmed date correction."""
+    if (type(stamp) not in (int, float) or not math.isfinite(stamp)
+            or not CLOCK_FLOOR <= stamp <= MAX_CLOCK):
+        raise ValueError("The confirmed time is outside the supported date range.")
+    root = Path(state_dir)
+    current = int(stamp)
+    fd = os.open(root / ".clock-floor.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        lock = os.fstat(fd)
+        if not stat.S_ISREG(lock.st_mode) or lock.st_uid != os.geteuid() or lock.st_mode & 0o077:
+            raise OSError("The clock-floor lock is not private.")
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(0.025, remaining))
+        previous = floor(root)
+        if current > previous or (correct_date and current != previous):
+            atomic_write(root / FLOOR_FILE, f"{current}\n", mode=0o600)
+    finally:
+        os.close(fd)
+
+
+def _boottime():
+    return time.clock_gettime(time.CLOCK_BOOTTIME) if hasattr(time, "CLOCK_BOOTTIME") else time.monotonic()
+
+
+def confirm_this_boot(stamp, path=CONFIRMED):
+    """Tie an owner-confirmed clock reading to this boot's elapsed time."""
+    if Path(path).parent.is_dir():
+        atomic_write(path, f"{int(stamp)} {_boottime():.3f}\n", mode=0o600)
+
+
+def confirmed_now(now=None, path=CONFIRMED):
+    if path is None:
+        return False
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                return False
+            stamp, anchor = map(float, handle.read(64).split())
+        elapsed = _boottime() - anchor
+        now = time.time() if now is None else now
+        return CLOCK_FLOOR <= stamp <= MAX_CLOCK and elapsed >= 0 and abs(now - stamp - elapsed) <= 60
+    except (OSError, ValueError):
+        return False
 
 
 def rtc_seconds(path=RTC_SINCE_EPOCH):
@@ -58,9 +140,11 @@ def clock_epoch(files=EPOCH_FILES):
     return max(stamps) if stamps else None
 
 
-def epoch_advanced(*, rtc=RTC_SINCE_EPOCH, epochs=EPOCH_FILES, synchronised=SYNCHRONISED, now=None):
+def epoch_advanced(*, rtc=RTC_SINCE_EPOCH, epochs=EPOCH_FILES, synchronised=SYNCHRONISED,
+                   confirmed=CONFIRMED, now=None):
     """True when the system clock was moved past a hardware clock that had lost the time."""
-    if Path(synchronised).exists():
+    now = time.time() if now is None else now
+    if Path(synchronised).exists() or confirmed_now(now, confirmed):
         return False
     reading = rtc_seconds(rtc)
     if reading is None:
@@ -68,14 +152,13 @@ def epoch_advanced(*, rtc=RTC_SINCE_EPOCH, epochs=EPOCH_FILES, synchronised=SYNC
     epoch = clock_epoch(epochs)
     if epoch is not None and reading + EPOCH_SLACK < epoch:
         return True
-    now = time.time() if now is None else now
     return reading + BEHIND_SLACK < now
 
 
-def doubted(*, now=None, **sources):
+def doubted(*, now=None, state_dir=None, **sources):
     """True when the wall clock cannot be believed: before 2026, or moved up to the epoch."""
     now = time.time() if now is None else now
-    if now < CLOCK_FLOOR:
+    if now < floor(state_dir) or now > MAX_CLOCK:
         return True
     try:
         return epoch_advanced(now=now, **sources)

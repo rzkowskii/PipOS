@@ -101,6 +101,20 @@ def load_policy(mind_dir) -> NetworkPolicy:
     return NetworkPolicy()
 
 
+def web_lookup_ready(mind_dir, *, policy=None):
+    """The skill's permission and, on the appliance, the active transport."""
+    directory = Path(mind_dir)
+    if policy is None:
+        policy = load_policy(directory)
+    if not policy.permits_web_lookup:
+        return False
+    if directory == Path("/mind"):
+        from .network_enforce import runtime_state
+
+        return policy.effective_mode == INTERNET and runtime_state()["mode"] == INTERNET
+    return True
+
+
 def save_policy(mind_dir, policy: NetworkPolicy) -> None:
     """Atomically save the owner's choice into an existing mind directory."""
     if not isinstance(policy, NetworkPolicy):

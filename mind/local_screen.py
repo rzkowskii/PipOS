@@ -3,9 +3,11 @@
 import asyncio
 import os
 import threading
+import time
+from collections import deque
 from pathlib import Path
 
-from . import local_menu
+from . import install_status, local_menu
 from .bus import Bus
 
 # The requests being-console.c leaves in the screen gate (one empty file per
@@ -27,23 +29,36 @@ GATE_REQUESTS = (
 )
 
 
-async def serve_panel(directory, stop):
+async def serve_panel(directory, stop, statuses, *, owner_page=False):
     show = directory / "show"
     presented = directory / "presented"
     current = None
     acknowledged = None
+    open_sequence = None
+    opened_at = None
+    last_lid = None
+    guest = False
+    hidden_for_guest = False
+    if owner_page:
+        from .care_routes import guest_active
     bus = Bus(
-        "face", ("body.lid",),
+        "face", ("body.lid", "app.privacy") if owner_page else ("body.lid",),
         path=os.environ.get("BEING_BUS", "/run/being/bus.sock"),
     )
 
     def close_panel():
-        nonlocal current, acknowledged
-        current = acknowledged = None
+        nonlocal current, acknowledged, open_sequence, opened_at
+        current = acknowledged = open_sequence = opened_at = None
+        statuses.clear()
         show.unlink(missing_ok=True)
         presented.unlink(missing_ok=True)
 
-    bus.on_disconnect = close_panel
+    def disconnected():
+        nonlocal last_lid, guest
+        last_lid, guest = None, False
+        close_panel()
+
+    bus.on_disconnect = disconnected
     close_panel()
     await bus.start()
     try:
@@ -52,8 +67,27 @@ async def serve_panel(directory, stop):
                 event = await asyncio.wait_for(bus.recv(), 0.1)
             except TimeoutError:
                 event = {}
+            if owner_page:
+                if event.get("t") == "body.lid":
+                    last_lid = event
+                if event.get("t") == "app.privacy":
+                    guest = event.get("guest") is True
+                if guest or guest_active():
+                    if not hidden_for_guest:
+                        close_panel()
+                    hidden_for_guest = True
+                    continue
+                if hidden_for_guest:
+                    event = last_lid or {}
+                    hidden_for_guest = False
             if event.get("t") == "body.lid":
                 sequence = event.get("seq")
+                if event.get("closed") is not False:
+                    open_sequence = opened_at = None
+                    statuses.clear()
+                elif type(sequence) is int and sequence >= 0 and sequence != open_sequence:
+                    open_sequence = sequence
+                    opened_at = time.monotonic()
                 visible = event.get("closed") is False or event.get("show_face") is True
                 if visible and type(sequence) is int and sequence >= 0:
                     current = str(sequence)
@@ -63,6 +97,7 @@ async def serve_panel(directory, stop):
                 else:
                     close_panel()
             if not bus.connected.is_set():
+                statuses.clear()
                 continue
             for filename, topic, fields in GATE_REQUESTS:
                 try:
@@ -70,6 +105,13 @@ async def serve_panel(directory, stop):
                 except FileNotFoundError:
                     continue
                 await bus.send(topic, **fields)
+            try:
+                stage, issued = statuses.popleft()
+            except IndexError:
+                pass
+            else:
+                if opened_at is not None and issued >= opened_at and time.monotonic() - issued <= install_status.FRESH_FOR:
+                    await bus.send(install_status.TOPIC, stage=stage, issued=issued, lid_seq=open_sequence)
             if current is not None and acknowledged != current:
                 try:
                     rendered = presented.read_text(encoding="ascii").strip()
@@ -87,12 +129,21 @@ def main():
     runtime = os.environ.get("BEING_SCREEN_DIR")
     if not runtime:
         return local_menu.main()
+    from .care_routes import take_page
+
+    page = take_page()
     stop = threading.Event()
-    panel = threading.Thread(target=lambda: asyncio.run(serve_panel(Path(runtime), stop)), daemon=True)
+    # The disk writer leaves at most one current status, without waiting for
+    # the panel, the bus, or playback. A newer status replaces an unsent one.
+    statuses = deque(maxlen=1)
+    token = install_status.sink.set(lambda stage: statuses.append((stage, time.monotonic())))
+    panel = threading.Thread(
+        target=lambda: asyncio.run(serve_panel(Path(runtime), stop, statuses, owner_page=page is not None)), daemon=True)
     panel.start()
     try:
-        return local_menu.main()
+        return local_menu.main(page=page)
     finally:
+        install_status.sink.reset(token)
         stop.set()
         panel.join(timeout=1)
 

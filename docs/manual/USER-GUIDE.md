@@ -1,7 +1,7 @@
 <!--
 doc: user-guide
 verified: 2026-11-24T22:17
-sources: mind/commands.py mind/reminder_language.py mind/reminders.py mind/turn.py mind/skills.py mind/local_screen.py mind/setup.py mind/care.py mind/local_menu.py mind/retention.py mind/backup.py mind/device.py mind/initiative.py mind/initiative_setup.py mind/voice.py mind/voice_engines.py mind/installer.py mind/recognition.py mind/app_commands.py mind/hands.py mind/usb_logs.py mind/diag.py mind/diag_report.py crates/face/src/main.rs crates/face/src/keys.rs mind/keys.py crates/brainstem/src/machine.rs crates/brainstem/src/body.rs crates/brainstem/src/battery.rs os/board/beingos/try-grub.cfg os/package/being/being-camera README.md docs/LAB.md docs/HARDWARE.md os/board/beingos/try-image.sh mind/diag_sound.py mind/diag_speech.py
+sources: mind/commands.py mind/reminder_language.py mind/reminders.py mind/habits.py mind/care_habits.py mind/turn.py mind/skills.py mind/local_screen.py mind/setup.py mind/care.py mind/local_menu.py mind/retention.py mind/backup.py mind/device.py mind/initiative.py mind/initiative_setup.py mind/voice.py mind/voice_engines.py mind/installer.py mind/recognition.py mind/app_commands.py mind/hands.py mind/usb_logs.py mind/diag.py mind/diag_report.py crates/face/src/main.rs crates/face/src/keys.rs mind/keys.py crates/brainstem/src/machine.rs crates/brainstem/src/body.rs crates/brainstem/src/battery.rs os/board/beingos/try-grub.cfg os/package/being/being-camera README.md docs/LAB.md docs/HARDWARE.md os/board/beingos/try-image.sh mind/diag_sound.py mind/diag_speech.py
 -->
 
 # Living with Pip: the PipOS user guide
@@ -89,6 +89,8 @@ Before you ever erase macOS, the design asks for three chores:
      not the words after it.
    - **measure speed** (**b**): times Pip's models and voices on this
      laptop and saves the numbers with the stick's logs.
+   - **measure boot and idle** (**i**): saves boot timing, processor power
+     and service resource use while Pip runs normally.
 
    The first stick, of 23 November, has only the first three entries.
 3. The start menu appears. Press **1 – Try PipOS**. The menu also offers
@@ -134,7 +136,8 @@ If the boot goes wrong:
 
 ## Reading Pip's face
 
-Pip has no mouth. Everything it shows is in the eyes.
+Pip shows its expression through its eyes by default. You can add brows
+and a mouth independently in Setup's Look menu or by asking Pip.
 
 | What you see | What it means |
 |---|---|
@@ -189,10 +192,11 @@ Panel**, **fn F3 Hide**.
 
 | Key | Does |
 |---|---|
-| **Esc** | Stop Pip mid-sentence |
+| **Esc** | Stop Pip mid-sentence. Pip remembers saying only what you heard |
 | **M** or **fn+F10** | Mute or unmute the microphone. The face shows when it is muted |
 | **fn+F2**, or **Mission Control** (F3) | Open settings. In Try mode it opens the start menu; choose **4 – Setup** |
-| **fn+F1** | Show or hide captions: the last thing Pip heard, what it is saying and how its parts are. Off by default, never saved |
+| **fn+F1** | Show or hide captions for what Pip hears and says, with a badge for how it answered. Off by default and never saved |
+| **Shift+fn+F1** | Show or hide the hardware and service health overlay |
 | **fn+F9** | Bring the face back if the screen stays blank because Pip has no lid reading |
 | **Brightness** (F1, F2) | *New.* The screen dimmer or brighter, never so dim that the eyes vanish. A bar shows the new level |
 | **Launchpad** (F4) | *New.* Open Pip's terminal; press again to put it away |
@@ -326,6 +330,7 @@ be made from the F2 menu, because that creates the backup key.
 | "How's your battery?" / "Are you charging?" / "How long will your battery last?" | The real battery reading |
 | "How's your battery health?" | *New.* For example "My battery holds 81 percent of what it did when new, after 71 charge cycles." |
 | "How warm are you?" / "Why is your fan loud?" | *New.* From its temperature sensors and fan |
+| "How bright is it in here?" / "Is it dark in here?" | Uses the ambient-light sensor to describe the room as dark, dim or bright. Ask "How many lux is it?" for an approximate reading. Pip says when the reading is unavailable. |
 | "How much space do you have?" / "How much memory are you using?" / "How long have you been awake?" | *New.* Disk, memory and uptime |
 | "Are you okay?" / "Run a check-up" / "What's wrong?" | *New.* Up to three findings, the worst first |
 | "What did you do last night?" / "What have you been up to?" | *New.* From its action log, which keeps counts and kinds only, never words |
@@ -364,7 +369,7 @@ switches the whole workshop off.
 | "What can you do?" / "What else can you do?" / "What can you do with lists?" | A short tour of what it can do |
 | "Are you alive?" / "Are you sentient?" / "What are you?" | An honest answer, always the same, from code |
 | "What did you dream about?" / "Did you dream last night?" | From its dream journal only |
-| "What do you see?" | With the camera off: "I can't see right now. My camera is switched off." With it on, Pip can tell someone is there but cannot make out things |
+| "Can you see me?" / "What do you see?" | Pip reports a recent face detection while camera access is active. It says when the camera is unavailable or its view is unclear. The reply stays out of the conversation archive. |
 | "What's 17 times 23?" / "What's 15 percent of 80?" / "Square root of 144" | *New.* Sums, said in words. It says "about" when it rounds |
 | "How many grams in a pound?" / "180 Fahrenheit in Celsius" / "How many cups in a litre?" | *New.* Conversions. A cup is the metric 250 ml and a tablespoon the Australian 20 ml, and it says so. Pints, gallons and fluid ounces are UK measures unless you say "US". Data sizes count in thousands |
 | "How do you spell necessary?" | *New.* Letter by letter |
@@ -428,7 +433,9 @@ Anything else is ordinary conversation.
 - **When the clock is wrong.** Timers, and reminders or alarms said as a
   delay ("in two hours"), count real time: they ring on time even if the
   clock is corrected in between. A reminder for a clock time set while Pip
-  doubts its clock waits, and is worked out again once you set the clock.
+  doubts its clock waits for a confirmed date. Set the full date and time
+  in Setup when the date is uncertain. On an installed PipOS, that screen
+  asks before setting the battery clock as well as the system clock.
 - Pip announces them only when the lid is open, it is awake and it is not
   already talking. Anything that comes due while it is asleep or closed
   waits until it can speak.
@@ -472,6 +479,19 @@ completely different words and it may still miss.
 
 Care (F2, **C**, then **4**, *What I remember*) lists the facts it keeps
 and forgets any one you choose.
+
+### Picking up a conversation later
+
+Say **“Pick this up later”** after a topic you want to continue.
+**“What were we working on?”** brings back that thread even after a restart.
+**“Close the thread”** removes the bookmark and leaves the original
+conversation in the archive. Pip keeps one open thread for the owner in
+persistent memory. Forgetting, correcting or expiring the original
+statement also clears its bookmark.
+
+If you bookmarked a dated plan and turned on greetings in Care, Pip
+can ask once how it went after that day has passed. It waits until you
+address it, the clock is trusted and quiet hours have ended.
 
 ### Correcting and forgetting
 
@@ -533,6 +553,120 @@ change restarts the mind.
 | **explicit-only** | Only facts you asked it to remember. New conversation is not archived and is gone when the mind restarts. What was already archived stays until you forget it |
 | **session-only** | Nothing survives a restart. Reminders, lists, weather and announcements are off |
 
+## Calculator
+
+Say “Open the calculator” to show it beneath Pip’s eyes. Type a sum such as
+`(2 + 3) * 4` and press **Enter** or **=**. **Backspace** edits and
+**Ctrl+L** clears the entry and result. You can also ask Pip a sum while the
+calculator is open to see its answer. **Esc** or “Close the calculator”
+closes it. The calculation display clears on close or entry into guest
+mode. Guests can still ask Pip a sum aloud.
+
+## Lists and Memory
+
+Say “Open the lists” or “Open the memory”, or choose **Lists** or **Memory**
+from Quick Menu. In Lists, **Left** and **Right** switch lists. **Page Up**
+and **Page Down** move through either panel, and **Esc** closes it.
+
+Lists shows your saved lists and items. You can still say “Add milk to my
+shopping list” or “Read my shopping list” to change or hear them. Memory shows
+the latest 40 saved facts, matching Setup’s **What I remember** view. Both
+panels are read-only, close on entering guest mode, and stay unavailable in
+session-only mode.
+
+Press **Command+Space** or **Fn+F6**, or say “Open the Quick Menu.” Use
+**Tab** to switch between grid and list views for this session. In list
+view, the pane beside the list explains the highlighted item. Press **/**
+to search for an app or setting. Use the arrow keys and **Enter** to open
+the highlighted result. Choosing a setting focuses the matching control
+in Options. **Esc** leaves search or returns from Options to the menu.
+At the menu, press **Esc** to dismiss it.
+
+Say “Move the Quick Menu left.” For 15 seconds after an explicit open or move, you can follow it with “Actually, put it on the right.”
+
+Say “Open Options” to keep the eyes on screen while changing your
+settings. Use **Tab** and **Shift+Tab** to move between sections.
+Use **Up** and **Down** for settings, and **Left**, **Right** or **Enter**
+to save a choice. Layout controls the Quick Menu and all three widget
+corners. If you set the Quick Menu to Off, ask Pip to open it again to
+restore the shortcut. Voice and text controls saved captions, the heard
+line and route badges. **Fn+F1** toggles captions for the current face
+session. Behaviour controls idle glances and keeps deliberate gaze cues
+available.
+
+Setup → Look shares these settings. Say “Show the clock widget” or “Move the system widget to the bottom left.” The clock shows local time. The system widget shows available battery, AC and temperature readings. Widgets stay out of focused apps.
+
+With Internet mode and web lookups enabled, choose **Look it up** in
+Quick Menu and type a topic, or say “Search Wikipedia for Ada Lovelace.”
+The panel shows the article introduction and its source. “Show the weather
+widget” enables a tile that appears after you ask for the current weather.
+Its reading expires and clears if online permission ends.
+
+## Journal
+
+Say “Open the journal” or choose **Journal** from Quick Menu. Use **Left**
+and **Right** to switch between the **Day record**, **Dream journal**,
+**Activity** and **Last night**. **Page Up** and **Page Down** move through entries. **Esc**
+closes the panel.
+
+The Day record shows up to 30 recorded days. The Dream journal shows up
+to 12 moments Pip selected from your words, as in Care. Activity shows up
+to 32 recent actions with dates and counts (for example, when Pip set a
+timer). The Journal is read-only. It closes when a guest arrives and stays
+unavailable in session-only mode.
+
+**Last night** lists the stages the overnight shift finished and the
+package-power reading when the hardware supplied one. Opening the lid
+after a long sleep can show a short notice linking back to the Journal.
+
+## Processes and the offline guide
+
+Say “Show me your processes”, or open **Monitor** and press **Tab** to
+switch between Body and Processes. The table shows Pip's services and
+their automatic restart counts. You can say “Restart your face” or ask
+to restart its ears and voice, thinking model, body care or hands. Pip
+asks for a plain “yes” before requesting the restart.
+
+“Ask your guide about backup” or “What does F9 do?” reads a short answer
+from the offline guide. Replies with instructions offer “Next guide
+step.” The guide is also available in guest mode.
+
+Say “Open Options” to go straight to Look. “Open camera settings”,
+“Open network settings”, “Open backup settings” and “Open update
+settings” open their existing screens.
+
+### Phrase habits
+
+Say “New habit”, then “Habit trigger” followed by the phrase you want.
+Say “Habit step” for each supported local action. “Save habit” reads the
+sequence back and asks for a plain “yes.” “Run the … habit” tries it on
+request. You can list, stop or forget your habits by voice.
+
+You can also give the whole recipe in one turn.
+“Pip, new habit when I say good night do set an alarm for seven, then
+read tomorrow’s reminders, then go to sleep.” Give an alarm an explicit
+local **a.m. or p.m.** time when you always mean that half of the day. A bare
+12-hour time such as “seven” keeps that bounded ambiguity: on each run Pip
+chooses the next matching seven a.m. or seven p.m., then speaks the exact
+date and a.m./p.m. it chose before asking. Durations, repeating alarms and
+named dates are not recipe steps. Saving the recipe does not authorize either
+state change. Each time you freshly address Pip with the habit phrase, Pip
+stops at the alarm and asks for a plain “yes” to set that exact time.
+The answer window starts after Pip finishes speaking. If the clock or time
+zone changes, or the announced time passes, run the habit again to hear a
+new choice. Pip then reads the remaining steps. “Go to sleep” is allowed
+only as the last step and asks for a separate “yes.” Alarm and sleep steps
+are available for phrase habits.
+
+## Mind
+
+Say “Open the mind” or choose **Mind** from Quick Menu. The surface shows
+the network illustration and explains when Pip uses a built-in action
+or the model. Below it are counts and up to ten route IDs from this Mind session.
+History contains only those counts and IDs. It clears when a guest
+arrives or the Mind restarts, and recording is paused in explicit-only
+mode. **Esc** closes the panel.
+
 ## Making Pip yours
 
 Press **F2** on the face, or choose **4 – Setup** from the USB menu.
@@ -548,23 +682,38 @@ Press **F2** on the face, or choose **4 – Setup** from the USB menu.
 | **7** | Surprise me: random name, voice and personality. The wake phrase also becomes "Hey" plus the new name, if the recognizer knows that name |
 | **8** | Network mode (installed Pip only) |
 | **9** | Quiet hours and announcements |
+| **L** | Look with eye colour, eye shape, glow strength, empty-screen face size, brows and mouth |
+| **V** | Voice commands and keys for Look, screen apps and the calculator |
 | **N** | Natural or original voice: automatic, natural (Piper) or original (Flite), with samples and a speed measurement |
 | **C** | Senses and memory (Care). See the table below |
 | **A** | Volume and microphone: levels, a test sound and a microphone meter |
 | **T** | Time zone |
 | **B** | Back up to a USB stick (installed Pip only; on a Try stick it is item **7** of the start menu) |
-| **U** | Update from a USB stick (installed Pip only) |
+| **U** | Install an update on the installed system. USB and any approved download source |
 | **Y** | Talk to Pip by typing (installed Pip only; on a Try stick it is item **6** of the start menu) |
 | **P** | Hear a sample. Press **F10** first to mute the microphone so Pip doesn't hear itself |
 | **K** | Keep your changes |
 | **Q** | Cancel |
+
+Look changes save immediately. Return to the face to see them. The default
+is full-size soft cyan eyes, with brows and mouth off. Face size applies
+when no app is open. Try keeps the look until you reboot.
+
+You can also say “Make your eyes blue,” “Make your eyes round,” “Set your
+glow to seventy percent,” “Make your face smaller,” “Show your brows,”
+“Hide your mouth,” or “What is your current look?”
+
+Ask “What can I say?” for examples. Ask about appearance, screen apps,
+the calculator or keys for a focused list. Setup’s **V** page shows the
+same commands in writing, along with keyboard shortcuts. Return to Pip’s
+face before opening a screen app.
 
 **Care** (key **C**):
 
 | Key | Page |
 |---|---|
 | **1** | Camera on or off |
-| **2** | Dreams on or off. Its *whenever the lid is closed* choice is not used yet |
+| **2** | Dreams on or off. Choose nights or whenever the lid is closed on power |
 | **3** | Memory mode, and forgetting conversations after a number of days |
 | **4** | What I remember: read the facts and forget one |
 | **5** | Dream journal |
@@ -572,8 +721,13 @@ Press **F2** on the face, or choose **4 – Setup** from the USB menu.
 | **7** | Time zone |
 | **8** | Workshop on or off |
 | **9** | Network: join Wi-Fi, wired Ethernet on or off, forget Wi-Fi (installed Pip only) |
+| **P** | Permissions for camera, network, workshop, announcements and dreams |
 | **D** | Boot diagnostics on the stick on or off (Try only) |
 | **H** | Health: the same check-up as "Are you okay?" |
+| **L** | Offline library. See what the library includes and allow or turn off an installed pack |
+
+Say “Open permissions” to see the page or “What are you allowed to do?”
+to hear a summary.
 
 How saving works:
 
@@ -705,9 +859,10 @@ The camera is **off by default**. When enabled:
 
 Seeing a face does not make Pip listen. You still need to say its name.
 
-To enable it, use **F2 → C → 1 Camera**. At a maintenance console,
-`being-camera enable` and `being-camera disable` do the same. The
-optional daily greeting uses the camera to know someone is there.
+To enable it, use **F2 → C → 1 Camera** or say “Hey Pip, you can use your
+camera” and press **E** on the permission screen. Say “Hey Pip, stop
+watching” to remove camera permission. The optional daily greeting uses
+the camera to know someone is there.
 
 *Not yet:* deliberate vision. Asked "What do you see?", Pip says its
 camera is off, or that it can tell someone is there but cannot make out
@@ -715,11 +870,23 @@ things.
 
 ## Dreaming and the night's chores
 
+On an installed Pip with persistent memory, “Sleep on my notes” asks Pip
+to pick out key points overnight. It reads back the source and waits for
+a plain “yes.” You can also name a list or ask it to use yesterday's
+conversation. Once the lid is closed and power is connected, Pip uses the
+night model to select excerpts. It reads the original words from their
+source. If you change or forget the source, the old draft is unavailable.
+
+“What are you sleeping on?” lists recent jobs. Say “Read my night draft”
+or “Read night job one” to hear one. “Cancel night job one” asks before
+deleting the request and draft. Your explicit request allows this work
+even when automatic dreaming is off.
+
 While it sleeps, Pip does its night's chores, and, if you opt in, it
 dreams. The night's work runs only when all of these hold:
 
 - Pip is asleep with the lid closed and plugged in;
-- it is between midnight and 5 a.m. in your time zone;
+- it is within the permitted window in your time zone;
 - memory is in **persistent** mode and guest mode is off;
 - its temperature reading is 65 °C or lower.
 
@@ -731,12 +898,12 @@ set a limit), search-index and memory-vector upkeep, the rule-based
 journal, the day record ("what did we do yesterday?"), a backup to a
 labelled stick, the dream model, a weekly re-check of the model files,
 and warming the conversation model for the morning. The upkeep runs every
-such night. The journal and the dream model are the dreaming, and run
-only if you turn dreams on in **F2 → C → 2 Dreams**.
-
-That page offers two windows, *at night only* and *whenever the lid is
-closed*. Today Pip keeps to the night window either way: the second
-choice is saved but not yet used.
+such night. The journal and dream model need your permission. **F2 → C → 2
+Dreams** offers recurring permission at night or whenever the lid is closed
+on power. For one night, say “Hey Pip, you can dream tonight,” check the
+date and midnight-to-5 a.m. window on screen, and press **Y**. Say “Hey Pip,
+stop dreaming” to revoke permission. You can still ask about an earlier
+dream from the saved journal.
 
 - **The journal** notes things you said that seem worth remembering, and
   uses those notes to find the right memory later. It only ever points
@@ -758,18 +925,18 @@ first.
 1. Boot the USB stick and choose **2 – Install PipOS**.
 2. Pick the internal disk. The installer shows its model, serial number,
    size and the exact layout. It never offers the USB stick itself.
-3. Decide whether to keep the name, voice, personality and announcement
-   settings you chose in Try. Conversations from Try are never carried
-   over.
+3. Choose which Try settings to keep. If you have talked with Pip in
+   Try, you can also choose **Bring Pip home** to carry the conversation
+   archive and identity into the installation.
 4. Type the confirmation exactly as shown, in capitals, for example
    `ERASE /dev/sda`. If the disk still holds macOS or a PipOS being, Pip
    shows a warning and then asks for a second confirmation:
    `ERASE MACOS` or `ERASE BEING`. Any difference, or a blank line,
-   cancels with "The disk was left untouched." If the drive cannot discard
-   old blocks, the warning says that parts of an old being's memories may
-   stay readable on the disk until new data overwrites them.
+   cancels with "The disk was left untouched." If Pip cannot read the
+   partition table, the second confirmation is `ERASE DRIVE`.
+   Old memory data may still be recoverable after installation.
 5. Keep the Mac plugged in and the stick in place while Pip writes and
-   then checks every byte. This takes a few minutes.
+   verifies the installation. This takes a few minutes.
 6. When it says it has finished, power off, **remove the USB stick**, and
    power on.
 
@@ -837,7 +1004,7 @@ drive.
 
 - reminders, alarms and timers, and the weather city;
 - Wi-Fi and network settings, and camera and dream consent;
-- `core.md` and the model's caches.
+- The manual core, the overnight core profile index and the model's caches.
 
 **To restore**, boot the USB stick and choose **3 – Restore a being**:
 
@@ -875,13 +1042,39 @@ starts from the new copy.
   old copy by itself.
 - Updates must carry PipOS's signature. Unsigned or wrong updates are
   refused.
-- Updates never touch Pip's memory.
+- System slots and the archive use separate partitions. With an enrolled
+  backup recipient, an installed update creates an encrypted checkpoint
+  before writing its target slot.
 
-To install one, put the `.raucb` update file on a USB stick, press
+If a memory or model continuity check fails on a system that already passed
+confirmation, Pip keeps the current system available. Ask “Did your update
+work?” or open **Care → Health** for the startup warning.
+
+“Did your update work?” uses the slot recorded by the installer. Pip can say
+when the update is waiting for a restart, when it passed its health check, or
+when it used up its startup attempts and Pip is back on the previous system.
+
+In **Care → Previous system**, Pip can try a previous confirmed slot that
+understands the current archive. Review the slot and type the restart
+challenge from the screen. You can also say “Go back to how you were” and
+answer “Yes” to try the previous system once. If that system fails to
+confirm, PipOS returns to the current slot.
+
+To install one, put the `.raucb` update file on a FAT or exFAT USB stick, press
 **F2**, then **U**, choose the stick and the update, and confirm. Pip
-shows the running and new versions first, and offers to restart when it
-is done. Try sticks cannot be updated. At a maintenance console the same
-step is `rauc install`.
+checks the signature and installed update channel before showing the running
+and new versions. Keep the update stick plugged in until Pip reports the
+result. RAUC checks that the signed manifest still matches what you confirmed
+before writing the spare system copy. Pip offers to restart after success.
+Try sticks cannot be updated. At a maintenance console the same step is
+`rauc install`.
+
+If a maintainer has approved an HTTPS release and Internet mode is active,
+**F2 → U** also offers **Download approved update**. The screen shows the
+approved host and size before requesting permission to download. If Pip needs
+the foreground or the transfer fails, reopening Update lets you start again.
+Press **Q** then **Enter** to stop a download. Once the entire release is checked,
+Pip asks separately whether to install it.
 
 ## Maintenance commands
 
@@ -978,8 +1171,6 @@ A developer can run the same checks, and more, as `pip-diag` (see the
   - deliberate vision ("what do you see");
   - reactions to the tilt sensor. Room light already affects when Pip
     sleeps and wakes;
-  - dreaming at any time with the lid closed (the Care choice is saved
-    but Pip still keeps to the night window);
   - a full memory browser (Care shows facts, not conversations).
 - **Weather** is in Celsius only.
 - **Wi-Fi** on the built-in Broadcom radio needs firmware that is not yet

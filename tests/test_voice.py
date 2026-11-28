@@ -1,7 +1,10 @@
 """Lid privacy and speech settings with stand-in audio streams."""
 
 import asyncio
+import struct
+import tempfile
 import unittest
+import wave
 from collections import deque
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
@@ -197,6 +200,55 @@ class SpeechSettings(unittest.IsolatedAsyncioTestCase):
 
 
 class PlaybackCadence(unittest.IsolatedAsyncioTestCase):
+    async def test_clause_cue_arrives_once_on_audible_playback(self):
+        for label, volume, sample, expected in (
+            ("audible", 60, 1200, [None, "joy", None]),
+            ("silent", 60, 0, [None, None, None]),
+            ("muted", 0, 1200, [None, None, None]),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                voice = Voice(Mock(), "Richard", [], "")
+                voice.volume = volume
+                process = Mock(returncode=None, wait=AsyncMock(return_value=0))
+                levels = []
+
+                async def send(topic, **fields):
+                    if topic == "say.level":
+                        levels.append(fields)
+                        if len(levels) == 3:
+                            process.returncode = 0
+
+                @asynccontextmanager
+                async def fake_child(*_command):
+                    yield process
+
+                voice.send_audio = AsyncMock(side_effect=send)
+                audio = Path(tmp) / "clause.wav"
+                with wave.open(str(audio), "wb") as wav:
+                    wav.setparams((1, 2, 16000, 0, "NONE", ""))
+                    wav.writeframes(bytes(640 * 2) + struct.pack("<h", sample) * (640 * 2))
+
+                with patch("mind.voice.child", fake_child):
+                    await voice.play_once(audio, first=True, cue="joy")
+                self.assertEqual(voice.send_audio.await_args_list[0], call("say.started"))
+                self.assertEqual(levels[0]["v"], 0.0)
+                self.assertEqual([fields.get("face_cue") for fields in levels], expected)
+
+    async def test_player_that_rejects_playback_cannot_start_an_expression(self):
+        voice = Voice(Mock(), "Richard", [], "")
+        voice.volume = 60
+        voice.send_audio = AsyncMock()
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "clause.wav"
+            with wave.open(str(audio), "wb") as wav:
+                wav.setparams((1, 2, 16000, 0, "NONE", ""))
+                wav.writeframes(struct.pack("<h", 1200) * 1600)
+
+            with patch("mind.voice.playback_command", return_value=["/bin/sh", "-c", "exit 19"]):
+                with self.assertRaisesRegex(RuntimeError, "aplay exit status 19"):
+                    await voice.play_once(audio, first=True, cue="joy")
+        voice.send_audio.assert_not_awaited()
+
     async def test_pause_trial_only_requests_segments_for_the_first_played_clause(self):
         voice = Voice(Mock(), "Richard", [], "", shorten_first_pause=True)
         voice.play = AsyncMock()
@@ -237,7 +289,7 @@ class PlaybackCadence(unittest.IsolatedAsyncioTestCase):
 
                 with patch("mind.voice.child", fake_child):
                     self.assertEqual(await voice.prepare_clause(Path("/unused/clause.wav"), first=True),
-                                     (True, True, None))
+                                     (True, True, None, None, None))
 
     async def test_final_announcement_is_echoed_only_after_playback(self):
         @asynccontextmanager

@@ -20,7 +20,7 @@ HEALTHY = {unit: {"Id": unit, "ActiveState": "active", "SubState": "running", "N
 
 class FakeSystem:
     def __init__(self, *, units=None, failed=(), disk=(120e9, 60e9, 60e9), cortex=True, uptime=7200.0,
-                 checks=None, backup=None, restart_ok=True, audio_ok=True):
+                 checks=None, backup=None, restart_ok=True, audio_ok=True, continuity_warning=False):
         self._units = {**HEALTHY, **(units or {})} if units is not False else None
         self.failed = list(failed)
         self._disk = disk
@@ -28,6 +28,7 @@ class FakeSystem:
         self._uptime = uptime
         self.checks = checks or {}
         self.backup = backup
+        self._continuity_warning = continuity_warning
         self.restart_ok, self.audio_ok = restart_ok, audio_ok
         self.restarted, self.audio_runs = [], 0
         self.budgets = []
@@ -61,6 +62,9 @@ class FakeSystem:
 
     def last_backup(self, state_dir):
         return self.backup
+
+    def continuity_warning(self):
+        return self._continuity_warning
 
 
 def unit(name, active="active", restarts=0):
@@ -142,6 +146,14 @@ class Checks(unittest.TestCase):
         self.assertIn("My thinking is slow: 11 tokens a second, against my usual 22.", line)
         doctor.note_turn(prompt_tps="fast")
         self.assertEqual(doctor._last_speed["prompt"], 11.0, "junk is ignored")
+
+    def test_continuity_warning_appears_in_speech_and_care_without_repairs(self):
+        system = FakeSystem(backup=self.now, continuity_warning=True)
+        line, _, repairs = self.examine(system)
+        self.assertIn("startup check for my saved memory or thinking model needs attention", line)
+        self.assertEqual(repairs, [])
+        self.assertIn(("warning", "startup continuity: check the archive and model slots"),
+                      doctor.health_rows(system, self.facts()))
 
     def test_no_systemd_and_broken_readings_still_answer(self):
         class Broken(FakeSystem):

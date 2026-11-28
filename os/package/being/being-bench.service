@@ -1,9 +1,10 @@
 [Unit]
-Description=Being: bench mode (measure speed; being.bench=1)
+Description=Being: bench mode (being.bench=1 or read-only bench+ being.bench=2)
 # Only when asked for: the Try menu's "measure speed" entry, or every entry of
 # a bench stick (BEING_TRY_BENCH=1). 50-being.preset keeps it disabled
 # otherwise, and the condition holds even if it is enabled by mistake.
-ConditionKernelCommandLine=being.bench=1
+ConditionKernelCommandLine=|being.bench=1
+ConditionKernelCommandLine=|being.bench=2
 RequiresMountsFor=/models
 # Results go to this boot's PIPLOGS folder when the Try stick has one.
 After=being-usb-logs.service being-cortex.service being-dream-cortex.service
@@ -16,9 +17,13 @@ Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1
 # dream models are stopped first, and the waking one is started again after.
 # The two systemctl calls run outside the sandbox below (+): they order
 # systemd about, which the bench itself never needs to do.
-ExecStartPre=-+/usr/bin/systemctl stop being-cortex.service being-dream-cortex.service
+# Bench+ observes the production organs. Only the original model benchmark
+# stops the two servers before starting its private one.
+# A dedicated bench stick adds bench=1 to every menu entry. An explicit
+# bench=2 on its bench+ entry wins, just as mind.bench's dispatcher does.
+ExecStartPre=-+/bin/sh -c 'if grep -qw being.bench=2 /proc/cmdline; then :; elif grep -qw being.bench=1 /proc/cmdline; then exec /usr/bin/systemctl stop being-cortex.service being-dream-cortex.service; fi'
 ExecStart=/usr/bin/python3 -m mind.bench
-ExecStopPost=-+/usr/bin/systemctl --no-block start being-cortex.service
+ExecStopPost=-+/bin/sh -c 'if grep -qw being.bench=2 /proc/cmdline; then :; elif grep -qw being.bench=1 /proc/cmdline; then exec /usr/bin/systemctl --no-block start being-cortex.service; fi'
 # A full run, thread sweep and dream model included, takes tens of minutes;
 # a soak (being.bench.soak=MINUTES) adds three steps of that length.
 TimeoutStartSec=6h
@@ -37,7 +42,8 @@ CPUWeight=100
 # still be read. Slot files go to the private /tmp.
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_IPC_LOCK
-# A setting may ask for mlock (LLAMA_ARG_MLOCK=1), as the cortex drop-in can.
+# A setting may ask for mlock (LLAMA_ARG_LOAD_MODE=mmap+mlock), as the cortex
+# drop-in can.
 LimitMEMLOCK=infinity
 ProtectSystem=strict
 ReadWritePaths=-/run/beinglogs

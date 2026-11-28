@@ -11,6 +11,7 @@ from typing import Any
 
 from mind import diary
 from mind.memory import Memory
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 ZONE = timezone(timedelta(hours=11))
 MONDAY = date(2026, 11, 23)

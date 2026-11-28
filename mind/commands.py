@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
+from . import actions, look
 from .reminder_language import ReminderRequest, duration_seconds, may_be_reminder, parse_reminder
 
 SNOOZE_MINUTES = 10  # "snooze" on its own
@@ -37,6 +38,9 @@ _PATTERNS = [
     ("remember_me", r"do you (?:still )?(?:remember|know) (?:me|who i am)|(?:do you know|remember) who i am"),
     ("about_me", r"what (?:else )?do you (?:remember|know) about me|what have you (?:remembered|learned) about me"
                  r"|what (?:things )?do you remember"),
+    ("thread_save", r"pick this up later|keep (?:this|that) thread open"),
+    ("thread_resume", r"what (?:were|are) we working on|pick up (?:our|the) thread|resume (?:our|the) thread"),
+    ("thread_close", r"close (?:this|that|the) thread"),
     # A past day has its own record (the diary), kept overnight. Today is
     # still the conversation itself.
     ("diary", rf"what did (?:we|you and i) do (?P<x>{_DIARY_DAYS})"),
@@ -74,13 +78,19 @@ _PATTERNS = [
     ("clear_weather_location", r"(?:clear|remove) (?:my|the|your) weather (?:location|city)"),
     ("clock_zone", r"(?:set|change) (?:my|the|your) (?:time zone|timezone) to (?P<x>.+)"),
     ("device_zone", r"use the (?:system|device) (?:time zone|timezone)"),
+    ("permissions", r"what are you allowed to do|what permissions do you have"),
+    # Consent is deliberately limited to explicit owner declarations. These
+    # exact forms must not turn questions or narrative into permission changes.
+    ("camera_consent", r"you can use your camera|stop watching|turn (?:the )?camera (?:on|off)"),
+    ("dream_consent", r"you can dream tonight|stop dreaming"),
     ("skills_more", r"what else can you do(?: for me)?|what else (?:can i (?:say|ask)|can you help (?:me )?with|do you do)"
                     r"|what more can you do"),
+    ("voice_help", r"what can i say(?: to you)?|(?:show|give) me (?:the )?voice commands"),
     ("skills_group", r"what (?:can|could) you do (?:with|about|for) (?!me$)(?P<x>.+)"),
     ("skills_group", r"what can i (?:say|ask(?: you)?) about (?P<x>.+)"),
     ("skills_group", r"help (?:me )?with (?P<x>.+)"),
     ("skills", r"what (?:can|could) you do(?: for me)?|what (?:skills|commands) (?:do you have|can i use)"
-               r"|what can i (?:say|ask)(?: you)?|what are you able to do|what can you help (?:me )?with|help(?: me)?"),
+               r"|what can i ask(?: you)?|what are you able to do|what can you help (?:me )?with|help(?: me)?"),
     # A ringing alarm, timer or reminder. Bare "okay" and "thanks" only count
     # while something rings: see ring_reply.
     ("snooze", r"snooze(?: (?:it|that|this|the alarm|my alarm|the timer|the reminder))?(?: for (?P<x>.+))?"),
@@ -93,7 +103,7 @@ _PATTERNS = [
                 r"|what(?:['’]s| is) your battery(?: level| at)?|tell me about your battery|are you charging"
                 r"|how long (?:will|can) your battery last|how much battery (?:is )?left"),
     ("sleep", r"go to sleep|good ?night|sleep now|time to sleep"),
-    ("look", r"(?:take a )?look at this|what do you see|can you see (?:me|this|anything)"),
+    ("look", r"(?:take a )?look at this|what do you see|can you see (?P<x>me|this|anything)"),
     ("dream", r"what did you dream(?: about)?(?: last night)?|did you dream(?: last night)?|do you dream"),
     # Questions about what it is. Answered honestly in code, never left to a
     # small model that may claim feelings or deny being anything at all.
@@ -116,13 +126,24 @@ QUESTION = re.compile(
 )
 _NOT_A_FACT = re.compile(r"^(?:when|how|what|why|where|who|whom|whose|which|if|whether)\b", re.I)
 _COMPILED = [(kind, re.compile(rf"^(?:{pattern})$", re.I)) for kind, pattern in _PATTERNS]
+_QUICK_MENU_VISIBILITY = re.compile(r"^(open|show|close|hide) (?:the )?quick menu$", re.I)
+_QUICK_MENU_POSITION = re.compile(r"^(?:move|put) (?:the )?(?:quick )?menu (?:(?:to|on) the )?(left|right|centre|center)$", re.I)
+_QUICK_MENU_FOLLOWUPS = {
+    f"actually put it on the {said}": position
+    for said, position in (("left", "left"), ("right", "right"), ("centre", "center"), ("center", "center"))
+}
 _COMMAND_START = re.compile(
     r"^(?:(?:remember|forget|don'?t\s+forget)\b"
     r"|(?:start|end) guest\b|don'?t remember\b"
+    r"|pick (?:this up later|up (?:our|the) thread)\b|keep (?:this|that) thread open\b"
+    r"|(?:resume (?:our|the)|close (?:this|that|the)) thread\b"
     r"|(?:can|could) you\b|(?:what (?:did|do|have|were)|when did|anything(?: else)? do)\b"
     r"|(?:that(?:'s| is)|no[, ]+that|go to|good night|sleep now|time to|(?:take a )?look at)\b"
     r"|what(?:'s| is) (?:the (?:time|date|weather)|today's date|tomorrow's date|it like outside)\b"
     r"|what (?:time|day|date|can you do|could you do|skills|commands|else can you do|can i say|did we do)\b"
+    r"|what reminders do i have\b|(?:read|list|show me) (?:(?:my )?reminders|(?:today|tomorrow)['’]s reminders)\b"
+    r"|(?:show|give) me (?:the )?voice commands\b"
+    r"|(?:open|show|close|hide|move|put) (?:the )?quick menu\b|(?:move|put) (?:the )?menu\b"
     r"|tell me (?:the (?:time|date|weather)|about the weather)\b"
     r"|(?:snooze|dismiss)\b|(?:give me |just )?\w+ more minutes?\b|i(?:'m| am) (?:up|awake)\b"
     r"|(?:stop|turn off|silence) (?:the|my|that) (?:alarm|timer|reminder)\b|help\b"
@@ -137,16 +158,30 @@ _COMMAND_START = re.compile(
     r"|how (?:much charge|is your battery)\b|what(?:'s| is) your battery\b"
     r"|never ?mind\b|(?:speak|talk|turn|be) (?:up|down|louder|quieter|softer|it|the|your|yourself|more)\b"
     r"|louder\b|quieter\b|softer\b|(?:set|change|put) (?:your |the )?(?:volume|time|clock)\b|the time is\b"
+    r"|make your (?:eyes|face)\b|(?:set|change) your (?:eye|face size|glow)\b"
+    r"|(?:show|hide) (?:your )?(?:(?:eye)?brows|mouth)\b"
+    r"|what(?:'s| is) your (?:current )?look\b|tell me your current look\b|how do you look\b"
     r"|are you (?:alive|conscious|sentient|real|aware|self|a |an |just|human|living)\b"
-    r"|do you (?:have |get |feel|dream|remember me|know me)|what are you\b|can you (?:feel|see)\b"
+    r"|do you (?:have |get |feel|dream|remember me|know me)|what (?:are you|permissions)\b|can you (?:feel|see)\b"
     r"|did you dream\b|tell me about your battery\b|how long (?:will|can) your\b|are you charging\b"
-    r"|i can'?t hear you\b|you(?:'re| are) too loud\b)",
+    r"|i can'?t hear you\b|you(?:'re| are) too loud\b"
+    r"|you can use your camera\b|stop watching\b|turn (?:the )?camera (?:on|off)\b"
+    r"|you can dream tonight\b|stop dreaming\b)",
     re.I,
 )
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 _WHEN = re.compile(
     rf"(?<!\S)(?:(?:on )?(?P<day>\d{{4}}-\d{{2}}-\d{{2}}|today|yesterday|last week)"
     rf"|(?P<weekday_marker>on |last )?(?P<weekday>{'|'.join(_WEEKDAYS)}))$",
+    re.I,
+)
+_EVENT_WHEN = re.compile(
+    r"(?<!\w)(?:(?:on\s+)?(?P<date>\d{4}-\d{2}-\d{2})|(?P<relative>today|yesterday|tomorrow))(?!\w)",
+    re.I,
+)
+_EVENT_QUESTION = re.compile(
+    r"^(?:what|when|where|which|who|why|how|do|does|did|is|are|was|were|can|could|would|will|"
+    r"tell|show|remember|recall|forget)\b",
     re.I,
 )
 _SPOKEN_WORD = re.compile(r"[\w']+")
@@ -236,6 +271,51 @@ def history_query(text, *, today=None, zone=None):
         return text, None, None
 
 
+def event_day(text):
+    """Return the lone day expression in a declarative statement, if any."""
+    said = re.sub(r"^remember\s+that\s+", "", text.strip(), flags=re.I)
+    if (not said or said.endswith("?") or _EVENT_QUESTION.match(said)
+            or re.match(r"^(?:today|yesterday|tomorrow)[, ]+(?:what|when|where|who|why|how|did|do|was|were)\b",
+                        said, re.I)):
+        return None
+    matches = list(_EVENT_WHEN.finditer(said))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    if match["relative"]:
+        return match["relative"].lower()
+    try:
+        return date.fromisoformat(match["date"])
+    except ValueError:
+        return None
+
+
+def event_range(text, *, today=None, zone=None, relative_allowed=None):
+    """Return an explicitly stated event day for a declarative owner sentence.
+
+    This deliberately recognises less than :func:`history_query`: weekdays
+    need conversational context to decide whether they are past or future,
+    and questions describe a search rather than an event being remembered.
+    Ambiguous sentences containing two different day phrases are left with
+    telling time only.
+    """
+    day = event_day(text)
+    if day is None:
+        return None
+    start = day
+    if isinstance(day, str):
+        if relative_allowed is not None and not relative_allowed():
+            return None
+        today = today or datetime.now(zone).date()
+        start = today + timedelta(days={"today": 0, "yesterday": -1, "tomorrow": 1}[day])
+    try:
+        end = start + timedelta(days=1)
+        return (datetime.combine(start, time.min, tzinfo=zone).timestamp(),
+                datetime.combine(end, time.min, tzinfo=zone).timestamp())
+    except (OverflowError, ValueError):
+        return None
+
+
 def _without_address(text, name):
     said = re.sub(r"^please[, ]+", "", _strip(text), flags=re.I)
     if name:
@@ -248,6 +328,16 @@ def may_be_command(text, name=""):
     """Avoid starting a speculative model read while a command is being said."""
     said = _without_address(text, name).replace("’", "'")
     return not said or bool(_COMMAND_START.match(said)) or may_be_reminder(said)
+
+
+def quick_menu_followup(text, name="", *, partial=False):
+    """Position wording to use only when the caller already has the Quick Menu context."""
+    said = " ".join(_without_address(text, name).casefold().split())
+    if said.startswith("actually,"):
+        said = "actually" + said.removeprefix("actually,")
+    if partial:
+        return any(phrase.startswith(said) for phrase in _QUICK_MENU_FOLLOWUPS)
+    return _QUICK_MENU_FOLLOWUPS.get(said)
 
 
 def _weather_command(said):
@@ -281,6 +371,25 @@ def _weather_command(said):
 def parse(text, name="", *, now=None):
     """Return the Command in `text`, or None if it is ordinary conversation."""
     said = _without_address(text, name)
+    if menu := _QUICK_MENU_VISIBILITY.fullmatch(said):
+        return Command("quick_menu", "open" if menu[1].casefold() in ("open", "show") else "close")
+    if menu := _QUICK_MENU_POSITION.fullmatch(said):
+        return Command("quick_menu", "center" if menu[1].casefold() == "centre" else menu[1].casefold())
+    if options := re.fullmatch(r"(open|show(?: me)?|close|hide) (?:the )?options", said, re.I):
+        return Command("screen_options", "close" if options[1].casefold() in ("close", "hide") else "open")
+    if request := look.parse(said):
+        field, value = request
+        return Command("look_current") if field == "current" else Command("look_set", f"{field} {value}")
+    # Day-scoped reads never create, cancel, or acknowledge queue entries.
+    # Their exact forms are also safe deterministic habit steps.
+    day_reminders = re.fullmatch(
+        r"(?:(?:read|list|show me) (?:my )?reminders (?:for )?|(what reminders do i have) )"
+        r"(?P<day>today|tomorrow)", said, re.I)
+    if day_reminders is None:
+        day_reminders = re.fullmatch(
+            r"(?:read|list|show me) (?P<day>today|tomorrow)['’]s reminders", said, re.I)
+    if day_reminders:
+        return Command(f"reminders_{day_reminders['day'].casefold()}")
     if reminder := parse_reminder(said, now=now):
         return Command("reminder", reminder=reminder)
     for kind, pattern in _COMPILED:
@@ -288,11 +397,18 @@ def parse(text, name="", *, now=None):
         if match:
             captured = match.groupdict().get("x")
             arg = _strip(captured or "")
+            if kind == "camera_consent":
+                choice = said.casefold()
+                arg = "off" if choice == "stop watching" or choice.endswith(" off") else "on"
+            elif kind == "dream_consent":
+                arg = "off" if said.casefold() == "stop dreaming" else "tonight"
             if captured is not None and len(arg) < (1 if kind in ("set_time", "volume_set", "snooze") else 2):
                 return None
             if kind == "skills_group":
                 # "Help me with my homework" is conversation: only a group it
                 # really has help for is answered here.
+                if (group := actions.help_group(arg)) is not None:
+                    return Command("voice_help", group)
                 from .skills import help_group
 
                 if help_group(arg) is None:

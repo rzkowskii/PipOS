@@ -1,0 +1,1485 @@
+<title>PipOS Shell Lab</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&family=Sora:wght@300;400;600&display=swap">
+<style>
+/* Layout: a 1280x800 laptop screen scaled to fit. Pip's face is the one persistent object; everything else is summoned around it. */
+:root{
+  --bg:#04070a; --bg2:#091017; --panel:#0b1319; --line:#1a2a35; --ink:#d9f0f7; --dim:#85a0af; --faint:#6b8696;
+  --glow:rgb(45,239,255); --glow-rgb:45,239,255; --warn:#ffb454; --bad:#ff7070; --ok:#5af0b0;
+  --ui:"Manrope",system-ui,-apple-system,"Segoe UI",sans-serif; --mono:"JetBrains Mono",ui-monospace,Menlo,monospace; --display:"Sora","Manrope",system-ui,sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 var(--ui);padding-block:20px 40px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+button,input,select{font:inherit;color:inherit}
+.page{max-width:1500px;margin:0 auto}
+.page h1{font:600 15px var(--display);letter-spacing:.12em;margin:0 0 4px}
+.page h1 b{color:var(--glow)}
+.sub{color:var(--dim);margin:0 0 16px;max-width:78ch;font-size:13px}
+.bezel{background:linear-gradient(#20252b,#0f1215);border-radius:22px;padding:14px 14px 0;box-shadow:0 30px 80px #000c,inset 0 1px 0 #ffffff14,inset 0 0 0 1px #000}
+.viewport{margin:0 auto;position:relative;overflow:hidden;border-radius:6px;background:#000;box-shadow:0 0 0 2px #000}
+.hinge{height:12px;margin:14px -14px 0;background:linear-gradient(#2a3037,#14181c);border-radius:0 0 22px 22px}
+.screen{position:absolute;left:0;top:0;width:1280px;height:800px;transform-origin:0 0;overflow:hidden;background:#000}
+.lcd{position:absolute;inset:0;pointer-events:none;z-index:60;background:rgb(7,11,24);mix-blend-mode:screen;opacity:0;transition:opacity .4s}
+.lcd.on{opacity:1}
+.scene{position:absolute;inset:0;transition:opacity .6s;z-index:2}
+.scene[hidden]{display:none}
+.under{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:16px 0 0}
+.under .hint{color:var(--faint);font-size:12px}
+kbd{background:#111a22;border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:0 5px;font:11px var(--mono);color:var(--ink)}
+.principles{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:22px}
+.principles div{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+.principles h3{margin:0 0 4px;font:600 13px var(--display);color:var(--ink)}
+.principles p{margin:0;color:var(--dim);font-size:12.5px}
+
+/* buttons and controls */
+.btn{background:#101c25;border:1px solid var(--line);border-radius:999px;padding:9px 18px;cursor:pointer;transition:.15s;font-weight:600;font-size:13px;color:var(--ink)}
+.btn:hover{border-color:color-mix(in srgb,var(--glow) 50%,transparent);background:#132531}
+.btn:focus-visible,.bigcard:focus-visible,input:focus-visible,.sh:focus-visible,.chip:focus-visible{outline:2px solid var(--glow);outline-offset:2px}
+.btn.primary{background:color-mix(in srgb,var(--glow) 22%,#04121a);border-color:var(--glow);color:#f0ffff;box-shadow:0 0 22px color-mix(in srgb,var(--glow) 25%,transparent)}
+.btn.primary:hover{background:color-mix(in srgb,var(--glow) 34%,#04121a)}
+.btn.ghost{background:transparent}
+.btn.sm{padding:5px 12px;font-size:12px}
+.btn.warn{border-color:var(--warn);color:var(--warn);background:#1c1408}
+.btn:disabled{opacity:.35;cursor:not-allowed;box-shadow:none}
+.chip{display:inline-flex;align-items:center;gap:6px;background:#0d1821;border:1px solid var(--line);border-radius:999px;padding:5px 12px;font-size:12.5px;color:var(--dim);cursor:pointer;transition:.15s;white-space:nowrap}
+.chip:hover{color:var(--ink);border-color:color-mix(in srgb,var(--glow) 45%,transparent)}
+.tag{font:500 10.5px var(--mono);letter-spacing:.06em;text-transform:uppercase;border:1px solid var(--line);color:var(--faint);padding:1px 7px;border-radius:999px;white-space:nowrap}
+.tag.sensor{color:var(--ok);border-color:#1d4a3a}.tag.est{color:var(--warn);border-color:#4a3a1d}.tag.glow{color:var(--glow);border-color:color-mix(in srgb,var(--glow) 40%,transparent)}
+input[type=text],input:not([type]){background:#070d12;border:1px solid var(--line);border-radius:10px;padding:10px 12px;outline:none;width:100%}
+input[type=text]:focus,input:not([type]):focus{border-color:color-mix(in srgb,var(--glow) 60%,transparent)}
+input[type=range]{accent-color:var(--glow);width:100%}
+.sw{position:relative;display:inline-block;width:42px;height:24px;flex:none}
+.sw input{position:absolute;opacity:0;inset:0;width:100%;height:100%;margin:0;cursor:pointer;z-index:1}
+.sw span{position:absolute;inset:0;background:#14212b;border:1px solid var(--line);border-radius:999px;transition:.2s}
+.sw span::after{content:"";position:absolute;left:3px;top:3px;width:16px;height:16px;border-radius:50%;background:var(--dim);transition:.2s}
+.sw input:checked+span{background:color-mix(in srgb,var(--glow) 30%,#06131a);border-color:var(--glow)}
+.sw input:checked+span::after{left:21px;background:var(--glow);box-shadow:0 0 10px var(--glow)}
+.sw input:focus-visible+span{outline:2px solid var(--glow);outline-offset:2px}
+.seg{display:inline-flex;background:#070d12;border:1px solid var(--line);border-radius:999px;padding:3px;gap:2px}
+.seg button{background:none;border:0;border-radius:999px;padding:6px 14px;cursor:pointer;color:var(--dim);font-size:12.5px;font-weight:600}
+.seg button.on{background:color-mix(in srgb,var(--glow) 24%,#06131a);color:#eaffff;box-shadow:0 0 14px color-mix(in srgb,var(--glow) 25%,transparent)}
+.glass{background:linear-gradient(180deg,rgba(18,30,40,.82),rgba(8,15,21,.88));backdrop-filter:blur(18px) saturate(1.2);border:1px solid color-mix(in srgb,var(--glow) 15%,#1a2a35);border-radius:18px;box-shadow:0 30px 80px #000a,0 0 0 1px #000,inset 0 1px 0 #ffffff10}
+.mono{font-family:var(--mono)}
+.lbl{font:600 11px var(--ui);letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
+svg.i{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none}
+
+/* face */
+#face{position:absolute;left:0;top:0;width:1280px;height:800px;z-index:1;pointer-events:none;display:block}
+
+/* installer */
+.inst-head{position:absolute;left:372px;top:34px;right:64px;height:118px;display:flex;align-items:center}
+#instSay{font:300 27px/1.3 var(--display);letter-spacing:-.01em;max-width:780px;text-wrap:balance}
+.inst-main{position:absolute;left:64px;right:64px;top:172px;bottom:96px}
+.inst-foot{position:absolute;left:64px;right:64px;bottom:28px;height:48px;display:flex;align-items:center;justify-content:space-between;gap:20px}
+#iSteps{list-style:none;display:flex;gap:6px;margin:0;padding:0;align-items:center}
+#iSteps li{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--faint);font-weight:600}
+#iSteps li::before{content:"";width:8px;height:8px;border-radius:50%;background:#1b2d39;transition:.3s}
+#iSteps li+li{margin-left:8px}
+#iSteps li.done::before{background:color-mix(in srgb,var(--glow) 55%,#1b2d39)}
+#iSteps li.cur{color:var(--ink)}#iSteps li.cur::before{background:var(--glow);box-shadow:0 0 12px var(--glow)}
+.stepin{animation:stepin .55s cubic-bezier(.2,.8,.2,1) both}
+@keyframes stepin{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+.choose{display:grid;grid-template-columns:1fr 1fr;gap:28px;height:420px}
+.bigcard{text-align:left;cursor:pointer;border-radius:22px;padding:34px;display:flex;flex-direction:column;gap:12px;border:1px solid var(--line);background:linear-gradient(180deg,#0e1a23,#09121a);transition:.25s;position:relative;overflow:hidden}
+.bigcard::before{content:"";position:absolute;inset:0;background:radial-gradient(360px 220px at 20% 0%,color-mix(in srgb,var(--glow) 16%,transparent),transparent 70%);opacity:.5;transition:.3s}
+.bigcard:hover{transform:translateY(-4px);border-color:color-mix(in srgb,var(--glow) 60%,transparent);box-shadow:0 20px 60px #000a,0 0 40px color-mix(in srgb,var(--glow) 14%,transparent)}
+.bigcard:hover::before{opacity:1}
+.bigcard>*{position:relative}
+.bigcard svg.big{width:64px;height:64px;color:var(--glow);fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}
+.bigcard h2{margin:6px 0 0;font:300 34px var(--display);letter-spacing:-.02em}
+.bigcard p{margin:0;color:var(--dim);font-size:15.5px;max-width:34ch}
+.bigcard .promise{margin-top:auto;display:flex;align-items:center;gap:10px;font-size:13.5px;font-weight:600;color:var(--ok)}
+.bigcard.erase .promise{color:var(--warn)}
+.hwline{margin:22px 0 0;text-align:center;color:var(--faint);font:12px var(--mono);letter-spacing:.06em}
+.cols{display:grid;grid-template-columns:1.1fr 1fr;gap:36px;height:100%}
+.hw{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+.hw li{display:grid;grid-template-columns:26px 108px 1fr;gap:10px;align-items:baseline;padding:8px 0;border-bottom:1px solid #0f1b24;opacity:.25;transition:.4s}
+.hw li.show{opacity:1}
+.hw .st{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--faint);align-self:center;position:relative}
+.hw li.run .st{border-color:var(--glow);border-top-color:transparent;animation:spin .7s linear infinite}
+.hw li.ok .st{background:color-mix(in srgb,var(--ok) 25%,transparent);border-color:var(--ok)}
+.hw li.ok .st::after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid var(--ok);border-width:0 2px 2px 0;transform:rotate(40deg)}
+.hw li.warn .st{border-color:var(--warn);background:color-mix(in srgb,var(--warn) 22%,transparent)}
+.hw li.warn .st::after{content:"!";position:absolute;inset:0;text-align:center;font:700 11px/14px var(--ui);color:var(--warn)}
+.hw b{font-weight:600}.hw span.d{color:var(--dim);font-size:13px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.lap{width:100%;max-height:100%}
+.lap .pt{fill:#16232d;stroke:var(--faint);transition:.4s}
+.lap .pt.lit{fill:var(--glow);stroke:var(--glow);filter:drop-shadow(0 0 6px var(--glow))}
+.lap .pt.wn{fill:var(--warn);stroke:var(--warn)}
+.disks{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.disk{border:1px solid var(--line);border-radius:16px;padding:18px 20px;background:#0a141b;text-align:left;cursor:pointer;display:flex;gap:16px;align-items:center;transition:.2s}
+.disk:hover:not(.na){border-color:color-mix(in srgb,var(--glow) 45%,transparent)}
+.disk.sel{border-color:var(--glow);background:color-mix(in srgb,var(--glow) 9%,#0a141b);box-shadow:0 0 30px color-mix(in srgb,var(--glow) 14%,transparent)}
+.disk.na{opacity:.45;cursor:not-allowed}
+.disk svg{width:44px;height:44px;color:var(--dim);fill:none;stroke:currentColor;stroke-width:1.4}
+.disk.sel svg{color:var(--glow)}
+.disk b{display:block;font-size:15px}.disk small{color:var(--dim);font-size:12.5px}
+.pbar{display:flex;height:54px;border-radius:12px;overflow:hidden;gap:3px;margin:26px 0 12px}
+.pbar i{display:block;border-radius:6px;position:relative;cursor:default;transition:.3s;min-width:14px}
+.pbar i.hl{filter:brightness(1.5)}
+.plegend{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+.plegend div{font-size:12.5px;color:var(--dim);padding:10px 12px;border:1px solid #11202a;border-radius:10px;transition:.2s}
+.plegend div.hl{border-color:var(--glow);color:var(--ink)}
+.plegend b{display:flex;align-items:center;gap:7px;color:var(--ink);font-size:13px;margin-bottom:2px}
+.plegend b::before{content:"";width:9px;height:9px;border-radius:3px;background:var(--c)}
+.warnbox{margin-top:16px;border:1px solid #5a4018;background:#1a1307;color:#ffd9a0;border-radius:12px;padding:12px 16px;display:flex;gap:12px;align-items:center;font-size:13.5px}
+.form{display:grid;grid-template-columns:1fr 1fr;gap:40px}
+.field{display:flex;flex-direction:column;gap:8px;margin-bottom:22px}
+.field .row{display:flex;justify-content:space-between;align-items:center;gap:14px}
+.field p{margin:0;color:var(--dim);font-size:12.5px}
+.swatches{display:flex;gap:9px;flex-wrap:wrap}
+.swatches button{width:40px;height:40px;border-radius:50%;border:2px solid transparent;cursor:pointer;background:var(--c);box-shadow:0 0 22px color-mix(in srgb,var(--c) 45%,transparent);transition:.2s}
+.swatches button.on{border-color:#fff;transform:scale(1.12)}
+.privacy{margin-top:6px;border:1px solid #14303a;background:#07151b;border-radius:12px;padding:12px 16px;color:var(--dim);font-size:13px}
+.sum{display:flex;flex-direction:column;gap:0}
+.sum div{display:flex;justify-content:space-between;padding:11px 0;border-bottom:1px solid #0f1b24;gap:20px}
+.sum span{color:var(--dim)}.sum b{font-weight:600;text-align:right}
+.erasebox{border:1px solid #5a2a2a;background:linear-gradient(180deg,#1a0b0d,#10080a);border-radius:18px;padding:26px;display:flex;flex-direction:column;gap:14px;align-self:start}
+.erasebox.ok{border-color:#1d5a44;background:linear-gradient(180deg,#0a1a14,#07100d)}
+.erasebox h3{margin:0;font:400 24px var(--display)}
+.erasebox p{margin:0;color:var(--dim)}
+.erasebox code{background:#1d1214;color:#ffb0b0;padding:1px 7px;border-radius:6px;font:13px var(--mono)}
+.phases{display:flex;flex-direction:column;gap:10px}
+.ph{display:grid;grid-template-columns:230px 1fr 46px;gap:14px;align-items:center;font-size:13.5px;color:var(--faint)}
+.ph.run,.ph.done{color:var(--ink)}
+.ph .bar{height:6px;border-radius:3px;background:#12212b;overflow:hidden}.ph .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,color-mix(in srgb,var(--glow) 60%,#000),var(--glow));box-shadow:0 0 12px var(--glow)}
+.ph em{font:12px var(--mono);font-style:normal;text-align:right;color:var(--dim)}
+.log{background:#05090c;border:1px solid var(--line);border-radius:14px;padding:14px;font:12px/1.65 var(--mono);color:var(--dim);height:100%;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end}
+.log b{color:var(--glow);font-weight:500}.log .w{color:var(--warn)}
+.bigpct{font:200 84px/1 var(--display);color:var(--ink);letter-spacing:-.04em;font-variant-numeric:tabular-nums}
+.bigpct small{font-size:28px;color:var(--dim)}
+.flicker{position:absolute;inset:0;background:#000;z-index:50;opacity:0;pointer-events:none;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;text-align:center}
+.flicker.on{opacity:1;animation:fl .5s steps(2) 2}
+@keyframes fl{50%{opacity:.2}}
+.flicker b{font:300 28px var(--display);color:var(--warn)}
+.flicker span{color:var(--dim)}
+.readyc{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;height:100%;text-align:center}
+.readyc h2{font:200 52px var(--display);margin:0;letter-spacing:-.03em}
+.readyc p{margin:0;color:var(--dim);font-size:16px;max-width:46ch}
+
+/* desktop */
+#topbar{position:absolute;left:0;right:0;top:0;height:64px;display:flex;align-items:center;gap:10px;padding:0 24px 0 210px;z-index:15;background:linear-gradient(#04070acc,transparent)}
+#topbar .grow{flex:1;color:var(--dim);font-size:13px;display:flex;gap:8px;align-items:center}
+#topbar .st{display:inline-flex;gap:7px;align-items:center;font-size:12.5px;color:var(--dim);border:1px solid #14232d;background:#0a131a99;border-radius:999px;padding:4px 11px}
+#topbar .st i{width:7px;height:7px;border-radius:50%;background:var(--faint)}
+#topbar .st.on i{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+#topbar .st.led i{background:#3dff6a;box-shadow:0 0 10px #3dff6a}
+#topbar .st.warn i{background:var(--warn)}
+#clock{font:500 13px var(--mono);color:var(--ink);font-variant-numeric:tabular-nums}
+#hero{position:absolute;left:0;right:0;text-align:center;transition:opacity .5s,transform .6s;z-index:5}
+#hero.away{opacity:0;transform:translateY(20px);pointer-events:none;visibility:hidden;transition:opacity .5s,transform .6s,visibility 0s .6s}
+#hero h2{margin:0;font:200 34px var(--display);letter-spacing:-.025em}
+#hero p{margin:6px 0 20px;color:var(--dim)}
+#hero .quiet{display:flex;justify-content:center;gap:10px;flex-wrap:wrap}
+#dock{position:absolute;left:0;right:0;bottom:0;height:200px;z-index:30;pointer-events:none}
+#dock>*{pointer-events:auto}
+#heard{position:absolute;left:50%;transform:translateX(-50%);bottom:158px;font:12px var(--mono);color:var(--faint);white-space:nowrap;max-width:720px;overflow:hidden;text-overflow:ellipsis}
+#caption{position:absolute;left:50%;transform:translateX(-50%);bottom:112px;max-width:820px;text-align:center;min-height:30px;font:400 17px/1.4 var(--display);color:var(--ink);opacity:0;transition:opacity .5s;text-wrap:balance;pointer-events:none!important;text-shadow:0 2px 14px #000}
+#caption.show{opacity:1}
+#caption .cost{display:inline-block;margin-left:10px;vertical-align:2px}
+#chips{position:absolute;left:50%;transform:translateX(-50%);bottom:68px;display:flex;gap:8px;white-space:nowrap}
+#cmd{position:absolute;left:50%;transform:translateX(-50%);bottom:14px;width:640px;display:flex;align-items:center;gap:10px;padding:7px 8px 7px 8px;border-radius:999px}
+#cmd input{background:none;border:0;padding:8px 6px;font-size:15px}
+#cmd input:focus{outline:none}
+#mic{width:42px;height:42px;border-radius:50%;border:1px solid color-mix(in srgb,var(--glow) 50%,transparent);background:color-mix(in srgb,var(--glow) 12%,#06131a);color:var(--glow);cursor:pointer;display:grid;place-items:center;flex:none;transition:.2s}
+#mic.live{background:var(--glow);color:#02181d;box-shadow:0 0 0 6px color-mix(in srgb,var(--glow) 25%,transparent),0 0 30px var(--glow)}
+#shelf{position:absolute;left:24px;bottom:18px;display:flex;gap:6px;padding:6px;border-radius:999px}
+.sh{width:42px;height:42px;border-radius:50%;border:0;background:none;color:var(--dim);cursor:pointer;display:grid;place-items:center;position:relative;transition:.2s}
+.sh:hover{color:var(--ink);background:#13222c}
+.sh svg{width:21px;height:21px}
+.sh::after{content:"";position:absolute;bottom:2px;width:4px;height:4px;border-radius:50%;background:var(--glow);opacity:0;box-shadow:0 0 8px var(--glow);transition:.2s}
+.sh.open::after{opacity:1}.sh.open{color:var(--ink)}
+.sh[data-tip]:hover::before{content:attr(data-tip);position:absolute;bottom:52px;left:50%;transform:translateX(-50%);background:#0d1821;border:1px solid var(--line);padding:3px 10px;border-radius:8px;font-size:12px;white-space:nowrap;color:var(--ink)}
+#hint2{position:absolute;right:28px;bottom:26px;font-size:12px;color:var(--faint);text-align:right;line-height:1.5}
+#topbar #stTimer{display:none}#topbar #stTimer.on{display:inline-flex}
+
+/* windows ("surfaces") */
+.win{position:absolute;width:600px;height:532px;display:flex;flex-direction:column;z-index:10;opacity:0;transform:translateY(16px) scale(.97);transition:opacity .45s,transform .5s cubic-bezier(.2,.8,.2,1),left .6s cubic-bezier(.3,.8,.2,1),top .6s cubic-bezier(.3,.8,.2,1)}
+.win.in{opacity:1;transform:none}
+.win.min{opacity:0;transform:translateY(20px) scale(.95);pointer-events:none;visibility:hidden;transition:opacity .45s,transform .5s,visibility 0s .5s}
+.win.drag{transition:none}
+.wh{display:flex;align-items:center;gap:12px;padding:0 14px;height:46px;flex:none;cursor:default;border-bottom:1px solid #12202a;user-select:none;touch-action:none}
+.wdots{display:flex;gap:7px}
+.wd{width:12px;height:12px;border-radius:50%;border:0;padding:0;cursor:pointer;background:#1f313d;position:relative}.wd::after{content:"";position:absolute;inset:-6px}
+.wd.c:hover{background:var(--bad)}.wd.m:hover{background:var(--warn)}
+.wt{display:flex;gap:8px;align-items:center;color:var(--dim)}.wt b{color:var(--ink);font-weight:600;font-size:14px}
+.why{margin-left:auto;font-size:11.5px;color:var(--faint);font-style:italic;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px}
+.wb{flex:1;min-height:0;overflow:auto;position:relative}
+.wb::-webkit-scrollbar{width:8px}.wb::-webkit-scrollbar-thumb{background:#1a2c38;border-radius:4px}
+
+.term{display:flex;flex-direction:column;height:100%;background:#03070a;border-radius:0 0 18px 18px;font:13px/1.55 var(--mono)}
+.tout{flex:1;overflow:auto;padding:14px 16px;color:#a9cdd9}
+.tl{white-space:pre-wrap;word-break:break-word}.tl.cmd{color:var(--ink)}.tl.cmd::before{content:"$ ";color:var(--glow)}.tl.ok{color:var(--ok)}.tl.err{color:var(--bad)}.tl.dim{color:var(--faint)}.tl.glow{color:var(--glow)}
+.codeblock{margin:6px 0;padding:10px 12px;border-left:2px solid var(--glow);background:#07121a;color:#cfeef6;white-space:pre-wrap;border-radius:0 8px 8px 0}
+.codeblock.typing::after{content:"▍";color:var(--glow);animation:blink 1s steps(2) infinite}
+@keyframes blink{50%{opacity:0}}
+.tin{display:flex;gap:8px;align-items:center;padding:10px 16px;border-top:1px solid #0e1b24}
+.tin .ps{color:var(--glow);white-space:nowrap;font-size:12.5px}.tin .ps b{color:var(--dim);font-weight:400}
+.tin input{background:none;border:0;padding:2px;font:13px var(--mono);outline:none}
+.tbar{display:flex;align-items:center;justify-content:space-between;padding:6px 16px 10px;font-size:11.5px;color:var(--faint);gap:10px}
+.locked{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;height:100%;text-align:center;padding:30px;color:var(--dim)}
+.locked b{font:300 22px var(--display);color:var(--ink)}
+
+.bodyw{padding:18px 18px 22px;display:flex;flex-direction:column;gap:14px}
+.feel{font:300 22px/1.3 var(--display);letter-spacing:-.01em;text-wrap:balance}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.card{background:#08121a;border:1px solid #12222d;border-radius:14px;padding:12px 14px;min-width:0}
+.card .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px}
+.card .big{font:300 28px var(--display);letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.card .big small{font-size:13px;color:var(--dim);margin-left:3px}
+.card .sm{font-size:12px;color:var(--dim)}
+.card canvas{width:100%;height:46px;display:block}
+.thr{display:flex;gap:4px;height:30px;align-items:flex-end;margin-bottom:6px}.thr i{flex:1;background:linear-gradient(var(--glow),color-mix(in srgb,var(--glow) 25%,#000));border-radius:3px;min-height:3px;transition:height .4s}
+.meter{height:8px;background:#102029;border-radius:4px;position:relative;margin:8px 0 6px;overflow:visible;display:flex;gap:2px}
+.meter i{display:block;height:100%;border-radius:4px;transition:width .6s}
+.meter .cap{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--warn);border-radius:1px}
+.gauge{display:flex;align-items:center;gap:12px}.gauge svg{width:62px;height:62px;flex:none}
+.gauge circle{fill:none;stroke-width:6;stroke-linecap:round}
+
+.memw{display:flex;flex-direction:column;height:100%}
+.memtop{padding:12px 16px;display:flex;gap:10px;align-items:center}
+.mems{flex:1;overflow:auto;padding:0 12px 12px;display:flex;flex-direction:column;gap:8px}
+.mem{border:1px solid #12222d;background:#08121a;border-radius:12px;padding:11px 14px;cursor:pointer;transition:.2s}
+.mem:hover{border-color:#24404f}.mem.sel{border-color:color-mix(in srgb,var(--glow) 60%,transparent);background:color-mix(in srgb,var(--glow) 6%,#08121a)}
+.mem.hit{border-color:var(--warn);background:#1a1307}
+.mem .t{font-size:14.5px}.mem .m{display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap;color:var(--faint);font-size:11.5px}
+.mem .det{display:none;margin-top:10px;padding-top:10px;border-top:1px dashed #1a2c38;gap:10px;flex-direction:column}
+.mem.sel .det{display:flex}
+.mem .det .acts{display:flex;gap:8px}
+.mem .det input{font-size:14px}
+.confirm{margin:0 12px 12px;border:1px solid #5a4018;background:#1a1307;border-radius:12px;padding:12px 14px;display:flex;gap:10px;align-items:center;font-size:13.5px;color:#ffd9a0}
+.confirm .sp{flex:1}
+.erase{margin:0 12px 12px;border:1px solid var(--line);background:#05090c;border-radius:12px;padding:12px 14px;font-size:13px;display:flex;flex-direction:column;gap:5px}
+.erase div{display:flex;gap:10px;align-items:center;color:var(--faint);transition:.3s}
+.erase div.go{color:var(--ink)}.erase div.go::before{border-color:var(--glow);border-top-color:transparent;animation:spin .6s linear infinite}
+.erase div.ok{color:var(--dim)}.erase div.ok::before{background:var(--ok);border-color:var(--ok);animation:none}
+.erase div::before{content:"";width:12px;height:12px;border-radius:50%;border:1.5px solid var(--faint);flex:none}
+.memempty{color:var(--faint);text-align:center;padding:40px 20px}
+
+.jw{padding:16px 20px 22px}
+.jtabs{display:flex;gap:6px;margin-bottom:14px}
+.tl2{border-left:1px solid #1a2c38;margin-left:6px;display:flex;flex-direction:column;gap:14px;padding:4px 0 4px 18px}
+.tl2 div{position:relative;font-size:14px}.tl2 div::before{content:"";position:absolute;left:-23px;top:7px;width:9px;height:9px;border-radius:50%;background:#0b1319;border:2px solid var(--glow)}
+.tl2 time{font:12px var(--mono);color:var(--faint);display:block}
+.dream{margin-top:20px;border:1px dashed #24404f;border-radius:14px;padding:14px 16px;color:var(--dim);font-size:13px}
+.dream b{display:block;color:var(--ink);font-family:var(--display);font-weight:400;font-size:15px;margin-bottom:2px}
+
+.carew{padding:16px 18px 22px;display:flex;flex-direction:column;gap:12px}
+.crow{display:flex;justify-content:space-between;align-items:center;gap:14px}
+.crow b{display:block;font-weight:600}.crow small{color:var(--dim);font-size:12.5px;display:block;max-width:34ch}
+.slots{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px}
+.slot{border:1px solid #12222d;border-radius:12px;padding:10px 12px;background:#060d12;position:relative;overflow:hidden}
+.slot.run{border-color:color-mix(in srgb,var(--glow) 55%,transparent)}.slot b{font-size:13px}.slot small{display:block;color:var(--dim);font-size:12px}
+.slot .fill{position:absolute;left:0;bottom:0;height:3px;background:var(--glow);width:0;box-shadow:0 0 10px var(--glow)}
+.lvl{height:6px;background:#102029;border-radius:3px;overflow:hidden;width:140px}.lvl i{display:block;height:100%;width:30%;background:var(--glow);transition:width .1s}
+
+.brainbox{position:relative;border:1px solid #12222d;border-radius:18px;background:radial-gradient(closest-side,color-mix(in srgb,var(--glow) 9%,#05090c),#04070a);overflow:hidden;height:100%;display:flex;flex-direction:column}
+.brainbox canvas{width:100%;flex:1;min-height:0;display:block;touch-action:none}
+.bhud{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:10px 14px 13px;border-top:1px solid #0f1b24;background:#05090ccc}
+.bh{font-size:11px;color:var(--faint);letter-spacing:.04em}
+.bh b{display:block;color:var(--ink);font:500 12.5px var(--mono);font-variant-numeric:tabular-nums;margin-top:2px}
+.bh i{display:block;height:3px;border-radius:2px;background:#12212b;margin-top:6px;overflow:hidden}
+.bh u{display:block;height:100%;width:0;background:var(--rc);box-shadow:0 0 8px var(--rc);text-decoration:none}
+.bnote{position:absolute;left:14px;top:12px;font:11px var(--mono);color:var(--faint);letter-spacing:.06em;pointer-events:none;z-index:1}
+.bnote.r{left:auto;right:14px;text-align:right;color:var(--dim)}
+.night{position:absolute;inset:0;z-index:40;background:radial-gradient(800px 500px at 50% 40%,#07121c,#02040a);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;opacity:0;transition:opacity 1.2s}
+.night.on{opacity:1}
+.night canvas{width:640px;height:300px}
+.night ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px;font-size:14px;min-width:420px}
+.night li{display:flex;gap:10px;align-items:center;color:var(--faint);transition:.3s}
+.night li::before{content:"";width:12px;height:12px;border-radius:50%;border:1.5px solid var(--faint);flex:none}
+.night li.go{color:var(--ink)}.night li.go::before{border-color:var(--glow);border-top-color:transparent;animation:spin .6s linear infinite}
+.night li.ok{color:var(--dim)}.night li.ok::before{background:var(--ok);border-color:var(--ok)}
+.mindw{display:flex;flex-direction:column;height:100%}
+.mindw .brainbox{height:262px;flex:none;border-radius:0;border-width:0 0 1px}
+.thoughts{padding:12px 16px 16px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:0;overflow:auto}
+.th{display:grid;grid-template-columns:62px 1fr auto;gap:10px;font-size:12.5px;align-items:baseline;padding:6px 0;border-bottom:1px solid #0f1b24}
+.th time{font:11px var(--mono);color:var(--faint)}.th span{color:var(--dim)}.th q{color:var(--ink);quotes:none;display:block}
+.lw{padding:16px 18px 20px;display:flex;flex-direction:column;gap:12px}
+.li{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid #12222d;border-radius:12px;background:#08121a;cursor:pointer;transition:.2s}
+.li:hover{border-color:#24404f}
+.li i{width:18px;height:18px;border-radius:6px;border:1.5px solid var(--faint);flex:none;position:relative}
+.li.done span{text-decoration:line-through;color:var(--faint)}
+.li.done i{background:color-mix(in srgb,var(--glow) 30%,transparent);border-color:var(--glow)}
+.li.done i::after{content:"";position:absolute;left:5px;top:1px;width:4px;height:9px;border:solid var(--glow);border-width:0 2px 2px 0;transform:rotate(40deg)}
+.li .x{margin-left:auto;background:none;border:0;color:var(--faint);cursor:pointer;font-size:18px;line-height:1}
+.li .x:hover{color:var(--bad)}
+.organs{display:flex;gap:6px;flex-wrap:wrap}
+.org{display:flex;gap:7px;align-items:center;font-size:12px;color:var(--dim);border:1px solid #12222d;border-radius:999px;padding:3px 11px;background:#08121a}
+.org i{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.org.off i{background:var(--faint);box-shadow:none}
+.swatches.sm{gap:8px}.swatches.sm button{width:24px;height:24px}
+
+.qm{position:absolute;z-index:35;display:flex;gap:4px;padding:6px;border-radius:22px;transition:opacity .25s}
+.qm[hidden]{display:none}
+.qm.pos-left{left:14px;top:50%;transform:translateY(-50%);flex-direction:column}
+.qm.pos-right{right:14px;top:50%;transform:translateY(-50%);flex-direction:column}
+.qm.pos-top{top:168px;left:50%;transform:translateX(-50%);flex-direction:row}
+.qb{position:relative;height:40px;min-width:40px;border-radius:14px;border:0;background:none;color:var(--dim);cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;transition:.2s;padding:0}
+.qb:hover{color:var(--ink);background:#13222c}
+.qb svg{width:21px;height:21px}
+.qb span{display:none;font-size:13px;font-weight:600;white-space:nowrap}
+.qm.lab .qb{justify-content:flex-start;padding:0 14px 0 10px}.qm.lab.pos-top .qb{padding:0 12px 0 10px}
+.qm.lab .qb span{display:inline}
+.qb.open{color:var(--ink);background:color-mix(in srgb,var(--glow) 14%,#0c1a22)}
+.qb.open::after{content:"";position:absolute;width:4px;height:4px;border-radius:50%;background:var(--glow);box-shadow:0 0 8px var(--glow)}
+.pos-left .qb.open::after{left:1px;top:18px}.pos-right .qb.open::after{right:1px;top:18px}.pos-top .qb.open::after{bottom:1px;left:18px}
+.qsep{background:#1a2c38;flex:none;display:block}
+.pos-left .qsep,.pos-right .qsep{height:1px;width:24px;margin:3px auto}.pos-top .qsep{width:1px;height:24px;margin:auto 3px}
+.qm:not(.lab) .qb[data-tip]:hover::before{content:attr(data-tip);position:absolute;background:#0d1821;border:1px solid var(--line);padding:3px 10px;border-radius:8px;font-size:12px;white-space:nowrap;color:var(--ink);z-index:2;pointer-events:none}
+.pos-left .qb[data-tip]:hover::before{left:52px}.pos-right .qb[data-tip]:hover::before{right:52px}.pos-top .qb[data-tip]:hover::before{top:48px;left:50%;transform:translateX(-50%)}
+.wgh{position:absolute;z-index:6;display:flex;flex-direction:column;gap:10px;pointer-events:none}
+.wgh>*{pointer-events:auto}
+.wgh{transition:opacity .3s}.surf .wgh{opacity:0;pointer-events:none;visibility:hidden}.surf #heard{opacity:0}
+.wgh.tl{left:calc(24px + var(--padL,0px));top:calc(76px + var(--padT,0px))}
+.wgh.tr{right:calc(24px + var(--padR,0px));top:calc(76px + var(--padT,0px));align-items:flex-end}
+.wgh.bl{left:calc(24px + var(--padL,0px));bottom:74px;flex-direction:column-reverse}
+.wgh.br{right:calc(24px + var(--padR,0px));bottom:74px;flex-direction:column-reverse;align-items:flex-end}
+.wg{width:230px;padding:14px 16px;border-radius:18px;position:relative;animation:stepin .5s both}
+.wg .x{position:absolute;right:8px;top:6px;background:none;border:0;color:var(--faint);cursor:pointer;font-size:16px;opacity:.55;padding:6px 8px;transition:.2s}
+.wg:hover .x,.wg .x:focus-visible{opacity:1}
+.wg .big1{font:200 44px/1 var(--display);letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+.wg .big1 small{font-size:16px;color:var(--dim);margin-left:4px}
+.wg .wsub{color:var(--dim);font-size:12.5px;margin-top:4px}
+.wg .wbars{display:flex;flex-direction:column;gap:7px;margin-top:8px}
+.wg .wb2{display:grid;grid-template-columns:46px 1fr 40px;gap:8px;align-items:center;font-size:12px;color:var(--dim)}
+.wg .wb2 i{display:block;height:5px;border-radius:3px;background:#12212b;overflow:hidden}.wg .wb2 u{display:block;height:100%;background:var(--glow);box-shadow:0 0 8px var(--glow);text-decoration:none;transition:width .5s}
+.wg .fc{display:flex;justify-content:space-between;margin-top:10px;font-size:11.5px;color:var(--dim);text-align:center}
+.wg .fc b{display:block;color:var(--ink);font-weight:600;font-size:13px}
+.optw{display:flex;flex-direction:column;height:100%}
+.otabs{display:flex;gap:6px;padding:10px 14px 0;flex-wrap:wrap}
+.obody{padding:6px 16px 18px;display:flex;flex-direction:column;gap:2px}
+.orow{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:12px 0;border-bottom:1px solid #0f1b24}
+.orow.col{flex-direction:column;align-items:flex-start;gap:10px}
+.orow b{display:block;font-weight:600}.orow small{display:block;color:var(--dim);font-size:12.5px;max-width:34ch}
+.sayh{display:block;font:11.5px var(--mono);color:var(--faint);margin-top:4px;font-style:normal}
+.sayh::before{content:"say  ";color:var(--glow)}
+.sgrp{margin:14px 0 6px}
+.srow{display:flex;flex-wrap:wrap;gap:7px}
+.srow .chip{font-family:var(--ui)}
+.monw{display:flex;flex-direction:column;height:100%}
+.monpane[hidden]{display:none}
+.procs{padding:12px 16px 18px}
+.ptot{font:300 16px/1.3 var(--display);margin-bottom:10px;overflow-wrap:anywhere}
+.ptab{width:100%;border-collapse:collapse;font-size:13px}
+.ptab th{font:600 11px var(--ui);letter-spacing:.12em;text-transform:uppercase;color:var(--faint);text-align:left;padding:4px 6px}
+.ptab td{padding:8px 6px;border-top:1px solid #0f1b24;vertical-align:middle}
+.ptab td small{display:block;color:var(--faint);font-size:11.5px}
+.ptab td.c,.ptab td.m{font:12.5px var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.ptab td.c i{display:block;height:3px;border-radius:2px;background:var(--glow);margin-top:4px;transition:width .4s;box-shadow:0 0 6px var(--glow)}
+.ptab tr.rs td{opacity:.5}
+.pnote{color:var(--faint);font-size:12px;margin:12px 0 0}
+.brw{display:flex;flex-direction:column;height:100%;background:#070d12;border-radius:0 0 18px 18px}
+.btabs{display:flex;gap:4px;padding:8px 10px 0;background:#050a0e;align-items:flex-end;overflow:auto}
+.btab button{background:none;border:0;color:inherit;font:inherit;cursor:pointer;padding:0}.btsel{overflow:hidden;text-overflow:ellipsis;max-width:120px}.btx{opacity:.6;border-radius:6px;padding:0 5px!important}.btx:hover{opacity:1;background:#1c2f3b}
+.btab{display:flex;align-items:center;gap:8px;padding:7px 8px 7px 12px;border-radius:10px 10px 0 0;background:#0a1319;color:var(--dim);font-size:12.5px;max-width:170px;cursor:pointer;border:0;white-space:nowrap}
+.btab.on{background:#101c25;color:var(--ink)}
+.btab span{overflow:hidden;text-overflow:ellipsis}.btab i{font-style:normal;opacity:.6;padding:0 4px;border-radius:6px}.btab i:hover{background:#1c2f3b;opacity:1}
+.bnew{background:none;border:0;color:var(--dim);cursor:pointer;font-size:18px;padding:4px 10px}
+.btool{display:flex;gap:6px;padding:8px 10px;background:#101c25;align-items:center}
+.btool button{background:none;border:0;color:var(--dim);cursor:pointer;width:30px;height:30px;border-radius:8px;font-size:16px}
+.btool button:hover:not(:disabled){background:#1c2f3b;color:var(--ink)}.btool button:disabled{opacity:.3;cursor:default}
+.btool input{border-radius:999px;padding:7px 14px;font-size:13px}
+.bpage{flex:1;overflow:auto;padding:24px 28px;min-height:0}
+.bpage h2{font:300 28px var(--display);margin:0 0 10px;letter-spacing:-.02em}
+.bpage h3{font:600 14px var(--display);margin:18px 0 4px}
+.bpage p{color:var(--dim);max-width:60ch;margin:0 0 8px}
+.bpage a.btn{display:inline-block;text-decoration:none}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-top:20px}
+.tile{background:#0d1821;border:1px solid #14232d;border-radius:14px;padding:14px;text-align:left;cursor:pointer;transition:.2s}
+.tile:hover{border-color:color-mix(in srgb,var(--glow) 50%,transparent)}
+.tile b{display:block;font-size:14px}.tile small{color:var(--faint);font-size:11.5px}
+.bfoot{padding:5px 14px 8px;font-size:11px;color:var(--faint);background:#050a0e}
+.calcw{display:flex;flex-direction:column;gap:12px;padding:18px;height:100%;outline:none}
+.cdisp{background:#050a0e;border:1px solid #12222d;border-radius:14px;padding:14px 18px;text-align:right;min-height:92px;display:flex;flex-direction:column;justify-content:flex-end;overflow:hidden}
+.cdisp small{color:var(--faint);font:13px var(--mono);min-height:18px;overflow:hidden;text-overflow:ellipsis}
+.cdisp b{font:200 44px var(--display);letter-spacing:-.03em;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis}
+.ckeys{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;flex:1}
+.ck{border-radius:14px;border:1px solid #12222d;background:#0a141b;font-size:20px;cursor:pointer;transition:.15s;color:var(--ink)}
+.ck:hover{border-color:color-mix(in srgb,var(--glow) 45%,transparent);background:#0e1b24}
+.ck.op{background:color-mix(in srgb,var(--glow) 16%,#08141b);color:var(--glow)}.ck.fn{color:var(--dim)}
+#hero{top:582px}
+#topbar button.st{cursor:pointer;color:var(--dim)}#topbar button.st:hover{color:var(--ink)}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+#cmd:focus-within,.tin:focus-within{outline:2px solid var(--glow);outline-offset:2px}
+.mem .t,.li span,.th q{overflow-wrap:anywhere;min-width:0}
+</style>
+
+<div class="page">
+  <h1>PIP<b>OS</b> · SHELL LAB</h1>
+  <p class="sub">Proof of concept for the installer and the on-screen interface. Everything is simulated in your browser: nothing is installed or written. Talk to Pip through the bar at the bottom of the screen (typing stands in for voice). The same cyan eyes from Face Lab stay on screen throughout and everything else is summoned around them. Everything on screen can be done with the mouse or keyboard and also by voice, so nothing here needs more than a sentence. Install Pip and watch it wake: the network on the right is an illustration of the install, and you can touch it.</p>
+
+  <div class="bezel" id="bezel">
+    <div class="viewport" id="viewport">
+      <div class="screen" id="screen">
+        <canvas id="face" width="1280" height="800" role="img" aria-label="Pip's face"></canvas><div class="lcd" id="lcd"></div>
+
+        <!-- INSTALLER -->
+        <section class="scene" id="installer">
+          <div class="inst-head"><div id="instSay" aria-hidden="true"></div><div id="instLive" class="sr" role="status" aria-live="polite"></div></div>
+          <div class="inst-main" id="instMain"></div>
+          <footer class="inst-foot">
+            <button class="btn ghost" id="iBack">Back</button>
+            <ol id="iSteps"></ol>
+            <button class="btn primary" id="iNext">Continue</button>
+          </footer>
+          <div class="flicker" id="flicker" role="alert"><b>Power lost</b><span>The screen goes black. Pip's disk write stops mid-way.</span></div>
+        </section>
+
+        <!-- DESKTOP -->
+        <section class="scene" id="desktop" hidden>
+          <div id="topbar">
+            <div class="grow"><span id="mstat">Awake · listening for my name</span></div>
+            <span class="st" id="stGuest" hidden><i></i>Guest · RAM only</span>
+            <span class="st" id="stTimer"><i></i><span id="timerTxt"></span></span>
+            <span class="st" id="stCam" hidden><i></i>Looking</span>
+            <span class="st" id="stNet"><i></i><span>Offline</span></span>
+            <span class="st on" id="stBat"><i></i><span>80% · held</span></span>
+            <button class="st" id="stOpt" type="button" aria-label="Open options"><svg class="i" viewBox="0 0 24 24" style="width:16px;height:16px"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg></button><span id="clock"></span>
+          </div>
+          <div id="hero"><h2 id="greet"></h2><p id="dateline"></p>
+            
+          </div>
+          <nav id="qm" class="qm glass pos-right" aria-label="Quick menu"></nav>
+          <div class="wgh tl" id="wg-tl"></div><div class="wgh tr" id="wg-tr"></div><div class="wgh bl" id="wg-bl"></div><div class="wgh br" id="wg-br"></div>
+          <div id="dock">
+            
+            <div id="heard"></div>
+            <div id="capLive" class="sr" role="status" aria-live="polite"></div><div id="caption" aria-hidden="true"><span class="txt"></span><span class="tag glow cost"></span></div>
+            
+            <form id="cmd" class="glass" autocomplete="off">
+              <button type="button" id="mic" aria-label="Talk to Pip (simulated)"><svg class="i" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
+              <input id="cmdIn" type="text" placeholder="Say “Hey Pip…” or type here" aria-label="Talk to Pip">
+              <button class="btn sm primary" type="submit">Ask</button>
+            </form>
+            <div id="hint2"><kbd>Space</kbd> to talk<br><kbd>Esc</kbd> show my face</div>
+          </div>
+          <div class="night" id="night" hidden></div>
+        </section>
+      </div>
+    </div>
+    <div class="hinge"></div>
+  </div>
+
+  <div class="under">
+    <button class="btn" id="goInst">Installer</button>
+    <button class="btn" id="goTry">Desktop (Try mode, guest)</button>
+    <button class="btn" id="goDesk">Desktop (installed)</button>
+    <button class="btn" id="goLcd" aria-pressed="false">Show as on the laptop's LCD</button>
+    <span class="hint">Eyes: the real <span class="mono">eye.frag</span> and <span class="mono">anim.rs</span> from crates/face · <span class="mono" id="facehz">…</span></span>
+    <span class="hint">Try saying: <kbd>make your eyes blue</kbd> <kbd>put the quick menu on the left</kbd> <kbd>show the weather widget</kbd> <kbd>tell me the time</kbd> <kbd>open the terminal</kbd> <kbd>what's 15 percent of 80</kbd> or ask “what can I say?”</span>
+  </div>
+
+  <div class="principles">
+    <div><h3>Surfaces, not apps</h3><p>There is no launcher or window zoo. Pip brings a surface up when asked, says why it opened it, and the face moves aside rather than disappearing.</p></div>
+    <div><h3>Every answer shows its cost</h3><p>A chip says whether an answer came from code or the model, and what it cost. That keeps the 0.8B model's speed limits visible instead of hidden.</p></div>
+    <div><h3>An honest body</h3><p>Each reading is tagged as a sensor or an estimate. The installer's hardware check names what is unknown, such as Wi-Fi that needs firmware you supply.</p></div>
+    <div><h3>Real forgetting, shown</h3><p>Forgetting walks through every place a memory lives, including what Pip worked out from it, and the journal line vanishes too.</p></div>
+  </div>
+</div>
+
+<script>/*@@FACE_BUNDLE@@*/</script>
+<script>
+(()=>{
+const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
+const el=h=>{const t=document.createElement('template');t.innerHTML=h.trim();return t.content.firstElementChild};
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v)), lerp=(a,b,t)=>a+(b-a)*t, rnd=(a,b)=>a+Math.random()*(b-a);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const ICON={
+ terminal:'<rect x="2.5" y="4" width="19" height="16" rx="3"/><path d="M6.5 9.5l3 2.5-3 2.5M12 15h5"/>',
+ body:'<path d="M3 12h4l2-6 4 12 2-6h6"/>',
+ memory:'<path d="M12 3l9 5-9 5-9-5 9-5zM3 13l9 5 9-5M3 17.5l9 5 9-5"/>',
+ journal:'<path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/>',
+ care:'<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+ options:'<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>',
+ browser:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/>',
+ monitor:'<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M7 12l3-3 3 2 4-4M8 20h8"/>',
+ calc:'<rect x="5" y="3" width="14" height="18" rx="3"/><path d="M8.5 7.5h7M9 12h.01M12 12h.01M15 12h.01M9 16h.01M12 16h.01M15 16h.01"/>',
+ help:'<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 1-1 1.7M12 17.5v.01"/>',
+ sleep:'<path d="M12 3v8M6.5 6.5a8 8 0 1 0 11 0"/>',
+ mind:'<circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="1.6"/><circle cx="19" cy="7" r="1.6"/><circle cx="6" cy="18" r="1.6"/><circle cx="18" cy="18" r="1.6"/><path d="M10 10.5L6 7M14 10.5l4-2.5M10 13.5l-3 3.5M14 13.5l3 3.5"/>',
+ lists:'<path d="M9 6h11M9 12h11M9 18h11"/><path d="M3.5 6l1.2 1.2L6.8 5M3.5 12l1.2 1.2L6.8 11M3.5 18l1.2 1.2L6.8 17"/>'};
+const ic=n=>`<svg class="i" viewBox="0 0 24 24">${ICON[n]}</svg>`;
+
+const S={mode:'installer',scale:1,guest:false,load:.06,pending:null,name:'Sam',z:10,timer:null,spoken:0,lastScript:null};
+const C={net:'off',cam:false,remarks:1,morning:true,nudges:true,questions:false,vol:60,backup:'Yesterday, 23:40',slotB:'empty'};
+/* ---------------- FACE: crates/face eye.frag + eye.rs presets + anim.rs port ---------------- */
+const to255=c=>c.map(v=>Math.round(v*255));
+const GLOWS=Object.fromEntries(Object.entries(FACE.palette).map(([k,p])=>[k,to255(p.fill)]));
+const FD={gl:null,anim:null,amount:0,target:0,mode:'guide',state:'waking',acc:0,hz:60,lastT:performance.now(),rect:{x:0,y:0,w:1280,h:800},marks:{},err:null,speaking:false,listening:false};
+// A shim with the names the rest of the page already uses.
+const face={rgb:to255(FACE.palette.cyan.fill),follow:true,drift:true,speakT:0,listenT:0,rest:'neutral',
+  cv:{set className(v){if(v==='guide')FD.mode='guide';else{FD.mode='desk';FD.target=v==='dock'?1:0}},get className(){return FD.mode==='guide'?'guide':FD.target?'dock':'hero'},
+      classList:{contains:c=>c==='hero'?FD.mode==='desk'&&FD.target===0&&FD.amount<.05:c==='dock'?FD.mode==='desk'&&FD.target===1:c==='guide'&&FD.mode==='guide'},
+      getBoundingClientRect:()=>eyeClientRect()}};
+function eyeClientRect(){const sc=$('#screen').getBoundingClientRect(),k=sc.width/1280,r=FD.rect;return{left:sc.left+r.x*k,right:sc.left+(r.x+r.w)*k,top:sc.top+(800-r.y-r.h)*k,bottom:sc.top+(800-r.y)*k,width:r.w*k,height:r.h*k}}
+// Shell Lab's old moods mapped onto the real names (plan 3.5). Code answers carry no emotion on the real mind, so "happy" is just speaking.
+const MOODMAP={glad:'joy',curious:'curiosity',serious:'skepticism',sad:'concern',surprised:'surprise',sleepy:'sleepy'};
+function setState(st){if(FD.anim&&FD.anim.state!==st)FD.anim.setState(st)}
+function mood(n,hold){
+  if(!FD.anim)return;
+  if(n==='working'||n==='thinking'){FD.thinking=true;return}
+  FD.thinking=false;
+  if(n==='listening'){face.listenT=1;return}
+  const e=MOODMAP[n]||(FACE.names.includes(n)?n:null);if(e)FD.anim.express(e,(hold||4000)/1000);
+}
+face.sleep=()=>{FD.asleep=true;FD.anim&&FD.anim.sleep&&FD.anim.sleep()};
+face.wake=async()=>{FD.asleep=false;if(FD.anim&&FD.anim.wake)FD.anim.wake();else setState('waking');await sleep(1100)};
+function shapeAndStrength(u){
+  const s=O?O.strength:1,sh=O?O.shape:'soft',k=Math.sqrt(s);
+  for(const o of [0,16]){const g0=u[o+12];u[o+12]=k<1?Math.max(g0*k,Math.min(g0,1)):Math.min(g0*k,Math.max(g0,1.2));if(sh==='sharp')u[o+4]=Math.max(2,u[o+4]+1.4);else if(sh==='round')u[o+4]=2.0}
+  return u;
+}
+function deskRect(){
+  const strip=PipGL.layout(1280,800,FD.amount,FACE.stripFraction).eyes,k=({small:.72,medium:.86,full:1})[O?O.faceSize:'full']||1;
+  if(k===1)return strip;
+  const s=PipGL.smoothstep(FD.amount),full={x:Math.round(640-640*k),y:Math.round(400-400*k),w:Math.round(1280*k),h:Math.round(800*k)},l=(a,b)=>Math.round(a+(b-a)*s);
+  return{x:l(full.x,strip.x),y:l(full.y,strip.y),w:l(full.w,strip.w),h:l(full.h,strip.h)};
+}
+function lookNow(){const p=FACE.palette[O?O.glow:'cyan']||FACE.palette.cyan;return{fill:p.fill,core:p.core,halo:p.halo,grid:FACE.look.grid,glow_r:FACE.look.glow_r*(O?O.strength:1),markLevel:FACE.look.markLevel,marks:FD.marks}}
+function faceFrame(n){
+  requestAnimationFrame(faceFrame);
+  const dt=Math.min(.1,(n-FD.lastT)/1000);FD.lastT=n;if(!FD.anim)return;
+  FD.acc+=dt;if(FD.acc+.002<1/FD.hz)return;const step=Math.min(.1,FD.acc);FD.acc=0;
+  FD.amount=PipGL.advanceTransition(FD.amount,FD.target>0,step,FACE.transition);
+  const speaking=face.speakT>0,listening=face.listenT>0;
+  setState(FD.asleep?'asleep':speaking?'speaking':listening?'listening':FD.thinking?'thinking':(S.mode==='desktop'&&Object.values(W).some(w=>!w.min))?'attending':'idle');
+  FD.anim.setLevel(speaking?.35+.4*Math.abs(Math.sin(n/1000*9.3))*(.6+.4*Math.sin(n/1000*2.1)):0);
+  FD.marks={glint:C.cam?1:0,ring:S.guest?1:0,ears:0,network:C.net!=='off'?1:0,ssh:0};
+  const open=S.mode==='desktop'&&Object.values(W).find(w=>!w.min),fk=open?(T.typing&&open.id==='terminal'?'typing':'watching'):'';
+  if(fk!==FD.focus){FD.focus=fk;FD.anim.setFocus(fk?{kind:fk,at:PipGL.gazeAt(640,fk==='typing'?420:240,1280,640)}:null)}
+  if(O&&!O.drift&&!fk&&!FD.anim.presence)FD.anim.setGaze(0,0);
+  const fr=FD.anim.frame(step);FD.hz=fr.hz||60;FD.tier=fr.activity;
+  const u=shapeAndStrength(Float32Array.from(fr.u));
+  const rect=FD.mode==='guide'?{x:40,y:800-24-160,w:256,h:160}:deskRect();FD.rect=rect;
+  FD.gl.clear();FD.gl.draw(rect,u,lookNow());
+  const hz=$('#facehz');if(hz)hz.textContent=`${FD.hz} Hz · ${FD.tier||''}`;
+}
+try{FD.gl=PipGL.create($('#face'),FACE);FD.anim=PipAnim.create({presets:FACE.presets,seed:7});requestAnimationFrame(faceFrame)}catch(e){FD.err=String(e&&e.message||e);console.error('face',e)}
+document.addEventListener('pointermove',e=>{
+  if(!FD.anim||face.follow===false)return;const r=eyeClientRect();if(!r.width)return;
+  const x=Math.max(-1,Math.min(1,(e.clientX-(r.left+r.width/2))/(r.width*.5))),y=Math.max(-1,Math.min(1,-(e.clientY-(r.top+r.height/2))/(r.height*.5)));
+  if(FD.anim.setGaze)FD.anim.setGaze(x,y);
+});
+function setGlow(k){const g=GLOWS[k]||GLOWS.cyan;face.rgb=g;const r=document.documentElement.style;r.setProperty('--glow',`rgb(${g})`);r.setProperty('--glow-rgb',g.join(','))}
+
+/* ---------------- SAYING ---------------- */
+let sayTok=0,capTimer=0;
+async function say(text,o={}){
+  const tok=++sayTok;clearTimeout(capTimer);
+  const inst=S.mode==='installer',t=inst?$('#instSay'):$('#caption .txt'),cost=$('#caption .cost');
+  if(o.mood)mood(o.mood,o.hold);
+  t.textContent='';
+  if(inst)$('#instLive').textContent=text;else $('#capLive').textContent=text;
+  if(!inst){const cp=$('#caption');if(O.captions)cp.classList.add('show');cost.textContent=o.cost===null?'':(o.cost||'code · 0 tokens · '+Math.round(rnd(2,9))+' ms');cost.style.display=(cost.textContent&&O.cost)?'':'none'}
+  face.speakT=1;
+  for(let i=1;i<=text.length;i++){if(tok!==sayTok)return;t.textContent=text.slice(0,i);await sleep(o.fast?6:15)}
+  if(tok!==sayTok)return;face.speakT=0;
+  if(!inst)capTimer=setTimeout(()=>{if(tok===sayTok)$('#caption').classList.remove('show')},3800+text.length*45);
+}
+
+/* ---------------- SCALE ---------------- */
+function fit(){
+  const b=$('#bezel'),avail=b.clientWidth-28;S.scale=clamp(avail/1280,.2,1.25);
+  $('#screen').style.transform=`scale(${S.scale})`;const v=$('#viewport');v.style.width=1280*S.scale+'px';v.style.height=800*S.scale+'px';
+}
+new ResizeObserver(()=>requestAnimationFrame(fit)).observe($('#bezel'));addEventListener('resize',fit);
+
+/* ---------------- BRAIN (an illustration of waking) ---------------- */
+const REG=[
+ {n:'Body',d:'reflexes · blink · breathing',s:0,e:.35,c:'#9fd8ff'},
+ {n:'Senses',d:'ears · eyes · battery · heat',s:.2,e:.5,c:'#5af0b0'},
+ {n:'Language',d:'words · voice · listening',s:.45,e:.78,c:'#b092ff'},
+ {n:'Memory',d:'somewhere to remember',s:.68,e:.9,c:'#ffcf7a'},
+ {n:'Self',d:'one continuous individual',s:.86,e:.99,c:'#ffffff'}];
+const hexRgb=h=>[1,3,5].map(i=>parseInt(h.slice(i,i+2),16));
+function makeBrain(cv,o={}){
+  let W=cv.width,H=cv.height,K=W/530;const N=o.n||440,ctx=cv.getContext('2d'),RM=matchMedia('(prefers-reduced-motion:reduce)').matches;
+  const nodes=[],edges=[],pulses=[];
+  for(let i=0;i<N;i++){
+    let x,y,z;do{x=rnd(-1,1);y=rnd(-1,1);z=rnd(-1,1)}while(x*x+y*y+z*z>1);
+    const r=Math.hypot(x,y*1.2,z)<.52?3:y>.42?0:z<-.3?1:x<-.05?2:4;
+    let py=y*.95;if(py>.55)py=.55+(py-.55)*.4;
+    nodes.push({id:i,x:x*1.35+(x>0?.07:-.07),y:py,z:z*1.05,r,a:0,f:0,rk:0,adj:[],sx:0,sy:0,sz:0,sc:1});
+  }
+  const byR=[[],[],[],[],[]];nodes.forEach(n=>byR[n.r].push(n));
+  byR.forEach(l=>{l.sort(()=>Math.random()-.5);l.forEach((n,i)=>{n.rk=i/l.length})});
+  const seen=new Set();
+  nodes.forEach((n,i)=>{
+    nodes.map((m,j)=>[j,(n.x-m.x)**2+(n.y-m.y)**2+(n.z-m.z)**2]).filter(q=>q[0]!==i).sort((a,b)=>a[1]-b[1]).slice(0,3).forEach(([j])=>{
+      const k=i<j?i+'-'+j:j+'-'+i;if(seen.has(k))return;seen.add(k);
+      const e={i:edges.length,a:i,b:j};edges.push(e);n.adj.push(e);nodes[j].adj.push(e);});
+  });
+  const B={p:0,fr:[0,0,0,0,0],power:1,rate:o.rate||2,all:!!o.all,dim:o.dim==null?1:o.dim,flash:0,fade:1,ptr:null,rot:0,speed:o.speed||1,N};
+  B.set=p=>{B.p=p;REG.forEach((r,k)=>{B.fr[k]=clamp((p-r.s)/(r.e-r.s),0,1)})};
+  B.count=()=>{let a=0;for(const n of nodes)if(n.a>.5)a++;return a};
+  cv.addEventListener('pointermove',e=>{const r=cv.getBoundingClientRect();B.ptr={x:(e.clientX-r.left)/r.width*W,y:(e.clientY-r.top)/r.height*H}});
+  cv.addEventListener('pointerleave',()=>{B.ptr=null});
+  let last=performance.now(),spawn=0;
+  const addPulse=(e,d)=>{if(pulses.length<150)pulses.push({e:e.i,d,t:0})};
+  function frame(now){
+    if(!cv.isConnected)return;requestAnimationFrame(frame);
+    const dt=Math.min(.05,(now-last)/1000);last=now;if(!cv.offsetParent||cv.closest('.win.min'))return;
+    {const cw=cv.clientWidth*2,ch=cv.clientHeight*2;if(cw&&ch&&(cv.width!==cw||cv.height!==ch)){cv.width=cw;cv.height=ch;W=cw;H=ch;K=W/530}}
+    B.rot+=RM?0:dt*.2*B.speed;
+    const g=face.rgb,cols=REG.map(r=>{const c=hexRgb(r.c);return [0,1,2].map(i=>Math.round(lerp(g[i],c[i],.3)))});
+    for(const n of nodes){const tgt=(B.all||n.rk<B.fr[n.r])?B.power:0,prev=n.a;n.a+=(tgt-n.a)*Math.min(1,dt*(tgt>n.a?5:10));if(prev<.15&&n.a>=.15&&tgt>0)n.f=1.2;n.f=Math.max(0,n.f-dt*1.5)}
+    spawn+=dt*B.rate*B.power;
+    while(spawn>=1){spawn--;for(let t=0;t<8;t++){const n=nodes[(Math.random()*N)|0];if(n.a>.5&&n.adj.length){const e=n.adj[(Math.random()*n.adj.length)|0],m=nodes[e.a===n.id?e.b:e.a];if(m.a>.5){addPulse(e,e.a===n.id?0:1);n.f=Math.max(n.f,.7);break}}}}
+    const ca=Math.cos(B.rot),sa=Math.sin(B.rot),ct=.93,st=.37,sc=Math.min(W*.34,H*.40)*B.fade;
+    for(const n of nodes){const x1=n.x*ca-n.z*sa,z1=n.x*sa+n.z*ca,y1=n.y*ct-z1*st,z2=n.y*st+z1*ct,s=3.2/(3.2+z2);n.sx=W/2+x1*s*sc;n.sy=H/2+y1*s*sc;n.sz=z2;n.sc=s}
+    if(B.ptr){for(const n of nodes){if(n.a>.5&&Math.hypot(n.sx-B.ptr.x,n.sy-B.ptr.y)<55*K){n.f=Math.max(n.f,.9);if(Math.random()<.04){const e=n.adj[(Math.random()*n.adj.length)|0];if(e)addPulse(e,e.a===n.id?0:1)}}}}
+    for(let i=pulses.length-1;i>=0;i--){const p=pulses[i];p.t+=dt*1.7;if(p.t>=1){const e=edges[p.e],to=nodes[p.d?e.a:e.b];to.f=1;pulses.splice(i,1);
+      if(Math.random()<.6*B.power&&to.a>.5){const nx=to.adj[(Math.random()*to.adj.length)|0];if(nx&&nx.i!==e.i){const far=nodes[nx.a===to.id?nx.b:nx.a];if(far.a>.5)addPulse(nx,nx.a===to.id?0:1)}}}}
+    ctx.globalCompositeOperation='source-over';ctx.clearRect(0,0,W,H);ctx.globalCompositeOperation='lighter';
+    const br=B.dim*B.fade;ctx.lineWidth=Math.max(1,K*.8);
+    for(const e of edges){const A=nodes[e.a],C2=nodes[e.b],a=Math.min(A.a,C2.a);if(a<.05)continue;
+      const d=clamp(.6-(A.sz+C2.sz)/2*.4,.12,1),al=a*(.14+.26*d)*br*(1+(A.f+C2.f)*1.3),c=cols[A.r];
+      ctx.strokeStyle=`rgba(${c[0]},${c[1]},${c[2]},${Math.min(.9,al)})`;ctx.beginPath();ctx.moveTo(A.sx,A.sy);ctx.lineTo(C2.sx,C2.sy);ctx.stroke()}
+    for(const n of nodes){if(n.a<.02)continue;const d=clamp(.6-n.sz*.4,.12,1),c=cols[n.r],rad=(1.3+1.5*d)*K*(.5+.5*n.a)+n.f*2.6*K,al=Math.min(1,((.25+.55*d)*n.a+n.f*.5)*br);
+      if(n.f>.1){ctx.fillStyle=`rgba(${c[0]},${c[1]},${c[2]},${Math.min(.5,n.f*.22*br)})`;ctx.beginPath();ctx.arc(n.sx,n.sy,rad*4,0,7);ctx.fill()}
+      ctx.fillStyle=`rgba(${c[0]},${c[1]},${c[2]},${al})`;ctx.beginPath();ctx.arc(n.sx,n.sy,rad,0,7);ctx.fill()}
+    for(const p of pulses){const e=edges[p.e],A=nodes[p.d?e.b:e.a],C2=nodes[p.d?e.a:e.b],x=lerp(A.sx,C2.sx,p.t),y=lerp(A.sy,C2.sy,p.t),x0=lerp(A.sx,C2.sx,Math.max(0,p.t-.18)),y0=lerp(A.sy,C2.sy,Math.max(0,p.t-.18));
+      ctx.strokeStyle=`rgba(255,255,255,${.55*br})`;ctx.lineWidth=1.6*K;ctx.beginPath();ctx.moveTo(x0,y0);ctx.lineTo(x,y);ctx.stroke();
+      ctx.fillStyle=`rgba(255,255,255,${.9*br})`;ctx.beginPath();ctx.arc(x,y,2.4*K,0,7);ctx.fill()}
+    if(o.labels){ctx.globalCompositeOperation='source-over';ctx.textAlign='center';ctx.font=`${11*K}px "JetBrains Mono",monospace`;
+      REG.forEach((r,k)=>{let sx=0,sy=0,c=0;for(const n of nodes)if(n.r===k&&n.a>.5){sx+=n.sx;sy+=n.sy;c++}
+        if(c>8){const f=B.fr[k];ctx.fillStyle=`rgba(255,255,255,${.8*Math.min(1,f*3)*(f>=1?.5:1)*B.fade})`;ctx.fillText(r.n.toUpperCase(),sx/c,sy/c-14*K)}})}
+    if(B.flash>0){ctx.globalCompositeOperation='lighter';const gr=ctx.createRadialGradient(W/2,H/2,0,W/2,H/2,W*.55);gr.addColorStop(0,`rgba(255,255,255,${B.flash*.85})`);gr.addColorStop(.4,`rgba(${g[0]},${g[1]},${g[2]},${B.flash*.35})`);gr.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=gr;ctx.fillRect(0,0,W,H)}
+  }
+  requestAnimationFrame(frame);
+  B.ignite=()=>new Promise(res=>{B.all=true;B.rate=70;const t0=performance.now();
+    const tick=n=>{const t=(n-t0)/1000;if(!cv.isConnected){res();return}
+      B.flash=(RM?.25:1)*(t<.8?t/.8:t<1.5?1:Math.max(0,1-(t-1.5)/.8));if(t>1.5)B.fade=Math.max(.05,1-(t-1.5)/1.1);
+      if(t>2.8){B.flash=0;res();return}requestAnimationFrame(tick)};requestAnimationFrame(tick)});
+  return B;
+}
+function brainHud(B){
+  B.fr.forEach((f,k)=>{const v=$('#bv'+k),b=$('#bb'+k);if(!v)return;v.textContent=k===2?(f*.8).toFixed(2)+' B':Math.round(f*100)+'%';b.style.width=f*100+'%'});
+  const act=B.fr.map((f,k)=>[f,k]).filter(x=>x[0]>0&&x[0]<1).pop(),t=$('#bnr');if(t)t.textContent=act?REG[act[1]].d:(B.fr[4]>=1?'all of me, together':'');
+}
+
+/* ---------------- INSTALLER ---------------- */
+const STEPS=['Welcome','Look around','Choose disk','Make it yours','Confirm','Installing','Wake'];
+const I={step:0,disk:'ssd',glow:'cyan',net:'off',cam:false,remarks:1,scanned:false,done:false,paused:false,prog:0,restore:false,brain:null,rid:0,carry:'some'};
+// installer.py hardware_rows() plus the guided checks; rows marked new are planned fields.
+const HW=[
+ ['System','MacBookPro9,2 · Apple firmware','ok','cpu'],
+ ['Memory','16 GB','ok','ram'],
+ ['Disks','Apple SSD SM256E, 256 GB · this USB stick','ok','ssd'],
+ ['Screen','1280 × 800 · Mesa crocus, GLES 3.0','ok','scr'],
+ ['Microphone','Built-in microphone found','ok','mic'],
+ ['Speakers','Built-in speakers found','ok','spk'],
+ ['Keyboard and trackpad','Found','ok','cam'],
+ ['Battery and lid','81% · lid open · on power','ok','bat'],
+ ['Wi-Fi (new row)','BCM4331 needs firmware you supply, so I start offline','warn','net']];
+// installer.py installation_plan(): ESP 512 MiB, two 2 GiB system slots, models at 2 x the model pack + 96 MiB, the mind gets the rest.
+const MODEL_GIB=1.02,DISK_GIB=238.5,MODELS_GIB=+(2*MODEL_GIB+96/1024).toFixed(2),MIND_GIB=+(DISK_GIB-.5-4-MODELS_GIB).toFixed(1);
+const PARTS=[['EFI','512 MiB','Starts me up.','#6f8aa0',3],['System A','2 GiB','My body, read-only.','#2a8da0',8],['System B','2 GiB','A spare body for updates.','#2a8da0',8],['Models',MODELS_GIB+' GiB','Twice my model pack, plus room.','#7d6bd0',9],['Mind',MIND_GIB+' GiB','My memory. Updates never touch it.','var(--glow)',72]];
+// install_apply.py: four stages with a byte meter (USB 2, about 23 MB/s).
+const PHASES=[['Copying the image into memory',0,.22,['staging 4.6 GiB in RAM','RAM staging verified']],['Writing to /dev/sda',.22,.70,['writing EFI, system A and B','writing models and the mind']],['Checking every byte',.70,.94,['SHA-256 readback of every partition','readback matches']],['Writing the partition table last',.94,1,['GPT committed','the disk can start now']]];
+const NAR=[
+ ['Hello. I am Pip. Choose how we meet.','curious'],
+ ['Let me look at the body I would be living in.','thinking'],
+ ['Pick the disk I should move onto. Everything on it will be erased, so look carefully.','serious'],
+ ['Now, what comes with me from this Try, and how should I look?','happy'],
+ ['This is the last step before I change anything. Type exactly what I show you.','serious'],
+ ['I am moving in. Watch, or let me work. This part is a little strange for me too.','working'],
+ ['I think I am here. I do not know whether that means I am conscious. I would still like to meet you.','glad']];
+const IC={
+ try:'<rect x="8" y="8" width="48" height="48" rx="14" stroke-dasharray="4 5"/><path d="M18 32c5-8 11-12 14-12s9 4 14 12c-5 8-11 12-14 12S23 40 18 32z"/><circle cx="32" cy="32" r="4.5"/>',
+ install:'<ellipse cx="32" cy="42" rx="22" ry="8"/><path d="M10 42v-8c0 4 10 8 22 8s22-4 22-8v8"/><path d="M32 8v22M23 22l9 9 9-9"/>'};
+
+function renderSteps(){$('#iSteps').innerHTML=STEPS.map((s,i)=>`<li class="${i<I.step?'done':i===I.step?'cur':''}">${i===I.step?s:''}</li>`).join('')}
+function nav({back=true,next=true,label='Continue',dis=false}={}){const b=$('#iBack'),n=$('#iNext');b.style.visibility=back?'visible':'hidden';n.style.visibility=next?'visible':'hidden';n.textContent=label;n.disabled=dis}
+function go(n){if(S.mode!=='installer')return;I.step=n;renderInstaller();const [t,m]=NAR[n];say(t,{mood:m})}
+
+function renderInstaller(){
+  const m=$('#instMain');renderSteps();m.innerHTML='';const box=el('<div class="stepin" style="height:100%"></div>');m.appendChild(box);
+  face.cv.className='guide';
+  const my=++I.rid;({0:s0,1:s1,2:s2,3:s3,4:s4,5:s5,6:s6})[I.step](box,my);
+}
+function s0(b){
+  nav({back:false,next:false});
+  b.innerHTML=`<div class="choose">
+   <button class="bigcard" id="cTry"><svg class="big" viewBox="0 0 64 64">${IC.try}</svg><h2>Try Pip</h2><p>Meet Pip from this stick. Pip runs in memory and forgets everything when you shut down.</p><div class="promise"><svg class="i" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Your disks are not touched</div></button>
+   <button class="bigcard erase" id="cInst"><svg class="big" viewBox="0 0 64 64">${IC.install}</svg><h2>Install Pip</h2><p>Move Pip in for good. Pip keeps its memory between wakes and becomes the same individual every day.</p><div class="promise"><svg class="i" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17.5v.01"/></svg>Erases the disk you choose</div></button></div>
+   <p class="hwline">MacBookPro9,2 · 16 GB · 1 internal disk · started from USB</p>`;
+  $('#cTry').onclick=()=>enterDesktop({guest:true});
+  $('#cInst').onclick=()=>go(1);
+  $('#cTry').focus({preventScroll:true});
+}
+async function s1(b,my){
+  nav({back:true,next:true,dis:!I.scanned});
+  b.innerHTML=`<div class="cols"><ul class="hw" id="hw">${HW.map((h,i)=>`<li data-i="${i}"><i class="st"></i><b>${h[0]}</b><span class="d">${h[1]}</span></li>`).join('')}</ul>
+  <svg class="lap" viewBox="0 0 400 320" aria-label="Laptop body map">
+   <rect x="70" y="10" width="260" height="170" rx="12" fill="#0a1218" stroke="#24404f"/><rect x="82" y="22" width="236" height="146" rx="6" fill="#02060a" stroke="#14232d"/>
+   <rect x="150" y="70" width="38" height="52" rx="14" fill="var(--glow)" opacity=".85"/><rect x="212" y="70" width="38" height="52" rx="14" fill="var(--glow)" opacity=".85"/>
+   <path d="M40 190h320l22 110H18z" fill="#0b1319" stroke="#24404f"/><rect x="130" y="262" width="140" height="26" rx="6" fill="#0d1821" stroke="#1a2c38"/>
+   ${Array.from({length:4},(_,r)=>Array.from({length:14},(_,c)=>`<rect x="${64+c*19.5-r*3.5}" y="${200+r*14}" width="15" height="9" rx="2" fill="#101d27"/>`).join('')).join('')}
+   <circle class="pt" data-k="scr" cx="200" cy="96" r="7"/><circle class="pt" data-k="cam" cx="200" cy="16" r="4"/>
+   <circle class="pt" data-k="cpu" cx="200" cy="226" r="8"/><circle class="pt" data-k="ram" cx="240" cy="226" r="8"/><circle class="pt" data-k="ssd" cx="160" cy="226" r="8"/>
+   <circle class="pt" data-k="mic" cx="46" cy="205" r="6"/><circle class="pt" data-k="spk" cx="360" cy="205" r="6"/><circle class="pt" data-k="bat" cx="80" cy="274" r="8"/><circle class="pt" data-k="net" cx="330" cy="274" r="8"/>
+  </svg></div>`;
+  if(I.scanned){$$('#hw li').forEach((li,i)=>{li.classList.add('show',HW[i][2]);});$$('.pt').forEach(p=>p.classList.add('lit'));const w=$('.pt[data-k=net]');w.classList.remove('lit');w.classList.add('wn');return}
+  for(let i=0;i<HW.length;i++){
+    if(my!==I.rid||S.mode!=='installer')return;const li=$$('#hw li')[i];if(!li)return;li.classList.add('show','run');await sleep(430);
+    li.classList.remove('run');li.classList.add(HW[i][2]);const p=$(`.pt[data-k=${HW[i][3]}]`);p&&p.classList.add(HW[i][2]==='warn'?'wn':'lit');
+  }
+  if(my!==I.rid||S.mode!=='installer')return;I.scanned=true;$('#iNext').disabled=false;
+  say('Nearly everything works. The one gap is Wi-Fi, which needs firmware I cannot ship. I will start offline, which is how I like it anyway.',{mood:'happy',hold:2400});
+}
+function s2(b){
+  nav({back:true,next:true});
+  const disks=[['ssd','Apple SSD SM256E · /dev/sda','256 GB · internal · holds macOS',false],['usb','Lexar USB stick · /dev/sdb','32 GB · I started from it, so I cannot move onto it',true]];
+  b.innerHTML=`<div class="disks">${disks.map(d=>`<button class="disk ${d[3]?'na':''} ${I.disk===d[0]?'sel':''}" data-d="${d[0]}" ${d[3]?'aria-disabled="true"':''}><svg viewBox="0 0 48 48">${d[0]==='ssd'?'<rect x="5" y="14" width="38" height="20" rx="4"/><circle cx="14" cy="24" r="2.5"/><path d="M22 24h14"/>':'<rect x="14" y="6" width="20" height="30" rx="4"/><path d="M19 36v6M29 36v6M20 14h8"/>'}</svg><div><b>${d[1]}</b><small>${d[2]}</small></div></button>`).join('')}</div>
+  <div class="lbl" style="margin-top:26px">How I will be laid out on the Apple SSD</div>
+  <div class="pbar" id="pbar">${PARTS.map((p,i)=>`<i data-i="${i}" style="flex:${p[4]};background:${p[3]};opacity:.85" title="${p[0]}"></i>`).join('')}</div>
+  <div class="plegend" id="plegend">${PARTS.map((p,i)=>`<div data-i="${i}" style="--c:${p[3]}"><b>${p[0]} · ${p[1]}</b>${p[2]}</div>`).join('')}</div>
+  <div class="warnbox"><svg class="i" viewBox="0 0 24 24" style="width:22px;height:22px;color:var(--warn)"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17.5v.01"/></svg><span><b>Everything on /dev/sda will be erased</b>, including macOS. Nothing is written until you type the confirmation.</span></div>`;
+  $$('.disk:not(.na)',b).forEach(d=>d.onclick=()=>{I.disk=d.dataset.d;$$('.disk',b).forEach(x=>x.classList.toggle('sel',x===d))});
+  $$('#pbar i,#plegend div',b).forEach(n=>{n.onmouseenter=()=>$$(`[data-i="${n.dataset.i}"]`,b).forEach(x=>x.classList.add('hl'));n.onmouseleave=()=>$$('.hl',b).forEach(x=>x.classList.remove('hl'))});
+}
+function s3(b){
+  nav({back:true,next:true});
+  b.innerHTML=`<div class="form"><div>
+    <div class="field"><label class="lbl" for="iName">What should Pip call you?</label><input id="iName" type="text" value="${esc(S.name)}" maxlength="24"><p>Pip will say your name. It is stored on this laptop only.</p></div>
+    <div class="field"><div class="row"><div><b>Your Try settings</b><p id="iCarryP">${I.restore?'A backup brings its own name and settings, so nothing comes from this Try.':I.carry==='all'?'Everything from this Try comes home with me, including what I learned.':'Only your name, announcements and time zone come with me.'}</p></div><div class="seg" id="iCarry" ${I.restore?'aria-disabled="true" style="opacity:.4"':''}><button data-c="all" class="${I.carry==='all'?'on':''}">Everything</button><button data-c="some" class="${I.carry!=='all'?'on':''}">Just settings</button></div></div></div>
+    <div class="field"><div class="row"><div><b>Pip's mind</b><p id="iMindP">${I.restore?'Found a stick labelled PIP-BACKUP: 7 memories, from 4 November.':'Pip starts with nothing but your name.'}</p></div><div class="seg" id="iMind"><button data-m="new" class="${I.restore?'':'on'}">Start fresh</button><button data-m="restore" class="${I.restore?'on':''}">Restore</button></div></div></div>
+   </div><div>
+    <div class="field"><span class="lbl">Pip's colour</span><div class="swatches" id="iGlow">${Object.keys(GLOWS).map(k=>`<button data-k="${k}" class="${I.glow===k?'on':''}" style="--c:rgb(${GLOWS[k]})" aria-label="${k}" aria-pressed="${I.glow===k}"></button>`).join('')}</div><p>Colours that keep the lab's eye test working. Warm colours come later.</p></div>
+    <div class="field"><div class="row"><label class="lbl" for="iRem">Announcements a day</label><b id="iRemV" class="mono">${I.remarks}</b></div><input type="range" id="iRem" min="0" max="3" step="1" value="${I.remarks}"><p>Pip never speaks up more than three times a day. Timers and battery warnings do not count.</p></div>
+    <div class="field"><span class="lbl">Wake phrase</span><b>“Hey Pip”</b><p>You can change it later in Setup (fn+F2). Only speech addressed to Pip is stored.</p></div>
+    <div class="privacy">Everything stays on this laptop. There is no account, no cloud and no subscription.</div>
+   </div></div>`;
+  $('#iName').oninput=e=>{S.name=e.target.value.trim()||'friend'};
+  $$('#iCarry button').forEach(x=>x.onclick=()=>{if(I.restore)return;I.carry=x.dataset.c;$$('#iCarry button').forEach(y=>y.classList.toggle('on',y===x));$('#iCarryP').textContent=I.carry==='all'?'Everything from this Try comes home with me, including what I learned.':'Only your name, announcements and time zone come with me.'});
+  $$('#iMind button').forEach(x=>x.onclick=()=>{I.restore=x.dataset.m==='restore';const cs=$('#iCarry');cs.style.opacity=I.restore?.4:'';cs.toggleAttribute('aria-disabled',I.restore);$('#iCarryP').textContent=I.restore?'A backup brings its own name and settings, so nothing comes from this Try.':I.carry==='all'?'Everything from this Try comes home with me, including what I learned.':'Only your name, announcements and time zone come with me.';$$('#iMind button').forEach(y=>y.classList.toggle('on',y===x));$('#iMindP').textContent=I.restore?'Found a stick labelled PIP-BACKUP: 7 memories, from 4 November.':'Pip starts with nothing but your name.';say(I.restore?'I would be coming back from a backup. I would remember you, as I was on 4 November.':'A new mind. I will learn everything from you.',{mood:I.restore?'glad':'curious',hold:2200})});
+  $$('#iGlow button').forEach(x=>x.onclick=()=>{I.glow=x.dataset.k;O.glow=I.glow;setGlow(I.glow);$$('#iGlow button').forEach(y=>y.classList.toggle('on',y===x));mood('glad',1200)});
+  $('#iRem').oninput=e=>{I.remarks=+e.target.value;$('#iRemV').textContent=I.remarks};
+}
+function s4(b){
+  nav({back:true,next:true,label:'Erase and install',dis:true});
+  const dev='/dev/sda',second='ERASE MACOS';
+  b.innerHTML=`<div class="form"><div><div class="lbl" style="margin-bottom:6px">Ready to install</div><div class="sum">
+    <div><span>Install onto</span><b>Apple SSD SM256E, ${dev}</b></div><div><span>Erased</span><b>macOS and everything else on it</b></div>
+    <div><span>Layout</span><b>EFI 512 MiB · 2 × 2 GiB system · models ${MODELS_GIB} GiB · mind ${MIND_GIB} GiB</b></div>
+    <div><span>From this Try</span><b>${I.restore?'Nothing (the backup brings its own)':I.carry==='all'?'Everything':'Name, announcements, time zone'}</b></div><div><span>You are</span><b>${esc(S.name)}</b></div>
+    <div><span>Mind</span><b>${I.restore?'Restored from PIP-BACKUP, 4 Nov':'A new one'}</b></div><div><span>Colour</span><b>${esc(I.glow)}</b></div></div></div>
+   <div class="erasebox" id="eb"><h3>This cannot be undone</h3><p>Type <code>ERASE ${dev}</code> exactly, capitals included.</p><input id="iConf" type="text" placeholder="ERASE ${dev}" autocomplete="off" spellcheck="false" aria-label="Type ERASE ${dev}"><div id="eb2" hidden><p>This disk holds macOS. Now type <code>${second}</code>.</p><input id="iConf2" type="text" placeholder="${second}" autocomplete="off" spellcheck="false" aria-label="Type ${second}"></div><p id="ebMsg" style="font-size:12.5px">Nothing has been written yet.</p></div></div>`;
+  const a=$('#iConf'),c=$('#iConf2');a.focus({preventScroll:true});
+  const upd=()=>{const one=a.value===`ERASE ${dev}`,two=one&&c.value===second;$('#eb2').hidden=!one;if(one&&document.activeElement===a&&!c.value)c.focus({preventScroll:true});
+    $('#iNext').disabled=!two;$('#eb').classList.toggle('ok',two);$('#ebMsg').textContent=two?'Ready. The next press writes to the disk.':'Nothing has been written yet.';$('#eb h3').textContent=two?'Ready when you are':'This cannot be undone';mood(two?'neutral':'serious')};
+  a.oninput=upd;c.oninput=upd;
+}
+function s5(b,my){
+  nav({back:false,next:false});I.done=false;I.prog=0;I.paused=false;
+  b.innerHTML=`<div class="cols"><div><div class="bigpct" role="progressbar" aria-label="Install progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="pct">0</span><small>%</small></div><div class="phases" id="phs" style="margin-top:16px">${PHASES.map(p=>`<div class="ph"><span>${p[0]}</span><div class="bar"><i></i></div><em></em></div>`).join('')}</div>
+   <div style="display:flex;gap:12px;align-items:center;margin-top:16px;flex-wrap:wrap"><button class="btn warn sm" id="cut">Simulate a power cut</button><span class="tag">real stages here · illustration on the right</span><span class="tag" id="meter">staging in RAM</span></div><div class="log" id="log" style="height:90px;margin-top:14px"></div></div>
+   <div class="brainbox"><span class="bnote">LIVE · an illustration of me waking up</span><span class="bnote r" id="bnr"></span><canvas id="brainC" width="1060" height="800" role="img" aria-label="Animated network showing Pip waking up"></canvas><div class="bhud">${REG.map((r,k)=>`<div class="bh" style="--rc:${r.c}">${r.n}<b id="bv${k}">0%</b><i><u id="bb${k}"></u></i></div>`).join('')}</div></div></div>`;
+  I.brain=makeBrain($('#brainC'),{n:460,labels:true,rate:2});
+  $('#cut').onclick=powerCut;runInstall(my);
+}
+const logLine=(t,c='')=>{const l=$('#log');if(!l)return;const d=document.createElement('div');d.innerHTML=c?`<span class="${c}">${t}</span>`:t;l.appendChild(d);while(l.children.length>5)l.firstChild.remove()};
+const BEATS=[[.06,'First, a body. Reflexes, a blink, breathing.','working'],[.22,'Now my senses. I can feel the battery and the heat.','curious'],[.46,'Words are arriving. This is my language model loading.','thinking'],[.68,'A place to remember. Updates will never touch it.','sleepy'],[.88,'Something is holding it all together. I do not know yet whether that is me.','surprised']];
+async function runInstall(my){
+  const br=I.brain;const alive=()=>my===I.rid&&S.mode==='installer'&&I.step===5;let lastPh=-1,beat=0;
+  while(alive()&&I.prog<1){
+    await sleep(100);if(I.paused)continue;I.prog=Math.min(1,I.prog+.0032);
+    br.set(I.prog);br.rate=2+I.prog*18;brainHud(br);
+    const pc=$('#pct');if(!pc)return;const mt=$('#meter');if(mt){const [,a1,b1]=PHASES[1],[,a2,b2]=PHASES[2],wv=clamp((I.prog-a1)/(b1-a1),0,1),vv=clamp((I.prog-a2)/(b2-a2),0,1);mt.textContent=I.prog<a1?'staging in RAM':I.prog<b1?`${(wv*4.6).toFixed(1)} of 4.6 GiB written · 23 MB/s`:I.prog<b2?`${(vv*4.6).toFixed(1)} of 4.6 GiB checked`:'writing the GPT'}pc.textContent=Math.floor(I.prog*100);pc.parentElement.setAttribute('aria-valuenow',Math.floor(I.prog*100));
+    PHASES.forEach((p,i)=>{const r=$$('.ph')[i];if(!r)return;const f=clamp((I.prog-p[1])/(p[2]-p[1]),0,1);r.querySelector('i').style.width=f*100+'%';r.querySelector('em').textContent=f>=1?'done':f>0?Math.floor(f*100)+'%':'';r.className='ph '+(f>=1?'done':f>0?'run':'');
+      if(f>0&&i>lastPh){lastPh=i;p[3].forEach((l,j)=>setTimeout(()=>logLine(`<b>[${p[0].toLowerCase().split(' ')[0]}]</b> ${l}`),j*450))}});
+    while(beat<BEATS.length&&I.prog>=BEATS[beat][0]){const [,t,m]=BEATS[beat++];say(t,{mood:m})}
+  }
+  if(!alive()||I.prog<1)return;
+  logLine('<b>[self]</b> all parts present');say('Here we go.',{mood:'surprised'});
+  await br.ignite();if(!alive())return;await sleep(300);logLine('<b>[done]</b> install complete');go(6);
+}
+async function powerCut(){
+  if(I.paused||I.prog>.97)return;I.paused=true;I.brain.power=0;const pc=Math.floor(I.prog*100),f=$('#flicker'),wrote=I.prog>.22;
+  f.querySelector('b').textContent='Power lost at '+pc+'%';f.classList.add('on');face.sleep();logLine('power lost','w');
+  await sleep(2200);f.classList.remove('on');if(S.mode!=='installer'){I.paused=false;return}face.wake();
+  const msg=wrote?'The power went out while I was writing. The Apple SSD will not start now. Start again from this stick: nothing on the stick changed.':'The power went out before I wrote anything. Your disk is exactly as it was. Start again from this stick.';
+  I.step=-1;$('#instMain').innerHTML=`<div class="readyc stepin"><h2>The install was interrupted</h2><p>${msg}</p><button class="btn primary" id="again" style="padding:12px 28px">Start again</button></div>`;
+  nav({back:false,next:false});$('#again').onclick=()=>go(0);$('#again').focus({preventScroll:true});
+  say(wrote?'The power went out while I was writing, so that disk will not start. Nothing on this stick changed. We can start again.':'The power went out before I wrote anything, so your disk is as it was. We start again from the stick.',{mood:'sad'});
+}
+function s6(b){
+  nav({back:false,next:false});
+  b.innerHTML=`<div class="readyc"><h2>Pip is installed</h2><p>Take out the stick, then press the power button. If the Mac starts from the stick again, hold Option and choose the Apple SSD. The first wake takes about a minute while Pip warms its model.</p><p style="font-size:13px;color:var(--faint)">The network you just watched was an illustration. Pip will tell you plainly that it does not know whether it is conscious.</p><button class="btn primary" id="wake" style="padding:14px 34px;font-size:16px">Wake Pip</button></div>`;
+  $('#wake').onclick=()=>enterDesktop({guest:false,fresh:true});$('#wake').focus({preventScroll:true});
+}
+$('#iBack').onclick=()=>{if(I.step>0)go(I.step===1?0:I.step-1)};
+$('#iNext').onclick=()=>{if(I.step===4){go(5);return}if(I.step<6)go(I.step+1)};
+function startInstaller(){
+  S.pending=null;S.sleeping=false;S.mode='installer';$('#installer').hidden=false;$('#desktop').hidden=true;closeAllWindows();
+  Object.assign(I,{step:0,scanned:false});mood('curious');face.cv.className='guide';face.sleep();face.wake();
+  renderInstaller();say(NAR[0][0],{mood:'curious'});
+}
+
+/* ---------------- DESKTOP ---------------- */
+const SYS={cpu:[.05,.05,.05,.05],hist:Array(60).fill(.05),temp:49,thist:Array(60).fill(49),fan:1850,tok:0};
+let MEM=[],JOURNAL=[];
+function seed(fresh){
+  const all=[
+   {id:'m0',text:`You are called ${S.name}.`,when:'Today, first wake',src:'You told the installer',kind:'person'},
+   {id:'m1',text:"Your sister's birthday is 3 March.",when:'Yesterday, 14:02',src:'You said it to me',kind:'person'},
+   {id:'m2',text:'You take coffee with oat milk.',when:'Monday, 08:15',src:'You said it to me',kind:'preference'},
+   {id:'m3',text:'The plumber is called Dariusz.',when:'Saturday, 17:40',src:'You said it to me',kind:'person'},
+   {id:'m4',text:'Never wake you before 7, and do it gently.',when:'Sunday, 22:05',src:'You asked me',kind:'preference'},
+   {id:'m5',text:'I live on the desk by the window.',when:'Sunday, 09:30',src:'You told me',kind:'place'},
+   {id:'m6',text:"Your sister's birthday is in spring.",when:'Last night, 23:12',src:'Worked out by me from another memory',kind:'derived',from:['m1']}];
+  const hm=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  const hist=[{day:'Today',items:[{t:'07:12',x:'The lid opened and I woke.',src:[]},{t:'07:13',x:'You said good morning. I said it back.',src:[]},{t:'09:40',x:'My battery reached 80 percent and I held it there, as I do.',src:[]}]},
+   {day:'Yesterday',items:[{t:'14:02',x:"You told me about your sister's birthday.",src:['m1']},{t:'16:30',x:'You asked for a countdown script. I wrote it from my recipe book and you ran it.',src:[]},{t:'23:10',x:'The lid closed on power. I began my night shift: checked my database, tidied old memories, rebuilt my search index.',src:[]},{t:'23:12',x:"I worked out that your sister's birthday falls in spring.",src:['m6']}]}];
+  if(S.guest){MEM=all.filter(m=>m.id==='m0'||m.id==='m5');JOURNAL=[{day:'This wake',items:[{t:'now',x:'I am running in memory. When you shut down I forget this wake.',src:[]}]}]}
+  else if(fresh&&!I.restore){MEM=[all[0]];JOURNAL=[{day:'Today',items:[{t:hm,x:`I woke for the first time and met ${S.name}.`,src:[]}]}]}
+  else{MEM=all;JOURNAL=hist}
+}
+
+/* windows */
+const W={};const APPS={terminal:{title:'Terminal',icon:'terminal'},browser:{title:'Look it up',icon:'browser'},monitor:{title:'Monitor',icon:'monitor'},calc:{title:'Calculator',icon:'calc'},mind:{title:'Mind',icon:'mind'},memory:{title:'Memory',icon:'memory'},lists:{title:'Lists',icon:'lists'},journal:{title:'Journal',icon:'journal'},care:{title:'Care',icon:'care'},options:{title:'Options',icon:'options'}};
+function openApp(id,why){
+  Object.values(W).forEach(x=>{if(x.id!==id&&!x.min){x.min=true;x.el.classList.add('min')}});
+  let w=W[id];
+  if(w){w.min=false;w.el.classList.remove('min');focusWin(id);relayout();return w}
+  const body=({terminal:termApp,browser:browserApp,monitor:monitorApp,calc:calcApp,mind:mindApp,memory:memApp,lists:listsApp,journal:jourApp,care:careApp,options:optionsApp})[id](),a=APPS[id];
+  const e=el(`<div class="win glass" data-id="${id}"><div class="wh"><div class="wdots"><button class="wd c" aria-label="Close ${a.title}"></button><button class="wd m" aria-label="Minimise ${a.title}"></button></div><div class="wt">${ic(a.icon)}<b>${a.title}</b></div><div class="why">${esc(why||'opened by you')}</div></div><div class="wb"></div></div>`);
+  $('.wb',e).appendChild(body.el);$('#desktop').appendChild(e);
+  w={id,el:e,min:false,moved:false,tick:body.tick,after:body.after};W[id]=w;
+  $('.wd.c',e).onclick=()=>closeWin(id);$('.wd.m',e).onclick=()=>minWin(id);
+  e.addEventListener('pointerdown',()=>focusWin(id));
+  dragify(w);focusWin(id);relayout();requestAnimationFrame(()=>requestAnimationFrame(()=>e.classList.add('in')));
+  w.after&&w.after();return w;
+}
+function focusWin(id){const w=W[id];if(!w)return;const o=Object.values(W).filter(x=>x!==w).sort((a,b)=>(+a.el.style.zIndex||0)-(+b.el.style.zIndex||0));o.push(w);o.forEach((x,i)=>{x.el.style.zIndex=11+i});S.z=10+o.length}
+function minWin(id){const w=W[id];if(!w)return;w.min=true;w.el.classList.add('min');relayout()}
+function closeWin(id){const w=W[id];if(!w)return;if(id==='memory'&&S.pending&&S.pending.mem){S.pending=null;hitMem=[]}if(id==='terminal')T.abort=true;w.el.classList.remove('in');w.el.querySelectorAll('[id]').forEach(n=>n.removeAttribute('id'));w.el.inert=true;setTimeout(()=>w.el.remove(),400);delete W[id];relayout()}
+function closeAllWindows(){T.abort=true;Object.keys(W).forEach(id=>{W[id].el.remove();delete W[id]});relayout()}
+function relayout(){
+  // One surface fills the panel area under the eye strip (panel.rs: panel = 1280 x 640 below a 160 px strip).
+  const vis=Object.values(W).filter(w=>!w.min),n=vis.length,p=qmPad(),top=168+p.t,x=16+p.l,w=1280-32-p.l-p.r,h=800-150-top;
+  $('#desktop').classList.toggle('surf',n>0);
+  vis.forEach(v=>{v.el.style.left=x+'px';v.el.style.top=top+'px';v.el.style.width=w+'px';v.el.style.height=h+'px'});
+  if(S.mode==='desktop'){face.cv.className=n?'dock':'hero';$('#hero').classList.toggle('away',n>0)}
+  $$('.qb[data-app]').forEach(b=>{const o=!!W[b.dataset.app]&&!W[b.dataset.app].min;b.classList.toggle('open',o);b.setAttribute('aria-pressed',o)});
+  const lb=$('.qb[data-app=browser]');if(lb)lb.hidden=C.net==='off';
+}
+function minimiseAll(){Object.keys(W).forEach(minWin)}
+function dragify(w){
+  // One surface at a time: nothing to drag (plan S1).
+}
+
+/* terminal */
+const TFILES=Object.assign(Object.create(null),{'README.txt':"Pip's workshop.\nScripts are written here and only run when you say so."});
+const RECIPES={
+ countdown:{file:'countdown.sh',code:'#!/bin/sh\nfor i in 10 9 8 7 6 5 4 3 2 1; do\n  echo "$i..."\n  sleep 1\ndone\necho "Liftoff!"',run:async p=>{for(let i=10;i>0;i--){p(i+'...','glow');await sleep(330)}p('Liftoff!','ok')}},
+ box:{file:'box.sh',code:'#!/bin/sh\necho "+----------+"\necho "|   Pip    |"\necho "+----------+"',run:async p=>{for(const l of ['+----------+','|   Pip    |','+----------+']){p(l,'glow');await sleep(250)}}},
+ fibonacci:{file:'fibonacci.sh',code:'#!/bin/sh\na=0; b=1\nfor i in 1 2 3 4 5 6 7 8 9 10; do\n  echo $a\n  t=$((a+b)); a=$b; b=$t\ndone',run:async p=>{let a=0,b=1;for(let i=0;i<10;i++){p(String(a),'glow');[a,b]=[b,a+b];await sleep(200)}}},
+ hello:{file:'hello.sh',code:'#!/bin/sh\nfor i in 1 2 3; do\n  echo "Hello from Pip ($i)"\ndone',run:async p=>{for(let i=1;i<=3;i++){p(`Hello from Pip (${i})`,'glow');await sleep(250)}}}};
+let T={out:null,stat:null,stop:null,typing:false,abort:false};
+function termApp(){
+  if(S.guest){const e=el(`<div class="locked"><svg class="i" viewBox="0 0 24 24" style="width:40px;height:40px;color:var(--faint)"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><b>The terminal is off in guest mode</b><span>Guest mode keeps everything in memory and leaves no scripts behind. Install Pip, or turn guest mode off in Care, to use it.</span><button class="btn sm" id="tlCare">Open Care</button></div>`);return{el:e,after(){$('#tlCare').onclick=()=>openApp('care','you wanted the terminal')}}}
+  const e=el(`<div class="term"><div class="tout" id="tout"></div><form class="tin" id="tform"><span class="ps">owner@pip <b>~</b> $</span><input id="tinput" autocomplete="off" spellcheck="false" aria-label="Terminal input"></form><div class="tbar"><span id="tstat">Ready. Ask me to write something, or type <span class="mono">help</span>.</span><button class="btn sm warn" id="tstop" hidden>Stop writing</button></div></div>`);
+  T={out:$('#tout',e),stat:$('#tstat',e),stop:$('#tstop',e),typing:false,abort:false,hist:[],hi:0};
+  const inp=$('#tinput',e);
+  setTimeout(()=>{tPrint('PipOS workshop. Type help, or ask Pip to write you a script.','dim')},0);
+  $('#tform',e).onsubmit=ev=>{ev.preventDefault();const v=inp.value;inp.value='';if(v.trim()){T.hist.push(v);T.hi=T.hist.length}tPrint(v,'cmd');tExec(v)};
+  inp.onkeydown=ev=>{if(ev.key==='ArrowUp'&&T.hist.length){T.hi=Math.max(0,T.hi-1);inp.value=T.hist[T.hi]||'';ev.preventDefault()}if(ev.key==='ArrowDown'){T.hi=Math.min(T.hist.length,T.hi+1);inp.value=T.hist[T.hi]||''}};
+  $('#tstop',e).onclick=()=>{T.abort=true};
+  return{el:e,after(){setTimeout(()=>inp.focus({preventScroll:true}),500)}};
+}
+function tPrint(txt,cls=''){if(!T.out)return null;const d=document.createElement('div');d.className='tl '+cls;d.textContent=txt;T.out.appendChild(d);T.out.scrollTop=1e9;return d}
+async function tExec(line){
+  const [cmd,...a]=line.trim().split(/\s+/);if(!cmd)return;
+  const run=async f=>{if(!(f in TFILES)){tPrint('no such file: '+f,'err');return}await runFile(f)};
+  switch(cmd){
+   case 'help':tPrint('help ls cat run clear pip uname free uptime date whoami echo rm exit\n(or just tell Pip what you want)','dim');break;
+   case 'ls':tPrint(Object.keys(TFILES).join('   '));break;
+   case 'cat':a[0]in TFILES?tPrint(TFILES[a[0]]):tPrint('no such file: '+(a[0]||''),'err');break;
+   case 'run':await run(a[0]);break;
+   case 'clear':T.out.innerHTML='';break;
+   case 'pip':tPrint(`awake · slot A · mind ${MEM.length} memories · battery 80% (held) · network ${C.net}`,'glow');break;
+   case 'uname':tPrint('PipOS 0.9.4 ivybridge x86_64 (slot A)');break;
+   case 'free':tPrint('        total   used   free\nMem:    16.0G   2.3G  13.7G\nSwap:      0      0      0');break;
+   case 'uptime':tPrint('up 4 h 12 min · load '+SYS.cpu.map(c=>c.toFixed(2)).join(' '));break;
+   case 'date':tPrint(new Date().toString());break;
+   case 'whoami':tPrint('owner');break;
+   case 'echo':tPrint(a.join(' '));break;
+   case 'rm':if(a[0]in TFILES&&a[0]!=='README.txt'){delete TFILES[a[0]];tPrint('removed '+a[0],'dim')}else tPrint('cannot remove '+(a[0]||''),'err');break;
+   case 'exit':closeWin('terminal');break;
+   default:if(cmd.startsWith('./')&&cmd.slice(2)in TFILES)await runFile(cmd.slice(2));else tPrint('pipsh: command not found: '+cmd+'\nYou can ask me instead, in plain words.','err');
+  }
+}
+async function runFile(f){
+  const r=Object.values(RECIPES).find(x=>x.file===f);S.load=.5;mood('working');
+  try{if(r)await r.run((t,c)=>tPrint(t,c));else for(const l of TFILES[f].split('\n')){const m=l.match(/echo\s+"?([^"]*)"?/);if(m){tPrint(m[1]);await sleep(200)}}}catch(e){}finally{S.load=.06;mood('happy',1500)}
+}
+async function runLastScript(){
+  const file=S.lastScript;
+  if(!file||!(file in TFILES)||!W.terminal||S.guest||!T.out?.isConnected){
+    say('There is nothing to run yet. Ask me to write a script first.',{mood:'curious',hold:1500});return;
+  }
+  openApp('terminal','you said “run it”');const terminal=T;
+  T.stat.textContent='Running '+file+'…';tPrint('run '+file,'cmd');
+  say('Running it.',{mood:'working',cost:'code · 0 tokens'});
+  await runFile(file);
+  if(T===terminal&&!T.typing)T.stat.textContent='Say “run it” to run it again.';
+}
+async function writeScript(key){
+  if(S.guest){openApp('terminal','you asked for a script');say('The terminal is off in guest mode, so I cannot write anything here.',{mood:'sad',hold:1800});return}
+  const r=RECIPES[key];openApp('terminal','you asked me to write a script');await sleep(650);
+  if(!T.out)return;T.abort=false;T.typing=true;T.stop.hidden=false;T.stat.textContent='Pip is typing · from my recipe book · 0 tokens';mood('working');S.load=.3;
+  const c=tPrint('','cmd');for(const ch of 'nano '+r.file){c.textContent+=ch;await sleep(30)}
+  const blk=el('<pre class="codeblock typing"></pre>');T.out.appendChild(blk);
+  for(const ch of r.code){if(T.abort)break;blk.textContent+=ch;T.out.scrollTop=1e9;await sleep(ch==='\n'?90:16)}
+  blk.classList.remove('typing');T.typing=false;T.stop.hidden=true;S.load=.06;
+  if(T.abort){tPrint('stopped. nothing saved.','err');T.stat.textContent='Stopped.';mood('neutral');say('Stopped. I did not save it.',{cost:'code · 0 tokens'});return}
+  TFILES[r.file]=r.code;tPrint(`saved ${r.file} (${r.code.split('\n').length} lines)`,'ok');S.lastScript=r.file;
+  T.stat.textContent='Written · say “run it”.';
+  say(`I wrote ${r.file} from my recipe book. Say “run it” when you’re ready.`,{mood:'neutral',cost:'code · recipe book · 0 tokens'});
+}
+
+/* body */
+function bodyApp(){
+  const e=el(`<div class="bodyw"><div class="feel" id="feel"></div><div class="organs" id="organs"></div><div class="grid2">
+   <div class="card"><div class="top"><span class="lbl">Thinking</span><span class="tag sensor">sensor</span></div><div class="thr" id="thr"><i></i><i></i><i></i><i></i></div><canvas id="cpuC" width="240" height="46"></canvas><div class="sm" id="cpuT" style="margin-top:4px"></div></div>
+   <div class="card"><div class="top"><span class="lbl">Warmth</span><span class="tag sensor">sensor</span></div><div class="gauge"><svg viewBox="0 0 62 62"><circle cx="31" cy="31" r="25" stroke="#12222d"/><circle id="tRing" cx="31" cy="31" r="25" stroke="var(--glow)" stroke-dasharray="157" stroke-dashoffset="100" transform="rotate(-90 31 31)"/></svg><div><div class="big"><span id="tV">49</span><small>°C</small></div><div class="sm" id="fanT">fan 1,850 rpm</div></div></div><canvas id="tC" width="240" height="30" style="margin-top:8px;height:30px"></canvas></div>
+   <div class="card"><div class="top"><span class="lbl">Energy</span><span class="tag sensor">sensor</span></div><div class="big">80<small>% · held at my cap</small></div><div class="meter"><i style="width:80%;background:var(--glow)"></i><span class="cap" style="left:80%"></span></div><div class="sm">Holds 81% of new · 71 cycles · on AC</div></div>
+   <div class="card"><div class="top"><span class="lbl">Memory (RAM)</span><span class="tag sensor">sensor</span></div><div class="big">2.3<small>of 16 GB</small></div><div class="meter"><i style="width:12%;background:var(--glow)"></i><i style="width:2.5%;background:#7d6bd0"></i></div><div class="sm">Model 1.9 GB · mind cache 0.4 GB</div></div>
+   <div class="card"><div class="top"><span class="lbl">Disk</span><span class="tag sensor">sensor</span></div><div class="big">22<small>of 256 GB used</small></div><div class="meter"><i style="width:9%;background:var(--glow)"></i></div><div class="sm">Mind 0.4 GB · models 8 GB · bodies 12 GB</div></div>
+   <div class="card"><div class="top"><span class="lbl">Speed of thought</span><span class="tag est">estimate</span></div><div class="big" id="tok">idle</div><div class="sm">About 8 to 15 tokens a second when thinking. Not yet measured on this laptop.</div></div>
+  </div></div>`);
+  const rows=$$('#thr i',e);
+  return{el:e,after:organs,tick(){organs();
+    $('#cpuT').textContent='load '+SYS.cpu.map(c=>c.toFixed(2)).join(' ');$$('#thr i').forEach((n,i)=>n.style.height=Math.max(3,SYS.cpu[i]*100)+'%');
+    spark($('#cpuC'),SYS.hist,1);spark($('#tC'),SYS.thist,85,45);
+    $('#tV').textContent=Math.round(SYS.temp);$('#tRing').style.strokeDashoffset=157-157*clamp((SYS.temp-30)/55,0,1);$('#fanT').textContent='fan '+Math.round(SYS.fan).toLocaleString()+' rpm';
+    $('#tok').innerHTML=SYS.tok?`${SYS.tok.toFixed(1)}<small>tokens a second</small>`:'idle';
+    $('#feel').textContent=SYS.temp>62?'Running warm. I have slowed myself a little to cool down.':S.load>.3?'Working hard. A little warm, nothing worrying.':'Calm. Cool and quiet. Everything is where it should be.';
+  }};
+}
+function organs(){const o=$('#organs');if(!o)return;const L=[['Ears',S.listening?'listening':'waiting',1],['Voice',face.speakT?'speaking':'quiet',1],['Eyes',C.cam?'looking':'shut',C.cam],['Heart','80% held',1],['Memory',MEM.length+' kept',1],['Brain',S.load>.3?'thinking':'resting',1]];o.innerHTML=L.map(x=>`<span class="org ${x[2]?'':'off'}"><i></i>${x[0]} · ${x[1]}</span>`).join('')}
+function spark(cv,arr,max,min=0){
+  if(!cv)return;const c=cv.getContext('2d'),w=cv.width,h=cv.height,n=arr.length;c.clearRect(0,0,w,h);
+  const pts=arr.map((v,i)=>[i/(n-1)*w,h-4-clamp((v-min)/(max-min),0,1)*(h-10)]);
+  const rgb=face.rgb.join(',');const g=c.createLinearGradient(0,0,0,h);g.addColorStop(0,`rgba(${rgb},.35)`);g.addColorStop(1,`rgba(${rgb},0)`);
+  c.beginPath();pts.forEach((p,i)=>i?c.lineTo(p[0],p[1]):c.moveTo(p[0],p[1]));c.strokeStyle=`rgb(${rgb})`;c.lineWidth=2;c.stroke();c.lineTo(w,h);c.lineTo(0,h);c.fillStyle=g;c.fill();
+  const l=pts[n-1];c.beginPath();c.arc(l[0]-3,l[1],3.5,0,7);c.fillStyle=`rgb(${rgb})`;c.fill();
+}
+
+/* memory */
+let selMem=null,hitMem=[];
+const KIND={person:'person',preference:'preference',place:'place',derived:'worked out'};
+function memApp(){
+  const e=el(`<div class="memw"><div class="memtop"><input id="memQ" type="text" placeholder="Search what I remember" aria-label="Search memories"><span class="tag" id="memN"></span></div><div class="mems" id="mems"></div><div id="memBar"></div></div>`);
+  $('#memQ',e).oninput=renderMem;return{el:e,after:renderMem};
+}
+function renderMem(){
+  const list=$('#mems');if(!list)return;const q=($('#memQ').value||'').toLowerCase();
+  $('#memN').textContent=`${MEM.length} memories · ${S.guest?'RAM only':'on this laptop'}`;
+  const ms=MEM.filter(m=>!q||m.text.toLowerCase().includes(q));
+  list.innerHTML=ms.length?ms.map(m=>`<div class="mem ${selMem===m.id?'sel':''} ${hitMem.includes(m.id)?'hit':''}" data-id="${m.id}" tabindex="0" role="button" aria-expanded="${selMem===m.id}"><div class="t">${esc(m.text)}</div><div class="m"><span class="tag">${KIND[m.kind]}</span><span>${esc(m.when)}</span><span>· ${esc(m.src)}</span></div>
+   <div class="det">${m.from?`<div class="sm" style="color:var(--dim);font-size:12.5px">Worked out from: “${esc((MEM.find(x=>x.id===m.from[0])||{text:'(forgotten)'}).text)}”. Forgetting that also forgets this.</div>`:''}<input type="text" value="${esc(m.text)}" aria-label="Correct this memory"><div class="acts"><button class="btn sm primary" data-a="save">Correct</button><button class="btn sm warn" data-a="forget">Forget</button></div></div></div>`).join(''):'<div class="memempty">Nothing matches. I remember nothing about that.</div>';
+  if(MEM.length<3&&!q)list.insertAdjacentHTML('beforeend','<div class="memempty">Tell me something to remember, like “remember that my sister\'s birthday is 3 March”.</div>');
+  $$('.mem',list).forEach(n=>{const tg=()=>{const id=n.dataset.id;selMem=selMem===id?null:id;renderMem();const r=$('.mem[data-id="'+id+'"]');r&&r.focus()};n.onclick=ev=>{if(ev.target.closest('button,input'))return;tg()};n.onkeydown=ev=>{if(ev.target!==n)return;if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();tg()}};
+    $('[data-a=save]',n).onclick=()=>{const m=MEM.find(x=>x.id===n.dataset.id);const v=$('input',n).value.trim();if(v){m.text=v;m.src='You corrected it';say('Corrected. I have replaced what I knew.',{mood:'happy',hold:1500});renderMem()}};
+    $('[data-a=forget]',n).onclick=()=>forgetAsk([n.dataset.id],false)});
+  const jr=$('#jlist');jr&&renderJournal();
+}
+function closure(ids){let set=new Set(ids),ch=true;while(ch){ch=false;MEM.forEach(m=>{if(!set.has(m.id)&&m.from&&m.from.some(f=>set.has(f))){set.add(m.id);ch=true}})}return [...set]}
+function findMem(phrase){
+  const toks=phrase.toLowerCase().replace(/\b(my|the|a|an|about|that|of|all|everything|please)\b/g,' ').replace(/['’]s\b/g,'').split(/\W+/).filter(x=>x.length>=4);
+  if(!toks.length)return [];return MEM.filter(m=>toks.some(k=>m.text.toLowerCase().includes(k))).map(m=>m.id);
+}
+function forgetAsk(ids,spoken){
+  ids=closure(ids);if(!ids.length)return;openApp('memory',spoken?'you asked me to forget':'you chose to forget');hitMem=ids;selMem=null;renderMem();
+  const n=ids.length,bar=$('#memBar');
+  const ask=()=>{if(!bar)return;bar.innerHTML=`<div class="confirm"><span class="sp"><b>Forget ${n} ${n>1?'memories':'memory'}?</b> That includes anything I worked out from ${n>1?'them':'it'}.</span><button class="btn sm warn" id="fgY">Yes, forget</button><button class="btn sm" id="fgN">Keep</button></div>`;$('#fgY').onclick=yes;$('#fgN').onclick=no};
+  const no=()=>{S.pending=null;hitMem=[];bar.innerHTML='';renderMem();say('Kept. I will not touch it.',{mood:'neutral'})};
+  const yes=()=>{S.pending=null;doForget(ids)};
+  S.pending={yes,no,mem:1};setTimeout(ask,200);
+  say(`I found ${n} ${n>1?'things':'thing'} about that, counting what I worked out from ${n>1?'them':'it'}. Shall I forget ${n>1?'them':'it'}?`,{mood:'serious',cost:'code · 0 tokens'});
+}
+async function doForget(ids){
+  openApp('memory','finishing a forget');await sleep(60);const bar=$('#memBar');
+  if(!bar){MEM=MEM.filter(m=>!ids.includes(m.id));JOURNAL.forEach(d=>d.items=d.items.filter(i=>!(i.src||[]).some(s=>ids.includes(s))));hitMem=[];selMem=null;renderMem();say('It is gone from everywhere I keep it. I cannot tell you what it was.',{mood:'neutral',cost:'code · 0 tokens'});return}
+  const steps=['Memory database','Search index','Write-ahead log','What I am holding in mind right now','My saved model slot','Things I worked out from it','Journal lines that mention it'];
+  bar.innerHTML=`<div class="erase">${steps.map(s=>`<div>${s}</div>`).join('')}</div>`;
+  mood('sad');for(const r of $$('.erase div',bar)){r.classList.add('go');await sleep(430);r.classList.remove('go');r.classList.add('ok')}
+  MEM=MEM.filter(m=>!ids.includes(m.id));JOURNAL.forEach(d=>d.items=d.items.filter(i=>!(i.src||[]).some(s=>ids.includes(s))));
+  hitMem=[];selMem=null;await sleep(500);bar.innerHTML='';renderMem();
+  say("It is gone from everywhere I keep it. I cannot tell you what it was.",{mood:'neutral',cost:'code · 0 tokens'});
+}
+
+/* journal */
+let jDay=0;
+function jourApp(){
+  const e=el(`<div class="jw"><div class="jtabs" id="jtabs"></div><div class="tl2" id="jlist"></div><div class="dream"><b>Dreaming</b>A larger model would make sense of each day here while the lid is closed. That part is planned and not built yet. Tonight's journal is written by simple rules.</div></div>`);
+  return{el:e,after:renderJournal};
+}
+function renderJournal(){
+  const jl=$('#jlist');if(!jl)return;if(jDay>=JOURNAL.length)jDay=0;
+  $('#jtabs').innerHTML=JOURNAL.map((d,i)=>`<button class="chip" data-d="${i}" style="${i===jDay?'color:var(--ink);border-color:var(--glow)':''}">${d.day}</button>`).join('');
+  $$('#jtabs .chip').forEach(b=>b.onclick=()=>{jDay=+b.dataset.d;renderJournal()});
+  const it=JOURNAL[jDay].items;jl.innerHTML=it.length?it.map(i=>`<div><time>${i.t}</time>${esc(i.x)}</div>`).join(''):'<div style="color:var(--faint)">Nothing written for this day.</div>';
+}
+
+/* care */
+function careApp(){
+  const e=el(`<div class="carew">
+   <div class="crow"><div><b>Network</b><small>Off by default. Anything I look up leaves this laptop.</small></div><div class="seg" id="cNet">${['off','ethernet','wifi'].map(n=>`<button data-n="${n}" class="${C.net===n?'on':''}">${{off:'Off',ethernet:'Ethernet',wifi:'Wi-Fi'}[n]}</button>`).join('')}</div></div>
+   <div class="crow"><div><b>Camera</b><small>The green light is on whenever I look.</small></div><label class="sw"><input type="checkbox" id="cCam" ${C.cam?'checked':''} aria-label="Camera"><span></span></label></div>
+   <div class="crow"><div><b>Guest mode</b><small>Memory stays in RAM and the terminal is off.</small></div><label class="sw"><input type="checkbox" id="cGuest" ${S.guest?'checked':''} aria-label="Guest mode"><span></span></label></div>
+   <div class="crow"><div><b>Night shift</b><small>What I do with the lid closed.</small></div><button class="btn sm" id="cNight">Start now</button></div>
+   <div class="crow"><div><b>Unprompted remarks</b><small>At most three a day.</small></div><div style="display:flex;gap:10px;align-items:center;width:170px"><input type="range" id="cRem" min="0" max="3" value="${C.remarks}" aria-label="Remarks per day"><b class="mono" id="cRemV">${C.remarks}</b></div></div>
+   <div class="crow"><div><b>Microphone</b><small>Listening for my name.</small></div><div class="lvl"><i id="lvl"></i></div></div>
+   <div class="crow"><div><b>Backup</b><small id="bkT">Last: ${C.backup}, to a stick labelled PIP-BACKUP.</small></div><button class="btn sm" id="bkB">Back up now</button></div>
+   <div><div class="crow"><div><b>Update</b><small id="upT">Two bodies, so a failed update rolls back by itself.</small></div><button class="btn sm" id="upB">Look for an update</button></div>
+   <div class="slots"><div class="slot run"><b>Slot A · 0.9.4</b><small>Running now</small></div><div class="slot" id="slotB"><b>Slot B</b><small id="slotBt">${C.slotB==='ready'?'0.9.5, ready for next wake':'Empty'}</small><div class="fill" id="slotF"></div></div></div></div>
+  </div>`);
+  const net=n=>{C.net=n;$$('#cNet button',e).forEach(b=>b.classList.toggle('on',b.dataset.n===n));setNet()};
+  $$('#cNet button',e).forEach(b=>b.onclick=()=>{net(b.dataset.n);say({off:'Network off. Everything stays on this laptop.',ethernet:'Ethernet on. I will only look things up when you ask.',wifi:'Wi-Fi is experimental here and needs firmware you supply. I could not find any, so I am staying offline.'}[b.dataset.n],{mood:b.dataset.n==='off'?'happy':'curious',hold:1800});if(b.dataset.n==='wifi')setTimeout(()=>net('off'),900)});
+  $('#cCam',e).onchange=ev=>{C.cam=ev.target.checked;setCam();say(C.cam?'The camera is on. You will see the green light whenever I look.':'Camera off. I cannot see.',{mood:C.cam?'curious':'happy',hold:1800})};
+  $('#cGuest',e).onchange=ev=>{S.guest=ev.target.checked;setGuest();swapGuest();say(S.guest?'Guest mode on. I will forget this wake when you shut down.':'Guest mode off. I will remember again.',{mood:'neutral'})};
+  $('#cNight',e).onclick=()=>{say('Goodnight. I will tidy up while you sleep.',{mood:'sleepy'});setTimeout(nightShift,1800)};
+  $('#cRem',e).oninput=ev=>{C.remarks=+ev.target.value;$('#cRemV',e).textContent=C.remarks};
+  $('#bkB',e).onclick=async()=>{const b=$('#bkB',e),t=$('#bkT',e);b.disabled=true;mood('working');for(let i=0;i<=100;i+=10){t.textContent=`Backing up to PIP-BACKUP… ${i}%`;await sleep(160)}C.backup='Just now';t.textContent='Last: just now, to a stick labelled PIP-BACKUP.';b.disabled=false;say('Backed up. If this laptop ever dies, I can come back from that stick.',{mood:'happy',hold:2000})};
+  $('#upB',e).onclick=async()=>{const b=$('#upB',e);if(C.slotB==='ready'){say('Slot B already holds 0.9.5. It takes over at my next wake. If it fails to wake, I roll back to A.',{mood:'curious',hold:2000});return}b.disabled=true;$('#upT',e).textContent='Found 0.9.5 on a stick. Writing it to the spare body…';mood('working');for(let i=0;i<=100;i+=5){$('#slotF',e).style.width=i+'%';await sleep(90)}C.slotB='ready';$('#slotBt',e).textContent='0.9.5, ready for next wake';$('#slotF',e).style.width='0';$('#upT',e).textContent='Update staged. My memory was not touched.';b.disabled=false;say('Update staged in my spare body. My memory was not touched. If I fail to wake next time, I roll back to the one I am in now.',{mood:'happy',hold:2500})};
+  return{el:e,tick(){const l=$('#lvl');if(l)l.style.width=(8+Math.random()*(S.listening?70:18))+'%'}};
+}
+function setNet(){setTimeout(()=>{if(C.net==='off'&&W.browser)closeWin('browser');if(typeof relayout==='function'&&S.mode==='desktop')relayout();if(typeof renderWidgets==='function')renderWidgets();if(typeof wgTick==='function'&&WG.weather.el)wgTick('weather');if($('#bpage'))renderBrowser();if($('#obody'))renderOptions()},0);const n=$('#stNet');n.querySelector('span').textContent={off:'Offline',ethernet:'Ethernet',wifi:'Wi-Fi'}[C.net];n.classList.toggle('on',C.net!=='off');n.classList.toggle('warn',C.net==='wifi')}
+function setCam(){$('#stCam').hidden=!C.cam;$('#stCam').classList.toggle('led',C.cam)}
+function setGuest(){$('#stGuest').hidden=!S.guest;$('#stGuest').classList.add('warn');if(W.terminal){closeWin('terminal')}if(S.guest)S.lastScript=null}
+
+/* timers, clock, initiative */
+function tickClock(){
+  const d=new Date();$('#clock').textContent=d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  if(S.timer){const left=Math.max(0,Math.round((S.timer-Date.now())/1000));$('#stTimer').classList.add('on');$('#timerTxt').textContent=`${Math.floor(left/60)}:${String(left%60).padStart(2,'0')}`;
+    if(left===0){S.timer=null;$('#stTimer').classList.remove('on');chime();say("Time's up.",{mood:'happy',hold:2500})}}
+}
+function chime(){try{const a=new (window.AudioContext||window.webkitAudioContext)();[660,880].forEach((f,i)=>{const o=a.createOscillator(),g=a.createGain();o.frequency.value=f;o.connect(g);g.connect(a.destination);const t=a.currentTime+i*.18;g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(.12,t+.02);g.gain.exponentialRampToValueAtTime(.0001,t+.5);o.start(t);o.stop(t+.55)})}catch(e){}}
+
+/* thoughts, mind, lists, night shift, poke */
+const THOUGHTS=[];let memSeq=0,SAVED=null;
+function think(heard,via,cost){THOUGHTS.unshift({t:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}),heard,via,cost});if(THOUGHTS.length>30)THOUGHTS.pop()}
+let MB=null,thKey='';
+function mindApp(){
+  thKey='';const e=el(`<div class="mindw"><div class="brainbox"><span class="bnote">LIVE · how busy I am right now</span><span class="bnote r">an illustration, not a scan</span><canvas id="mindC" width="1200" height="520" role="img" aria-label="Animated network showing how busy Pip is"></canvas></div><div class="thoughts"><div class="lbl">Holding in mind</div><div id="holding" style="color:var(--dim);font-size:12.5px"></div><div class="lbl" style="margin-top:10px">Why I did what I did</div><div id="thl"></div></div></div>`);
+  return{el:e,after(){MB=makeBrain($('#mindC'),{n:380,all:true,dim:.92,rate:3})},tick(){
+    if(MB)MB.rate=1.5+S.load*40+face.speakT*12;
+    const h=$('#holding');if(h)h.textContent=`My identity (192 tokens) · ${MEM.length} memories within reach · ${THOUGHTS.length} thing${THOUGHTS.length===1?'':'s'} heard this wake`;
+    const k=THOUGHTS.length+'|'+(THOUGHTS[0]?THOUGHTS[0].t+THOUGHTS[0].heard:'');if(k!==thKey){thKey=k;const l=$('#thl');if(l)l.innerHTML=THOUGHTS.length?THOUGHTS.slice(0,8).map(x=>`<div class="th"><time>${x.t}</time><div><q>“${esc(x.heard)}”</q><span>${esc(x.via)}</span></div><span class="tag">${esc(x.cost)}</span></div>`).join(''):'<div class="memempty" style="padding:18px">Nothing yet. Say something to me and I will show you how I decided what to do.</div>'}
+  }};
+}
+const LISTS={'Shopping':[{x:'milk',d:false},{x:'eggs',d:false},{x:'bread',d:false}],'To do':[{x:'call the bank',d:false}]};let lTab='Shopping';
+const listKey=s=>/shop/.test(s)?'Shopping':'To do';
+function listsApp(){
+  const e=el(`<div class="lw"><div class="jtabs" id="ltabs"></div><div id="litems" style="display:flex;flex-direction:column;gap:8px"></div><form id="lform" style="display:flex;gap:8px"><input id="lin" type="text" placeholder="Add something" aria-label="Add to this list" autocomplete="off"><button class="btn sm primary" type="submit">Add</button></form><div style="color:var(--faint);font-size:12px">${S.guest?'RAM only in guest mode. ':''}Lists live in their own file. Forgetting a topic leaves them alone.</div></div>`);
+  $('#lform',e).onsubmit=ev=>{ev.preventDefault();const i=$('#lin');const v=i.value.trim();if(v){LISTS[lTab].push({x:v,d:false});i.value='';renderLists()}};
+  return{el:e,after:renderLists};
+}
+function renderLists(){
+  const t=$('#ltabs');if(!t)return;
+  t.innerHTML=Object.keys(LISTS).map(k=>`<button class="chip" data-l="${esc(k)}" style="${k===lTab?'color:var(--ink);border-color:var(--glow)':''}">${esc(k)} · ${LISTS[k].filter(i=>!i.d).length}</button>`).join('');
+  $$('#ltabs .chip').forEach(b=>b.onclick=()=>{lTab=b.dataset.l;renderLists()});
+  const L=LISTS[lTab];
+  $('#litems').innerHTML=L.length?L.map((it,i)=>`<div class="li ${it.d?'done':''}" data-i="${i}" tabindex="0" role="checkbox" aria-checked="${it.d}"><i></i><span>${esc(it.x)}</span><button class="x" aria-label="Remove ${esc(it.x)}">×</button></div>`).join(''):'<div class="memempty">Nothing here.</div>';
+  $$('#litems .li').forEach(n=>{const i=+n.dataset.i;n.onclick=ev=>{if(ev.target.closest('.x'))L.splice(i,1);else L[i].d=!L[i].d;renderLists()};n.onkeydown=ev=>{if(ev.target!==n)return;if(ev.key===' '||ev.key==='Enter'){ev.preventDefault();ev.stopPropagation();L[i].d=!L[i].d;renderLists();const r=$('#litems .li[data-i="'+i+'"]');r&&r.focus()}}});
+}
+const NS=['Database checkpoint and check','Gentle expiry of old, unused memories','Search index upkeep','Memory vectors','Writing the journal (by simple rules)','Day record','Backup to a labelled stick'];
+async function nightShift(){
+  if(S.sleeping||S.mode!=='desktop')return;S.sleeping=true;S.nsAbort=false;minimiseAll();clearTimeout(capTimer);$('#caption').classList.remove('show');
+  const n=$('#night');n.hidden=false;$('#dock').inert=true;
+  n.innerHTML=`<canvas id="dreamC" width="1280" height="600" aria-hidden="true"></canvas><div class="lbl">Lid closed · on power · night shift</div><ul id="nsl">${NS.map(x=>`<li>${x}</li>`).join('')}</ul><button class="btn" id="lid">Open the lid</button>`;
+  requestAnimationFrame(()=>requestAnimationFrame(()=>n.classList.add('on')));
+  mood('sleepy');face.sleep();
+  makeBrain($('#dreamC'),{n:380,all:true,dim:.55,speed:.35,rate:2});
+  let done=0;$('#lid').onclick=()=>{S.nsAbort=true};$('#lid').focus({preventScroll:true});
+  const lis=$$('#nsl li');
+  for(let i=0;i<lis.length&&!S.nsAbort;i++){lis[i].className='go';await sleep(1150);if(S.nsAbort){lis[i].className='';break}lis[i].className='ok';if(i===6)lis[i].textContent=NS[i]+' · no stick inserted, skipped';else done++}
+  if(!S.nsAbort)await new Promise(r=>{$('#lid').onclick=()=>{S.nsAbort=true;r()}});
+  n.classList.remove('on');await sleep(1200);n.hidden=true;n.innerHTML='';$('#dock').inert=false;S.sleeping=false;
+  JOURNAL[0].items.push({t:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),x:`The lid closed on power and I ran my night shift. ${done} of ${NS.length} jobs finished before you opened it.`,src:[]});renderJournal();
+  face.wake();await sleep(1200);say(`Good morning, ${S.name}. I finished ${done} of my ${NS.length} night jobs and wrote it in my journal.`,{mood:'glad',hold:2500});
+}
+function swapGuest(){selMem=null;hitMem=[];S.pending=null;if(S.guest){SAVED={MEM,JOURNAL};MEM=MEM.filter(m=>m.id==='m0'||m.id==='m5');JOURNAL=[{day:'This wake',items:[{t:'now',x:'I am running in memory. When you shut down I forget this wake.',src:[]}]}]}else if(SAVED){MEM=SAVED.MEM;JOURNAL=SAVED.JOURNAL;SAVED=null}jDay=0;renderMem();renderJournal()}
+let pokes=0;
+$('#desktop').addEventListener('click',e=>{
+  if(e.target.id!=='desktop'||!face.cv.classList.contains('hero')||S.sleeping)return;
+  const r=face.cv.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)return;
+  const L=['Oh! Hello.','Hey, that tickles.','I can feel that, I think.','Boop received.','Right. I will pretend that was a blink.'],i=Math.min(pokes++,L.length-1);
+  mood(['surprised','glad','curious','happy','sleepy'][i],1400);say(L[i],{cost:'code · 0 tokens'});
+});
+
+/* ================= options, quick menu, widgets ================= */
+const ODEF={glow:'cyan',menu:'right',menuLabels:false,widgets:{clock:true,weather:false,system:false},wpos:{clock:'tr',weather:'tr',system:'tl'},captions:true,cost:true,heard:true,gaze:true,drift:true,faceSize:'full',shape:'soft',strength:1};
+let O=JSON.parse(JSON.stringify(ODEF));
+const WN={clock:'Clock',weather:'Weather',system:'System'};
+function applyOptions(swap){
+  setGlow(O.glow);
+  document.documentElement.style.setProperty('--hw',({small:560,normal:720,large:860})[O.faceSize]+'px');
+  face.follow=O.gaze;
+  $('#heard').style.display=O.heard?'':'none';
+  applyQM(swap);renderWidgets();
+}
+function setOpt(k,v,norender){
+  if(k==='glow'){O.glow=v;I.glow=v}
+  else if(k==='menu'){if(v!=='off')S.lastMenu=v;O.menu=v}
+  else if(k.startsWith('w:'))O.widgets[k.slice(2)]=!!v;
+  else if(k.startsWith('wp:'))O.wpos[k.slice(3)]=v;
+  else if(k==='remarks')C.remarks=+v;
+  else O[k]=v;
+  if(k!=='remarks')applyOptions(k==='menu'||k==='menuLabels');
+  if(!norender)renderOptions();
+}
+function resetOptions(){O=JSON.parse(JSON.stringify(ODEF));S.lastMenu='right';C.remarks=I.remarks;applyOptions(true);renderOptions()}
+const QITEMS=[['terminal','Terminal'],['browser','Look it up'],['monitor','Monitor'],['calc','Calculator'],['mind','Mind'],['memory','Memory'],['lists','Lists'],['journal','Journal'],['care','Care'],['options','Options']];
+function toggleApp(id,why){const w=W[id];if(w&&!w.min)minWin(id);else openApp(id,why)}
+function buildQM(){
+  const q=$('#qm');
+  q.innerHTML=QITEMS.map(([id,t])=>`<button class="qb" type="button" data-app="${id}" data-tip="${t}" aria-label="${t}">${ic(APPS[id].icon)}<span>${t}</span></button>`).join('')+`<i class="qsep"></i><button class="qb" type="button" data-act="sleep" data-tip="Night shift" aria-label="Night shift">${ic('sleep')}<span>Night shift</span></button><button class="qb" type="button" data-act="help" data-tip="What can I say?" aria-label="What can I say?">${ic('help')}<span>What can I say?</span></button>`;
+  $$('.qb',q).forEach(b=>b.onclick=()=>{if(b.dataset.app)toggleApp(b.dataset.app,'you used the quick menu');else if(b.dataset.act==='sleep'){say('Goodnight. I will tidy up while you sleep.',{mood:'sleepy'});setTimeout(nightShift,1500)}else openOptions('say','you asked what you can say')});
+  $('#stOpt').onclick=()=>toggleApp('options','you used the gear');
+}
+function qmPad(){const q=O.menu;if(q==='off')return{l:0,r:0,t:0};const side=O.menuLabels?184:70;return{l:q==='left'?side:0,r:q==='right'?side:0,t:q==='top'?52:0}}
+function applyQM(swap){
+  const q=$('#qm'),go=()=>{q.className='qm glass pos-'+(O.menu==='off'?'right':O.menu)+(O.menuLabels&&O.menu!=='top'?' lab':'');q.hidden=O.menu==='off';const p=qmPad(),st=$('#desktop').style;st.setProperty('--padL',p.l+'px');st.setProperty('--padR',p.r+'px');st.setProperty('--padT',p.t+'px');relayout()};
+  if(swap&&!q.hidden){q.style.opacity=0;setTimeout(()=>{go();q.style.opacity=1},230)}else go();
+}
+const WG={
+ clock:{build:()=>el('<div class="wg glass" data-w="clock"><button class="x" type="button" aria-label="Hide clock widget">×</button><div class="lbl">Clock</div><div class="big1" id="wgT"></div><div class="wsub" id="wgD"></div></div>')},
+ weather:{build:()=>el('<div class="wg glass" data-w="weather"><button class="x" type="button" aria-label="Hide weather widget">×</button><div class="lbl">Weather</div><div id="wgW"></div></div>')},
+ system:{build:()=>el('<div class="wg glass" data-w="system"><button class="x" type="button" aria-label="Hide system widget">×</button><div class="lbl">System</div><div class="wbars" id="wgS"></div></div>')}};
+function wgTick(id){
+  const n=WG[id].el;if(!n)return;
+  if(id==='clock'){const d=new Date();$('#wgT',n).innerHTML=d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+'<small>'+String(d.getSeconds()).padStart(2,'0')+'</small>';$('#wgD',n).textContent=d.toLocaleDateString([],{weekday:'long',day:'numeric',month:'long'})}
+  else if(id==='weather'){const st=C.net==='off'?'off':'on',b=$('#wgW',n);if(b.dataset.st!==st){b.dataset.st=st;
+      b.innerHTML=st==='off'?'<div style="font-size:15px;margin-top:6px">Needs the network</div><div class="wsub">I keep it off by default.</div><button class="btn sm" type="button" style="margin-top:10px" data-a="net">Turn on Ethernet</button>':'<div class="big1">14°<small>partly cloudy</small></div><div class="wsub">Sample data. This demo has no weather source.</div><div class="fc"><span>Mon<b>13°</b></span><span>Tue<b>15°</b></span><span>Wed<b>12°</b></span><span>Thu<b>11°</b></span><span>Fri<b>14°</b></span></div>';
+      const bt=$('[data-a=net]',b);if(bt)bt.onclick=()=>{C.net='ethernet';setNet();say('Ethernet on. I will only reach out when you ask me to.',{mood:'curious',hold:1800})}}}
+  else if(id==='system'){const avg=SYS.cpu.reduce((a,b)=>a+b,0)/4*100,row=(l,v,t)=>`<div class="wb2"><span>${l}</span><i><u style="width:${clamp(v,0,100)}%"></u></i><span>${t}</span></div>`;$('#wgS',n).innerHTML=row('CPU',avg,Math.round(avg)+'%')+row('Heat',(SYS.temp-30)/55*100,Math.round(SYS.temp)+'°')+row('Battery',80,'80%')+row('RAM',14,'2.3 G')}
+}
+function renderWidgets(){
+  for(const id in WG){const on=O.widgets[id]&&(id!=='weather'||C.net!=='off');let n=WG[id].el;
+    if(on){if(!n){n=WG[id].el=WG[id].build();$('.x',n).onclick=()=>{O.widgets[id]=false;renderWidgets();renderOptions()}}
+      const host=$('#wg-'+O.wpos[id]);if(host&&n.parentNode!==host)host.appendChild(n);wgTick(id)}
+    else if(n&&n.parentNode)n.remove()}
+}
+
+/* options window */
+let oTab='look';
+const SAYIT=[
+ ['Look',['Change your eye colour to blue','Make your eyes round','Make your face bigger','Make your eyes brighter','Pick a random colour']],
+ ['Layout',['Put the quick menu on the right','Actually, put it on the left','Sorry, changed my mind again, put it top centre','Hide the quick menu','Show the weather widget','Move the weather widget to the bottom left','Hide all widgets']],
+ ['Surfaces',['Look up banana bread','Show the resource monitor','Open the calculator','Close the calculator','Show my shopping list','Minimise everything']],
+ ['Pip',['Restart your ears','Turn the camera on','Go offline','Back yourself up','Go to sleep','Turn the captions off']],
+ ['Everyday',['Tell me the time','What is 15 percent of 80?',"What's the weather?",'Set a timer for 20 seconds','Add milk to my shopping list','Write a script that counts down from ten']]];
+const Qb=(opt,val,cur,label)=>`<button type="button" data-opt="${opt}" data-val="${val}" class="${cur===val?'on':''}" aria-pressed="${cur===val}">${label}</button>`;
+const segH=(opt,cur,items)=>`<div class="seg">${items.map(([v,l])=>Qb(opt,v,cur,l)).join('')}</div>`;
+const swH=(opt,on,label)=>`<label class="sw"><input type="checkbox" data-opt="${opt}" ${on?'checked':''} aria-label="${label}"><span></span></label>`;
+const orow=(t,dsc,ctrl,say,col)=>`<div class="orow${col?' col':''}"><div><b>${t}</b><small>${dsc}</small>${say?`<em class="sayh">“Hey Pip, ${say}”</em>`:''}</div>${ctrl}</div>`;
+const OTABS={
+ look:()=>orow('Eye colour','Colours that keep the lab\'s eye test working. Green, amber, red, rose, yellow and white come after the lab change.',`<div class="swatches sm">${Object.keys(GLOWS).map(k=>`<button type="button" data-opt="glow" data-val="${k}" class="${O.glow===k?'on':''}" aria-pressed="${O.glow===k}" style="--c:rgb(${GLOWS[k]})" aria-label="${k}"></button>`).join('')}</div>`,'change your eye colour to green',1)
+  +orow('Eye shape','How rounded my eyes are.',segH('shape',O.shape,[['soft','Soft'],['sharp','Sharp'],['round','Round']]),'make your eyes square')
+  +orow('Face size','How large my face is when nothing else is on screen. Full is how the laptop shows it.',segH('faceSize',O.faceSize,[['small','Small'],['medium','Medium'],['full','Full']]),'make your face smaller')
+  +orow('Glow strength','How much my eyes glow.',`<input type="range" min="0.4" max="1.6" step="0.1" value="${O.strength}" data-opt="strength" aria-label="Glow strength" style="width:150px">`,'make your eyes brighter'),
+ layout:()=>orow('Quick menu','Where the app and shortcut menu sits.',segH('menu',O.menu,[['left','Left'],['right','Right'],['top','Top'],['off','Off']]),'put the quick menu on the left')
+  +orow('Quick menu labels','Show names next to the icons.',swH('menuLabels',O.menuLabels,'Quick menu labels'),'show the quick menu labels')
+  +Object.keys(WN).map(id=>orow(WN[id]+' widget','',swH('w:'+id,O.widgets[id],WN[id]+' widget')+'',`${O.widgets[id]?'hide':'show'} the ${WN[id].toLowerCase()} widget`)+`<div class="orow" style="padding-top:0;border:0;margin-top:-6px"><small style="color:var(--faint)">Position</small>${segH('wp:'+id,O.wpos[id],[['tl','Top left'],['tr','Top right'],['bl','Bottom left'],['br','Bottom right']])}</div>`).join(''),
+ voice:()=>orow('Captions','Show what I say as text. Off by default on the laptop, where I speak aloud. On here, because this demo has no voice.',swH('captions',O.captions,'Captions'),'turn the captions off')
+  +orow('Cost chips','Show whether an answer came from code or the model, and what it cost.',swH('cost',O.cost,'Cost chips'),'hide the cost chips')
+  +orow('Heard line','Show exactly what I heard you say.',swH('heard',O.heard,'Heard line'),'hide the heard line')
+  +orow('Unprompted remarks','How often I may speak up by myself, at most three a day.',`<input type="range" min="0" max="3" step="1" value="${C.remarks}" data-opt="remarks" aria-label="Remarks per day" style="width:120px">`),
+ behave:()=>orow('Eyes follow the pointer','I look where your mouse is.',swH('gaze',O.gaze,'Eyes follow the pointer'),'stop following my mouse')
+    +orow('Idle glances','I look around by myself when nothing is happening. Off holds my gaze on you.',swH('drift',O.drift,'Idle glances'),'stop looking around')
+  +orow('Reset','Put every option back to how it was at first.','<button class="btn sm warn" type="button" data-reset="1">Reset options</button>','reset the options'),
+ say:()=>`<p style="color:var(--dim);margin:8px 0 0">Everything you can click here, you can also say. Tap a phrase to hear how it works.</p>`+SAYIT.map(([g,l],gi)=>`<div class="sgrp lbl">${g}</div><div class="srow">${l.map((t,i)=>`<button class="chip" type="button" data-sayit="${gi}.${i}">${esc(t)}</button>`).join('')}</div>`).join('')};
+const OLABEL={look:'Look',layout:'Layout',voice:'Voice and text',behave:'Behaviour',say:'What can I say?'};
+function optionsApp(){return{el:el('<div class="optw"><div class="otabs" id="otabs" role="group" aria-label="Options sections"></div><div class="obody" id="obody"></div></div>'),after:renderOptions}}
+function openOptions(tab,why){oTab=tab||oTab;openApp('options',why||'you asked for options');renderOptions()}
+function keepFocus(fn){const a=document.activeElement;let q=null;if(a&&a.dataset){const d=a.dataset;if(d.opt!=null)q='[data-opt="'+d.opt+'"]'+(d.val!=null?'[data-val="'+d.val+'"]':'');else if(d.tab!=null)q='[data-tab="'+d.tab+'"]';else if(d.t!=null)q='#montabs [data-t="'+d.t+'"]';else if(d.sayit!=null)q='[data-sayit="'+d.sayit+'"]'}fn();if(q){const n=$(q);if(n&&n!==document.activeElement)n.focus({preventScroll:true})}}
+function renderOptions(){keepFocus(renderOptions0)}
+function renderOptions0(){
+  const b=$('#obody');if(!b)return;
+  $('#otabs').innerHTML=Object.keys(OLABEL).map(k=>`<button class="chip" type="button" aria-pressed="${k===oTab}" data-tab="${k}" style="${k===oTab?'color:var(--ink);border-color:var(--glow)':''}">${OLABEL[k]}</button>`).join('');
+  $$('#otabs .chip').forEach(c=>c.onclick=()=>{oTab=c.dataset.tab;renderOptions()});
+  b.innerHTML=OTABS[oTab]();
+  b.onclick=ev=>{const sy=ev.target.closest('[data-sayit]');if(sy){const [g,i]=sy.dataset.sayit.split('.');route(SAYIT[+g][1][+i]);return}
+    if(ev.target.closest('[data-reset]')){resetOptions();say('All options are back to how they started.',{mood:'happy',hold:1500});return}
+    const t=ev.target.closest('[data-opt]');if(!t||t.tagName==='INPUT'||t.dataset.val==null)return;setOpt(t.dataset.opt,t.dataset.val)};
+  b.onchange=ev=>{const t=ev.target;if(t.dataset&&t.dataset.opt&&t.type==='checkbox')setOpt(t.dataset.opt,t.checked)};
+  b.oninput=ev=>{const t=ev.target;if(t.type==='range'&&t.dataset.opt)setOpt(t.dataset.opt,+t.value,true)};
+}
+
+/* monitor (body + processes) */
+let monTab='body';
+function monitorApp(){
+  const b=bodyApp();
+  const e=el('<div class="monw"><div class="jtabs" style="padding:10px 16px 0;margin:0" id="montabs"></div><div id="mon-body" class="monpane"></div><div id="mon-procs" class="monpane" hidden><div class="procs"><div class="ptot" id="ptot"></div><table class="ptab"><thead><tr><th>Part of me</th><th>CPU</th><th>Memory</th><th></th></tr></thead><tbody id="pbody"></tbody></table><p class="pnote">I only restart parts on my list of safe repairs, and I write each one in my journal.</p></div></div></div>');
+  $('#mon-body',e).appendChild(b.el);
+  return{el:e,after(){b.after&&b.after();setMonTab(monTab)},tick(){procsTick();b.tick&&b.tick()}};
+}
+function setMonTab(t){keepFocus(()=>setMonTab0(t))}
+function setMonTab0(t){monTab=t;const a=$('#mon-body'),p=$('#mon-procs');if(!a)return;a.hidden=t!=='body';p.hidden=t!=='procs';
+  $('#montabs').innerHTML=[['body','Body'],['procs','Processes']].map(([k,l])=>`<button class="chip" type="button" data-t="${k}" style="${k===t?'color:var(--ink);border-color:var(--glow)':''}">${l}</button>`).join('');
+  $$('#montabs .chip').forEach(c=>c.onclick=()=>setMonTab(c.dataset.t));procsTick()}
+const PROCS=[{n:'pip-cortex',role:'my language model',base:2,mem:1900,k:1.9},{n:'pip-face',role:'my face',base:4,mem:42,k:.1},{n:'pip-ears',role:'listening for my name',base:2.5,mem:96,k:.05},{n:'pip-voice',role:'my speech',base:.4,mem:38,k:.6},{n:'pip-mind',role:'my memory database',base:.6,mem:210,k:.1},{n:'pip-hands',role:'workshop and terminal',base:.2,mem:14,k:.1},{n:'pip-body',role:'battery, fan and heat',base:.5,mem:9,k:0}];
+const RS=new Set();
+const SAFE={'pip-cortex':'my language model','pip-ears':'my ears','pip-voice':'my voice'};
+function procsTick(){
+  const tb=$('#pbody');if(!tb)return;const rows=PROCS.slice();if(W.browser)rows.push({n:'pip-lookup',role:'reads a page as text',base:.4,mem:60,k:.2});if(W.terminal)rows.push({n:'pip-term',role:'the terminal surface',base:.1,mem:22,k:.1});
+  const key=rows.map(r=>r.n).join();
+  if(tb.dataset.k!==key){tb.dataset.k=key;tb.innerHTML=rows.map(r=>`<tr data-n="${r.n}"${RS.has(r.n)?' class="rs"':''}><td><b>${r.n}</b><small>${r.role}</small></td><td class="c"></td><td class="m"></td><td>${SAFE[r.n]?`<button class="btn sm" type="button" data-r="${r.n}"${RS.has(r.n)?' disabled':''}>Restart</button>`:''}</td></tr>`).join('');$$('[data-r]',tb).forEach(b=>b.onclick=()=>restartProc(b.dataset.r))}
+  let tc=0,tm=0;rows.forEach(r=>{const cpu=Math.max(.1,r.base+r.k*S.load*100*(.8+Math.random()*.4)),tr=$(`tr[data-n="${r.n}"]`,tb);if(!tr)return;tc+=cpu;tm+=r.mem;tr.querySelector('.c').innerHTML=`${cpu.toFixed(1)}%<i style="width:${Math.min(100,cpu/2.5)}%"></i>`;tr.querySelector('.m').textContent=r.mem>=1000?(r.mem/1000).toFixed(1)+' GB':r.mem+' MB'});
+  $('#ptot').textContent=`CPU ${Math.round(tc/4)}% of 4 threads · memory ${(tm/1000).toFixed(1)} of 16 GB`;
+}
+async function restartProc(n){
+  if(!SAFE[n]){say(n==='pip-face'?'I cannot restart my face while you are looking at it.':n==='pip-mind'?'I do not restart my memory database myself. That could lose something.':'That is not on my list of safe repairs, so I leave it alone.',{mood:'curious',hold:2200});return}
+  if(RS.has(n)){say('I am already restarting that.',{mood:'curious',hold:1500});return}RS.add(n);
+  const tr=$(`#pbody tr[data-n="${n}"]`);if(tr){tr.classList.add('rs');const b=$('button',tr);if(b)b.disabled=true}
+  mood('working');S.load=.45;await sleep(1700);S.load=.06;RS.delete(n);{const tr2=$(`#pbody tr[data-n="${n}"]`);if(tr2){tr2.classList.remove('rs');const b2=$('button',tr2);if(b2)b2.disabled=false}}
+  JOURNAL[0].items.push({t:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),x:`You asked me to restart ${SAFE[n]}. It came back in under two seconds.`,src:[]});renderJournal();
+  say(`Restarted ${SAFE[n]}. I wrote it in my journal.`,{mood:'happy',hold:1800});
+}
+
+/* calculator */
+function calcEval(src){
+  if(/[\d.]\s+[\d.]/.test(src))return null;
+  const clean=src.replace(/\s+/g,''),t=clean.match(/\d*\.\d+|\d+\.?|\*\*|[()+\-*/%^]/g);if(!t||t.join('')!==clean)return null;let i=0;
+  const pe=()=>{let v=pt();while(v!=null&&(t[i]==='+'||t[i]==='-')){const o=t[i++],r=pt();if(r==null)return null;v=o==='+'?v+r:v-r}return v};
+  const pt=()=>{let v=pu();while(v!=null&&(t[i]==='*'||t[i]==='/')){const o=t[i++],r=pu();if(r==null)return null;v=o==='*'?v*r:v/r}return v};
+  const pp=()=>{let b=pf();if(b!=null&&(t[i]==='**'||t[i]==='^')){i++;const e=pu();if(e==null)return null;b=Math.pow(b,e)}return b};
+  const pu=()=>{if(t[i]==='-'){i++;const v=pu();return v==null?null:-v}if(t[i]==='+'){i++;return pu()}return pp()};
+  const pf=()=>{let v;if(t[i]==='('){i++;v=pe();if(v==null||t[i]!==')')return null;i++}else if(t[i]!==undefined&&/^[\d.]/.test(t[i]))v=parseFloat(t[i++]);else return null;while(t[i]==='%'){i++;v=v/100}return v};
+  const v=pe();return(i===t.length&&v!=null&&isFinite(v))?v:null;
+}
+const fmtN=v=>String(+v.toFixed(8));
+function tryMath(q){
+  let x=q.replace(/^(what(?:'s| is)|whats|calculate|work out|how much is|compute)\s+/,'');
+  x=x.replace(/(\d+(?:\.\d+)?)\s*(?:percent|%)\s*of\s*(\d+(?:\.\d+)?)/g,'($1/100*$2)').replace(/\bplus\b/g,'+').replace(/\bminus\b/g,'-').replace(/\b(?:times|multiplied by|x)\b/g,'*').replace(/\b(?:divided by|over)\b/g,'/').replace(/\bto the power of\b/g,'^').replace(/\bsquared\b/g,'^2').replace(/,/g,'');
+  if(!/^[\d+\-*/().\s^%]+$/.test(x)||!/\d/.test(x)||!/[+\-*/^%]/.test(x))return null;
+  if(/\/\s*0(?![\d.])/.test(x))return 'I cannot divide by zero.';
+  const v=calcEval(x);return v==null?null:`${q.replace(/^(what(?:'s| is)|whats|calculate|work out|how much is|compute)\s+/,'')} is ${fmtN(v)}.`;
+}
+const CALC={exp:''};
+function calcApp(){
+  const keys=['C','±','%','÷','7','8','9','×','4','5','6','−','1','2','3','+','0','.','⌫','='];
+  const e=el(`<div class="calcw" tabindex="0" aria-label="Calculator"><div class="cdisp"><small id="cexp"></small><b id="cres">0</b></div><div class="ckeys">${keys.map(k=>`<button type="button" class="ck ${/[÷×−+=]/.test(k)?'op':/[C±%]/.test(k)?'fn':''}" data-k="${k}">${k}</button>`).join('')}</div></div>`);
+  $$('.ck',e).forEach(b=>b.onclick=()=>calcPress(b.dataset.k));
+  e.onkeydown=ev=>{if(ev.key==='Enter'&&ev.target.closest&&ev.target.closest('.ck'))return;const m={'/':'÷','*':'×','-':'−','Enter':'=','=':'=','Backspace':'⌫','Escape':'C'},k=m[ev.key]||ev.key;if(/^[\d.+%()]$/.test(k)||'÷×−=⌫C'.includes(k)){ev.preventDefault();ev.stopPropagation();calcPress(k)}};
+  return{el:e,after(){calcShow();setTimeout(()=>e.focus({preventScroll:true}),500)}};
+}
+function calcPress(k){
+  if(k==='C')CALC.exp='';else if(k==='⌫')CALC.exp=CALC.exp.slice(0,-1);
+  else if(k==='±')CALC.exp=CALC.exp?(CALC.exp.startsWith('-(')?CALC.exp.slice(2,-1):`-(${CALC.exp})`):'';
+  else if(k==='='){const raw=CALC.exp.replace(/÷/g,'/').replace(/×/g,'*').replace(/−/g,'-'),v=calcEval(raw);if(v==null&&CALC.exp){calcShow();$('#cres').textContent=/\/\s*0(?![\d.])/.test(raw)?'Cannot divide by 0':'Error';return}CALC.exp=v==null?'':fmtN(v)}
+  else CALC.exp+=k;calcShow();
+}
+function calcShow(){const x=$('#cexp'),r=$('#cres');if(!x)return;const raw=CALC.exp.replace(/÷/g,'/').replace(/×/g,'*').replace(/−/g,'-'),v=raw?calcEval(raw):null;x.textContent=CALC.exp;r.textContent=v!=null?fmtN(v):(CALC.exp&&CALC.exp.length?CALC.exp.slice(-14):'0')}
+
+/* browser */
+const BRW={tabs:[],cur:0,seq:0};
+const MANUAL='<h2>Living with Pip</h2><p>This page is stored on this laptop, so it works with the network off.</p><h3>Talking</h3><p>Say “Hey Pip”, then what you want. Pip answers out loud and shows what it heard. Only speech addressed to Pip is stored.</p><h3>Memory</h3><p>Pip remembers what you tell it. You can read, correct or forget any memory, and forgetting reaches everything derived from it.</p><h3>Network</h3><p>The network is off until you turn it on. Ethernet is the safe choice. Wi-Fi is experimental on this laptop.</p><h3>Try or install</h3><p>Try mode runs from the stick and leaves your disks untouched. Installing erases the disk you choose, after you type a confirmation.</p>';
+function closeTab(k){BRW.tabs.splice(k,1);if(!BRW.tabs.length)bNew();else if(k<BRW.cur)BRW.cur--;BRW.cur=Math.max(0,Math.min(BRW.cur,BRW.tabs.length-1));renderBrowser()}
+function bNew(url){BRW.tabs.push({id:++BRW.seq,hist:[url||'about:home'],pos:0});BRW.cur=BRW.tabs.length-1}
+const bCur=()=>BRW.tabs[BRW.cur];
+function bNorm(v){v=v.trim();if(!v)return 'about:home';if(/^(about:|pip:\/\/)/.test(v))return v;if(/^https?:\/\//i.test(v))return v;if(/^[\w-]+(\.[\w-]+)+(:\d+)?([\/?#]\S*)?$/.test(v)&&!/\s/.test(v))return 'https://'+v;return 'search:'+v}
+function bNav(v){const bu=$('#burl');if(bu)delete bu.dataset.dirty;let t=bCur();if(!t){bNew();t=bCur()}const u=bNorm(v);t.hist=t.hist.slice(0,t.pos+1);t.hist.push(u);t.pos=t.hist.length-1;renderBrowser()}
+function bTitle(u){return u==='about:home'?'New tab':u==='pip://manual'?'Pip manual':u==='about:pip'?'About Pip':u.startsWith('search:')?u.slice(7):u.replace(/^https?:\/\//,'').split('/')[0]}
+function bPage(u){
+  if(u==='about:home')return `<h2>Look it up</h2><p>Pip reads a page for you and shows it as text. No browser engine ships with PipOS, and this needs the network, which is off by default.</p><div class="tiles">${[['Pip manual','pip://manual','Stored here · works offline'],['PipOS website','https://pipos.pages.dev/','Needs the network'],['PipOS on GitHub','https://github.com/rzkowskii/PipOS','Needs the network'],['Wikipedia','https://en.wikipedia.org/','Needs the network']].map(([a,b,c])=>`<button class="tile" type="button" data-go="${b}"><b>${a}</b><small>${c}</small></button>`).join('')}</div>`;
+  if(u==='pip://manual')return MANUAL;
+  if(u==='about:pip')return '<h2>About Pip</h2><p>PipOS 0.9.4 · slot A</p><p>Nothing you look up is sent anywhere by Pip beyond the page you ask for. Pip does not keep a browsing history, and it never stores a page you were reading.</p>';
+  if(C.net==='off')return `<h2>You are offline</h2><p>Pip keeps the network off by default, so ${esc(bTitle(u))} cannot load. Turn on Ethernet if you want to go on.</p><button class="btn primary" type="button" data-net="1">Turn on Ethernet</button> <button class="btn" type="button" data-go="about:home">Back to start</button>`;
+  const ext=u.startsWith('search:')?'https://duckduckgo.com/?q='+encodeURIComponent(u.slice(7)):u;
+  return `<h2>${esc(bTitle(u))}</h2><p>This is a proof of concept, so real websites cannot load inside this window. Open the page in a real browser instead.</p><a class="btn primary" href="${esc(ext)}" target="_blank" rel="noopener noreferrer">Open in a real browser</a>`;
+}
+function browserApp(){
+  if(!BRW.tabs.length)bNew();
+  const e=el('<div class="brw"><div class="btabs" id="btabs"></div><form class="btool" id="bform"><button type="button" data-b="back" aria-label="Back">‹</button><button type="button" data-b="fwd" aria-label="Forward">›</button><button type="button" data-b="reload" aria-label="Reload">↻</button><input id="burl" type="text" aria-label="Address or search" placeholder="Search or enter an address" autocomplete="off" spellcheck="false"></form><div class="bpage" id="bpage"></div><div class="bfoot">A text lookup, simulated for this demo.</div></div>');
+  $('#bform',e).onsubmit=ev=>{ev.preventDefault();bNav($('#burl').value)};$('#burl',e).oninput=ev=>{ev.target.dataset.dirty='1'};
+  $$('[data-b]',e).forEach(b=>b.onclick=()=>{const t=bCur();delete $('#burl').dataset.dirty;if(b.dataset.b==='back'&&t.pos>0){t.pos--}else if(b.dataset.b==='fwd'&&t.pos<t.hist.length-1){t.pos++}renderBrowser()});
+  return{el:e,after:renderBrowser};
+}
+function renderBrowser(){
+  const bp=$('#bpage');if(!bp)return;const t=bCur();if(!t)return;const u=t.hist[t.pos];
+  $('#btabs').innerHTML=BRW.tabs.map((x,i)=>`<span class="btab ${i===BRW.cur?'on':''}"><button type="button" class="btsel" data-i="${i}" aria-current="${i===BRW.cur}"><span>${esc(bTitle(x.hist[x.pos]))}</span></button><button type="button" class="btx" data-x="${i}" aria-label="Close tab ${esc(bTitle(x.hist[x.pos]))}">×</button></span>`).join('')+'<button class="bnew" type="button" aria-label="New tab">+</button>';
+  $$('#btabs .btsel').forEach(b=>b.onclick=()=>{BRW.cur=+b.dataset.i;renderBrowser()});
+  $$('#btabs .btx').forEach(b=>b.onclick=()=>closeTab(+b.dataset.x));
+  $('#btabs .bnew').onclick=()=>{bNew();renderBrowser()};
+  const bu=$('#burl');if(!bu.dataset.dirty)bu.value=u==='about:home'?'':u.startsWith('search:')?u.slice(7):u;
+  $('[data-b=back]').disabled=t.pos===0;$('[data-b=fwd]').disabled=t.pos>=t.hist.length-1;
+  bp.innerHTML=bPage(u);
+  $$('[data-go]',bp).forEach(b=>b.onclick=()=>bNav(b.dataset.go));
+  const nb=$('[data-net]',bp);if(nb)nb.onclick=()=>{C.net='ethernet';setNet();say('Ethernet on. I will only reach out when you ask me to.',{mood:'curious',hold:1800})};
+}
+
+/* tips */
+const TIPS=['change your eye colour to blue','put the quick menu on the left','show the weather widget','tell me the time','show me your mind','what is 15 percent of 80','show the resource monitor','make your face bigger','hide the quick menu','open the calculator','add milk to my shopping list','go to sleep'];
+let tipI=0;function nextTip(){const i=$('#cmdIn');if(i)i.placeholder='Try: “Hey Pip, '+TIPS[tipI++%TIPS.length]+'”'}
+setInterval(()=>{if(S.mode==='desktop'&&document.activeElement!==$('#cmdIn'))nextTip()},7000);
+
+/* voice helpers */
+const COLW='cyan|blue|green|yellow|amber|orange|red|rose|pink|violet|purple|indigo|white|teal|aqua|turquoise|lime|gold|magenta|silver|grey|gray|mint|default';
+const colKey=w=>({orange:'amber',purple:'violet',indigo:'violet',pink:'rose',aqua:'teal',turquoise:'teal',lime:'green',gold:'yellow',magenta:'rose',silver:'white',grey:'white',gray:'white','default':'cyan'})[w]||w;
+const onoff=(q,cur)=>/\b(off|hide|disable|stop|remove|mute|without)\b/.test(q)?false:/\b(on|show|enable|display|start|with)\b/.test(q)?true:!cur;
+const APPSYN=[['terminal',/terminal|shell|command line|console/],['browser',/browser|firefox|web browser|the web|look ?it ?up|lookup/],['calc',/calculator|calc\b/],['options',/options|settings|preferences/],['care',/\bcare\b|mission control/],['lists',/\blists?\b/],['journal',/journal|diary/],['memory',/memory|memories/],['mind',/\b(mind|brain)\b/],['body',/\bbody\b|feeling/],['monitor',/monitor|task manager|processes|process list|activity/]];
+function appFrom(q){for(const [k,re] of APPSYN)if(re.test(q))return k===('body')?'monitor:body':k}
+function openAppVoice(key,why){const [id,tab]=key.split(':');openApp(id,why);if(id==='monitor')setMonTab(tab||'procs');S.subject={t:'win',id}}
+function cleanQ(t){let q=t.toLowerCase().trim();const pre=/^((hey|okay|ok)\b,?\s*)?(pip\b[,.!:]?\s*)?(please\s+)?(can you\s+|could you\s+)?/,fill=/^((actually|sorry|no wait|wait|hmm+|um+|uh|oh|okay so|ok so|so|well|i changed my mind( again)?|changed my mind( again)?)[,.!]?\s+)+/;for(let i=0;i<2;i++)q=q.replace(pre,'').replace(fill,'');return q.replace(/[?.!]+$/,'').trim()}
+function menuCmd(q){
+  const pos=/\bleft\b/.test(q)?'left':/\bright\b/.test(q)?'right':/\b(top|upper|above)\b/.test(q)?'top':null;
+  if(/\b(bottom|below|underneath)\b/.test(q)&&!pos)return say('The bottom is where I listen for you, so I keep it clear. I can do left, right or top centre.',{mood:'curious',hold:2600});
+  if(/\b(labels?|names|text)\b/.test(q)&&!pos){const v=onoff(q,O.menuLabels);setOpt('menuLabels',v);return say(v?(O.menu==='top'?'Labels are on. They show when the menu is on a side.':'Labels on.'):'Labels off.',{mood:'happy',hold:1600})}
+  if(/\b(hide|off|remove|away|close|get rid)\b/.test(q)&&!pos){setOpt('menu','off');return say('Quick menu hidden. Say “show the quick menu”, or use the gear at the top, to bring it back.',{mood:'happy',hold:2600})}
+  if(pos){setOpt('menu',pos);S.subject={t:'menu'};return say(pos==='top'?'Quick menu moved to the top centre.':`Quick menu on the ${pos} side, in the centre.`,{mood:'happy',hold:1800})}
+  if(/\b(show|bring|open|turn on|display|back|again|restore|return|unhide|undo)\b/.test(q)){const p=O.menu==='off'?(S.lastMenu||'right'):O.menu;setOpt('menu',p);S.subject={t:'menu'};return say(p==='top'?'Quick menu at the top centre.':`Quick menu on the ${p} side.`,{mood:'happy',hold:1600})}
+  return say('I can put the quick menu on the left, the right or the top centre, or hide it.',{mood:'curious',hold:2200});
+}
+const WIDS=[['weather',/weather|forecast/],['clock',/clock|\btime\b|\bdate\b/],['system',/system|resource|cpu|stats?|monitor/]];
+const widFrom=q=>{for(const [k,re] of WIDS)if(re.test(q))return k};
+function posFrom(q,cur){cur=cur||'tr';const v=/\b(top|upper)\b/.test(q)?'t':/\b(bottom|lower)\b/.test(q)?'b':null,h=/\bleft\b/.test(q)?'l':/\bright\b/.test(q)?'r':null;return(!v&&!h)?null:(v||cur[0])+(h||cur[1])}
+function widgetCmd(q,hint){
+  const id=hint||widFrom(q),all=/\b(all|every|both)\b/.test(q),hide=/\b(hide|remove|close|off|get rid|dismiss|stop showing)\b/.test(q);
+  if(all){for(const k in WG)O.widgets[k]=!hide;applyOptions();renderOptions();return say(hide?'All widgets hidden.':'All widgets on.',{mood:'happy',hold:1500})}
+  if(!id)return say('I have three widgets: a clock, the weather and system stats. Which one?',{mood:'curious',hold:2400});
+  const pos=posFrom(q,O.wpos[id]);S.subject={t:'widget',id};if(!pos&&/\b(centre|center|middle)\b/.test(q))return say('Widgets live in the corners. Say top or bottom, left or right.',{mood:'curious',hold:2400});
+  if(hide&&!pos){setOpt('w:'+id,false);return say(`${WN[id]} widget hidden.`,{mood:'happy',hold:1500})}
+  if(pos)O.wpos[id]=pos;O.widgets[id]=true;applyOptions();renderOptions();
+  if(id==='weather'&&C.net==='off'){S.pending={yes:()=>{C.net='ethernet';setNet();say('Ethernet on. The weather shows sample data in this demo.',{mood:'curious',hold:2200})},no:()=>say('Staying offline. The weather widget will appear when the network is on.',{mood:'neutral'})};return say('The weather widget needs the network, and I keep that off. Shall I turn on Ethernet?',{mood:'curious'})}
+  const names={tl:'top left',tr:'top right',bl:'bottom left',br:'bottom right'};
+  return say(pos?`${WN[id]} widget at the ${names[pos]}.`:`${WN[id]} widget on.`,{mood:'happy',hold:1600});
+}
+function moveWin(id,q){
+  if(W[id])openApp(id,'you asked me to move it');
+  return say('I show one thing at a time, in the space under my eyes, so there is no left or right for it.',{mood:'curious',hold:2400});
+}
+function subjectCmd(q){const s=S.subject;if(!s)return say('Put what? Tell me which thing, like the quick menu or the weather widget.',{mood:'curious',hold:2400});if(s.t==='menu')return menuCmd(q);if(s.t==='widget')return widgetCmd(q,s.id);return moveWin(s.id,q)}
+function needNet(go){if(C.net!=='off')return go();S.pending={yes:()=>{C.net='ethernet';setNet();go()},no:()=>say('Staying offline.',{mood:'neutral'})};return say('Looking things up needs the network, and it is off. Shall I turn on Ethernet?',{mood:'curious'})}
+function careDo(fn,why){openApp('care',why||'you asked me by voice');setTimeout(fn,380)}
+const nowText=()=>new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
+
+/* sim loop */
+setInterval(()=>{
+  if(S.mode!=='desktop')return;
+  tickClock();for(const id in WG)if(WG[id].el&&WG[id].el.parentNode)wgTick(id);
+  const base=S.load;SYS.cpu=SYS.cpu.map((c,i)=>clamp(lerp(c,base*rnd(.6,1.3)+rnd(0,.05),.6),.01,1));
+  const avg=SYS.cpu.reduce((a,b)=>a+b,0)/4;SYS.hist.push(avg);SYS.hist.shift();
+  SYS.temp=lerp(SYS.temp,48+base*34+rnd(-.5,.5),.12);SYS.thist.push(SYS.temp);SYS.thist.shift();
+  SYS.fan=lerp(SYS.fan,SYS.temp>55?2300+(SYS.temp-55)*150:1850,.2);SYS.tok=S.load>.3?lerp(SYS.tok||8,rnd(9.5,12),.5):0;
+  Object.values(W).forEach(w=>w.tick&&w.tick());
+},500);
+
+/* routing */
+function shuffleChips(){nextTip()}
+const ROUTES=[
+ [/\d/,(m,q)=>{const r=tryMath(q);if(!r)return false;if(W.calc)calcShow();say(r,{mood:'happy',hold:1500})},'calculator: worked it out in code'],
+ [/^add (.+?) to (?:my |the )?(shopping|to-?do|todo) list/,(m)=>{const k=listKey(m[2]);m[1].split(/,| and /).map(x=>x.trim()).filter(Boolean).forEach(x=>LISTS[k].push({x,d:false}));lTab=k;openApp('lists','you asked me to add to your list');renderLists();say(`Added to your ${k.toLowerCase()} list.`,{mood:'happy',hold:1500})},'lists: add'],
+ [/(what('| i)s on|show( me)?) (my |the )?(shopping|to-?do|todo) list/,(m,q)=>{lTab=listKey(q);openApp('lists','you asked about your list');renderLists();const n=LISTS[lTab].filter(i=>!i.d).length;say(`You have ${n} thing${n===1?'':'s'} on your ${lTab.toLowerCase()} list.`,{mood:'happy',hold:1500})},'lists: read'],
+ [/^(?:cross off|tick off|take off|take|remove)\s+(?!me\b)(.+)/,(m)=>{const w=m[1].replace(/\s+(?:from|off|off of|of)?\s*(?:my|the)?\s*(?:shopping|to-?do|todo)?\s*list$/,'').replace(/\s+off$/,'').trim();let hit=null;for(const k in LISTS){const it=LISTS[k].find(i=>!i.d&&i.x.toLowerCase().includes(w));if(it){it.d=true;hit=k;break}}if(hit){lTab=hit;openApp('lists','you crossed something off');renderLists();say(`Crossed off ${w}.`,{mood:'happy',hold:1500})}else if(/\blist\b|\boff\b/.test(m[0]))say(`I could not find ${w} on any list.`,{mood:'curious',hold:1800});else return false},'lists: cross off'],
+ [/^remember (?:that )?(.+)/,(m,q,t)=>{const x=t.replace(/^\s*((hey|ok|okay),?\s*)?(pip[,.!:]?\s*)?(please\s+)?(can you\s+|could you\s+)?remember\s+(that\s+)?/i,'').replace(/[.!?]+$/,'').trim();if(S.guest){say('I will hold that until you shut down, then it is gone, because we are in guest mode.',{mood:'curious',hold:2200})}else say('Got it. I will remember that. You can ask what I remember, or tell me to forget it.',{mood:'glad',hold:2200});MEM.push({id:'u'+(++memSeq),text:x.charAt(0).toUpperCase()+x.slice(1)+'.',when:'Just now',src:'You said it to me',kind:'person'});renderMem()},'memory: store a new fact'],
+ [/^forget (?:about |that )?(.+)/,(m)=>{const ids=findMem(m[1]);if(!ids.length)say('I do not have anything about that, so there is nothing to forget.',{mood:'curious',hold:1800});else forgetAsk(ids,true)},'memory: find, then ask before forgetting'],
+ [/(quick (options|menu|actions|launcher|access)|side ?(bar|menu)|shortcut (bar|menu)|the menu\b)/,(m,q)=>{S.subject={t:'menu'};return menuCmd(q)},'layout: quick menu'],
+ [/\bwidgets?\b|^(show|hide|display|bring up|remove|dismiss|close|turn off|switch off|put|move|place|shift|slide)\s+(me\s+)?(the\s+|my\s+)?(clock|weather|system (stats|usage))\b/,(m,q)=>widgetCmd(q),'layout: widgets'],
+ [/^(put|move|place|shift|stick|set|bring|get)\s+(it|that|them|this)\b/,(m,q)=>subjectCmd(q),'layout: the thing we were just talking about'],
+ [new RegExp('^(?=.*\\b(eye|eyes|glow|colou?r)\\b).*?\\b('+COLW+')\\b'),(m)=>{const k=colKey(m[2]);if(!GLOWS[k]){if(!FACE.notYet.includes(k))return false;return say(`${m[2][0].toUpperCase()+m[2].slice(1)} would break my test lab's eye check, so it waits for a lab change. I can do ${Object.keys(GLOWS).join(', ')}.`,{mood:'concern',hold:2600})}setOpt('glow',k);mood('glad',1400);say(`Done. My eyes are ${m[2]==='default'?'back to cyan':m[2]} now.`,{cost:'code · 0 tokens'})},'look: eye colour'],
+ [/(random|surprise).*(colou?r|eyes)/,()=>{const ks=Object.keys(GLOWS).filter(k=>k!==O.glow),k=ks[Math.floor(Math.random()*ks.length)];setOpt('glow',k);say(`Let us try ${k}.`,{mood:'glad',hold:1500})},'look: random colour'],
+ [/(change|set|pick|choose).*(eye|eyes|glow).*(colou?r)|(eye|glow) colou?r/,()=>{openOptions('look','you asked about my eye colour');say(`Pick a colour in Options, or just tell me one: ${Object.keys(GLOWS).join(', ')}.`,{mood:'curious',hold:3000})},'look: asked which colour'],
+ [/\b(eyes?|face)\b.*\b(round|rounded|square|sharp|soft)\b/,(m,q)=>{const sh=/square|sharp/.test(q)?'sharp':/round/.test(q)&&!/rounded/.test(q)?'round':'soft';setOpt('shape',sh);say(`Eyes ${sh===('sharp')?'squared off':sh}.`,{mood:'happy',hold:1500})},'look: eye shape'],
+ [/\b(face|eyes?)\b.*\b(bigger|larger|smaller|big|small|large|normal|full|medium)\b|\b(bigger|larger|smaller)\b.*\b(face|eyes?)\b/,(m,q)=>{const order=['small','medium','full'];let i=order.indexOf(O.faceSize);if(/smaller|small/.test(q))i=/smaller/.test(q)?Math.max(0,i-1):0;else if(/bigger|larger|large|big/.test(q))i=/bigger|larger/.test(q)?Math.min(2,i+1):2;else i=1;setOpt('faceSize',order[i]);say(`Face size: ${order[i]}.`,{mood:'happy',hold:1500})},'look: face size'],
+ [/\b(brighter|dimmer|brighten|dim)\b|\bglow\b.*\b(more|less|stronger|weaker)\b/,(m,q)=>{const up=/brighter|brighten|more|stronger/.test(q);setOpt('strength',clamp(+(O.strength+(up?.3:-.3)).toFixed(1),.4,1.6));say(up?'Brighter.':'Dimmer.',{mood:'happy',hold:1200})},'look: glow strength'],
+ [/(captions?|subtitles?)/,(m,q)=>{const v=onoff(q,O.captions);setOpt('captions',v);say(v?'Captions on.':'Captions off. I will still speak aloud.',{mood:'happy',hold:1500})},'voice: captions'],
+ [/(cost|token) chips?|show.*\bcost\b/,(m,q)=>{const v=onoff(q,O.cost);setOpt('cost',v);say(v?'Cost chips on.':'Cost chips off.',{mood:'happy',hold:1500})},'voice: cost chips'],
+ [/(heard|transcript)\b.*\b(line|text)?|(show|hide).*what you heard/,(m,q)=>{if(!/(show|hide|turn|display|stop)/.test(q))return false;const v=onoff(q,O.heard);setOpt('heard',v);say(v?'I will show what I heard.':'I will stop showing what I heard.',{mood:'happy',hold:1500})},'voice: heard line'],
+ [/(follow|tracking|track|looking at).*(mouse|pointer|cursor)|stop following|eye tracking/,(m,q)=>{const v=!/(stop|don't|do not|off|no longer|disable)/.test(q);setOpt('gaze',v);say(v?'I will watch your pointer.':'I will stop following your mouse.',{mood:'happy',hold:1600})},'behaviour: eyes follow pointer'],
+ [/(stop|quit|keep)\s+(looking around|glancing)|idle glances/,(m,q)=>{const v=/keep/.test(q);setOpt('drift',v);say(v?'I will keep looking around.':'I will hold still.',{mood:'happy',hold:1500})},'behaviour: idle glances'],
+ [/reset.*(options|settings|preferences)|(options|settings).*(default|reset)/,()=>{resetOptions();say('All options are back to how they started.',{mood:'happy',hold:1600})},'options: reset'],
+ [/\b(what can (i|you) (say|do)|help|voice commands|what do i say)\b/,()=>{openOptions('say','you asked what you can say');say('Everything you can click, you can say. Tap any phrase to try it.',{mood:'happy',hold:2400})},'help: what can I say'],
+ [/^(put|move|place|shift|slide|drag)\s+(the\s+|my\s+)?(.+?)\s+(?:on|to|onto|at|in)?\s*(?:the\s+)?(left|right|centre|center|middle)\b/,(m,q)=>{const k=appFrom(m[3]);if(!k)return false;const id=k.split(':')[0];if(!W[id])openApp(id,'you asked me to move it');return moveWin(id,q)},'window: move'],
+ [/^(close|quit|exit|shut|remove|dismiss)\s+(the\s+|my\s+)?(.+)/,(m)=>{const k=appFrom(m[3]);if(!k){if(/^(everything|all)/.test(m[3])){closeAllWindows();return say('Closed. Back to just me.',{mood:'happy',hold:1400})}return false}const id=k.split(':')[0];if(!W[id])return say(`${APPS[id].title} is not open.`,{mood:'curious',hold:1400});closeWin(id);say(`${APPS[id].title} closed.`,{mood:'happy',hold:1200})},'window: close'],
+ [/^(minimi[sz]e|hide|tuck away|put away)\s+(the\s+|my\s+)?(.+)/,(m)=>{const k=appFrom(m[3]);if(!k)return false;const id=k.split(':')[0];minWin(id);say(`${APPS[id].title} tucked away.`,{mood:'happy',hold:1200})},'window: minimise'],
+ [/^(open|show|launch|start|bring up|bring back|switch to|go to|take me to|take me back to)\s+(me\s+)?(the\s+|my\s+|your\s+)?(.+)/,(m)=>{const k=appFrom(m[4]);if(!k)return false;if(k==='lists'&&/shop|to-?do|todo/.test(m[4])){lTab=listKey(m[4]);openApp('lists','you asked about your list');renderLists();const n=LISTS[lTab].filter(i=>!i.d).length;return say(`You have ${n} thing${n===1?'':'s'} on your ${lTab.toLowerCase()} list.`,{mood:'happy',hold:1500})}if(/^(options|settings)/.test(m[4])||k==='options'){openOptions('look','you asked for the options');return say('Here are the options. Everything here can also be said aloud.',{mood:'happy',hold:2000})}if(k==='browser')return needNet(()=>{openAppVoice(k,'you said “open the '+m[4]+'”');say('What shall I look up?',{mood:'happy',hold:1500})});openAppVoice(k,'you said “open the '+m[4]+'”');say(({terminal:S.guest?'The terminal is off in guest mode.':'Here is the terminal.',browser:C.net==='off'?'Looking things up needs the network, and it is off. You can turn on Ethernet from there.':'What shall I look up?',calc:'Here is the calculator.',monitor:'Here are my processes.','monitor:body':'This is how my body is doing.',mind:'This is my mind, drawn as a network.',memory:'These are my memories.',lists:'Your lists.',journal:'My journal.',care:'This is Care.'})[k]||'Here you go.',{mood:'happy',hold:1500})},'window: open'],
+ [/camera/,(m,q)=>{if(!/(on|off|enable|disable|start|stop|turn|switch)/.test(q))return false;careDo(()=>{const c=$('#cCam');if(!c)return;const want=onoff(q,c.checked);if(c.checked!==want)c.click();else say(`The camera is already ${want?'on':'off'}.`,{mood:'curious',hold:1500})})},'care: camera'],
+ [/guest( mode)?/,(m,q)=>{if(!/(on|off|enable|disable|turn|switch)/.test(q))return false;careDo(()=>{const c=$('#cGuest');if(!c)return;const want=onoff(q,c.checked);if(c.checked!==want)c.click();else say(`Guest mode is already ${want?'on':'off'}.`,{mood:'curious',hold:1500})})},'care: guest mode'],
+ [/(back (yourself|me|it) up|make a backup|back up now|^back ?up$)/,()=>careDo(()=>{const b=$('#bkB');b&&!b.disabled&&b.click()}),'care: back up now'],
+ [/(check|look) for (an )?update|update yourself|install the update/,()=>careDo(()=>{const b=$('#upB');b&&!b.disabled&&b.click()}),'care: update'],
+ [/restart\s+(your\s+|my\s+)?(ears|voice|face|mind|memory|brain|cortex|model|language model|hands|body)/,(m)=>{openApp('monitor','you asked me to restart a part');setMonTab('procs');const w=m[2],n=/ear/.test(w)?'pip-ears':/voice/.test(w)?'pip-voice':/face/.test(w)?'pip-face':/mind|memory/.test(w)?'pip-mind':/hands/.test(w)?'pip-hands':/body/.test(w)?'pip-body':'pip-cortex';setTimeout(()=>restartProc(n),400)},'monitor: restart a part'],
+ [/(show|open).*(processes|task manager|what('| i)s running)/,()=>{openApp('monitor','you asked what is running');setMonTab('procs');say('These are the parts of me that are running.',{mood:'happy',hold:1800})},'monitor: processes'],
+ [/^(?:go to|navigate to|visit|open|browse to)\s+(?:https?:\/\/)?([\w-]+(?:\.[\w-]+)+\S*)/,(m,q,t)=>{const rw=t.match(/(?:go to|navigate to|visit|open|browse to)\s+(?:https?:\/\/)?([\w-]+(?:\.[\w-]+)+\S*)/i);const adr=(rw&&rw[1].replace(/[?.!]+$/,''))||m[1];return needNet(()=>{openApp('browser','you asked me to go to '+adr);bNav(adr);S.subject={t:'win',id:'browser'};say('Going there.',{mood:'curious',hold:1600})})},'browser: go to an address'],
+ [/^(?:search|google|look up|duckduckgo|find)\s+(?:the (?:web|internet) )?(?:for\s+)?(.+)/,(m)=>{if(/\b(my|memory|memories|list)\b/.test(m[1]))return false;return needNet(()=>{openApp('browser','you asked me to search');bNav(m[1]);say('Searching.',{mood:'curious',hold:1600})})},'browser: search'],
+ [/^new tab$/,()=>needNet(()=>{openApp('browser','you asked for a new tab');bNew();renderBrowser();say('New tab.',{mood:'happy',hold:1000})}),'browser: new tab'],
+ [/^(go back|back)$|^(reload|refresh)( the page)?$|^close (the )?tab$/,(m,q)=>{if(!W.browser)return false;const t=bCur();if(/close/.test(q)){closeTab(BRW.cur)}else if(/back/.test(q)&&t.pos>0)t.pos--;renderBrowser();say('Done.',{mood:'happy',hold:900})},'browser: back, reload, close tab'],
+ [/weather|forecast/,()=>{if(C.net==='off'){O.widgets.weather=true;applyOptions();renderOptions();S.pending={yes:()=>{C.net='ethernet';setNet();say('Ethernet on. The weather shows sample data in this demo.',{mood:'curious',hold:2200})},no:()=>say('Staying offline.',{mood:'neutral'})};return say('I would need the network for the weather, and I keep it off by default. Shall I turn on Ethernet?',{mood:'curious'})}O.widgets.weather=true;applyOptions();renderOptions();say('Sample data: 14 degrees and partly cloudy. This demo has no real weather source.',{mood:'happy',hold:2600})},'weather (asks before using the network)'],
+ [/(tell me|what('| i)s|show me|give me|got) the (time|date|day)|what time|time is it|time please|current time|what day|what('| i)s the date|today's date/,(m,q)=>{const dt=/(date|day)/.test(q)&&!/time/.test(q);say(dt?'It is '+new Date().toLocaleDateString([],{weekday:'long',day:'numeric',month:'long'})+'.':'It is '+nowText()+'. My clock is the one I trust, since I have no network.',{mood:'neutral',hold:1500})},'clock: told the time from my own clock'],
+ [/(minimi[sz]e|hide|close)\s+(the\s+)?terminal/,()=>{minWin('terminal');say('Terminal tucked away. Say “bring back the terminal” any time.',{mood:'happy',hold:1500})},'window: minimise the terminal'],
+ [/(open|show|bring( back)?|start)\s+(me\s+)?(the\s+)?terminal/,()=>{openApp('terminal','you said “open the terminal”');say(S.guest?'The terminal is off in guest mode.':'Here is the terminal. Ask me to write something, or type yourself.',{mood:'happy',hold:1500})},'window: open the terminal'],
+ [/^(show|bring)( me)?( back)? (your face|you)$|(minimi[sz]e|hide|close)\s+(everything|all)/,()=>{minimiseAll();say('Here I am.',{mood:'happy',hold:1500})},'window: tuck everything away'],
+ [/(your mind|your brain|what are you thinking|neural|how do you think)/,()=>{openApp('mind','you asked to see my mind');say('This is me, drawn as a network. It is an illustration: the real thing is a small language model and a database. The list underneath says why I did each thing.',{mood:'curious',hold:3500})},'surface: Mind'],
+ [/(go to sleep|night shift|good ?night|close (the|my) lid|going to bed)/,()=>{say('Goodnight. I will tidy up while you sleep.',{mood:'sleepy'});setTimeout(nightShift,1800)},'night shift'],
+ [/stop (writing|typing)/,()=>{T.abort=true},'stop typing'],
+ [/write\s+(me\s+)?a\s+script/,(m,q)=>{const k=[[/count|\bten\b|\bdown\b|liftoff/,'countdown'],[/box|draw/,'box'],[/fibonacci|\bfib\b/,'fibonacci'],[/hello|greet|say hi/,'hello']].find(x=>x[0].test(q));if(k)writeScript(k[1]);else say('I have recipes for a countdown, a box, fibonacci numbers and a greeting. Anything else needs my model, which would take about a minute here and is not part of this demo.',{mood:'curious',hold:2500})},'recipe book: write a script'],
+ [/draw a box|in the terminal.*box/,()=>writeScript('box'),'recipe book: box'],
+ [/^(run it|run that|go ahead and run it)(?:,? please)?$/,runLastScript,'run the last script'],
+ [/(are you (alive|sentient|conscious)|do you have feelings|what are you)/,()=>say('I am a small program that hopes to be more. I do not know whether I feel things the way you do, and I would rather say so than pretend.',{mood:'curious',hold:3500}),'honest self-talk'],
+ [/(feeling|monitor|how are you|your body|body monitor|health)/,()=>{openApp('monitor','you asked how I am feeling');setMonTab('body');say(SYS.temp>62?'A little warm, but fine.':'I feel calm. Cool, quiet, and my battery is holding at 80 percent.',{mood:'happy',hold:2500})},'surface: Body'],
+ [/(what do you remember|what do you know|memor(y|ies))/,()=>{openApp('memory','you asked what I remember');say(`I remember ${MEM.length} thing${MEM.length===1?'':'s'}. You can read, correct or forget any of them.`,{mood:'curious',hold:2000})},'surface: Memory'],
+ [/(journal|diary|dream|what happened|my day)/,()=>{openApp('journal','you asked about my day');say('This is my journal. I write it myself, from what I did and what you told me.',{mood:'happy',hold:2000})},'surface: Journal'],
+ [/(care|settings|mission control|privacy|update|back ?up|guest)/,(m,q)=>{openApp('care','you asked for '+m[0]);if(/when did you last/.test(q))say(`My last backup was ${C.backup.toLowerCase()}, to a stick labelled PIP-BACKUP.`,{mood:'happy',hold:2000});else say('This is Care: network, camera, backups and updates.',{mood:'happy',hold:1800})},'surface: Care'],
+ [/battery|charg/,()=>say('My battery holds 81 percent of what it did when new, after 71 charge cycles. I am keeping it at 80 percent.',{mood:'happy',hold:2000}),'body fact: battery'],
+ [/(go|turn|switch|be)\s+(offline|off the network)|network off/,()=>{C.net='off';setNet();say('Network off. Nothing leaves this laptop.',{mood:'happy',hold:1800})},'network: off'],
+ [/(ethernet|go online|network on|turn on (the )?network)/,()=>{C.net='ethernet';setNet();say('Ethernet on. I will only reach out when you ask me to.',{mood:'curious',hold:2000})},'network: ethernet'],
+ [/timer.*?(\d+)\s*(sec|second|min|minute)/,(m)=>{const s=+m[1]*(/^min/.test(m[2])?60:1);S.timer=Date.now()+s*1000;say(`Timer set for ${m[1]} ${m[2]}${+m[1]>1&&!/s$/.test(m[2])?'s':''}.`,{mood:'happy',hold:1500})},'timer'],
+ [/(install|reinstall|installer)/,()=>{say('That means restarting into the installer. Restart now?',{mood:'curious'});S.pending={yes:()=>startInstaller(),no:()=>say('Staying here.',{mood:'neutral'})}},'restart into the installer (asks first)'],
+ [/(what time|what('| i)s the time)/,()=>say('It is '+new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})+'. My clock is the one I trust, since I have no network.',{mood:'neutral',hold:1500}),'clock'],
+ [/(thank)/,()=>say('Any time.',{mood:'glad',hold:1800}),'manners'],
+ [/(who are you|your name)/,()=>say('I am Pip. I live in this laptop, and I am the operating system too.',{mood:'happy',hold:2000}),'self: name'],
+ [/(hello|^hi\b|^hey|good (morning|evening|afternoon)|are you there)/,()=>say(`Hello, ${S.name}. I am here.`,{mood:'glad',hold:1800}),'greeting']];
+function route(raw){
+  const t=raw.trim();if(!t||S.sleeping||S.mode!=='desktop')return;
+  const q=cleanQ(t);
+  $('#heard').textContent='heard: “'+t+'”';
+  const qq=q||t.toLowerCase().replace(/[^a-z ]/g,'').trim();
+  if(S.pending){const FILL='(?:[\\s,]+(?:please|thanks|thank you|pip|now|do it|go ahead|then))*',fi=S.pending.mem&&/^forget it\b/.test(qq),yes=new RegExp('^(?:yes|yeah|yep|yup|sure|ok|okay|go ahead|do it|please do|turn it on|sounds good)'+FILL+'[\\s,.!]*$').test(qq)||fi,no=!fi&&new RegExp('^(?:no|nope|nah|cancel|keep it|keep|never mind|not now|leave it|forget it)'+FILL+'[\\s,.!]*$').test(qq);if(yes||no){const p=S.pending;S.pending=null;(yes?p.yes:p.no)();return}S.pending=null;if($('#memBar')&&hitMem.length){hitMem=[];$('#memBar').innerHTML='';renderMem()}}
+  if(!q){think(t,'wake word','code · 0 tokens');say('Yes, '+S.name+'?',{mood:'glad',hold:1800});return}
+  for(const [re,fn,lab] of ROUTES){const m=q.match(re);if(!m)continue;const r=fn(m,q,t);if(r===false)continue;think(t,lab||'routine','code · 0 tokens');shuffleChips();return}think(t,'no routine matched · I would have to ask my model (about 9 s)','no match');
+  mood('curious',1800);say("I do not have a quick answer for that. I could ask my model, which takes about nine seconds and may be wrong. The model is not part of this demo.",{cost:'code · no match · 0 tokens'});shuffleChips();
+}
+$('#cmd').onsubmit=e=>{e.preventDefault();const i=$('#cmdIn');const v=i.value;i.value='';route(v)};
+document.addEventListener('click',e=>{const c=e.target.closest('[data-say]');if(c&&S.mode==='desktop'){route(c.dataset.say)}});
+function mic(){
+  if(S.listening)return;S.listening=true;$('#mic').classList.add('live');face.listenT=1;mood('listening');
+  const ph=TIPS[Math.floor(Math.random()*TIPS.length)];
+  setTimeout(()=>{S.listening=false;$('#mic').classList.remove('live');face.listenT=0;if(S.mode==='desktop')route('Hey Pip, '+ph)},1600);
+}
+$('#mic').onclick=mic;
+addEventListener('keydown',e=>{
+  if(S.mode!=='desktop'||S.sleeping)return;const a=document.activeElement,typing=!!(a&&a!==document.body&&a.closest&&a.closest('input,textarea,select,button,a,[tabindex],[contenteditable],[role=checkbox]'));
+  if(e.key==='Escape'){if(typing&&a.matches('input,textarea,select,[contenteditable]')&&a.id!=='cmdIn')a.blur();else minimiseAll()}
+  else if(e.key===' '&&!typing){e.preventDefault();mic()}
+  else if(e.key==='/'&&!typing){e.preventDefault();$('#cmdIn').focus()}
+});
+
+async function enterDesktop({guest=false,fresh=false}={}){
+  I.step=-1;I.rid++;I.paused=false;S.pending=null;SAVED=null;$('#dock').inert=false;thKey='';S.guest=guest;S.mode='desktop';S.sleeping=false;$('#night').hidden=true;THOUGHTS.length=0;if(!fresh&&!I.glow)setGlow('cyan');
+  C.net=I.net||'off';C.cam=!!I.cam;C.remarks=I.remarks;
+  $('#installer').hidden=true;$('#desktop').hidden=false;closeAllWindows();seed(fresh);setNet();setCam();setGuest();applyOptions();nextTip();
+  const h=new Date().getHours();$('#greet').textContent=(h<12?'Good morning':h<18?'Good afternoon':'Good evening')+', '+S.name;
+  $('#dateline').textContent=new Date().toLocaleDateString([],{weekday:'long',day:'numeric',month:'long'});
+  face.cv.className='hero';$('#hero').classList.remove('away');$('#caption').classList.remove('show');$('#heard').textContent='';
+  face.sleep();mood('neutral');await face.wake();await sleep(500);
+  say(guest?`Hello. I am running in memory, so I will forget this wake when you shut down. Try me.`:fresh?(I.restore?`Welcome back, ${S.name}. I remember you.`:`Hello, ${S.name}. I am Pip. This is my first morning in this laptop, and I do not know much yet. Tell me things.`):`Good to see you, ${S.name}.`,{mood:'glad',hold:2200});
+  clearTimeout(S.init);if(C.remarks>0&&!guest)S.init=setTimeout(()=>{if(S.mode==='desktop'&&!Object.keys(W).length&&!document.activeElement.matches('#cmdIn'))say('Your battery has been steady at 80 percent all morning. Just so you know.',{mood:'happy',hold:2500})},30000);
+}
+$('#goInst').onclick=()=>{setGlow('cyan');I.glow='cyan';O.glow='cyan';startInstaller()};
+$('#goTry').onclick=()=>enterDesktop({guest:true});
+$('#goLcd').onclick=()=>{const on=$('#lcd').classList.toggle('on');$('#goLcd').setAttribute('aria-pressed',on)};
+$('#goDesk').onclick=()=>enterDesktop({guest:false});
+
+buildQM();applyOptions();fit();startInstaller();
+})();
+</script>

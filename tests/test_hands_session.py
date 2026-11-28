@@ -12,11 +12,18 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
+from contextlib import closing
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-from mind import hands as hands_module
+from mind import action_log, app_organizer, diary, hands as hands_module, lists
+from mind.app_mind import RECENT, RouteHistory
+from mind.dream_store import DreamStore
+from mind.memory import Memory
+from mind.retention import MemoryPolicy, save_policy
 from mind.app_commands import AppBridge
 from mind.hands import CodeCortex, Hands, LocalCage, RecordingRenderer
 
@@ -245,6 +252,18 @@ class HandsSessionTest(unittest.IsolatedAsyncioTestCase):
         await self.hear("close the terminal")
         self.assertEqual(self.said[-1], "The terminal isn't open.")
 
+    async def test_disabling_workshop_stops_the_open_cage_and_preserves_files(self):
+        await self.open_minimised()
+        script = self.workshop / "keep.py"
+        script.write_text("print('kept')\n")
+        self.disabled.touch()
+        await self.until(lambda: self.bridge.view["terminal"] == "closed", what="workshop closed")
+        self.assertIsNone(self.hands.session)
+        self.assertIn(("stop", "being-shell-1"), self.cage.calls)
+        self.assertEqual(script.read_text(), "print('kept')\n")
+        await self.hear("open the terminal")
+        self.assertIn("switched off", self.said[-1])
+
     async def test_recipe_written_checked_and_run(self):
         await self.open_minimised()
         await self.hear("Hey Pip, write a script that draws a spiral.")
@@ -270,7 +289,7 @@ class HandsSessionTest(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: self.phase() == "waiting", what="second spiral")
         self.assertTrue((self.workshop / "spiral-2.py").exists())
 
-    async def test_one_liner_runs_after_a_countdown(self):
+    async def test_builtin_one_liner_runs_after_a_countdown(self):
         await self.open_minimised()
         with mock.patch.object(hands_module, "COUNTDOWN", 1):
             await self.hear("in the terminal, show me the files")
@@ -278,6 +297,62 @@ class HandsSessionTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(self.screen().rstrip().endswith("ls -l"))
             await self.until(lambda: self.phase() == "done", what="listed")
         self.assertIn("total", self.screen())
+
+    async def test_generated_one_liner_runs_only_after_run_it(self):
+        await self.open_minimised()
+        self.llama.replies.append(["touch approved.txt\n"])
+        target = self.workshop / "approved.txt"
+        with mock.patch.object(hands_module, "COUNTDOWN", 0):
+            await self.hear("in the terminal, touch approved.txt")
+            await self.until(lambda: self.phase() == "waiting" and "# touch approved.txt" in self.screen(),
+                             what="command preview")
+            await self.hands.tick()
+        self.assertFalse(target.exists())
+        self.assertIn("It's ready. Say run it.", await self.announced())
+        await self.hear("run it")
+        self.assertEqual(self.said[-1], "Running it.")
+        await self.until(lambda: self.phase() == "done", what="command ran")
+        self.assertTrue(target.is_file())
+
+    async def test_enter_does_not_submit_a_generated_command_preview(self):
+        await self.open_minimised()
+        self.llama.replies.append(["touch approved.txt\n"])
+        await self.hear("in the terminal, touch approved.txt")
+        await self.until(lambda: self.phase() == "waiting", what="command preview")
+        await self.hear("show me the terminal")
+        self.hands.on_key(b"\r")
+        await self.until(lambda: self.phase() == "cancelled", what="preview cancelled")
+        self.hands.on_key(b"\r")
+        await self.hear("run it")
+        self.assertEqual(self.said[-1], "There's nothing ready to run.")
+        self.assertFalse((self.workshop / "approved.txt").exists())
+
+    async def test_cursor_move_cannot_change_the_checked_one_liner(self):
+        await self.hear("open the terminal")
+        await self.until(lambda: "pip:~$" in self.screen(), what="prompt")
+        self.llama.replies.append(["echo checked > proof.txt\n"])
+        with mock.patch.object(hands_module, "HUMAN_QUIET", 0.1):
+            await self.hear("in the terminal, echo checked to proof.txt")
+            await self.until(lambda: self.hands._typist.current_line().startswith("# ech"),
+                             what="comment being typed")
+            self.hands.on_key(b"\x01")  # Ctrl-A moves the shell cursor inside the preview.
+            await self.until(lambda: self.phase() == "waiting", what="command preview")
+        self.assertEqual(list(self.workshop.iterdir()), [])
+        await self.hear("run it")
+        await self.until(lambda: self.phase() == "done", what="command ran")
+        self.assertEqual([file.name for file in self.workshop.iterdir()], ["proof.txt"])
+        self.assertEqual((self.workshop / "proof.txt").read_text(), "checked\n")
+
+    async def test_new_job_replaces_the_pending_one_liner(self):
+        await self.open_minimised()
+        self.llama.replies.append(["touch approved.txt\n"])
+        await self.hear("in the terminal, touch approved.txt")
+        await self.until(lambda: self.phase() == "waiting", what="command preview")
+        with mock.patch.object(hands_module, "COUNTDOWN", 0):
+            await self.hear("in the terminal, show me the files")
+            await self.until(lambda: self.phase() == "done", what="built-in command ran")
+        self.assertIn("total", self.screen())
+        self.assertFalse((self.workshop / "approved.txt").exists())
 
     async def test_stop_during_countdown_clears_the_line(self):
         await self.open_minimised()
@@ -520,15 +595,16 @@ class HandsSessionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("It ran for a minute, so I stopped it.", await self.announced())
 
     async def test_cancel_kills_a_program_that_ignores_ctrl_c(self):
-        self.llama.replies.append(["import time\n", "while True:\n", "    try:\n", "        time.sleep(60)\n",
+        self.llama.replies.append(["import time\n", "while True:\n", "    try:\n",
+                                   "        print('interrupt handler ready', flush=True)\n", "        time.sleep(60)\n",
                                    "    except KeyboardInterrupt:\n", "        print('ignored')\n", "```"])
         await self.open_minimised()
         with mock.patch.object(hands_module, "KILL_GRACE", 0.5):
             await self.hear("write a script that never stops, write it yourself")
             await self.until(lambda: self.phase() == "waiting", what="written")
             await self.hear("run it")
-            await self.until(lambda: self.phase() == "running" and not self.hands.session.foreground_is_shell(),
-                             what="running in front")
+            await self.until(lambda: "\ninterrupt handler ready\n" in self.screen().replace("\r", ""),
+                             what="the running program can catch Ctrl-C")
             await self.hear("cancel that")
             self.assertEqual(self.said[-1], "Cancelled.")
             self.assertEqual(self.phase(), "cancelled")
@@ -820,6 +896,223 @@ class HandsSessionTest(unittest.IsolatedAsyncioTestCase):
     def text_of(self, app):
         return self.app_renderer(app).data.decode("utf-8", "replace")
 
+    async def test_organizer_voice_focus_keys_live_updates_and_guest_wipe(self):
+        self.hands.organizer_path = Path(self.dir.name) / "o.sock"
+        server = await app_organizer.start_server(
+            self.hands.organizer_path, self.mind_dir, lambda: not self.bridge.guest)
+        self.assertEqual(self.hands.organizer_path.stat().st_mode & 0o777, 0o600)
+
+        async def close_server():
+            server.close()
+            await server.wait_closed()
+
+        self.addAsyncCleanup(close_server)
+        store = lists.Lists(self.mind_dir)
+        store.add("shopping", [f"Private groceries {i:02}" for i in range(1, 20)])
+        store.add("to-do", ["Private errands", "One item\x1b[2J\r\nWith a pasted line"])
+        memory = Memory(self.mind_dir)
+        memory.remember("Private owner fact", speaker="Richard")
+        memory.close()
+        await self.hear("open the terminal")
+        terminal = self.app_renderer("terminal")
+        with mock.patch.object(hands_module, "APP_FRAME", 0.05):
+            await self.hear("open my lists")
+            lists_panel = self.app_renderer("lists")
+            self.assertEqual(self.hands.view["terminal"], "minimised")
+            self.assertFalse(terminal.visible)
+            self.assertEqual(lists_panel.flag_log[0]["focus"], 1)
+            first = self.text_of("lists")
+            self.assertIn("Private groceries 01", first)
+            self.assertNotIn("Private groceries 17", first)
+            await asyncio.sleep(0.1)
+            self.assertEqual(self.text_of("lists"), first, "idle refresh does not redraw")
+            self.hands.on_key(b"\0pgdn")
+            await self.until(lambda: "Private groceries 17" in self.text_of("lists"), what="second page")
+            self.hands.on_key(b"\x1b[C")
+            await self.until(lambda: "Private errands" in self.text_of("lists"), what="next list")
+            self.assertIn("One item [2J With a pasted line", self.text_of("lists"))
+            self.assertNotIn("One item\x1b", self.text_of("lists"))
+            store.add("to-do", ["A new errand"])
+            await self.until(lambda: "A new errand" in self.text_of("lists"), what="read current data")
+            self.assertEqual(len(store.items("to-do")), 3)
+        await self.hear("open the memory")
+        memory_panel = self.app_renderer("memory")
+        self.assertIn("Private owner fact", self.text_of("memory"))
+        self.assertEqual((lists_panel.wiped, lists_panel.data, lists_panel.visible), (1, b"", False))
+        self.assertEqual(memory_panel.flag_log[0]["focus"], 1)
+        owner_words = ("Private groceries", "Private errands", "Private owner fact")
+        for event in self.hands_bus.sent + self.mind_bus.sent:
+            self.assertFalse(any(words in str(event) for words in owner_words), event)
+        # The urgent path blanks the panel before any queued terminal work finishes.
+        self.hands.urgent({"t": "app.privacy", "guest": True})
+        self.assertEqual((memory_panel.wiped, memory_panel.data), (1, b""))
+        self.assertEqual(self.hands._refusal("lists"), "guest")
+        await self.bridge.privacy(True)
+        await self.until(lambda: self.bridge.view["memory"] == "closed", what="owner facts hidden")
+        self.assertEqual((memory_panel.data, memory_panel.visible), (b"", False))
+        for app in ("lists", "memory"):
+            self.assertEqual((await self.hear(f"open the {app}")).kind, "say")
+            await self.hands.on_event({"t": "app.open", "app": app, "req": "direct"})
+            self.assertEqual(self.hands_bus.sent[-1]["reason"], "guest")
+            self.assertEqual((await app_organizer.fetch(self.hands.organizer_path, app, 0, 0))["status"],
+                             "private")
+
+    async def test_session_only_wipes_open_lists_and_refuses_both_panels(self):
+        self.hands.organizer_path = Path(self.dir.name) / "o.sock"
+        server = await app_organizer.start_server(self.hands.organizer_path, self.mind_dir, lambda: True)
+
+        async def close_server():
+            server.close()
+            await server.wait_closed()
+
+        self.addAsyncCleanup(close_server)
+        lists.Lists(self.mind_dir).add("private", ["Existing owner item"])
+        with mock.patch.object(hands_module, "APP_FRAME", 0.05):
+            await self.hear("open the lists")
+            renderer = self.app_renderer("lists")
+            self.assertIn("Existing owner item", self.text_of("lists"))
+            save_policy(self.mind_dir, MemoryPolicy("session-only"))
+            await self.until(lambda: self.bridge.view["lists"] == "closed", what="retention gate")
+            self.assertEqual((renderer.wiped, renderer.data), (1, b""))
+        for app in ("lists", "memory", "journal", "mind"):
+            await self.hear(f"open the {app}")
+            self.assertIn("session only", self.said[-1])
+            self.assertEqual(self.bridge.view[app], "closed")
+            self.assertEqual((await app_organizer.fetch(self.hands.organizer_path, app, 0, 0))["status"],
+                             "private")
+
+    async def test_journal_reads_three_real_sources_and_wipes_the_owner_quote(self):
+        self.hands.organizer_path = Path(self.dir.name) / "o.sock"
+        server = await app_organizer.start_server(
+            self.hands.organizer_path, self.mind_dir, lambda: not self.bridge.guest, owner="Richard")
+
+        async def close_server():
+            server.close()
+            await server.wait_closed()
+
+        self.addAsyncCleanup(close_server)
+        with (closing(Memory(self.mind_dir)) as memory,
+              patch.object(memory, "disk_state", return_value={"state": "ok"})):
+            # Seed the owner's and guest's archived speech even if the host
+            # filesystem is below the appliance's conversation threshold.
+            self.assertIsNotNone(memory.log("heard", "I moved the orchids to the study.", "Richard"))
+            self.assertIsNotNone(memory.log("heard", "This guest likes purple onions.", "Guest"))
+            dreams = DreamStore(memory)
+            self.assertTrue(dreams.publish(dreams.stage("Richard")))
+            self.assertTrue(dreams.publish(dreams.stage("Guest")))
+            today = date.today()
+            diary.build_day(memory, "Richard", today, state_dir=self.mind_dir)
+            diary.build_day(memory, "Guest", today, state_dir=self.mind_dir)
+        action_log.record(self.mind_dir, "timer.set", 2)
+        await self.hear("open the journal")
+        renderer = self.app_renderer("journal")
+        self.assertEqual(renderer.flag_log[0]["focus"], 1)
+        self.assertIn("Day record", self.text_of("journal"))
+        self.assertIn("we talked once", self.text_of("journal"))
+        self.hands.on_key(b"\x1b[C")
+        await self.until(lambda: "I moved the orchids to the study." in self.text_of("journal"), what="owner dream")
+        self.assertNotIn("purple onions", self.text_of("journal"))
+        self.hands.on_key(b"\x1b[C")
+        await self.until(lambda: "set two timers" in self.text_of("journal"), what="activity page")
+        self.hands.on_key(b"\x1b[D")
+        await self.until(lambda: "Dream journal" in self.text_of("journal").rsplit("\x1b[2J", 1)[-1],
+                         what="return to dream page")
+        self.hands.urgent({"t": "app.privacy", "guest": True})
+        self.assertEqual(renderer.data, b"")
+        await self.bridge.privacy(True)
+        await self.until(lambda: self.bridge.view["journal"] == "closed", what="journal closed in guest mode")
+        self.assertEqual((renderer.alive(), renderer.data), (False, b""))
+        await self.hear("open the dream journal")
+        self.assertIn("stays private", self.said[-1])
+
+    async def test_mind_reads_live_counts_and_ids_and_has_no_saved_history(self):
+        self.hands.organizer_path = Path(self.dir.name) / "o.sock"
+        history = RouteHistory()
+        server = await app_organizer.start_server(
+            self.hands.organizer_path, self.mind_dir, lambda: not self.bridge.guest,
+            routes=history.snapshot)
+
+        async def close_server():
+            server.close()
+            await server.wait_closed()
+
+        self.addAsyncCleanup(close_server)
+        for i in range(RECENT + 1):
+            history.add("code", f"command.{i}")
+        history.add("code", "Private utterance!")
+        with mock.patch.object(hands_module, "APP_FRAME", 0.05):
+            await self.hear("open the mind")
+            renderer = self.app_renderer("mind")
+            self.assertIn("Routing illustration", self.text_of("mind"))
+            self.assertIn(f"Code  {RECENT + 1}", self.text_of("mind"))
+            self.assertIn(f"command.{RECENT}", self.text_of("mind"))
+            self.assertNotIn("command.0", self.text_of("mind"))
+            self.assertNotIn("Private utterance!", self.text_of("mind"))
+            history.add("model", "model")
+            await self.until(lambda: "Model  1" in self.text_of("mind"), what="live route counts")
+            self.assertNotIn("command.", str(self.mind_bus.sent))
+            self.assertNotIn("command.", str(self.hands_bus.sent))
+            self.assertEqual(list(self.mind_dir.iterdir()), [])
+        await self.hands.on_escape()
+        self.assertEqual((renderer.visible, renderer.data), (False, b""))
+        self.assertEqual(RouteHistory().snapshot()["rows"], [])
+
+    async def test_calculator_owns_focused_keys_and_only_redraws_on_changes(self):
+        await self.hear("open the terminal")
+        terminal = self.app_renderer("terminal")
+        with mock.patch.object(hands_module, "APP_FRAME", 0.02):
+            await self.hear("open the calculator")
+            calculator = self.app_renderer("calc")
+            self.assertEqual(self.said[-1], "Here's my calculator. Type a sum or ask me one.")
+            self.assertEqual(self.hands.view["terminal"], "minimised")
+            self.assertFalse(terminal.visible)
+            self.assertEqual(calculator.flag_log[0]["focus"], 1)
+            for key in b"(2+3)*59\x7f\r":
+                self.hands.on_key(bytes((key,)))
+            screen = self.text_of("calc")
+            self.assertIn("(2+3)*5", screen)
+            self.assertIn("25", screen)
+            self.assertNotIn("(2+3)", self.text_of("terminal"))
+            await asyncio.sleep(0.08)
+            self.assertEqual(self.text_of("calc"), screen)
+            await self.hands.on_event({"t": "state.changed", "state": "idle"})
+            await self.hands.on_escape()
+            self.assertFalse(calculator.visible)
+            self.assertEqual((calculator.wiped, self.bridge.view["calc"]), (1, "closed"))
+
+    async def test_calculator_drops_displays_when_lid_is_closed_or_guest_active(self):
+        await self.hear("show me the calculator")
+        renderer = self.app_renderer("calc")
+        await self.hands.on_event({"t": "app.calc_display", "expression": "Two plus two", "result": "4", "error": False})
+        self.assertIn("Two plus two", self.text_of("calc"))
+        await self.hands.on_event({"t": "app.calc_display", "expression": "Bad\x1b[H", "result": "8", "error": False})
+        self.assertNotIn("Bad", self.text_of("calc"))
+        await self.hands.on_lid(True)
+        before = self.text_of("calc")
+        await self.hands.on_event({"t": "app.calc_display", "expression": "Four minus two", "result": "2", "error": False})
+        self.assertEqual(self.text_of("calc"), before)
+        await self.hands.on_lid(False)
+        await self.bridge.privacy(True)
+        await self.until(lambda: self.bridge.view["calc"] == "closed", what="calculator closed for a guest")
+        self.assertEqual((renderer.wiped, renderer.alive(), renderer.data), (1, False, b""))
+        await self.hear("open the calculator")
+        self.assertIn("stays closed in guest mode", self.said[-1])
+
+    async def test_failed_calculator_open_preserves_the_shown_terminal(self):
+        await self.hear("open the terminal")
+        terminal = self.app_renderer("terminal")
+        with mock.patch.object(RecordingRenderer, "ready", return_value=False):
+            await self.hear("open the calculator")
+        self.assertEqual(self.said[-1], "My calculator didn't open.")
+        self.assertFalse(self.app_renderer("calc").alive())
+        self.assertEqual(self.hands.view["calc"], "closed")
+        self.assertTrue(terminal.visible)
+        with mock.patch.object(terminal, "hide", return_value=False):
+            await self.hear("open the calculator")
+        self.assertEqual(self.said[-1], "My calculator didn't open.")
+        self.assertFalse(self.app_renderer("calc").alive())
+        self.assertEqual(self.hands.view["terminal"], "shown")
+
     async def test_the_monitor_opens_over_the_terminal_and_the_clock_replaces_it(self):
         await self.hear("open the terminal")
         terminal = self.app_renderer("terminal")
@@ -833,9 +1126,16 @@ class HandsSessionTest(unittest.IsolatedAsyncioTestCase):
             monitor = self.app_renderer("monitor")
             self.assertEqual(monitor.flag_log[0]["title"], "How I'm feeling")
             self.assertIn("Thinking", self.text_of("monitor"))
-            self.assertEqual(monitor.flag_log[0]["focus"], 0, "keys stay with the face: nothing to type into")
+            self.assertEqual(monitor.flag_log[0]["focus"], 1, "Tab switches the monitor's tabs")
             size = len(monitor.data)
             await self.until(lambda: len(monitor.data) > 2 * size, what="a frame a second")
+            source = self.hands._app_sources["monitor"][0]
+            with mock.patch.object(source.system, "units", return_value={}):
+                self.hands.on_key(b"\t")
+                await self.until(lambda: "Automatic restarts" in self.text_of("monitor"), what="the processes tab")
+                body_frames = self.text_of("monitor").count("Thinking")
+                self.hands.on_key(b"\t")
+                await self.until(lambda: self.text_of("monitor").count("Thinking") > body_frames, what="the body tab")
             await self.hear("open the monitor")
             self.assertEqual(self.said[-1], "It's already open.")
             await self.hear("show me the clock")

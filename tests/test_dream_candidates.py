@@ -10,6 +10,7 @@ from pathlib import Path
 from mind import diary, dream_journal, dream_store
 from mind.dream_verify import Line, check
 from mind.memory import Memory
+from tests.disk_roomy import setUpModule  # noqa: F401  (disk guard is not under test here)
 
 
 def checked(memory, episode_id, claim, quote, kind="fact"):
@@ -359,13 +360,18 @@ class TheWholeChain(unittest.TestCase):
         embedder = embed.load(model) if (model / "model.safetensors").is_file() else None
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            memory = Memory(root, embedder=embedder)
+            # Seed without starting a competing writer. The night job retries
+            # busy saves, but this fixture publishes its candidate directly.
+            memory = Memory(root, embedder=None)
             day = date.today()
             heard = memory.log("heard", "remember that my orchid Quixotica loves the sun", "Richard", command=True)
             fact = memory.remember("my orchid Quixotica loves the sun", "Richard", heard)
             chat = [memory.log("heard", f"Quixotica the orchid needs watering, day {i}", "Richard") for i in range(3)]
+            memory.embedder = embedder
             memory.recall("what does my flower love")
             memory.index_pending(100)
+            if embedder is not None:
+                self.assertEqual(memory.vector_counts(), (1 + len(chat), 1))
             dream_store.save_candidates(memory, "Richard", [checked(
                 memory, chat[0], "Quixotica the orchid needs watering.", "Quixotica the orchid needs watering")],
                 night="2026-11-23")
