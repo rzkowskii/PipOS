@@ -361,6 +361,51 @@ class Bridge(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(chat_bridge.guest_latched(str(path)))
 
 
+class Switch(unittest.IsolatedAsyncioTestCase):
+    """`"written_chat": false` in being.json: the typed modes cannot be entered."""
+
+    def config(self, text=None):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        if text is not None:
+            (Path(directory.name) / "being.json").write_text(text)
+        return Path(directory.name)
+
+    def test_the_setting_is_on_unless_the_image_says_false(self):
+        for text, expected in ((None, True), ('{"written_chat": true}', True), ('{"written_chat": false}', False),
+                               ('{"written_chat": "no"}', True), ('{"name": "Pip"}', True), ("not json", True),
+                               ("[]", True)):
+            self.assertIs(chat_bridge.written_chat_enabled(self.config(text)), expected, text)
+
+    async def test_when_it_is_off_every_way_into_a_written_mode_is_refused(self):
+        bus = FakeBus()
+        bridge = ChatBridge(bus, enabled=False, guest=lambda: False, log=lambda *a: None)
+        await bridge.set_mode("typed_text")
+        await bridge.handle({"t": "ui.action", "id": "chat.mode.next", "via": "key"})
+        await bridge.handle({"t": "ui.action", "id": "chat.mode.typed_voice", "via": "click"})
+        await bridge.handle({"t": "chat.mode.request", "mode": "typed_text"})
+        self.assertEqual(bridge.mode, "spoken")
+        self.assertEqual([e["mode"] for e in bus.of("chat.mode")], [], "nothing but spoken was ever said")
+        notices = [e["text"] for e in bus.of("chat.notice")]
+        self.assertTrue(notices and all("switched off" in text for text in notices), notices)
+        # A typed line goes nowhere.
+        bridge._chat.on_event({"t": "body.lid", "closed": False, "seq": 4, "snapshot": True})
+        bridge._chat.on_event({"t": "state.changed", "state": "attending", "muted": False})
+        await bridge.handle({"t": "ui.text", "text": "hello"})
+        await bridge.idle()
+        self.assertEqual(bus.of("hear.final"), [])
+
+    async def test_going_back_to_spoken_is_always_allowed(self):
+        bus = FakeBus()
+        bridge = ChatBridge(bus, enabled=False, guest=lambda: False, log=lambda *a: None)
+        await bridge.set_mode("spoken")
+        self.assertEqual(bridge.mode, "spoken")
+
+    def test_the_unit_gives_the_bridge_the_config_directory(self):
+        unit = (Path(__file__).resolve().parents[1] / "os/package/being/being-chat.service").read_text()
+        self.assertIn("--config /etc/being", unit)
+
+
 class WrittenReceipts(unittest.TestCase):
     def test_a_receipt_that_carries_words_is_shown_as_a_written_reply(self):
         shown = []

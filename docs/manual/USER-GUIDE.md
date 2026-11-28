@@ -661,6 +661,8 @@ not used). A guest always gets Spoken, no dock and no captions of your words.
 Written chat is meant to work with the voice off or broken too; a reply then
 shows when it is over.
 
+An image can ship with the two written modes switched off (`"written_chat": false` in `/etc/being/being.json`); the chip and **F7** then say "Written chat is switched off in this image" and Pip stays Spoken.
+
 **Status, 28 November (host tests only, never run on the laptop):** the dock,
 the chip, F7, the typing box, the text shown as Pip speaks, and a guest
 forcing Spoken are built. Silent replies, the microphone going off, spoken

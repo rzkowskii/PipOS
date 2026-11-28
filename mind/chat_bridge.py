@@ -30,6 +30,7 @@ Rules kept here, not on the face:
 
 import argparse
 import asyncio
+import json
 import os
 import signal
 import sys
@@ -66,6 +67,17 @@ def _log(*parts):
     print("mind: chat:", *parts, file=sys.stderr, flush=True)
 
 
+def written_chat_enabled(config_dir):
+    """The image's switch for the two written modes: `"written_chat": false` in
+    being.json turns them off (every start is spoken and stays spoken). Anything
+    else, a missing file or key included, leaves them on."""
+    try:
+        settings = json.loads((Path(config_dir) / "being.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True
+    return not (isinstance(settings, dict) and settings.get("written_chat") is False)
+
+
 def next_mode(mode):
     return MODES[(MODES.index(mode) + 1) % len(MODES)] if mode in MODES else DEFAULT
 
@@ -85,8 +97,9 @@ class ChatBridge:
     """The mode, and the typed lines of the dock. `bus` is a mind.bus.Bus
     joined as `keyboard`; `guest()` says whether a guest is here."""
 
-    def __init__(self, bus, *, name="Pip", owner="friend", guest=guest_latched, log=_log):
+    def __init__(self, bus, *, name="Pip", owner="friend", guest=guest_latched, log=_log, enabled=True):
         self.bus = bus
+        self.enabled = enabled
         self.guest = guest
         self.log = log
         self.mode = DEFAULT
@@ -131,6 +144,9 @@ class ChatBridge:
         if mode == "next":
             mode = next_mode(self.mode)
         if mode not in MODES:
+            return self.mode
+        if mode != DEFAULT and not self.enabled:
+            await self._notice("Written chat is switched off in this image.", "warning")
             return self.mode
         if mode != DEFAULT and self.guest_here():
             mode = DEFAULT
@@ -270,9 +286,10 @@ class ChatBridge:
                 self.log(f"watch failed: {exc!r}")
 
 
-async def run(path, mind_dir):
+async def run(path, mind_dir, config_dir):
     name, owner = type_chat.profile_names(mind_dir)
-    bridge = ChatBridge(Bus(ORGAN, SUBS, path=path), name=name, owner=owner)
+    bridge = ChatBridge(Bus(ORGAN, SUBS, path=path), name=name, owner=owner,
+                        enabled=written_chat_enabled(config_dir))
     await bridge.start()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -287,8 +304,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--bus", default=None)
     parser.add_argument("--mind-dir", default=type_chat.MIND_DIR)
+    parser.add_argument("--config", default="/etc/being")
     args = parser.parse_args(argv)
-    asyncio.run(run(args.bus, Path(args.mind_dir)))
+    asyncio.run(run(args.bus, Path(args.mind_dir), args.config))
     return 0
 
 

@@ -11,7 +11,7 @@ StartLimitIntervalSec=0
 [Service]
 EnvironmentFile=/etc/being/env
 Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 -m mind.chat_bridge --bus ${BEING_BUS}
+ExecStart=/usr/bin/python3 -m mind.chat_bridge --bus ${BEING_BUS} --config /etc/being
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=5
