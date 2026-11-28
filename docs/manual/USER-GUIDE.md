@@ -653,7 +653,9 @@ There are three modes, and every start is **Spoken**:
 | **Written only** | type in the dock | answers in writing only, and still does what you ask: timers, lists, settings. It asks "yes or no" on screen, and you answer by typing **yes** or **no** in the dock. A timer or reminder shows as text with one short chime. **Alarms still ring.** |
 
 Use the chip, or press **F7**, to cycle: Spoken, Written + voice, Written
-only, Spoken. Press **Enter** to send a line and **Esc** to leave the box.
+only, Spoken. Or say "Let's type" (Written + voice), "Silent mode" (Written
+only) or "Back to talking" (Spoken; heard only while the microphone is on).
+Press **Enter** to send a line and **Esc** to leave the box.
 
 The aim in both written modes is that the microphone is off, so Pip does not
 listen for “Hey Pip” while you type (the mute key is a different thing and is
@@ -671,8 +673,7 @@ conversation code that is not in yet. Until it is, **Written only still
 speaks and the microphone stays on**, so this page describes the intended
 behaviour of the two written modes, not what Pip does today.
 
-Not there yet: switching by voice (“Let's type”, “Silent mode”, “Back to
-talking”), an entry for the mode in the Quick Menu or Options, touch on the
+Not there yet: an entry for the mode in the Quick Menu or Options, touch on the
 dock, and Yes and No buttons: a question that needs “yes” is plain text, so
 type **yes** or **no** in the dock.
 

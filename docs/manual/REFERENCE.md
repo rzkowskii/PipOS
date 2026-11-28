@@ -198,7 +198,9 @@ Options on the face and under **L** in Setup.
 | "Open the Quick Menu" / "Show the Quick Menu" / "Close the Quick Menu" | Opens or dismisses it |
 | "Move the Quick Menu to the left" / "Put the menu on the right" / "Move the Quick Menu to the center" | Moves it. Right after that, "Actually put it on the left" moves it again |
 | "Open the options" / "Close the options" | Opens or closes the Options surface |
-| *(not yet)* "Let's type", "Silent mode", "Back to talking" | Switching the chat mode by voice is written (`commands.parse`, off behind `actions.CHAT_MODE_BY_VOICE`) but not offered: the turn loop does not pass it on yet. Use the dock's chip or F7 (`chat.mode`: `spoken`, `typed_voice`, `typed_text`) |
+| "Let's type" / "Written chat" / "Switch to written chat" | Written chat with spoken replies (`chat.mode` `typed_voice`): type in the dock, Pip answers aloud and the words show as they are spoken |
+| "Silent mode" / "Written replies only" / "Text only" | Written chat with written replies (`typed_text`): Pip says nothing, still does what you ask, confirmations show as text; alarms still ring |
+| "Back to talking" / "Voice mode" / "Let's talk" | Spoken again, as at every start. Heard only while the microphone is on: from a written mode use the dock's chip or F7 |
 
 ### Greetings (local replies, no model)
 

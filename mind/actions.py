@@ -6,11 +6,11 @@ from .look import DISPLAY_FLAGS, FACE_LAYERS, WIDGET_POSITIONS, WIDGETS
 
 
 # Switching the chat mode by voice ("Let's type", "Silent mode", "Back to talking")
-# needs the turn loop to pass the request on (a `chat_mode` branch in mind/turn.py
-# that sends `chat.mode.request`, with "chat_mode" in ADDRESS_ONLY_COMMANDS). Until
-# that is there the phrases are neither understood nor advertised: the dock's chip
-# and F7 switch the mode. The branch's author sets this True.
-CHAT_MODE_BY_VOICE = False
+# needs the turn loop to pass the request on (the `chat_mode` branch in mind/turn.py
+# that sends `chat.mode.request`, with "chat_mode" in ADDRESS_ONLY_COMMANDS). On a tree
+# without that branch this must be False: the phrases are then neither understood nor
+# advertised, and the dock's chip and F7 switch the mode.
+CHAT_MODE_BY_VOICE = True
 
 
 @dataclass(frozen=True)

@@ -428,13 +428,17 @@ class Wiring(unittest.TestCase):
         registered = {action.id for action in actions.ACTIONS if action.id.startswith("chat.mode.")}
         self.assertEqual(registered, set(chat_bridge.ACTIONS))
 
-    def test_the_voice_phrases_are_off_until_the_turn_loop_can_pass_them_on(self):
-        self.assertIs(actions.CHAT_MODE_BY_VOICE, False)
-        for said in ("Let's type", "Silent mode", "Back to talking", "Written chat"):
+    def test_the_voice_phrases_are_on_and_advertised_with_the_turn_loop_branch(self):
+        # True only on a tree whose mind/turn.py has the chat_mode branch (it answers the command).
+        self.assertIs(actions.CHAT_MODE_BY_VOICE, True)
+        turn = (Path(__file__).resolve().parents[1] / "mind/turn.py").read_text()
+        self.assertIn('kind == "chat_mode"', turn, "the flag needs the turn loop's branch")
+        self.assertIn('"chat.mode.request"', turn)
+        for said, mode in (("Let's type", "typed_voice"), ("Silent mode", "typed_text"), ("Back to talking", "spoken")):
             command = commands.parse(said, "Pip")
-            self.assertTrue(command is None or command.kind != "chat_mode", said)
+            self.assertEqual((command.kind, command.arg), ("chat_mode", mode), said)
         advertised = [action.phrases for action in actions.ACTIONS if action.id.startswith("chat.mode.")]
-        self.assertEqual([p for p in advertised if p], [], "no phrase is advertised that nothing acts on")
+        self.assertIn(("Let's type",), advertised)
 
     def test_the_voice_phrases_name_the_modes_once_switched_on(self):
         wanted = {
