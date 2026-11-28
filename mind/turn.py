@@ -346,6 +346,26 @@ def _age_reply(life, now):
     return f"[joy] I'm {age} old. {times}"
 
 
+# The brainstem's own words for how long it has been awake ("awake 5 min", "awake 3 hours").
+_AWAKE_PART = re.compile(r"^awake (?P<n>\d+|1) (?P<unit>min|hours?)$")
+# And for its age; both are answered in code now, and no longer put in the model's prompt.
+_AGE_PART = re.compile(r"^(?:born today|\d+ days? old)$")
+
+
+def _awake_reply(senses):
+    """How long it has been awake, from the brainstem's own count in the senses line."""
+    for part in (p.strip() for p in (senses or "").split(",")):
+        match = _AWAKE_PART.match(part)
+        if match:
+            n = int(match["n"])
+            if match["unit"] == "min":
+                return "[neutral] I've been awake for about a minute." if n <= 1 else (
+                    f"[neutral] I've been awake for about {n} minutes.")
+            return "[neutral] I've been awake for about an hour." if n <= 1 else (
+                f"[neutral] I've been awake for about {n} hours.")
+    return "[concern] I'm not sure. I can't feel how long I've been awake right now."
+
+
 def _words(text):
     return re.findall(r"[a-z0-9']+", text.lower())
 
@@ -4945,6 +4965,8 @@ class Mind:
                     state, "unplugged" if "unplugged" in state else None)
             elif minutes := re.fullmatch(r"about (\d+) min left", part):
                 seen["minutes"] = int(minutes[1])
+            elif _AWAKE_PART.match(part) or _AGE_PART.match(part):
+                continue    # "how long have you been awake" and "how old are you" are answered in code
             elif part in ("cool", "warm", "hot"):
                 seen["temp"] = part
             elif part.startswith("room "):
@@ -5679,6 +5701,9 @@ class Mind:
                 await self._say("[concern] I'm not sure. My clock was reset, so I can't count my days right now.")
             else:
                 await self._say(_age_reply(self._life, self.memory.now()))
+        elif kind == "awake":
+            self._record("command", text, speaker)
+            await self._say(_awake_reply(self.senses))
         elif kind == "battery":
             await self._say(self._battery_line(), canned=True)
         elif kind in ("self_alive", "self_aware", "self_feel", "self_what"):

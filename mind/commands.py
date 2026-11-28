@@ -104,6 +104,9 @@ _PATTERNS = [
             r"|i(?:['’]m| am) (?:up|awake)(?: now)?"),
     ("name", r"what(?:['’]s| is) your name|what (?:should|do) i call you"),
     ("age", r"how old are you|what(?:['’]s| is) your age|when were you born"),
+    ("awake", r"how long (?:have you been|are you|has it been since you(?:'ve| have)? been) (?:awake|up|on|switched on|running)"
+              r"|how long have you been (?:awake|up|on|switched on|running)(?: for)?"
+              r"|when did you (?:last )?(?:wake up|wake|start up|switch on)"),
     ("battery", r"how much (?:charge|battery) (?:do you have|have you got)(?: left)?|how(?:['’]s| is) your battery(?: doing)?"
                 r"|what(?:['’]s| is) your battery(?: level| at)?|tell me about your battery|are you charging"
                 r"|how long (?:will|can) your battery last|how much battery (?:is )?left"),
