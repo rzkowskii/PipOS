@@ -1,10 +1,10 @@
 <!--
 doc: reference
-verified: 2026-11-28T13:22
+verified: 2026-11-28T14:02
 sources: mind/commands.py mind/reminder_language.py mind/turn.py mind/everyday.py mind/skills.py mind/profile.py mind/setup.py mind/care.py mind/local_menu.py mind/initiative_setup.py mind/retention.py mind/backup.py mind/dream_journal.py mind/network_enforce.py mind/network_policy.py mind/initiative.py mind/voice.py mind/voice_engines.py mind/mic_channel.py mind/mic_port.py mind/try_mode.py mind/tts.py mind/eyes.py mind/__main__.py crates/face/src/main.rs crates/face/src/keys.rs crates/brainstem/src/main.rs crates/brainstem/src/battery.rs crates/brainstem/src/kbd_light.rs mind/keys.py mind/local_screen.py os/board/beingos/slots.sh crates/bodycare/src/main.rs sim/body.py lab/vm.py lab/build.sh lab/cable.sh scripts/run-sim.sh os/package/being/being.env os/package/being/being-camera os/package/being/50-being.preset os/package/cortex/being-cortex.service os/package/cortex/being-dream-cortex.service os/board/beingos/try-grub.cfg os/board/beingos/try-image.sh config/being.json mind/wifi.py mind/reminders.py os/package/being/being-usb-logs os/package/being/being-hardware-report mind/diag.py mind/diag_report.py mind/diag_sound.py mind/diag_speech.py mind/diag_codec.py mind/diag_system.py os/package/being/pip-diag os/package/being/being-cable-link.service os/package/being/being-cable-ssh.service os/package/being/being-cable-workbench.service os/package/being/cable/sshd_config mind/look.py mind/actions.py mind/continuity.py mind/care_habits.py
 mind/dream_policy.py mind/mood.py mind/speaker_eq.py mind/vision_describer.py mind/context_storage.py
 crates/face/src/quick_menu.rs crates/face/src/options.rs os/package/being/being-ears.service
-os/package/being/being-context-storage.service os/package/cortex/being-model-check.service
+os/package/being/being-context-storage.service os/package/cortex/being-model-check.service mind/asr_sherpa.py
 -->
 
 # PipOS reference
@@ -560,7 +560,7 @@ puts everything back itself; `--force` restores anyway.
 ## Voice debug and route lines
 
 Sources: `mind/voice.py`, `mind/turn.py`, `mind/try_mode.py`,
-`mind/mic_port.py`, `mind/usb_logs.py`
+`mind/mic_port.py`, `mind/usb_logs.py`, `mind/asr_sherpa.py`
 
 Voice debugging writes what Pip heard into the journal (and so into a Try
 stick's `journal.txt`). It is on when the kernel command line of a **Try**
@@ -569,6 +569,16 @@ boot has `being.voice_debug=1` (as with any repeated argument, the last
 prompt turns it off), or when the voice's environment has
 `BEING_VOICE_DEBUG=1`. An installed system's command line alone never turns
 it on. Every entry of a cable development stick turns it on.
+
+**One-breath window.** "Hey Pip, what time is it?" in one breath is heard by
+Moonshine from the end of the name. When Silero hears no speech at all in that
+window, in the replayed audio or the live audio ("Hey Pip", a pause, then the
+request), the window is not sent to the recogniser: it stays open for the
+request for up to 5 s after the wake, and ends as an empty result if nothing
+comes. With voice debugging on and no guest here, each one-breath window is
+also kept under `/tmp/being-oneshot-windows` (the newest 20, as a 16 kHz WAV and
+a JSON line saying what was decided), so the speech engine's decision can be
+checked against the real audio.
 
 | Line | Organ | When |
 |---|---|---|

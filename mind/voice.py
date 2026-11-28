@@ -1845,6 +1845,10 @@ class Voice:
             self.last_sound = now
         elif topic == "hear.wake":
             run_on = bool(fields.pop("run_on", False))
+            if oneshot and hasattr(self.recognizer, "window_dump_enabled"):
+                # Voice debugging only, and never with a guest here: keep the
+                # one-breath window for the Device lane (asr_sherpa._dump).
+                self.recognizer.window_dump_enabled = self.text_logged()
             segment = self.last_segment or self.segment or Span()
             LOG.info("heard the wake phrase%s%s: score %s, %s, mic gain %.2fx", " in one breath" if oneshot else "",
                      f" while {self.state}" if self.state in TALKING else "",

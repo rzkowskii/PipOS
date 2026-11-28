@@ -50,6 +50,14 @@ HISTORY_FRAMES = int(4.0 / FRAME_SECONDS) + 1
 # A one-breath command whose rest is shorter than Silero's MIN_SPEECH never
 # raises `detected`; end it after this long without speech.
 ONESHOT_QUIET_FRAMES = int(0.6 / FRAME_SECONDS) + 1
+# "Hey Pip, <pause> <request>": a one-breath window in which Silero hears no
+# speech at all, in the replayed audio or the live audio, is not sent to the
+# recogniser (it writes "You" or "So" from the noise floor). It stays open for
+# the request, up to this long after the wake, and then ends empty. Silero is
+# the judge, not a level: the floor rises with the mic gain (-59 dBFS at 2.3x,
+# -44 at 6x on the laptop), speech does not stand clear of it at every gain.
+ONESHOT_WAIT_FRAMES = int(5.0 / FRAME_SECONDS)
+DUMP_KEEP = 20
 MAX_FAILURES = 3
 
 
@@ -143,6 +151,9 @@ class SherpaRecognizer(RecognizerEngine):
         self.decoding = None          # (generation, oneshot) while a decode runs
         self.failures = 0
         self.broken = False
+        # Voice debugging only: the voice turns this on while transcripts may be logged.
+        self.window_dump_enabled = False
+        self.window_dump_dir = None
         self._reset_listening()
         self.history = deque(maxlen=HISTORY_FRAMES)
         self.was_attending = False
@@ -273,6 +284,11 @@ class SherpaRecognizer(RecognizerEngine):
         self.in_speech = True
         self.segment = [sherpa.pcm_to_float(frame) for frame in history]
         self.segment_samples = sum(len(part) for part in self.segment)
+        self.replay_frames = len(self.segment)
+        # Silero hears the replayed audio too, so the window knows whether it
+        # holds speech and how long its own tail has been quiet.
+        for samples in self.segment:
+            self._watch(samples)
         return [("hear.wake", {"oneshot": True}), ("hear.speech_start", {"oneshot": True})]
 
     def _back_to_rest(self):
@@ -300,16 +316,17 @@ class SherpaRecognizer(RecognizerEngine):
         self.segment_samples = 0
         self.preroll = deque(maxlen=PREROLL_FRAMES)
         self.window_rest = array("f")
+        self.vad_finished = False       # Silero ended a segment inside the replay
+        self.peak = 0.0                 # loudest sample of a one-breath window
+        self.replay_frames = 0
+        self.live_frames = 0
+        self.waiting = False
 
     def _flags(self):
         return {"oneshot": True} if self.oneshot else {}
 
-    def _listen(self, samples):
-        if self.in_speech:
-            self.segment.append(samples)
-            self.segment_samples += len(samples)
-        else:
-            self.preroll.append(samples)
+    def _watch(self, samples):
+        """Feed Silero one frame; return (detected, finished) and keep the window's bookkeeping."""
         self.window_rest.extend(samples)
         whole = len(self.window_rest) // WINDOW * WINDOW
         if whole:
@@ -317,24 +334,104 @@ class SherpaRecognizer(RecognizerEngine):
             del self.window_rest[:whole]
         detected = self.vad.detected()
         finished = self.vad.pop_segments()
+        if self.oneshot:
+            self.peak = max(self.peak, max(map(abs, samples), default=0.0))
+        if detected:
+            self.vad_seen = True
+            self.quiet_frames = 0
+        else:
+            self.quiet_frames += 1
+        if finished:
+            self.vad_finished = True
+        return detected, finished
+
+    def _speechless(self):
+        return not self.vad_seen and not self.vad_finished
+
+    def _listen(self, samples):
+        if self.in_speech:
+            self.segment.append(samples)
+            self.segment_samples += len(samples)
+        else:
+            self.preroll.append(samples)
+        if self.oneshot:
+            self.live_frames += 1
+        detected, finished = self._watch(samples)
+        finished = finished or (self.oneshot and self.vad_finished)
         events = []
         if not self.in_speech and (detected or finished):
             self.in_speech = True
             self.segment = list(self.preroll)
             self.segment_samples = sum(len(part) for part in self.segment)
             self.preroll.clear()
+            self.waiting = False
             events.append(("hear.speech_start", self._flags()))
-        if detected:
-            self.vad_seen = True
-            self.quiet_frames = 0
-        else:
-            self.quiet_frames += 1
         ended = bool(finished) or self.segment_samples >= MAX_SPEECH * RATE
         if self.oneshot and not self.vad_seen and self.quiet_frames >= ONESHOT_QUIET_FRAMES:
+            # A command too short for Silero's MIN_SPEECH ends here. A window
+            # with no speech in it does not: it waits for the request.
+            if self._speechless():
+                if not self.waiting:
+                    self.waiting = True
+                    self._dump("waiting", self.segment)
+                    self.in_speech = False
+                    self.segment = []
+                    self.segment_samples = 0
+                    self.preroll.clear()
+                if self.live_frames >= ONESHOT_WAIT_FRAMES:
+                    return events + self._give_up()
+                return events
             ended = True
         if self.in_speech and ended:
             self._submit()
         return events
+
+    def _give_up(self):
+        """Nothing was said after the name: an empty one-breath final, as for any empty result."""
+        self._dump("gave up", [])
+        self._reset_listening()
+        self.vad.reset()
+        return [("hear.final", {"text": "", "oneshot": True})]
+
+    def _dump(self, decision, parts):
+        """Voice debugging only: keep the one-breath window and how it was decided.
+
+        Off unless the voice enables it (transcripts may be logged and no guest
+        is here); it never runs by default, and the newest DUMP_KEEP are kept.
+        """
+        if not self.window_dump_enabled or not self.oneshot:
+            return
+        try:
+            import json
+            import math
+            import tempfile
+            import time
+            import wave
+            folder = Path(self.window_dump_dir or Path(tempfile.gettempdir()) / "being-oneshot-windows")
+            folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+            stem = f"window-{time.strftime('%H%M%S')}-{self.generation:04d}-{decision.replace(' ', '-')}"
+            samples = array("f")
+            for part in parts:
+                samples.extend(part)
+            pcm = array("h", (max(-32768, min(32767, int(x * 32768))) for x in samples))
+            with wave.open(str(folder / f"{stem}.wav"), "wb") as out:
+                out.setnchannels(1)
+                out.setsampwidth(2)
+                out.setframerate(RATE)
+                out.writeframes(pcm.tobytes())
+            peak = max(map(abs, samples), default=0.0)
+            info = {"decision": decision, "seconds": round(len(samples) / RATE, 3),
+                    "replay_frames": self.replay_frames, "live_frames": self.live_frames,
+                    "quiet_frames": self.quiet_frames, "vad_seen": self.vad_seen,
+                    "vad_finished": self.vad_finished, "peak_dbfs": round(20 * math.log10(peak), 1) if peak else None,
+                    "window_peak_dbfs": round(20 * math.log10(self.peak), 1) if self.peak else None}
+            (folder / f"{stem}.json").write_text(json.dumps(info) + "\n")
+            old = sorted(folder.glob("window-*.wav"))[:-DUMP_KEEP]
+            for path in old:
+                path.unlink(missing_ok=True)
+                path.with_suffix(".json").unlink(missing_ok=True)
+        except Exception as error:
+            log(f"one-breath window dump failed ({error!r})")
 
     # The decode thread --------------------------------------------------------------
 
@@ -343,6 +440,8 @@ class SherpaRecognizer(RecognizerEngine):
         for part in self.segment:
             samples.extend(part)
         oneshot = self.oneshot
+        if oneshot:
+            self._dump("sent", self.segment)
         self._reset_listening()
         self.vad.reset()
         self.generation += 1

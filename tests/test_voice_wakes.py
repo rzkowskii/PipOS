@@ -275,6 +275,21 @@ class FalseWakes(unittest.IsolatedAsyncioTestCase):
                                            state="idle", prepare=taken)
         self.assertIn("hear.final", harness.topics())
 
+    async def test_the_one_breath_window_dump_follows_voice_debugging_and_guests(self):
+        for transcripts, guest, expected in ((False, False, False), (True, False, True), (True, True, False)):
+            seen = {}
+
+            def prepare(voice, transcripts=transcripts, guest=guest, seen=seen):
+                voice.wake_taken = AsyncMock(return_value=True)
+                voice.transcripts = transcripts
+                voice.guest = guest
+                voice.recognizer.window_dump_enabled = None
+                seen["voice"] = voice
+
+            await self.run_script([ONESHOT_WAKE, final("What time is it?", oneshot=True)], [tone(500), tone(10)],
+                                  state="idle", prepare=prepare)
+            self.assertIs(seen["voice"].recognizer.window_dump_enabled, expected, (transcripts, guest))
+
     async def test_a_key_wake_hears_short_words(self):
         # No wake phrase was heard: a key or a touch opened attention.
         harness, _ = await self.run_script([START, final("yes")], [tone(4000), tone(10)])
