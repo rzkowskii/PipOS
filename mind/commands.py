@@ -31,6 +31,8 @@ _DIARY_DAYS = r"(?:yesterday|last week|(?:on |last )?(?:monday|tuesday|wednesday
 
 # Tried in order. Recall comes before remember, so "do you remember X" is a
 # question, not a new memory.
+_MONTH_WORDS = ("january|february|march|april|june|july|august|september|october|november|december|"
+                "jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec")
 _PATTERNS = [
     ("guest_start", r"start guest mode|don['’]?t remember this(?:[\s,.:;!?][\s\S]*)?"),
     ("guest_end", r"end guest mode"),
@@ -62,8 +64,9 @@ _PATTERNS = [
     ("correct", r"(?:no[,. ]+)?that(?:['’]s| is) (?:wrong|not right|incorrect|not true)[,.:; ]+(?P<x>.+)"),
     ("remember", r"(?:please )?(?:can you |could you )?remember (?:that |this[:, ]+)?(?P<x>.+)"),
     ("remember", r"(?:please )?don'?t forget (?:that )?(?P<x>.+)"),
-    ("set_time", r"(?:set|change) (?:the|your) (?:time|clock) to (?P<x>.+)"),
-    ("set_time", r"(?:actually[, ]+)?the time is (?:now |actually )?(?P<x>\d.*)"),
+    # Not when a date comes with it: mind/clock_set.py takes date and time together.
+    ("set_time", rf"(?:set|change) (?:the|your) (?:time|clock) to (?P<x>(?!.*\b(?:{_MONTH_WORDS})\b).+)"),
+    ("set_time", rf"(?:actually[, ]+)?the time is (?:now |actually )?(?P<x>\d(?!.*\b(?:{_MONTH_WORDS})\b).*)"),
     ("world_time", r"(?:what(?:['’]s| is) the time|what time is it|what time(?:['’]s| is) it|tell me the time)"
                    r"(?: right now| now)? (?:in|over in) (?P<x>.+?)(?: right now| now| at the moment)?"),
     ("time_difference", r"what(?:['’]s| is) the time difference (?:to|with|from|for|in|between) (?P<x>.+)"),

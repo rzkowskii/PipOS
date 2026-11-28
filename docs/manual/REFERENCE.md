@@ -73,7 +73,8 @@ night speech) have their phrases in the user guide's
 | "What's tomorrow's date?" / "What day is tomorrow?" | "Tomorrow is …" |
 | "What time is it in London?" | The time there |
 | "What's the time difference to London?" / "Is London ahead or behind?" | The difference in hours |
-| "Set the time to 7:30 pm" / "The time is 7:30" | Sets the system and hardware clocks; moves running timers with the clock. Refused to a guest |
+| "Set the time to 7:30 pm" / "The time is 7:30" | Sets the time of day; moves running timers with the clock. Refused to a guest, and refused while the date is doubted (say the date too, as below) |
+| "It's the 28th of November 2026, twenty to four in the afternoon" | Date and time in one sentence, spoken or typed (mind/clock_set.py; also "28 November 2026, 3:40 pm", "2026-11-28 15:40", "quarter to four", "half past two", "noon"). Pip reads it back ("I heard Saturday 28 November 2026, 3:40 in the afternoon. Shall I set my clock to that?") and asks for a plain yes; on yes it uses the Setup screen's own path (`care.set_clock` with `date_confirmed`: moves running timers, saves the trusted clock floor, tells memory, writes the battery clock when it can and says if it could not). A date alone ("It's the 28th of November 2026") is asked for its time and kept 90 seconds. Only the appliance's own clock is set, never a development machine's. Refused to a guest, with no time zone set, for a nonexistent day, before 2026 or after 2100, or earlier than what Pip already remembers |
 | "Set my time zone to Australia Sydney" | Saves an IANA zone. Spoken forms such as "Australia slash Sydney" work |
 | "Use the device time zone" | Saves an empty zone: UTC |
 
@@ -118,7 +119,7 @@ due, it says "You asked me to remind you: *task*." An alarm says the time
 said in 20 words or fewer, is honest when it is late, and repeats up to
 three times, two minutes apart, until you answer.
 
-While the clock is doubted (reset, or gone backwards), only timers and
+While the clock is doubted (reset, or gone backwards), Pip explains it once per boot the first time you ask the time or date, and asks for the date and time; asked again it only says it is still not sure. Three ways to put it right: say or type the date and time (above), "Set the time to" for the time of day when the date is right, or Setup, **Date and time**. Meanwhile only timers and
 delays ring. A clock-time reminder set then is held and worked out again
 when the clock is set.
 

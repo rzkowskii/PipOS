@@ -103,7 +103,7 @@ class Registry(unittest.TestCase):
 
 class RealOrder(unittest.TestCase):
     def test_order_is_the_spec(self):
-        self.assertEqual(everyday.ORDER, ("readback", "calc", "units", "lists", "play", "body_talk", "device",
+        self.assertEqual(everyday.ORDER, ("clock_set", "readback", "calc", "units", "lists", "play", "body_talk", "device",
                                           "removable_media", "keep", "doctor", "action_log", "diary", "ponder",
                                           "voice_engines", "care_routes", "library", "night_speech"))
 
