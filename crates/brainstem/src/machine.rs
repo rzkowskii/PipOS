@@ -4,7 +4,7 @@
 //! here touches a socket or a clock, so every transition is testable.
 
 use bus::Event;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -126,6 +126,14 @@ pub struct Resume {
 /// and the routing treat an unknown lid as closed from the start).
 pub const RESUME_LID_HOLD: f64 = 3.0;
 
+/// A terminal job that failed (non-zero exit): the face shows it as sad.
+const JOB_FAILED_FACE: (&str, f64) = ("sad", 1.5);
+/// A terminal job that finished with a real exit code 0: relieved.
+const JOB_DONE_FACE: (&str, f64) = ("relieved", 1.5);
+/// How many (job id, phase) pairs it remembers so a re-sent status (hands
+/// repeats it when asked) does not make the face react twice.
+const JOB_FACE_MEMORY: usize = 32;
+
 pub struct Machine {
     cfg: Config,
     state: State,
@@ -142,6 +150,11 @@ pub struct Machine {
     muted: bool,
     unwell: bool,
     privacy_fault: bool,
+    /// The owner is not the one at the screen (the mind's `app.privacy`
+    /// guest report, or the boot-local guest latch): no reaction to their work.
+    guest: bool,
+    /// Recent (job id, phase) pairs already considered for a face reaction.
+    job_faces: VecDeque<(String, String)>,
     lid_blocked: bool,
     lid_wake: bool,
     /// The lid was confirmed closed during the current blocked spell.
@@ -187,6 +200,8 @@ impl Machine {
             muted: false,
             unwell: false,
             privacy_fault: false,
+            guest: false,
+            job_faces: VecDeque::new(),
             lid_blocked: false,
             lid_wake: false,
             closed_seen: false,
@@ -241,6 +256,37 @@ impl Machine {
             woke: self.woke_once,
             lid_blocked: self.lid_blocked,
         }
+    }
+
+    /// Whether the face is in guest (privacy) mode, as the brainstem knows it.
+    pub fn set_guest(&mut self, guest: bool) {
+        self.guest = guest;
+    }
+
+    /// The face's reaction to a finished terminal job, if it is true now.
+    /// Idle and Attending only: elsewhere the face is busy with speech,
+    /// listening or sleep, and a late face would fight it. The pair is
+    /// remembered even when suppressed, so a status re-sent later (after the
+    /// moment has passed) stays quiet instead of reacting to old news.
+    fn job_face(&mut self, ev: &Event) -> Option<Event> {
+        let phase = ev.str("phase")?;
+        let (name, hold) = match (phase, ev.f64("exit")) {
+            ("failed", Some(code)) if code != 0.0 => JOB_FAILED_FACE,
+            ("done", Some(code)) if code == 0.0 && ev.str("reason") != Some("exit_unknown") => JOB_DONE_FACE,
+            _ => return None,
+        };
+        // A status without a job id cannot be told from a repeat, so it never reacts.
+        let key = (ev.str("id")?.to_string(), phase.to_string());
+        if self.job_faces.contains(&key) {
+            return None;
+        }
+        if self.job_faces.len() >= JOB_FACE_MEMORY {
+            self.job_faces.pop_front();
+        }
+        self.job_faces.push_back(key);
+        let calm = matches!(self.state, State::Idle | State::Attending);
+        (calm && !self.lid_blocked && !self.guest)
+            .then(|| Event::new("face.express").with("name", name).with("hold", hold))
     }
 
     pub fn state(&self) -> State {
@@ -614,6 +660,7 @@ impl Machine {
                     );
                 }
             }
+            "term.status" => out.extend(self.job_face(ev)),
             "key.interrupt" => {
                 if matches!(self.state, State::Thinking | State::Speaking) {
                     out.push(Event::new("say.stop"));
@@ -1497,5 +1544,115 @@ mod tests {
         let out = m.on_event(&Event::new("mind.emotion").with("name", "joy"), 11.0);
         assert_eq!(out[0].topic, "face.express");
         assert_eq!(out[0].str("name"), Some("joy"));
+    }
+
+    fn job(phase: &str, id: &str, exit: Option<i64>) -> Event {
+        let e = Event::new("term.status").with("id", id).with("phase", phase);
+        match exit {
+            Some(code) => e.with("exit", code),
+            None => e,
+        }
+    }
+
+    fn face_of(out: &[Event]) -> Vec<(String, f64)> {
+        out.iter()
+            .filter(|e| e.topic == "face.express")
+            .map(|e| (e.str("name").unwrap().to_string(), e.f64("hold").unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_job_looks_sad_and_a_clean_one_relieved() {
+        let mut m = awake();
+        let out = m.on_event(&job("failed", "j1", Some(2)), 11.0);
+        assert_eq!(face_of(&out), [("sad".to_string(), 1.5)]);
+        let out = m.on_event(&job("done", "j2", Some(0)), 12.0);
+        assert_eq!(face_of(&out), [("relieved".to_string(), 1.5)]);
+    }
+
+    #[test]
+    fn it_reacts_while_attending_too() {
+        let mut m = awake();
+        m.go(State::Attending, 11.0, &mut Vec::new());
+        let out = m.on_event(&job("done", "a", Some(0)), 12.0);
+        assert_eq!(face_of(&out).len(), 1);
+    }
+
+    #[test]
+    fn an_unknown_exit_is_not_a_success() {
+        let mut m = awake();
+        let e = job("done", "j1", Some(0)).with("reason", "exit_unknown");
+        assert!(face_of(&m.on_event(&e, 11.0)).is_empty());
+        assert!(face_of(&m.on_event(&job("done", "j3", None), 11.0)).is_empty());
+        assert!(face_of(&m.on_event(&job("failed", "j4", Some(0)), 11.0)).is_empty());
+        assert!(face_of(&m.on_event(&job("failed", "j5", None), 11.0)).is_empty());
+    }
+
+    #[test]
+    fn a_resent_status_reacts_once() {
+        let mut m = awake();
+        let e = job("failed", "j1", Some(1));
+        assert_eq!(face_of(&m.on_event(&e, 11.0)).len(), 1);
+        assert!(face_of(&m.on_event(&e, 12.0)).is_empty());
+        // Another phase of the same job, or another job, is its own moment.
+        assert_eq!(face_of(&m.on_event(&job("done", "j1", Some(0)), 13.0)).len(), 1);
+        assert_eq!(face_of(&m.on_event(&job("failed", "j2", Some(1)), 14.0)).len(), 1);
+    }
+
+    #[test]
+    fn the_memory_is_bounded() {
+        let mut m = awake();
+        for i in 0..JOB_FACE_MEMORY + 5 {
+            m.on_event(&job("failed", &format!("j{i}"), Some(1)), 11.0);
+        }
+        assert_eq!(m.job_faces.len(), JOB_FACE_MEMORY);
+        // The oldest was forgotten, so it can react again.
+        assert_eq!(face_of(&m.on_event(&job("failed", "j0", Some(1)), 12.0)).len(), 1);
+    }
+
+    #[test]
+    fn a_guest_sees_no_reaction_and_it_is_not_saved_for_later() {
+        let mut m = awake();
+        m.set_guest(true);
+        let e = job("failed", "j1", Some(1));
+        assert!(face_of(&m.on_event(&e, 11.0)).is_empty());
+        m.set_guest(false);
+        assert!(face_of(&m.on_event(&e, 12.0)).is_empty(), "old news stays quiet");
+    }
+
+    #[test]
+    fn a_closed_lid_shows_nothing() {
+        let mut m = awake();
+        m.lid_blocked = true;
+        assert!(face_of(&m.on_event(&job("failed", "j1", Some(1)), 11.0)).is_empty());
+    }
+
+    #[test]
+    fn busy_states_show_nothing() {
+        let mut m = awake();
+        m.go(State::Speaking, 11.0, &mut Vec::new());
+        assert!(face_of(&m.on_event(&job("failed", "j1", Some(1)), 11.0)).is_empty());
+        m.go(State::Asleep, 11.5, &mut Vec::new());
+        assert!(face_of(&m.on_event(&job("done", "j2", Some(0)), 12.0)).is_empty());
+    }
+
+    #[test]
+    fn other_phases_and_reasons_show_nothing() {
+        let mut m = awake();
+        for phase in ["waiting", "running", "writing", "paused", "frozen", "forgotten"] {
+            assert!(face_of(&m.on_event(&job(phase, "j1", Some(1)), 11.0)).is_empty(), "{phase}");
+        }
+        let refused = job("refused", "j2", Some(1)).with("reason", "policy");
+        assert!(face_of(&m.on_event(&refused, 11.0)).is_empty());
+        assert!(face_of(&m.on_event(&Event::new("term.status").with("phase", "failed"), 11.0)).is_empty());
+    }
+
+    #[test]
+    fn a_status_without_a_job_id_never_reacts_and_never_hides_a_later_one() {
+        let mut m = awake();
+        let nameless = |phase: &str| Event::new("term.status").with("phase", phase).with("exit", 1);
+        assert!(face_of(&m.on_event(&nameless("failed"), 11.0)).is_empty());
+        assert!(face_of(&m.on_event(&nameless("failed"), 12.0)).is_empty());
+        assert_eq!(face_of(&m.on_event(&job("failed", "j9", Some(1)), 13.0)).len(), 1);
     }
 }

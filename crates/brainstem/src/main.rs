@@ -1061,6 +1061,11 @@ fn main() {
                                 && (body.lid_blocked()
                                     || ev.data.get("lid_seq").is_some_and(|value| value.as_u64() != Some(seq))) => {}
                             _ => {
+                                if ev.topic == "term.status" {
+                                    // Same guest test as the routing below.
+                                    machine.set_guest(caption_privacy.as_ref().and_then(|event| event.bool("guest")) == Some(true)
+                                        || guest_latched(appliance_body));
+                                }
                                 body.on_event(&ev, now);
                                 let outs = machine.on_event(&ev, now);
                                 pending.push((ev, Some(id)));
