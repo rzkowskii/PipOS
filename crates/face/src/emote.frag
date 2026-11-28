@@ -155,18 +155,19 @@ void main() {
     if (kind == 13) alpha *= 1.0 - smoothstep(-0.70, 0.94, p.y);
     if (kind == 19) alpha *= 1.0 - smoothstep(-0.93, 0.93, p.y);
 
+    // Glints mix toward the eye's own hottest colour, never toward white.
     vec3 fill = sqrt(uFill), core = sqrt(uCore);
     vec3 ordinary = mix(fill, core, 0.32);
     vec3 accent = ordinary;
     if (kind == 0 || kind == 19) {
         vec3 water = mix(vec3(170.0, 232.0, 255.0) / 255.0, fill, 0.25);
         float glint = kind == 0 ? 0.84 * (1.0 - smoothstep(0.15, 0.25, length(p - vec2(-0.24, 0.14)))) : 0.0;
-        accent = mix(water, vec3(1.0), glint);
+        accent = mix(water, core, glint);
         ordinary = mix(ordinary, core, glint);
     } else if (kind == 2 || kind == 20 || (kind == 1 && vSprite.z < 0.25)) {
         accent = pink;
     } else if (kind == 3 || (kind == 1 && vSprite.z < 0.9)) {
-        accent = mix(core, vec3(1.0), kind == 3 ? 0.5 : 0.4);
+        accent = core;
     } else if (kind == 1) {
         accent = sqrt(uHalo);
         ordinary = accent;
@@ -178,7 +179,7 @@ void main() {
         accent = gold;
         if (kind == 10) {
             float glint = 1.0 - smoothstep(0.08, 0.12, length(p - vec2(-0.12, 0.23)));
-            accent = mix(accent, vec3(1.0), 0.80 * glint);
+            accent = mix(accent, core, 0.80 * glint);
         }
     } else if (kind == 7) {
         accent = red;
@@ -190,7 +191,7 @@ void main() {
         accent = mix(vec3(255.0, 90.0, 20.0), vec3(255.0, 210.0, 60.0), smoothstep(-0.8, 0.9, p.y)) / 255.0;
     } else if (kind == 15) {
         float glint = 1.0 - smoothstep(0.10, 0.15, length(p - vec2(-0.31, 0.36)));
-        accent = mix(core, vec3(1.0), 0.70 * glint);
+        accent = mix(ordinary, core, 0.5 + 0.5 * glint);
     } else if (kind == 16) {
         accent = green;
     } else if (kind == 18) {

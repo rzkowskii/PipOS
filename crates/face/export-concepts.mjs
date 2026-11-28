@@ -1,4 +1,9 @@
 // Export the Face Lab catalogue for Cargo without running the preview UI.
+//
+// concept-expressions.json is the canonical, checked-in catalogue: build.rs
+// reads only that file, so the face builds without this script. Regenerating
+// it, or `node export-concepts.mjs --check`, needs the Face Lab source at
+// research/face-expression-poc/src/face-lab.src.html.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 

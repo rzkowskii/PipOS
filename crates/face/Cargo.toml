@@ -13,3 +13,7 @@ serde_json.workspace = true
 [build-dependencies]
 serde = "1"
 serde_json.workspace = true
+
+[dev-dependencies]
+# Offline GLSL checks (render.rs tests). Not built by `cargo build`.
+glslang = "0.9"

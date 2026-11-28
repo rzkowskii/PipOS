@@ -52,6 +52,17 @@ impl Spring {
                damping: eye::DEFAULT_DAMPING, flip: false, flipped: false }
     }
 
+    /// A fresh spring that keeps drawing from the source poses when a preview asked for them.
+    fn rebuilt(expression: ExprId, source_pose: bool) -> Self {
+        let mut spring = Self::new(expression);
+        if source_pose {
+            spring.source_pose = true;
+            spring.x = expression.concept_pose().to_array();
+            spring.target = spring.x;
+        }
+        spring
+    }
+
     fn step(&mut self, expression: ExprId, intensity: f32, blend: Option<(ExprId, f32)>, dt: f32, omega: f32) {
         if self.expression != expression || self.intensity != intensity || self.blend != blend || self.flip != self.flipped {
             self.guarded |= expression.is_audition() || intensity != 1.0 || blend.is_some();
@@ -948,7 +959,7 @@ impl Anim {
         self.muted = muted;
         self.unwell = unwell;
         if muted || unwell || self.asleep() {
-            self.end_reply();
+            self.hush_reply();
             self.speech_end = None;
             self.screen_concern_until = 0.0;
             self.unheard_until = 0.0;
@@ -1036,8 +1047,15 @@ impl Anim {
     }
 
     pub fn end_reply(&mut self) {
-        self.speech_cue = None;
+        self.hush_reply();
         self.speech_ended = true;
+    }
+
+    /// Drop the reply's cue and level without ending it. A link blip, a dark
+    /// panel or a mute can pass while the reply carries on, and its later
+    /// levels must still reach the eyes.
+    pub fn hush_reply(&mut self) {
+        self.speech_cue = None;
         if matches!(self.state.as_str(), "thinking" | "speaking") {
             self.emotion = None;
             self.level_target = 0.0;
@@ -1093,11 +1111,11 @@ impl Anim {
             self.lit_at = self.t;
         }
         if self.panel_blank {
-            self.end_reply();
+            self.hush_reply();
             self.screen_concern_until = 0.0;
             self.unheard_until = 0.0;
             if !was_blank {
-                self.spring = Spring::new(ExprId::Asleep);
+                self.spring = Spring::rebuilt(ExprId::Asleep, self.spring.source_pose);
             }
             self.lid_wake = None;
             self.level = 0.0;
@@ -1245,7 +1263,10 @@ impl Anim {
         if success {
             self.screen_concern_until = 0.0;
             self.glance(0.0, -0.65, 0.50);
-            self.start_gesture(Gesture::Acknowledge);
+            // Replacing a yawn or a contented smile would snap its lids in one frame.
+            if !self.gesture.is_some_and(|(g, _, _)| matches!(g, Gesture::Yawn | Gesture::Content)) {
+                self.start_gesture(Gesture::Acknowledge);
+            }
         } else {
             self.glance(0.0, 0.12, 0.72);
             self.screen_concern_until = self.t + 0.72;
@@ -1256,7 +1277,7 @@ impl Anim {
         if self.link_lost != lost {
             self.link_lost = lost;
             if lost {
-                self.end_reply();
+                self.hush_reply();
                 self.screen_concern_until = 0.0;
                 self.unheard_until = 0.0;
                 self.set_breath_effort(None);
@@ -3020,6 +3041,55 @@ mod tests {
         assert_eq!(a.target_name(), "neutral");
         a.screen_outcome(true);
         assert!(matches!(a.gesture, Some((Gesture::Acknowledge, _, _))));
+    }
+
+    #[test]
+    fn a_screen_outcome_lets_a_running_yawn_or_smile_finish() {
+        for gesture in [Gesture::Yawn, Gesture::Content] {
+            let mut a = awake(42);
+            a.start_gesture(gesture);
+            run(&mut a, 0.5);
+            let running = a.gesture;
+            a.screen_outcome(true);
+            assert_eq!(a.gesture, running, "{gesture:?}");
+            assert!(a.touch.is_some(), "the glance still answers");
+        }
+    }
+
+    #[test]
+    fn a_brief_link_loss_or_dark_panel_does_not_end_the_reply() {
+        let mut a = awake(42);
+        a.set_state("thinking", false, false);
+        a.set_state("speaking", false, false);
+        a.speech_level(0.55, Some("joy"));
+        a.set_link_lost(true);
+        assert_eq!(a.speech_cue, None);
+        assert_eq!(a.level_target, 0.0);
+        a.set_link_lost(false);
+        a.speech_level(0.7, Some("joy"));
+        assert!(a.level_target > 0.0);
+        assert_eq!(a.target_name(), "joy");
+
+        a.set_lid(Some(true), false, false);
+        a.set_lid(Some(false), false, false);
+        a.speech_level(0.7, None);
+        assert!(a.level_target > 0.0);
+
+        a.end_reply();
+        a.speech_level(0.7, None);
+        assert_eq!(a.level_target, 0.0, "a real end still holds");
+    }
+
+    #[test]
+    fn a_source_pose_preview_survives_the_lid_closing() {
+        let mut a = Anim::new(7);
+        a.set_lid(Some(false), false, true);
+        a.enable_concept_preview([false; emote::CHANNELS], true);
+        a.set_lid(Some(true), false, false);
+        assert!(a.spring.source_pose);
+        assert_eq!(a.spring.x, ExprId::Asleep.concept_pose().to_array());
+        a.set_lid(Some(false), false, false);
+        assert!(a.spring.source_pose);
     }
 
     #[test]

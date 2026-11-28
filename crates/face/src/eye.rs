@@ -386,6 +386,26 @@ mod tests {
     }
 
     #[test]
+    fn the_existing_expressions_keep_their_former_motion_data() {
+        // These were hard-coded before the table: a data edit must not quietly
+        // change idle and conversation behaviour.
+        let lively = ["attentive", "listening", "thinking", "joy", "curiosity", "surprise", "skepticism", "concern"];
+        for &id in &ExprId::ALL[..ExprId::PUBLIC.len() + 1] {
+            let name = id.name();
+            let damping = match name {
+                "joy" | "surprise" => 0.64,
+                "attentive" | "curiosity" | "skepticism" => 0.72,
+                _ => 0.82,
+            };
+            assert_eq!(id.lively(), lively.contains(&name), "{name}");
+            assert_eq!(id.damping(), damping, "{name}");
+            let m = id.motion();
+            assert_eq!((m.gaze, m.roll, m.blink_interval, m.breath), ([0.0; 2], 0.0, 1.0, 1.0), "{name}");
+            assert_eq!(m.kick, if name == "surprise" { Kick::Startle } else { Kick::None }, "{name}");
+        }
+    }
+
+    #[test]
     fn the_audition_catalogue_keeps_its_tuned_poses_before_the_concept_poses() {
         let names = ["sad", "laugh", "love", "embarrassed", "scared", "annoyed", "smug",
                      "confused", "wink", "bored", "relieved"];

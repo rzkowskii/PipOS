@@ -82,7 +82,9 @@ const PALETTES: [Palette; 11] = [
     Palette::new("red",    [1.00, 0.17, 0.11], [1.00, 0.39, 0.33], [0.74, 0.06, 0.07]),
     Palette::new("rose",   [1.00, 0.30, 0.59], [1.00, 0.59, 0.77], [0.71, 0.10, 0.35]),
     Palette::new("yellow", [1.00, 0.83, 0.16], [1.00, 0.97, 0.48], [0.72, 0.51, 0.05]),
-    Palette::new("white",  [0.89, 0.92, 0.97], [1.00, 1.00, 1.00], [0.57, 0.65, 0.78]),
+    // A pale azure core, not white: the centre and its 1.35 capture glint
+    // must stay off-white after the shader's roll-off (never white).
+    Palette::new("white",  [0.89, 0.92, 0.97], [0.80, 0.88, 1.00], [0.57, 0.65, 0.78]),
 ];
 
 /// The Face Lab tint transition uses four parallel springs. Their exact
@@ -134,16 +136,29 @@ impl Mood {
         }
     }
 
-    /// Per-expression hues use the same screen-space mixing as Face Lab.
+    /// Per-expression hues use the same screen-space mixing as Face Lab, but
+    /// mixed onto the owner's palette already in `look`: at amount 0 the eyes
+    /// keep that palette exactly, and at amount 1 they match Face Lab's fill.
     pub fn apply(self, look: &mut Look) {
         let [amount, red, green, blue] = self.value;
         let amount = amount.clamp(0.0, 1.0);
         let accent = [red, green, blue].map(|channel| channel.clamp(0.0, 1.0));
-        let fill = mix([44.0 / 255.0, 237.0 / 255.0, 1.0], accent, amount);
-        look.fill = fill;
-        look.core = mix(fill, [1.0; 3], 0.5 * (1.0 - 0.7 * amount));
-        look.halo = mix([0.0, 176.0 / 255.0, 1.0], fill, 0.5);
+        // Face Lab's core at full tint is 15% toward white; never more, so a
+        // pale accent's centre stays off-white even under the capture glint.
+        let hot = mix(accent, [1.0; 3], 0.15);
+        look.fill = mix(look.fill, accent, amount);
+        look.core = off_white(mix(look.core, hot, amount));
+        look.halo = mix(look.halo, accent, 0.5 * amount);
     }
+}
+
+/// Two pale colours (the white palette and a gold tint, say) can mix to a
+/// grey-white. Holding the dimmest channel at or under 0.82 keeps the core,
+/// and its 1.35 capture glint, off white without touching any palette core.
+fn off_white(mut core: [f32; 3]) -> [f32; 3] {
+    let dimmest = (0..3).min_by(|&a, &b| core[a].total_cmp(&core[b])).unwrap_or(0);
+    core[dimmest] = core[dimmest].min(0.82);
+    core
 }
 
 fn mix(from: [f32; 3], to: [f32; 3], amount: f32) -> [f32; 3] {
@@ -205,6 +220,48 @@ mod tests {
         };
         for (left, right) in transition(20).into_iter().zip(transition(60)) {
             assert!((left - right).abs() < 1e-5);
+        }
+    }
+
+    /// eye.frag's screen encoding: gamma 2, then the soft roll-off above 0.92.
+    fn encode(screen: f32, linear_gain: f32) -> f32 {
+        let v = (screen * screen * linear_gain).sqrt();
+        v.min(0.92) + 0.08 * (1.0 - (-(v - 0.92).max(0.0) / 0.08).exp())
+    }
+
+    /// The core and its 1.35 capture glint never encode to white: the
+    /// dimmest channel stays at least a dozen 8-bit levels under the 254
+    /// that a pure-white core reaches after the roll-off.
+    fn assert_never_white(core: [f32; 3], what: &str) {
+        for gain in [0.35, 0.6, 1.0, 1.35] {
+            let dimmest = core.map(|c| encode(c, gain)).into_iter().fold(1.0, f32::min);
+            assert!(dimmest <= 0.95, "{what} core {core:?} at gain {gain} encodes to {dimmest}");
+        }
+    }
+
+    #[test]
+    fn no_palette_core_encodes_to_white() {
+        for palette in PALETTES {
+            assert_never_white(palette.colours[1], palette.name);
+        }
+    }
+
+    #[test]
+    fn neutral_mood_keeps_the_chosen_palette_and_no_tint_whitens_the_core() {
+        for palette in PALETTES {
+            let mut chosen = Look::default();
+            palette.apply(&mut chosen);
+            let mut tinted = chosen;
+            Mood::default().apply(&mut tinted);
+            assert_eq!([tinted.fill, tinted.core, tinted.halo], [chosen.fill, chosen.core, chosen.halo],
+                       "{}", palette.name);
+            for &id in ExprId::ALL {
+                for intensity in [0.25, 0.5, 1.0, 1.5] {
+                    let mut look = chosen;
+                    Mood::still(id.visual().tint, intensity).apply(&mut look);
+                    assert_never_white(look.core, &format!("{} {}", palette.name, id.name()));
+                }
+            }
         }
     }
 }

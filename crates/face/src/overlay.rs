@@ -18,6 +18,15 @@ use std::time::{Duration, Instant};
 /// Longest caption kept, in characters (the newest part is kept).
 const KEEP: usize = 360;
 const CAPTION_HOLD: Duration = Duration::from_secs(16);
+/// Most clauses held back for the voice's receipts (mind/played.py).
+const PENDING: usize = 64;
+
+/// A reply's clause waiting for the voice to report it playing.
+struct Pending {
+    reply: String,
+    seq: u64,
+    text: String,
+}
 
 #[derive(Default)]
 pub struct Captions {
@@ -29,6 +38,15 @@ pub struct Captions {
     guest: bool,
     /// The reply being spoken has ended; the next clause starts a new one.
     said_done: bool,
+    /// The reply now in the caption, by its token (`say.request` `reply`).
+    said_reply: Option<String>,
+    /// A reply's clauses are captioned when the voice reports their
+    /// first audio (`say.played`), so an interrupted reply never shows words
+    /// that were not said. Until then they wait here.
+    pending: Vec<Pending>,
+    /// The voice has reported playback on this link. One that never does
+    /// (an older voice) has its clauses captioned when its reply ends.
+    receipts_seen: bool,
     state: String,
     muted: bool,
     unwell: bool,
@@ -67,6 +85,8 @@ impl Captions {
         self.heard.clear();
         self.hearing.clear();
         self.said.clear();
+        self.pending.clear();
+        self.said_reply = None;
         self.via = None;
         self.last_caption = None;
         self.said_done = true;
@@ -142,21 +162,79 @@ impl Captions {
             }
             "say.request" => {
                 let text = ev.str("text").unwrap_or("").trim();
-                if !text.is_empty() {
-                    if self.said_done {
-                        self.said.clear();
-                        self.said_done = false;
+                let reply = ev.str("reply").filter(|reply| !reply.is_empty());
+                let seq = ev.data.get("seq").and_then(|seq| seq.as_u64());
+                if let (Some(reply), Some(seq)) = (reply, seq) {
+                    // A reply with a token: shown as the voice plays it, and its
+                    // end comes with the voice's final receipt.
+                    if !text.is_empty() {
+                        if self.pending.len() == PENDING {
+                            self.pending.remove(0);
+                        }
+                        self.pending.push(Pending { reply: reply.to_string(), seq, text: text.to_string() });
                     }
-                    let joined = if self.said.is_empty() { text.to_string() } else { format!("{} {text}", self.said) };
-                    self.said = keep_tail(&joined);
+                    return;
+                }
+                if !text.is_empty() {
+                    self.show(None, text);
                 }
                 if ev.bool("last") == Some(true) {
                     self.said_done = true;
                 }
                 self.changed_caption();
             }
+            "say.played" => {
+                self.receipts_seen = true;
+                let Some(reply) = ev.str("reply") else { return };
+                if ev.bool("final") == Some(true) {
+                    // Whatever of it is still waiting never played.
+                    self.pending.retain(|clause| clause.reply != reply);
+                    if self.said_reply.as_deref() == Some(reply) {
+                        self.said_done = true;
+                    }
+                    return;
+                }
+                let Some(seq) = ev.data.get("seq").and_then(|seq| seq.as_u64()) else { return };
+                let Some(at) = self.pending.iter().position(|clause| clause.reply == reply && clause.seq == seq) else {
+                    return;
+                };
+                // Earlier clauses of this reply that are still waiting were skipped.
+                let mut kept = Vec::with_capacity(self.pending.len());
+                let mut playing = None;
+                for (index, clause) in self.pending.drain(..).enumerate() {
+                    if index == at {
+                        playing = Some(clause);
+                    } else if clause.reply != reply || clause.seq > seq {
+                        kept.push(clause);
+                    }
+                }
+                self.pending = kept;
+                if let Some(clause) = playing {
+                    self.show(Some(clause.reply), &clause.text);
+                    self.changed_caption();
+                }
+            }
+            "say.done" if ev.bool("final") == Some(true) && !self.receipts_seen => {
+                // A voice that never reports playback finished its reply.
+                for clause in std::mem::take(&mut self.pending) {
+                    self.show(Some(clause.reply), &clause.text);
+                }
+                self.said_done = true;
+                self.changed_caption();
+            }
             _ => {}
         }
+    }
+
+    /// Add a clause to the caption. A clause of another reply starts a new one.
+    fn show(&mut self, reply: Option<String>, text: &str) {
+        if self.said_done || self.said_reply != reply {
+            self.said.clear();
+            self.said_done = false;
+        }
+        self.said_reply = reply;
+        let joined = if self.said.is_empty() { text.to_string() } else { format!("{} {text}", self.said) };
+        self.said = keep_tail(&joined);
     }
 
     pub fn picture(&self, font: &Font, columns: usize, show_heard: bool, show_cost: bool) -> Option<Picture> {
@@ -224,9 +302,12 @@ impl Captions {
             self.state.clear();
             self.changed = true;
         }
-        if !self.heard.is_empty() || !self.hearing.is_empty() || !self.said.is_empty() || self.via.is_some() {
+        if !self.heard.is_empty() || !self.hearing.is_empty() || !self.said.is_empty() || self.via.is_some()
+            || !self.pending.is_empty()
+        {
             self.forget();
         }
+        self.receipts_seen = false;
     }
 
     pub fn health_lines(&self, health: &Health, columns: usize) -> Vec<String> {
@@ -382,6 +463,105 @@ mod tests {
         assert!(!c.toggle());
         let closed = c.lines(&health(), 100).join("\n");
         assert!(!closed.contains("Hello") && !closed.contains("what time"), "closing forgets: {closed}");
+    }
+
+    fn clause(reply: &str, seq: u64, text: &str) -> Event {
+        Event::new("say.request").with("text", text).with("seq", seq).with("last", text.is_empty()).with("reply", reply)
+    }
+
+    fn played(reply: &str, seq: u64) -> Event {
+        Event::new("say.played").with("reply", reply).with("seq", seq)
+    }
+
+    fn ended(reply: &str, stopped: bool) -> Event {
+        Event::new("say.played").with("reply", reply).with("final", true).with("stopped", stopped)
+    }
+
+    fn said(c: &Captions) -> String {
+        c.lines(&health(), 100).into_iter().find(|l| l.starts_with("said")).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_model_reply_is_captioned_as_the_voice_plays_it() {
+        let mut c = Captions::default();
+        c.toggle();
+        for (seq, text) in [(1, "One."), (2, "Two."), (3, "Three."), (4, "")] {
+            c.event(&clause("aaaaaaaaaaaaaaaa", seq, text));
+        }
+        assert_eq!(said(&c), "said    (nothing yet)", "handed to the voice is not said");
+        c.event(&played("aaaaaaaaaaaaaaaa", 1));
+        assert_eq!(said(&c), "said    One.");
+        c.event(&played("aaaaaaaaaaaaaaaa", 2));
+        assert_eq!(said(&c), "said    One. Two.");
+        // Esc: the voice stops, and the third clause never played.
+        c.event(&ended("aaaaaaaaaaaaaaaa", true));
+        c.event(&played("aaaaaaaaaaaaaaaa", 3));
+        assert_eq!(said(&c), "said    One. Two.", "a late receipt shows nothing");
+        assert!(c.pending.is_empty());
+        // The next reply starts a caption of its own.
+        c.event(&clause("bbbbbbbbbbbbbbbb", 1, "Hello."));
+        c.event(&played("bbbbbbbbbbbbbbbb", 1));
+        assert_eq!(said(&c), "said    Hello.");
+        // A clause without a token (the camera's description) is shown as before, on its own.
+        c.event(&Event::new("say.request").with("text", "Okay.").with("seq", 1).with("last", false));
+        assert_eq!(said(&c), "said    Okay.");
+    }
+
+    #[test]
+    fn a_clause_the_voice_skipped_is_never_captioned() {
+        let mut c = Captions::default();
+        c.toggle();
+        for (seq, text) in [(1, "One."), (2, "Two."), (3, "Three.")] {
+            c.event(&clause("aaaaaaaaaaaaaaaa", seq, text));
+        }
+        c.event(&played("aaaaaaaaaaaaaaaa", 1));
+        c.event(&played("aaaaaaaaaaaaaaaa", 3));
+        c.event(&played("aaaaaaaaaaaaaaaa", 2));
+        assert_eq!(said(&c), "said    One. Three.");
+        c.event(&played("cccccccccccccccc", 1));
+        assert_eq!(said(&c), "said    One. Three.", "another reply's receipt");
+    }
+
+    #[test]
+    fn a_voice_that_never_reports_is_captioned_when_its_reply_ends() {
+        let mut c = Captions::default();
+        c.toggle();
+        c.event(&clause("aaaaaaaaaaaaaaaa", 1, "One."));
+        c.event(&clause("aaaaaaaaaaaaaaaa", 2, "Two."));
+        c.event(&Event::new("say.done").with("final", true));
+        assert_eq!(said(&c), "said    One. Two.");
+        // Once the voice has reported playback, its say.done shows nothing more.
+        c.event(&clause("bbbbbbbbbbbbbbbb", 1, "Three."));
+        c.event(&clause("bbbbbbbbbbbbbbbb", 2, "Four."));
+        c.event(&played("bbbbbbbbbbbbbbbb", 1));
+        c.event(&Event::new("say.done").with("final", true));
+        assert_eq!(said(&c), "said    Three.");
+        c.link_lost();
+        assert!(!c.receipts_seen, "a new link may bring another voice");
+    }
+
+    #[test]
+    fn clauses_waiting_for_the_voice_are_dropped_with_the_other_words() {
+        let mut c = Captions::default();
+        c.event(&clause("aaaaaaaaaaaaaaaa", 1, "Shut."));
+        assert!(c.pending.is_empty(), "nothing is kept while the overlay is closed");
+        c.toggle();
+        c.event(&clause("aaaaaaaaaaaaaaaa", 2, "Open."));
+        assert_eq!(c.pending.len(), 1);
+        c.toggle();
+        assert!(c.pending.is_empty(), "closing forgets");
+        c.toggle();
+        c.event(&clause("aaaaaaaaaaaaaaaa", 3, "Guest."));
+        c.event(&Event::new("app.privacy").with("guest", true));
+        assert!(c.pending.is_empty(), "a guest's arrival forgets");
+        c.event(&Event::new("app.privacy").with("guest", false));
+        c.event(&clause("aaaaaaaaaaaaaaaa", 4, "Lost."));
+        c.link_lost();
+        assert!(c.pending.is_empty(), "a lost link forgets");
+        for seq in 0..(PENDING as u64 + 5) {
+            c.event(&clause("aaaaaaaaaaaaaaaa", seq + 10, "Many."));
+        }
+        assert_eq!(c.pending.len(), PENDING, "bounded");
     }
 
     #[test]

@@ -517,13 +517,20 @@ fn run() -> Result<(), String> {
     let mut renderer = unsafe { render::Renderer::new(&gl)? };
     let effects_enabled = args.effects || (!args.override_layers
         && std::env::var("BEING_FACE_EFFECTS").as_deref() == Ok("1"));
+    // Optional layers never take the live face down: a driver that rejects
+    // their shaders leaves it eyes-only. Stills fail instead, so a lab
+    // capture never silently lacks the layer it asked for.
     if effects_enabled {
-        unsafe { renderer.enable_emotes(&gl)? };
+        if let Err(error) = unsafe { renderer.enable_emotes(&gl) } {
+            if offscreen {
+                return Err(error);
+            }
+        }
     }
     let mut look = render::Look::default();
     let mut decor = decor::Decor::default();
     let mut mood = colour::Mood::default();
-    look.accent_emotes = effects_enabled;
+    look.accent_emotes = accent_emotes(effects_enabled, args.mood_colour);
 
     if let Some(marks) = args.marks {
         look.marks = marks;
@@ -730,6 +737,11 @@ fn run() -> Result<(), String> {
                         }
                         continue;
                     }
+                    // M is the plain keyboard's mic mute; it must still work
+                    // while Options or the Quick Menu holds the keyboard.
+                    if link.as_mut().is_some_and(|link| link.chrome_mute(key, repeat)) {
+                        continue;
+                    }
                     if let Some(link) = link.as_mut().filter(|link| link.side.options.open()) {
                         if ![Keycode::F1, Keycode::F2, Keycode::F9, Keycode::F10].contains(&key) {
                             let return_to_menu = key == Keycode::Escape && !repeat && link.side.options.opened_from_menu();
@@ -871,8 +883,7 @@ fn run() -> Result<(), String> {
                 keys::Action::Send(ev) => {
                     if let Some(link) = &mut link {
                         if key == keys::Media::Launchpad {
-                            link.side.menu.set_open(false);
-                            link.side.options.set_open(false);
+                            link.close_chrome();
                         }
                         link.send(ev);
                     }
@@ -1184,8 +1195,9 @@ fn run() -> Result<(), String> {
             let (w, h) = window.drawable_size();
             (w as i32, h as i32)
         };
-        let captions_open = link.as_ref().is_some_and(|link| link.side.captions.on);
-        let showing_captions = link.as_ref().is_some_and(|link| link.side.captions.displaying(now));
+        // The saved Captions setting only collects words; what clears the
+        // screen for them is a caption actually being shown.
+        let showing_captions = caption_on_screen(link.as_ref().map(|link| &link.side.captions), now);
         if panel_blank || guest || !showing_captions {
             if let Some(old) = caption_tex.take() {
                 unsafe { renderer.delete(&gl, old) };
@@ -1287,7 +1299,7 @@ fn run() -> Result<(), String> {
         let overlays: Vec<(&render::Texture, i32)> =
             overlay_tex.iter().map(|t| (t, 8)).chain(note_tex.iter().map(|t| (t, 4))).collect();
         let notice = link.as_ref().and_then(|link| link.night_notice(now)).filter(|_| {
-            !panel_blank && !anim.asleep() && panel_amount == 0.0 && !privacy.guest && !captions_open && !health_open
+            !panel_blank && !anim.asleep() && panel_amount == 0.0 && !privacy.guest && !showing_captions && !health_open
                 && level_tex.is_none()
         });
         if notice != night_notice.as_ref().map(|(stages, _)| *stages) {
@@ -1303,7 +1315,7 @@ fn run() -> Result<(), String> {
             }
         }
         let layer_space = panel_amount == 0.0 && shown.is_none() && !chrome_focus
-            && !captions_open && !health_open && level_tex.is_none() && night_notice.is_none();
+            && !showing_captions && !health_open && level_tex.is_none() && night_notice.is_none();
         let use_prefs = !args.override_layers;
         let layers = decor::Layers {
             brows: args.preview_brows || (use_prefs && prefs.brows),
@@ -1315,34 +1327,39 @@ fn run() -> Result<(), String> {
             let start = if args.audition.is_some() { AUDITION_START } else { 0.45 };
             motion.viseme = speech.sample(clock - start);
         }
-        if args.mood_colour || (use_prefs && prefs.mood_colour) {
+        let mood_colour = args.mood_colour || (use_prefs && prefs.mood_colour);
+        if mood_colour {
             prefs.palette(&mut look);
-            if let Some(motion) = motion {
-                let tint = mood_tint(motion.expression, motion.blend);
-                mood.update(tint, motion.strength, dt);
-                mood.apply(&mut look);
-            } else {
-                mood = colour::Mood::default();
-            }
         }
         if let Some(palette) = args.palette {
             palette.apply(&mut look);
+        }
+        if mood_colour {
+            // The tint mixes onto the owner's palette. While an overlay hides
+            // the layers it eases back to neutral (the palette) rather than
+            // snapping, so overlays coming and going never flip the colour.
+            let (tint, strength) = motion.map_or((ExprId::Neutral.visual().tint, 1.0), |motion| {
+                (mood_tint(motion.expression, motion.blend), motion.strength)
+            });
+            mood.update(tint, strength, dt);
+            mood.apply(&mut look);
         }
         decor.update(layers, motion, dt);
         look.decor = decor;
         let eyes = prefs.eyes(pose.uniforms());
         let show_effects = effects_enabled || (use_prefs && prefs.effects);
-        look.accent_emotes = show_effects;
+        look.accent_emotes = accent_emotes(show_effects, mood_colour);
         let effects = if show_effects && layer_space { anim.emote_motion(offline_scene) } else { None };
         look.glitch = effects.map_or([0.0; 4], |(effects, _, age)| emote::glitch(effects[emote::GLITCH], age));
         look.emotes = effects.map_or_else(emote::Sprites::default, |(effects, burst, age)| {
             emote::sprites(&effects, burst, &eyes, age, seed)
         });
+        // A failed compile is logged once and the eyes draw without it.
         if decor.active() || look.glitch[3] > 0.0 {
-            unsafe { renderer.enable_decor(&gl)? };
+            let _ = unsafe { renderer.enable_decor(&gl) };
         }
         if look.emotes.len() > 0 {
-            unsafe { renderer.enable_emotes(&gl)? };
+            let _ = unsafe { renderer.enable_emotes(&gl) };
         }
         let widget_now = Instant::now();
         let widget_link = link.as_ref().filter(|_| !guest && !privacy.guest);
@@ -1427,7 +1444,7 @@ fn run() -> Result<(), String> {
             rate = rate.max(pace::hz(pace::Activity::Calm, software));
         } else if idle_unchanged {
             rate = pace::hz(pace::Activity::Blank, software);
-        } else if let Some(idle) = idle_trial.filter(|_| !captions_open && !health_open && level_tex.is_none() && anim.trial_idle()) {
+        } else if let Some(idle) = idle_trial.filter(|_| !showing_captions && !health_open && level_tex.is_none() && anim.trial_idle()) {
             rate = rate.min(idle);
         }
         if look.decor.moving() || look.emotes.len() > 0 || look.glitch[3] > 0.0 {
@@ -1936,6 +1953,18 @@ fn scene(anim: &mut anim::Anim, name: &str, from: f64, to: f64) -> f32 {
     0.0
 }
 
+/// Accent glyph colours (pink, gold, red, green) belong to the opt-in mood
+/// colour layer; with effects alone the glyphs stay in the eyes' own colours.
+/// Whether a caption is on screen now. The saved Captions setting alone only
+/// collects words, so it must not hide the layers, the night notice or idle pacing.
+fn caption_on_screen(captions: Option<&overlay::Captions>, now: std::time::Instant) -> bool {
+    captions.is_some_and(|captions| captions.displaying(now))
+}
+
+fn accent_emotes(effects: bool, mood_colour: bool) -> bool {
+    effects && mood_colour
+}
+
 fn mood_tint(expression: ExprId, blend: Option<(ExprId, f32)>) -> eye::MoodTint {
     let primary = expression.visual().tint;
     let Some((other, weight)) = blend else { return primary };
@@ -1959,11 +1988,11 @@ fn stills(
         let pose = if args.source_pose { expression.concept_pose() } else { expression.pose() };
         let eyes = pose.uniforms();
         let mut look = *look;
-        if args.mood_colour {
-            colour::Mood::still(expression.visual().tint, 1.0).apply(&mut look);
-        }
         if let Some(palette) = args.palette {
             palette.apply(&mut look);
+        }
+        if args.mood_colour {
+            colour::Mood::still(expression.visual().tint, 1.0).apply(&mut look);
         }
         let layers = decor::Layers { brows: args.preview_brows, mouth: args.preview_mouth, details: args.preview_details };
         // Freeze the effects at the same point in their motion on every still.
@@ -2041,6 +2070,25 @@ mod tests {
     use super::{anim, asks_attention, level_rect, Launcher, ATTEND_KEYS};
     use sdl2::keyboard::Keycode;
     use std::time::Duration;
+
+    #[test]
+    fn accent_glyph_colours_need_the_mood_colour_layer() {
+        assert!(!super::accent_emotes(true, false), "effects alone stay in the eyes' colours");
+        assert!(super::accent_emotes(true, true));
+        assert!(!super::accent_emotes(false, true));
+    }
+
+    #[test]
+    fn the_saved_captions_setting_alone_leaves_room_for_the_layers() {
+        // layer_space, the night notice and idle pacing all key off a caption
+        // being shown, not off the setting that collects words.
+        let mut captions = super::overlay::Captions::default();
+        captions.set_enabled(true);
+        let now = std::time::Instant::now();
+        assert!(captions.on);
+        assert!(!super::caption_on_screen(Some(&captions), now), "the setting alone shows nothing");
+        assert!(!super::caption_on_screen(None, now));
+    }
 
     #[test]
     fn audition_arguments_select_a_bounded_native_scene() {

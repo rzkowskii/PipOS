@@ -22,6 +22,8 @@ const SUBS: &[&str] = &[
     "say.stop",
     "say.done",
     "say.request",
+    // Which clauses of a model reply really played: captions follow it (no words).
+    "say.played",
     "stem.beat",
     "body.lid",
     "body.state",
@@ -299,6 +301,31 @@ impl Link {
         }
     }
 
+    /// Close the Quick Menu and Options from the face side (the Launchpad
+    /// key), with the same dismissal receipt as Esc, so the mind does not
+    /// keep treating follow-ups as about a menu that is gone.
+    pub fn close_chrome(&mut self) {
+        self.side.options.set_open(false);
+        if self.side.menu.open() {
+            self.side.menu.set_open(false);
+            self.menu_action(MENU_DISMISSED);
+        }
+    }
+
+    /// M mutes the mic even while Options or an unsearched Quick Menu holds
+    /// the keyboard: neither has a use for the letter, and a privacy key
+    /// must not silently do nothing. True when the key was taken.
+    pub fn chrome_mute(&mut self, key: Keycode, repeat: bool) -> bool {
+        let held = self.side.options.open() || (self.side.menu.open() && !self.side.menu.searching());
+        if key != Keycode::M || !held {
+            return false;
+        }
+        if !repeat {
+            self.send(Event::new("key.mute"));
+        }
+        true
+    }
+
     fn online(&self, now: Instant) -> Option<&Online> {
         self.side.online.as_ref().filter(|online| {
             self.client.is_some() && !self.quiet() && !self.side.menu.guest()
@@ -406,7 +433,9 @@ impl Link {
             }
         }
         if closed {
-            anim.end_reply();
+            // A reconnect can land mid-reply with the state still speaking, so
+            // quiet the eyes without ending the reply: later levels still count.
+            anim.hush_reply();
             self.client = None;
             self.side.camera = false;
             self.side.online = None;
@@ -644,11 +673,14 @@ mod tests {
         assert_eq!(event().topic, "hello");
         link.lid_seq = Some(12);
 
-        for key in [Keycode::Escape, Keycode::F6] {
+        // F15 stands in for the Launchpad media key, which SDL never sees.
+        for key in [Keycode::Escape, Keycode::F6, Keycode::F15] {
             link.toggle_menu();
             assert!(link.side.menu.open());
             if key == Keycode::Escape {
                 link.menu_key(key, false, false, Instant::now());
+            } else if key == Keycode::F15 {
+                link.close_chrome();
             } else {
                 link.toggle_menu();
             }
@@ -659,6 +691,20 @@ mod tests {
             assert_eq!(receipt.str("via"), Some("key"));
             assert_eq!(receipt.data["lid_seq"].as_u64(), Some(12));
         }
+
+        // M still mutes while Options or the unsearched menu is open.
+        link.side.options.set_open(true);
+        assert!(link.chrome_mute(Keycode::M, false));
+        assert_eq!(event().topic, "key.mute");
+        assert!(link.chrome_mute(Keycode::M, true), "a held M is taken, not typed");
+        assert!(!link.chrome_mute(Keycode::Down, false));
+        link.close_chrome();
+        assert!(!link.chrome_mute(Keycode::M, false), "with nothing open M takes the ordinary path");
+        link.toggle_menu();
+        assert!(link.chrome_mute(Keycode::M, false));
+        assert_eq!(event().topic, "key.mute");
+        link.close_chrome();
+        assert_eq!(event().str("id"), Some(MENU_DISMISSED));
     }
 
     #[test]

@@ -93,6 +93,13 @@ impl Default for Look {
     }
 }
 
+fn remember_failure(slot: &mut Option<String>, layer: &str, error: String) -> String {
+    let error = format!("the {layer} shader is unavailable, drawing eyes only: {error}");
+    eprintln!("face: {error}");
+    *slot = Some(error.clone());
+    error
+}
+
 /// Screen colour to the shader's linear light (gamma 2, matching its output).
 fn linear(c: [f32; 3]) -> [f32; 3] {
     c.map(|v| v * v)
@@ -117,6 +124,20 @@ fn grid(h: i32, depth: f32) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emote_glints_mix_toward_the_core_never_white() {
+        let source = emote::FRAG.replace(' ', "");
+        assert!(!source.contains("vec3(1.0)"), "a glyph glint mixes toward white");
+    }
+
+    #[test]
+    fn a_failed_optional_shader_is_remembered_and_reported_once() {
+        let mut slot = None;
+        let error = remember_failure(&mut slot, "effects", "link failed".into());
+        assert!(error.contains("eyes only") && error.contains("link failed"));
+        assert_eq!(slot.as_deref(), Some(error.as_str()));
+    }
 
     #[test]
     fn grid_is_three_pixels_on_the_laptop_and_absent_when_tiny() {
@@ -258,6 +279,10 @@ pub struct Renderer {
     emote: Option<EmoteProgram>,
     eye: EyeProgram,
     decorated: Option<EyeProgram>,
+    /// Why an optional program would not build. Kept so a driver that
+    /// rejects it is reported once and not recompiled every frame.
+    decor_failed: Option<String>,
+    emote_failed: Option<String>,
     vao: glow::VertexArray,
     quad: glow::Program,
     u_rect: Option<glow::UniformLocation>,
@@ -307,19 +332,22 @@ pub fn clip(rect: Rect, w: i32, h: i32) -> [f32; 4] {
     ]
 }
 
+/// Prepended to every shader on OpenGL ES 3.0 (the laptop's fallback context).
+const GLES_HEADER: &str = "#version 300 es\nprecision highp float;\nprecision highp int;\n";
+/// Prepended to every shader on desktop OpenGL 3.3 core.
+const GL_HEADER: &str = "#version 330 core\n";
+/// Added after the header for the eye program with the optional face layers.
+const DECOR_DEFINE: &str = "#define FACE_DECOR\n";
+
 fn shader_header(gl: &glow::Context) -> &'static str {
-    if gl.version().is_embedded {
-        "#version 300 es\nprecision highp float;\nprecision highp int;\n"
-    } else {
-        "#version 330 core\n"
-    }
+    if gl.version().is_embedded { GLES_HEADER } else { GL_HEADER }
 }
 
 impl EyeProgram {
     unsafe fn new(gl: &glow::Context, decorated: bool) -> Result<Self, String> {
         let header = shader_header(gl);
         let program = if decorated {
-            let header = format!("{header}#define FACE_DECOR\n");
+            let header = format!("{header}{DECOR_DEFINE}");
             program(gl, &header, VERT, FRAG)?
         } else {
             program(gl, header, VERT, FRAG)?
@@ -357,6 +385,8 @@ impl Renderer {
             emote: None,
             eye,
             decorated: None,
+            decor_failed: None,
+            emote_failed: None,
             vao,
             quad,
             u_rect: loc(quad, "uRect"),
@@ -366,19 +396,31 @@ impl Renderer {
     }
 
     /// Keep the eyes-only startup path on the small base shader.
+    /// A failure leaves the eyes-only program in use (draw_in falls back) and
+    /// is remembered, so it is logged once and never retried.
     pub unsafe fn enable_decor(&mut self, gl: &glow::Context) -> Result<(), String> {
+        if let Some(error) = &self.decor_failed {
+            return Err(error.clone());
+        }
         if self.decorated.is_none() {
-            self.decorated = Some(EyeProgram::new(gl, true)?);
+            match EyeProgram::new(gl, true) {
+                Ok(program) => self.decorated = Some(program),
+                Err(error) => return Err(remember_failure(&mut self.decor_failed, "face layers", error)),
+            }
         }
         Ok(())
     }
 
     /// Compile the optional sprite pass when effects are requested.
     pub unsafe fn enable_emotes(&mut self, gl: &glow::Context) -> Result<(), String> {
+        if let Some(error) = &self.emote_failed {
+            return Err(error.clone());
+        }
         if self.emote.is_some() {
             return Ok(());
         }
-        let program = program(gl, shader_header(gl), emote::VERT, emote::FRAG)?;
+        let program = program(gl, shader_header(gl), emote::VERT, emote::FRAG)
+            .map_err(|error| remember_failure(&mut self.emote_failed, "effects", error))?;
         self.emote = Some(EmoteProgram {
             program,
             res: gl.get_uniform_location(program, "uRes"),
@@ -609,5 +651,85 @@ impl Renderer {
             self.draw(gl, w as i32, h as i32, eyes, look);
             Ok(())
         })
+    }
+}
+
+/// Offline compile checks for every shader under both headers the face uses, so
+/// a shader that only the laptop's GLES 3.0 driver would reject fails here first
+/// instead of at run time. glslang parses each stage with no client API; its
+/// linker applies Vulkan rules, so stage interfaces are matched separately.
+#[cfg(test)]
+mod glsl {
+    use super::{emote, DECOR_DEFINE, FRAG, GLES_HEADER, GL_HEADER, QUAD_FRAG, QUAD_VERT, VERT};
+    use glslang::{Compiler, CompilerOptions, ShaderInput, ShaderSource, ShaderStage, Target};
+
+    const HEADERS: [(&str, &str); 2] = [("GLES 3.0", GLES_HEADER), ("GL 3.3 core", GL_HEADER)];
+
+    fn parse(stage: ShaderStage, header: &str, source: &str) -> Result<(), String> {
+        let compiler = Compiler::acquire().expect("glslang compiler");
+        let source = ShaderSource::from(format!("{header}{source}"));
+        let options = CompilerOptions { target: Target::None(None), ..Default::default() };
+        let input = ShaderInput::new(&source, stage, &options, None::<&[(&str, Option<&str>)]>, None)
+            .map_err(|error| format!("{error:?}"))?;
+        compiler.create_shader(input).map(|_| ()).map_err(|error| error.to_string())
+    }
+
+    /// The face's programs as (name, defines after the header, vertex, fragment).
+    fn programs() -> [(&'static str, &'static str, &'static str, &'static str); 4] {
+        [
+            ("eyes", "", VERT, FRAG),
+            ("eyes with face layers", DECOR_DEFINE, VERT, FRAG),
+            ("quad", "", QUAD_VERT, QUAD_FRAG),
+            ("emotes", "", emote::VERT, emote::FRAG),
+        ]
+    }
+
+    /// `[flat] in|out type name[...];` declarations at the top level of a stage.
+    fn interface(source: &str, direction: &str) -> Vec<String> {
+        let mut found: Vec<String> = source
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or("").trim())
+            .filter(|line| {
+                let rest = line.strip_prefix("flat ").unwrap_or(line);
+                rest.starts_with(direction) && rest[direction.len()..].starts_with(' ') && line.ends_with(';')
+            })
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ").replacen(&format!("{direction} "), "", 1))
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn every_shader_compiles_for_gles_3_and_gl_3_3() {
+        let mut failures = Vec::new();
+        for (target, header) in HEADERS {
+            for (name, defines, vert, frag) in programs() {
+                let header = format!("{header}{defines}");
+                for (stage, kind, source) in [(ShaderStage::Vertex, "vertex", vert), (ShaderStage::Fragment, "fragment", frag)] {
+                    if let Err(error) = parse(stage, &header, source) {
+                        failures.push(format!("{name} {kind} shader on {target}:\n{error}"));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn each_vertex_stage_feeds_exactly_what_its_fragment_stage_reads() {
+        for (name, _, vert, frag) in programs() {
+            let outputs = interface(vert, "out");
+            assert!(!outputs.is_empty(), "{name}: no varyings found, so the comparison would prove nothing");
+            assert_eq!(outputs, interface(frag, "in"), "{name}: vertex outputs and fragment inputs differ");
+        }
+    }
+
+    #[test]
+    fn the_gles_check_rejects_what_only_desktop_gl_allows() {
+        // An implicit int-to-float conversion is legal in GLSL 3.30 but not in
+        // GLSL ES 3.00, which is exactly the kind of slip this test exists for.
+        let slip = "out vec4 colour;\nvoid main() { float x = 1; colour = vec4(x); }\n";
+        assert!(parse(ShaderStage::Fragment, GL_HEADER, slip).is_ok());
+        assert!(parse(ShaderStage::Fragment, GLES_HEADER, slip).is_err());
     }
 }

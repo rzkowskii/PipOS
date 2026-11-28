@@ -156,10 +156,15 @@ float decorCoverage(vec2 p, float px) {
     vec4 curve = uDecor[5]; // skew, arc, opening, roundness
     vec4 detail = uDecor[6]; // cat curve, wave, zigzag, tongue
     vec3 ink = uDecor[7].xyz; // lower lip, alpha, wave phase
-    if (ink.y > 0.0 && abs(p.x - m.x) < m.y + 0.15 && p.y > -0.86 && p.y < -0.32) {
-        vec2 eyeCenter = 0.5 * (uE[0].xy + uE[4].xy);
+    vec2 eyeCenter = 0.5 * (uE[0].xy + uE[4].xy);
+    float gap = min(0.26 * curve.z, 0.22);
+    float center = max(m.z + m.w + 0.20 * eyeCenter.y, -0.80 + gap + ink.x + max(curve.y, 0.0));
+    // The window's top follows the raised centre, so a wide-open mouth such
+    // as horror keeps its upper lip: skew, an upturned arc, wave, zigzag, the
+    // stroke's cap and a pixel are the most it can rise above the centre.
+    float reach = 0.5 * abs(curve.x) + max(-curve.y, 0.0) + 0.022 * abs(detail.y) + 0.014 * abs(detail.z) + 0.017 + px;
+    if (ink.y > 0.0 && abs(p.x - m.x) < m.y + 0.15 && p.y > -0.86 && p.y < max(center + reach, -0.32)) {
         float width = max(0.025, m.y);
-        float gap = min(0.26 * curve.z, 0.22);
         float roundness = clamp(max(curve.w, gap / (2.0 * width) * 1.1 - 0.35), 0.0, 1.0);
         float x = p.x - m.x - 0.20 * eyeCenter.x;
         float along = clamp(x / width, -1.0, 1.0);
@@ -168,7 +173,6 @@ float decorCoverage(vec2 p, float px) {
         float catDip = 0.07 * clamp(width / 0.2, 0.4, 1.4) * (1.0 - cat * cat);
         float wave = detail.y * 0.022 * sin(along * 8.79645943 + ink.z) * pow(profile, 0.35);
         float zig = detail.z * 0.014 * (2.0 * abs(mod(along * 4.0 + 1.0, 2.0) - 1.0) - 1.0) * pow(profile, 0.2);
-        float center = max(m.z + m.w + 0.20 * eyeCenter.y, -0.80 + gap + ink.x + max(curve.y, 0.0));
         float upper = center + 0.5 * curve.x * along - mix(curve.y * profile, catDip, detail.x) + wave + zig;
         float lower = upper - gap * pow(profile, mix(0.90, 0.50, roundness)) - ink.x * profile + 0.6 * wave - 2.0 * zig;
         float end = x - along * width;
@@ -309,8 +313,10 @@ void main() {
             if (details.y + details.z > 0.0) {
                 float shine = 0.0;
                 if (uMarks[0].x <= 0.0) {
-                    // Keep a capture glint recognizable while the camera may see.
-                    shine = stroke(length(q - eye.zw * vec2(-0.28, 0.32)) - 0.14 * rmin * details.y, px);
+                    // Both highlights sit on the right, well clear of the capture
+                    // glint's spot up and to the left, so a shine never reads as
+                    // the camera being on. While it is, they go out entirely.
+                    shine = stroke(length(q - eye.zw * vec2(0.30, 0.30)) - 0.14 * rmin * details.y, px);
                     shine = max(shine, 0.7 * stroke(length(q - eye.zw * vec2(0.30, -0.28)) - 0.08 * rmin * details.y, px));
                 }
                 float wet = 1.0 - smoothstep(-0.82, -0.20, q.y / eye.w);
@@ -366,7 +372,18 @@ void main() {
         }
     }
 
-    lit = max(lit, mix(uFill, uCore, 0.26) * (0.82 * decor * decor));
+#ifdef FACE_DECOR
+    if (decor > 0.0) {
+        // Strokes follow the eyes' glow, so they never outshine dimmed or
+        // blinking eyes, and their green stays below 0.59 linear (about 196
+        // on screen): the lab reads G >= 200 as an eye's core.
+        vec3 ink = mix(uFill, uCore, 0.26) * 0.82;
+        ink *= min(1.0, 0.59 / max(ink.g, 1e-4));
+        // Speech and bounce lift eye glow above 1; the cap must still hold.
+        float glow = min(1.0, 0.5 * (uE[3].x * uE[3].x + uE[7].x * uE[7].x));
+        lit = max(lit, ink * (glow * decor * decor));
+    }
+#endif
     vec3 col = lit + uHalo * (halo * (1.0 - max(cover, decor)));
     // Encode for the screen (gamma 2), then roll highlights off softly so a
     // bright eye turns cyan-white without a hard clip.
