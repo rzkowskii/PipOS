@@ -1,5 +1,5 @@
-# gallery a866fdf771b896f5c96e159115a1f3b39f726424b3f76830bba23e92b5f4b9d9
-# made 2026-11-28T04:20:47Z
+# gallery dc32058442a0fc6b8cd4a99b6701e29fe0237a8f18d01383466302a88e43b3f9
+# made 2026-11-28T04:52:36Z
 8b3a66b5813d94258f25a69d27239912629a186f645bae6c41a00b9414bfafcc  crates/bus/Cargo.toml
 c497df696cee41d46179db9dbfb5877616a139734eba5933d73c12aae54df686  crates/bus/src/body_drives.rs
 d1822a016fce15ece4e70a41b6583408d717513ab0dad63c33910cbff2d0b355  crates/bus/src/body_map.rs
@@ -8,7 +8,7 @@ da0b870cd611093bb0b4dce512df7e9aa743113029ef02a805c5a5727bc945e4  crates/bus/src
 ff07327c0f592ed4c3c0258e07e7ec91424648c5cc4241fd9923aaeac30faeea  crates/face/Cargo.toml
 f378f39c6f53a6f7c88c7ea9d9fc6e400fb28d5cc2d94fed7afee85eda9dc795  crates/face/build.rs
 28405aa7f9a99bf268d65667cd43055732e84d622002d3942342e8cdb986b75d  crates/face/concept-expressions.json
-fc43f3ca3d923c33e8a95e3d9c6c4d6592e0e2c4f13a99c2dc04814e7230beab  crates/face/expressions.json
+d06ce959e0fde65fbc5bc7522e2f635669b643c5aee6d83d9afce3c048aa9c9f  crates/face/expressions.json
 380803eec24ec72aa71e19ad607c1ce50e7225a6cbae2c472572a4bf0bc1dd68  crates/face/src/anim.rs
 a7ad4f01195975d1648daa01330c68c49ddd11a3b8ef5df43ff5e185f9fc3e0f  crates/face/src/audition.rs
 f294e60ddf215d71426ae59f5f2be3b7ff7d95a0518e30a9e9b40ca75de959f9  crates/face/src/chrome.rs
