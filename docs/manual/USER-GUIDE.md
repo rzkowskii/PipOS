@@ -222,7 +222,9 @@ on the face, with **fn+F9** and **fn+F10**, but no bar or "speaker muted"
 note is shown there.
 
 If Pip hears you but cannot make out the words, it says "Sorry, I
-didn't catch that." (once each time you wake it). The second time within
+didn't catch that." (once each time you wake it). It says the same when
+nothing follows "Hey Pip" and the room goes quiet for a couple of seconds;
+it is still listening then, so just say your request again. The second time within
 ten minutes it adds that you can type to it instead: the menu key (**fn+F2**
 or Mission Control), then **6** (on an installed Pip, then **Y**). Once it has answered you, a cough or the TV in the
 few seconds after its reply gets no apology.

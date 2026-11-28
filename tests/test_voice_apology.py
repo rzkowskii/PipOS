@@ -184,5 +184,102 @@ class Apology(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("could not say sorry" in line and "flite exit status 1" in line for line in logs.output))
 
 
+class QuietAfterTheWake(Apology):
+    """A plain "Hey Pip" followed by nothing: sorry once the room is quiet, still attending.
+
+    On the real laptop (round L and the owner's own voice, 28 Nov 2026) the
+    apology came only when the brainstem's 20 s attention lapsed, at idle, with
+    the microphone deaf while it played."""
+
+    async def run_after_wake(self, steps):
+        """Wake plainly, then for each (seconds, frame, in_speech) advance the clock and feed one frame."""
+        script = [WAKE] + [(in_speech, []) for _, _, in_speech in steps]
+        harness = self.harness(script)
+        voice = harness.voice
+        self.player.release.set()
+        async with asyncio.TaskGroup() as voice.tasks:
+            voice.capture = voice.tasks.create_task(voice.listen())
+            await harness.frames(tone(500))
+            for seconds, frame, _ in steps:
+                harness.clock.now += seconds
+                await harness.frames(frame)
+            await settle(voice)
+            state = voice.state
+            voice.disarm()
+        return harness, state
+
+    def missed(self, harness):
+        return [fields for topic, fields in harness.sent if topic == "hear.missed"]
+
+    async def test_quiet_after_a_plain_wake_is_answered_while_still_attending(self):
+        harness, state = await self.run_after_wake([(1.0, tone(10), False)] * 7)
+        self.assertEqual(self.missed(harness), [{"reason": "no_speech"}])
+        self.assertEqual(len(self.player.played), 1)
+        self.assertEqual(state, "attending")
+
+    async def test_not_before_the_owner_has_had_time_to_speak(self):
+        harness, _ = await self.run_after_wake([(1.0, tone(10), False)] * 3)
+        self.assertEqual(self.missed(harness), [])
+        self.assertEqual(self.player.played, [])
+
+    async def test_not_while_the_room_is_still_loud(self):
+        # Sound the recognizer did not take for a dictation still counts as someone talking.
+        harness, _ = await self.run_after_wake([(1.0, tone(4000), True)] * 8)
+        self.assertEqual(self.missed(harness), [])
+        harness, _ = await self.run_after_wake([(1.0, tone(4000), True)] * 8 + [(1.0, tone(10), False)] * 3)
+        self.assertEqual(self.missed(harness), [{"reason": "no_speech"}])
+
+    async def test_not_after_a_dictation_began(self):
+        script_start = (1.0, tone(4000), True)
+        harness = self.harness([WAKE, START] + [(False, [])] * 8)
+        voice = harness.voice
+        self.player.release.set()
+        async with asyncio.TaskGroup() as voice.tasks:
+            voice.capture = voice.tasks.create_task(voice.listen())
+            await harness.frames(tone(500), tone(4000))
+            for _ in range(8):
+                harness.clock.now += 1.0
+                await harness.frames(tone(10))
+            await settle(voice)
+            voice.disarm()
+        self.assertEqual(self.missed(harness), [])
+
+    async def test_not_after_a_one_breath_wake(self):
+        harness = self.harness([(False, [("hear.wake", {"oneshot": True})])] + [(False, [])] * 8)
+        voice = harness.voice
+        self.player.release.set()
+        async with asyncio.TaskGroup() as voice.tasks:
+            voice.capture = voice.tasks.create_task(voice.listen())
+            await harness.frames(tone(500))
+            for _ in range(8):
+                harness.clock.now += 1.0
+                await harness.frames(tone(10))
+            await settle(voice)
+            voice.disarm()
+        self.assertEqual(self.missed(harness), [])
+
+    async def test_the_lapse_after_it_says_nothing_more(self):
+        harness = self.harness([WAKE] + [(False, [])] * 7)
+        voice = harness.voice
+        self.player.release.set()
+        async with asyncio.TaskGroup() as voice.tasks:
+            voice.capture = voice.tasks.create_task(voice.listen())
+            await harness.frames(tone(500))
+            for _ in range(7):
+                harness.clock.now += 1.0
+                await harness.frames(tone(10))
+            await settle(voice)
+            await harness.event("state.changed", state="idle", muted=False)
+            await settle(voice)
+            voice.disarm()
+        self.assertEqual(self.missed(harness), [{"reason": "no_speech"}])
+        self.assertEqual(len(self.player.played), 1)
+
+
+# Only the new cases here: the Apology tests run once, in their own class.
+for _name in [name for name in vars(Apology) if name.startswith("test_")]:
+    setattr(QuietAfterTheWake, _name, None)
+
+
 if __name__ == "__main__":
     unittest.main()

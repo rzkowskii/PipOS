@@ -215,7 +215,7 @@ the morning brief, unless Setup **9**, **5** turned it off.
 |---|---|
 | "I can't think right now. My language model isn't answering." | The model server is down or loading. Direct commands still work |
 | "Sorry. I lost my thought." | The model produced nothing usable, or failed before saying anything. A reply that only repeats the question, or opens with assistant boilerplate, is retried first |
-| "Sorry, I didn't catch that." | The voice heard speech after the wake but made out no words |
+| "Sorry, I didn't catch that." | The voice heard speech after the wake but made out no words, or nothing followed "Hey Pip" and the room has been quiet for 2 s (at least 4 s after the wake; Pip is still listening) |
 | "I can't read my battery level right now." | The battery reading is unknown |
 | "I don't remember anything about that." | Recall found no fact or archive match |
 | "I'm not sure which memory you mean." | "That's wrong, …" had no recent memory to correct |

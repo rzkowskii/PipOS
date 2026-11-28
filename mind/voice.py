@@ -152,6 +152,16 @@ ENDPOINT_EVIDENCE_ENV = "BEING_ENDPOINT_EVIDENCE"
 HYBRID_ENDPOINT_ENV = "BEING_HYBRID_ENDPOINT"
 # A frame this far over the noise floor is the owner's voice, for timing.
 VOICED_OVER_FLOOR_DB = 10.0
+# A plain "Hey Pip" followed by nothing is answered once the room has been
+# quiet (nothing VOICED_OVER_FLOOR_DB over the floor) for MISS_QUIET_SECONDS,
+# and no sooner than MISS_AFTER_WAKE_SECONDS after the wake, while the being is
+# still attending: the owner can then say it again without the name. Waiting
+# for the brainstem's 20 s window to lapse put the apology 20 s after the wake,
+# at idle (real laptop, 28 Nov: 12 times in the owner's free talk, often while
+# he was still talking). Raw level is the judge, not Silero, which missed his
+# quiet speech there.
+MISS_AFTER_WAKE_SECONDS = 4.0
+MISS_QUIET_SECONDS = 2.0
 # The microphone's per-frame cost is measured over this many frames, once.
 COST_FRAMES = 1000
 # While resting, voice_engines may take a due measurement this often.
@@ -1163,6 +1173,7 @@ class Voice:
         self.plain_wake = False
         # hear.missed went out since the last wake (or follow-up window): at most once.
         self.missed_sent = False
+        self.plain_wake_at = None
         # The room's light (body.state lux), None when there is no sensor.
         self.lux = None
         # Capture times: the newest frame clearly over the room's floor, the
@@ -1467,6 +1478,25 @@ class Voice:
             self.purr_task.cancel()
             self.purr_task = None
 
+    async def miss_when_quiet(self):
+        """Say sorry for a plain wake that nothing followed, once the room is
+        quiet and while still attending (MISS_AFTER_WAKE_SECONDS)."""
+        wake_at = self.plain_wake_at
+        if wake_at is None or not self.expecting or self.state != "attending":
+            return
+        now = self.now()
+        began = self.dictation_began_at
+        if began is not None and began >= wake_at:
+            self.plain_wake_at = None   # something was dictated: the usual path answers it
+            return
+        heard = self.voice_heard_at if self.voice_heard_at is not None else -math.inf
+        if now - wake_at < MISS_AFTER_WAKE_SECONDS or now - max(heard, wake_at) < MISS_QUIET_SECONDS:
+            return
+        self.plain_wake_at = None
+        self.expecting = False
+        LOG.info("nothing followed the wake phrase and the room is quiet; saying so while still attending")
+        await self.missed("no_speech")
+
     async def follow_attention(self, before):
         """Notice a wake that ended with nothing heard (the voice's own record, not `prev`)."""
         if self.state in TALKING:
@@ -1694,6 +1724,7 @@ class Voice:
                     self.measure(level, self._in_speech, captured)
                     for topic, fields in events:
                         await self.hear(topic, fields)
+                    await self.miss_when_quiet()
                     # A backlog in the queue is read without suspending, so
                     # give the bus its turn between frames: a lid close, a
                     # mute or the brainstem's answer to a wake is acted on
@@ -1890,6 +1921,7 @@ class Voice:
                 self.pending_timing = None
                 self.plain_wake = not oneshot
                 self.missed_sent = False
+                self.plain_wake_at = None if oneshot else self.now()
         elif topic == "hear.speech_start":
             self.dictation = Span()
             self.voiced = None
