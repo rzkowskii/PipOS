@@ -49,13 +49,13 @@ STOP_LISTENING = re.compile(
     r"|mute\s+(?:yourself|your\s+(?:microphone|mic|ears))|turn\s+(?:off\s+your\s+(?:microphone|mic|ears)|your\s+(?:microphone|mic|ears)\s+off)"
     r"|close\s+your\s+ears|stop\s+hearing\s+me)" + _END, re.IGNORECASE)
 BRIGHTER = re.compile(
-    _LEAD + r"(?:(?:be\s+|get\s+|go\s+)?brighter|(?:make\s+(?:your\s+(?:screen|face)|it|yourself)\s+)?brighter"
-    r"|turn\s+(?:up\s+(?:your|the)\s+brightness|(?:your|the)\s+brightness\s+up)|brightness\s+up|increase\s+(?:your|the)\s+brightness"
+    _LEAD + r"(?:(?:be\s+|get\s+|go\s+)?brighter|(?:make\s+(?:(?:your|the)\s+(?:screen|face)|it|yourself)\s+)?brighter"
+    r"|turn\s+(?:up\s+(?:your|the)\s+brightness|(?:your|the)\s+(?:brightness|screen)\s+up)|brightness\s+up|increase\s+(?:your|the)\s+brightness"
     r"|brighten\s+(?:up|your\s+(?:screen|face)))" + _END, re.IGNORECASE)
 DIMMER = re.compile(
-    _LEAD + r"(?:(?:be\s+|get\s+|go\s+)?(?:dimmer|darker)|(?:make\s+(?:your\s+(?:screen|face)|it|yourself)\s+)?(?:dimmer|darker)"
-    r"|turn\s+(?:down\s+(?:your|the)\s+brightness|(?:your|the)\s+brightness\s+down)|brightness\s+down|decrease\s+(?:your|the)\s+brightness"
-    r"|dim\s+(?:your\s+(?:screen|face)|yourself|down))" + _END, re.IGNORECASE)
+    _LEAD + r"(?:(?:be\s+|get\s+|go\s+)?(?:dimmer|darker)|(?:make\s+(?:(?:your|the)\s+(?:screen|face)|it|yourself)\s+)?(?:dimmer|darker)"
+    r"|turn\s+(?:down\s+(?:your|the)\s+brightness|(?:your|the)\s+(?:brightness|screen)\s+down)|brightness\s+down|decrease\s+(?:your|the)\s+brightness"
+    r"|dim\s+(?:(?:your|the)\s+(?:screen|face)|yourself|down))" + _END, re.IGNORECASE)
 LEVEL = re.compile(
     _LEAD + r"(?:set\s+(?:your\s+|the\s+)?brightness\s+to|(?:your\s+|the\s+)?brightness\s+(?:to\s+)?)\s*(?P<n>\d{1,3}|[a-z]+(?:[\s-][a-z]+)?)\s*(?:percent|%)?"
     + _END, re.IGNORECASE)

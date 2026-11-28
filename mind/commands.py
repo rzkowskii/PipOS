@@ -70,7 +70,7 @@ _PATTERNS = [
     ("time_difference", r"how (?:many hours|far) (?:ahead|behind|ahead or behind) (?:is|are) (?P<x>.+?)"
                         r"(?: (?:from|of|than) (?:here|us|me|you))?"),
     ("time_difference", r"is (?P<x>.+?) ahead (?:of (?:us|me|here) )?or behind(?: (?:us|me|here))?"),
-    ("time", r"(?:what(?:['’]s| is) the time|what time is it|tell me the time)(?: now)?"),
+    ("time", r"(?:what(?:['’]s| is) the time|what time is it|tell me the time|do you know what time it is)(?: now)?"),
     ("date", r"(?:what(?:['’]s| is) (?:the|today['’]s) date|what date is it|tell me the date)(?: today)?"),
     ("day", r"what day(?: of the week)? (?:is it(?: today)?|is today)"),
     ("date_tomorrow", r"what(?:['’]s| is) tomorrow['’]s date|what (?:day|date) is (?:it )?tomorrow"),
@@ -99,7 +99,7 @@ _PATTERNS = [
             r"|i(?:['’]m| am) (?:up|awake)(?: now)?"),
     ("name", r"what(?:['’]s| is) your name|what (?:should|do) i call you"),
     ("age", r"how old are you|what(?:['’]s| is) your age|when were you born"),
-    ("battery", r"how much (?:charge|battery) do you have(?: left)?|how(?:['’]s| is) your battery(?: doing)?"
+    ("battery", r"how much (?:charge|battery) (?:do you have|have you got)(?: left)?|how(?:['’]s| is) your battery(?: doing)?"
                 r"|what(?:['’]s| is) your battery(?: level| at)?|tell me about your battery|are you charging"
                 r"|how long (?:will|can) your battery last|how much battery (?:is )?left"),
     ("sleep", r"go to sleep|good ?night|sleep now|time to sleep"),
@@ -155,7 +155,7 @@ _COMMAND_START = re.compile(
     r"|(?:set|change|clear|remove) (?:my|the|your) (?:weather|time zone|timezone)\b"
     r"|use the (?:system|device) (?:time zone|timezone)\b"
     r"|what(?:['’]s| is) your name\b|what (?:should|do) i call you\b"
-    r"|how (?:much charge|is your battery)\b|what(?:'s| is) your battery\b"
+    r"|how (?:much (?:charge|battery)|is your battery)\b|what(?:'s| is) your battery\b|do you know what time\b"
     r"|never ?mind\b|(?:speak|talk|turn|be) (?:up|down|louder|quieter|softer|it|the|your|yourself|more)\b"
     r"|louder\b|quieter\b|softer\b|(?:set|change|put) (?:your |the )?(?:volume|time|clock)\b|the time is\b"
     r"|make your (?:eyes|face)\b|(?:set|change) your (?:eye|face size|glow)\b"
