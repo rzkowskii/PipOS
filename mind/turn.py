@@ -48,7 +48,7 @@ from .reminders import RING_GAP, Reminder, mentions, wall_stamp
 from .retention import SECONDS_PER_DAY, load_policy as load_memory_policy
 from .skills import Skills, find_zone, number_words, speakable_date, speakable_time
 from .speech import (GRAMMAR, STRICT_GRAMMAR, ClauseSplitter, EchoGuard, TagParser, ThinkFilter, boilerplate, clause_cue,
-                     perception_claim)
+                     perception_claim, reply_open)
 from .storage import atomic_write, sync_directory
 from .try_mode import installed_trial_pending, is_try_boot
 from .weather import SAMPLE_SECONDS as WEATHER_SAMPLE_SECONDS
@@ -463,6 +463,10 @@ class Config:
     # ships "strict" (lab/results/real-model-2026-11-24.json: 18/18 complete
     # long answers against 16/18 open).
     reply_shape: str = "open"
+    # "short": the first spoken clause is cut at the first mark or after three
+    # words, so speech starts sooner (docs/manual/ARCHITECTURE.md, WP-D6);
+    # "normal": as before. Not yet heard on the laptop, so "normal" ships.
+    first_chunk: str = "normal"
     intent_aliases: bool = False
     mood: bool = False
     # Factory-off SSD-write experiment: keep a warm conversation slot only
@@ -5145,6 +5149,7 @@ class Mind:
         failed = None
         parroted = False
         stopped_late = False
+        held = []       # clauses cut but not yet handed over (see out())
         rest = ""
         started = time.monotonic()
         first_clause = None
@@ -5156,6 +5161,15 @@ class Mind:
         played = PlayedReply()
         self._register_played(played)
 
+        async def hand(item):
+            nonlocal first_clause
+            spoken.append(item)
+            played.hand(len(spoken), item)
+            if first_clause is None:
+                first_clause = time.monotonic() - started
+            await self._send_reply("say.request", text=item, seq=len(spoken), last=False,
+                                   reply=played.token, face_cue=clause_cue(item, tags.emotion))
+
         async def out(visible):
             nonlocal parroted, first_clause, stopped_late
             raw.append(visible)
@@ -5163,8 +5177,9 @@ class Mind:
             for clause in splitter.feed(piece):
                 # The guards read the reply as it grows: a short first clause
                 # ("Sure,") can pass alone and be followed by boilerplate.
-                fault = reply_fault(" ".join([*spoken, clause]), text, last_try=last_try())
+                fault = reply_fault(" ".join([*spoken, *held, clause]), text, last_try=last_try())
                 if fault and not spoken:
+                    held.clear()
                     parroted = True
                     return
                 if fault:
@@ -5173,12 +5188,14 @@ class Mind:
                     log(f"a later clause broke the {fault} guard; the reply stops after {len(spoken)} "
                         f"clause{'' if len(spoken) == 1 else 's'}")
                     return
-                spoken.append(clause)
-                played.hand(len(spoken), clause)
-                if first_clause is None:
-                    first_clause = time.monotonic() - started
-                await self._send_reply("say.request", text=clause, seq=len(spoken), last=False,
-                                       reply=played.token, face_cue=clause_cue(clause, tags.emotion))
+                if not spoken and not last_try() and reply_open(" ".join([*held, clause])):
+                    # Nothing is said yet and the opening could still turn into boilerplate
+                    # or a claim to see something: hold it until the next words say which.
+                    held.append(clause)
+                    continue
+                batch, held[:] = [*held, clause], []
+                for item in batch:
+                    await hand(item)
 
         # A very small model sometimes answers a question by repeating it, or
         # with assistant boilerplate. The first clause is checked before it is
@@ -5205,9 +5222,11 @@ class Mind:
         while attempt < len(temperatures):
             temperature = temperatures[attempt]
             attempt += 1
-            think, guard, tags, splitter = ThinkFilter(), EchoGuard(body), TagParser(), ClauseSplitter()
+            think, guard, tags = ThinkFilter(), EchoGuard(body), TagParser()
+            splitter = ClauseSplitter(short_first=self.cfg.first_chunk == "short")
             parroted = False
             stopped_late = False
+            held.clear()
             raw.clear()
             self._slot_generation += 1
             self._slot_empty = False
@@ -5249,11 +5268,14 @@ class Mind:
                 await out(guard.feed(think.flush()))
                 await out(guard.flush())
                 rest = (tags.flush() + " " + splitter.flush()).strip()
-                fault = reply_fault(" ".join([*spoken, rest]), text, last_try=last_try()) if rest else None
+                tail = [*held, rest] if rest else list(held)
+                fault = reply_fault(" ".join([*spoken, *tail]), text, last_try=last_try()) if tail else None
                 if fault and not spoken:
                     parroted, rest = True, ""
+                    held.clear()
                 elif fault:
                     stopped_late, echoed, rest = True, True, ""
+                    held.clear()
                     log(f"the end of the reply broke the {fault} guard; it stops after {len(spoken)} "
                         f"clause{'' if len(spoken) == 1 else 's'}")
             if not parroted or failed is not None or self._cancelled or self._discard_reply:
@@ -5293,13 +5315,10 @@ class Mind:
 
         if failed is None:
             self._needs_warmup = False
-            if rest:
-                spoken.append(rest)
-                played.hand(len(spoken), rest)
-                if first_clause is None:
-                    first_clause = time.monotonic() - started
-                await self._send_reply("say.request", text=rest, seq=len(spoken), last=False,
-                                       reply=played.token, face_cue=clause_cue(rest, tags.emotion))
+            # What the reply ended on: an opening still held, then the unfinished last clause.
+            for item in [*held, *([rest] if rest else [])]:
+                await hand(item)
+            held.clear()
         else:
             log(f"cortex failed mid-reply: {failed}" if self._durable_context else "cortex failed during a private reply")
 

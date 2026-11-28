@@ -87,6 +87,36 @@ _PERCEPTION = re.compile(
 _REFUSAL = re.compile(r"\b(?:can't|cannot|can not|couldn't|don't|do not|not|never|unable to)\b", re.I)
 
 
+_INTERJECTION = {"well", "oh", "sure", "okay", "ok", "hi", "hello", "hey", "of", "course", "certainly", "great",
+                 "good", "question", "hmm", "um", "uh", "yes", "right", "alright", "so", "now", "ah"}
+_OPENINGS = tuple(tuple(opening.split()) for opening in (
+    "as an ai", "as a language model", "i am an ai", "i am an artificial intelligence", "i am just an ai",
+    "i am a language model", "i am just a language model", "i am a large language model",
+    "i am a program", "i am just a program", "i am a computer program", "how can i help you today",
+    "how may i assist you today", "how can i assist you", "i am here to help", "i am here to assist",
+    "i do not have personal feelings", "i do not have feelings", "i do not have a body",
+    "i can see a", "i can hear a", "i see a", "i hear a", "i am seeing", "i am hearing", "i smell a",
+))
+
+
+def reply_open(text):
+    """True while a reply's opening could still become boilerplate or a claim to see
+    or hear something, so a short first clause is held until the next words say
+    which: only interjections so far ("Of course,"), or the first words of such an opening."""
+    words = re.findall(r"[a-z']+", text.replace("\u2019", "'").casefold())
+    words = [w.replace("i'm", "i am").replace("don't", "do not") for w in words]
+    words = " ".join(words).split()
+    if not words:
+        return False
+    while words and words[0] in _INTERJECTION:
+        words.pop(0)
+        if not words:
+            return True
+    if not words:
+        return True
+    return any(opening[:len(words)] == tuple(words) and len(words) < len(opening) for opening in _OPENINGS)
+
+
 def perception_claim(text):
     """True when a reply says it sees, hears or smells something. A sentence that
     also says it cannot ("I can't see the sea, but I hear the waves") is split
@@ -237,9 +267,14 @@ class ClauseSplitter:
     ends, or at a comma once a sentence runs long.
     """
 
-    def __init__(self, first_min=10, long_run=90):
+    def __init__(self, first_min=10, long_run=90, short_first=False, first_words=3):
         self.first_min = first_min
         self.long_run = long_run
+        # A short first clause (WP-D6): cut at the first mark the moment it
+        # arrives (no waiting for the space after it), or after `first_words`
+        # words with no mark. Later clauses are cut as before.
+        self.short_first = short_first
+        self.first_words = first_words
         self._buf = ""
         self._first = True
 
@@ -257,7 +292,39 @@ class ClauseSplitter:
                 self._first = False
         return out
 
+    _FIRST_MARK = re.compile(r"[.!?…,;:—–]")
+
+    def _find_short_first(self):
+        buf = self._buf
+        for match in self._FIRST_MARK.finditer(buf):
+            i = match.start()
+            head = buf[:i + 1]
+            if not re.search(r"[A-Za-z0-9]", head):
+                continue
+            prev = buf[i - 1] if i else ""
+            nxt = buf[i + 1] if i + 1 < len(buf) else None
+            if buf[i] in ",." and prev.isdigit() and (nxt is None or nxt.isdigit()):
+                if nxt is None:
+                    return None     # "3." may become "3.5": wait for the next character
+                continue
+            if buf[i] == "." and (_ABBREVIATION.search(head) or (nxt is not None and not nxt.isspace()
+                                                                 and nxt not in "\"')]")):
+                continue
+            end = i + 1
+            while end < len(buf) and buf[end] in "\"')]" and buf[i] in ".!?…":
+                end += 1
+            return end
+        words = list(re.finditer(r"\S+\s", buf))
+        if len(words) >= self.first_words:
+            return words[self.first_words - 1].end()
+        return None
+
     def _find_cut(self):
+        if self._first and self.short_first:
+            cut = self._find_short_first()
+            if cut is not None:
+                return cut
+            return None
         for match in _BOUNDARY.finditer(self._buf):
             mark = match.group(1)
             head = self._buf[:match.start(1) + len(mark)]

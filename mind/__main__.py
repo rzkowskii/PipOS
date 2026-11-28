@@ -34,6 +34,7 @@ FACTORY_KEYS = {
     "top_p": _NUMBER,
     "presence_penalty": _NUMBER,
     "reply_shape": (str,),
+    "first_chunk": (str,),
     "intent_aliases": (bool,),
     "mood": (bool,),
     "defer_idle_slot_writes": (bool,),
@@ -57,6 +58,8 @@ def load_config(config_dir, mind_dir, *, include_core=True):
         if value is None or isinstance(value, bool) and bool not in kinds or not isinstance(value, kinds):
             continue
         if key == "reply_shape" and value not in ("open", "strict"):
+            continue
+        if key == "first_chunk" and value not in ("normal", "short"):
             continue
         setattr(cfg, key, value)
     identity = (config_dir / "identity.md").read_text(encoding="utf-8")

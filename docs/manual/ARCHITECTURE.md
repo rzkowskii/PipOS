@@ -1,6 +1,6 @@
 <!--
 doc: architecture
-verified: 2026-11-28T15:36
+verified: 2026-11-28T15:49
 sources: crates/bus/src/lib.rs crates/brainstem/src/main.rs crates/brainstem/src/machine.rs crates/brainstem/src/body.rs crates/brainstem/src/battery.rs crates/brainstem/src/brightness.rs crates/brainstem/src/kbd_light.rs crates/face/src/keys.rs mind/keys.py mind/app_commands.py mind/mic_port.py mind/mic_channel.py mind/try_mode.py mind/diag.py mind/diag_sound.py mind/install_apply.py os/package/being/being-cable-link.service os/package/being/being-cable-ssh.service os/package/being/being-cable-workbench.service os/board/beingos/linux-cable.config crates/brainstem/src/peer.rs crates/brainstem/src/life.rs crates/brainstem/src/camera.rs crates/brainstem/src/linux_body.rs crates/bodycare/src/main.rs crates/bodycare/src/policy.rs crates/face/src/main.rs crates/face/src/anim.rs crates/face/src/link.rs crates/face/src/render.rs crates/face/src/eye.rs crates/face/src/pace.rs crates/face/src/dpms.rs crates/face/src/overlay.rs mind/turn.py mind/played.py mind/everyday.py mind/memory.py mind/embed.py mind/cortex.py mind/speech.py mind/voice.py mind/voice_engines.py mind/hands.py mind/night_shift.py mind/dream_model.py mind/dream_verify.py mind/eyes.py mind/retention.py mind/dream_policy.py mind/dream_store.py mind/boot_health.py mind/installer.py mind/network_policy.py mind/network_enforce.py os/package/being/being.mk os/package/cortex/being-cortex.service os/package/cortex/being-dream-cortex.service os/board/beingos/grub.cfg os/board/beingos/genimage.cfg os/board/beingos/post-build.sh os/board/beingos/rauc.conf mind/storage.py mind/backup.py mind/backup_crypto.py mind/wifi.py mind/initiative.py mind/consolidation.py mind/install_binding.py mind/usb_logs.py mind/model_pack.py mind/bus.py mind/local_screen.py mind/local_menu.py os/package/being/being-try-generator os/package/being/being-installed-generator os/package/being/being-screen-mode os/package/being/50-being.preset os/package/being/30-model-pack.conf os/board/beingos/being-update-ready os/board/beingos/slots.sh mind/diag_speech.py os/package/being/cable/sshd_config lab/build.sh os/package/being/being-health-watch os/package/being/being-health-watch.service crates/ears/src/main.rs crates/ears/src/linux.rs crates/brainstem/src/ears.rs crates/brainstem/src/camera_look.rs crates/brainstem/src/camera_usb.rs crates/bus/src/body_drives.rs crates/bus/src/body_map.rs config/body-maps.json os/package/being/being-ears.service mind/vision_describer.py mind/vitals.py mind/ponder.py mind/habits.py mind/intents.py mind/update_checkpoint.py mind/update_slots.py crates/face/src/quick_menu.rs crates/face/src/options.rs
 -->
 
@@ -501,6 +501,10 @@ Only a hardware body (or a test naming `--poweroff-cmd`) powers off.
      ("I see a quiet blue lamp.") as a fault: Pip has no eyes or ears of its
      own, and only code tells it what the camera or microphone found. Plain
      talk ("I see.", "I hear you.") and refusals ("I can't see the sea") pass.
+   - With `first_chunk short` the first clause is cut at the first mark or
+     after three words, and an opening that could still become boilerplate or
+     a claim to see ("Sure," "I see") is held, not spoken, until the next words
+     say which (a reply that ends while held is then said whole).
    - A fault before the first clause is spoken asks the model again, as
      above. A fault in a later clause (a short first clause such as "Of
      course," followed by boilerplate) stops the reply there: what was said is

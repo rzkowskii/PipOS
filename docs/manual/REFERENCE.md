@@ -1,6 +1,6 @@
 <!--
 doc: reference
-verified: 2026-11-28T14:02
+verified: 2026-11-28T15:49
 sources: mind/commands.py mind/reminder_language.py mind/turn.py mind/everyday.py mind/skills.py mind/profile.py mind/setup.py mind/care.py mind/local_menu.py mind/initiative_setup.py mind/retention.py mind/backup.py mind/dream_journal.py mind/network_enforce.py mind/network_policy.py mind/initiative.py mind/voice.py mind/voice_engines.py mind/mic_channel.py mind/mic_port.py mind/try_mode.py mind/tts.py mind/eyes.py mind/__main__.py crates/face/src/main.rs crates/face/src/keys.rs crates/brainstem/src/main.rs crates/brainstem/src/battery.rs crates/brainstem/src/kbd_light.rs mind/keys.py mind/local_screen.py os/board/beingos/slots.sh crates/bodycare/src/main.rs sim/body.py lab/vm.py lab/build.sh lab/cable.sh scripts/run-sim.sh os/package/being/being.env os/package/being/being-camera os/package/being/50-being.preset os/package/cortex/being-cortex.service os/package/cortex/being-dream-cortex.service os/board/beingos/try-grub.cfg os/board/beingos/try-image.sh config/being.json mind/wifi.py mind/reminders.py os/package/being/being-usb-logs os/package/being/being-hardware-report mind/diag.py mind/diag_report.py mind/diag_sound.py mind/diag_speech.py mind/diag_codec.py mind/diag_system.py os/package/being/pip-diag os/package/being/being-cable-link.service os/package/being/being-cable-ssh.service os/package/being/being-cable-workbench.service os/package/being/cable/sshd_config mind/look.py mind/actions.py mind/continuity.py mind/care_habits.py
 mind/dream_policy.py mind/mood.py mind/speaker_eq.py mind/vision_describer.py mind/context_storage.py
 crates/face/src/quick_menu.rs crates/face/src/options.rs os/package/being/being-ears.service
@@ -682,6 +682,7 @@ Source: `config/`, installed to `/etc/being/`
 | `temperature` | 0.7 | Retries after a parrot or boilerplate reply raise it |
 | `top_k`, `top_p`, `presence_penalty` | 20, 0.8, 1.0 | Sampler settings sent to llama-server |
 | `reply_shape` | `strict` | The reply grammar. `strict` (shipped since the model audition of 24 November) ends long answers at a sentence (stories keep the open shape); `open` is the built-in default |
+| `first_chunk` | `normal` | `short` cuts the first spoken clause at the first mark (a comma, a full stop) the moment it arrives, or after three words, so speech starts sooner; an opening such as "Sure," is held until the next words show it is not boilerplate. Not yet heard on the laptop, so it ships `normal`; later clauses are cut as before |
 | `mood` | false | Off. When on, current body readings may shape the reply grammar and length (`mind/mood.py`) |
 | `defer_idle_slot_writes` | false | Off. An experiment to write less to the disk: keeps a warm conversation slot only in the model server's memory until sleep, lid close or shutdown |
 | `prefill` | false | Read-ahead while listening (experimental) |

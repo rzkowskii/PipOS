@@ -112,12 +112,12 @@ class InTheTurn(MindCase):
         self.bus.push("say.done", final=True)
         return [e["text"] for e in self.bus.of("say.request") if e["text"]]
 
-    async def test_boilerplate_after_a_short_first_clause_stops_the_reply_there(self):
-        self.cortex_server.reply = lambda _: "[neutral] Of course, how can I help you today?"
+    async def test_boilerplate_after_a_short_first_clause_is_held_and_asked_for_again(self):
+        replies = iter(["[neutral] Of course, how can I help you today?", "[joy] Kites ride the wind."])
+        self.cortex_server.reply = lambda _: next(replies)
         spoken = await self.say("How do kites fly so high")
-        self.assertEqual(spoken, ["Of course,"])
-        self.assertEqual(self.mind.last_timing["retries"], 0, "nothing said is taken back, so no second try")
-        self.assertEqual(self.mind.messages[-1]["content"], "[neutral] Of course,")
+        self.assertEqual(spoken, ["Kites ride the wind."], "nothing of the first try was said")
+        self.assertEqual(self.mind.last_timing["retries"], 1)
 
     async def test_a_claim_to_see_after_a_clause_stops_the_reply(self):
         self.cortex_server.reply = lambda _: "[joy] Kites are lovely. I see a kite over the quiet sea."
@@ -142,6 +142,83 @@ class InTheTurn(MindCase):
         spoken = await self.say("How do kites fly so high")
         self.assertEqual(spoken, ["Kites ride the wind.", "They love a steady breeze."])
         self.assertEqual(self.mind.last_timing["retries"], 0)
+
+
+class ShortFirstClause(MindCase):
+    cfg = {"first_chunk": "short"}
+
+    async def say(self, text):
+        return await InTheTurn.say(self, text)
+
+    async def test_the_first_clause_is_cut_at_the_first_mark(self):
+        self.cortex_server.reply = lambda _: "[joy] Kites ride, and they love a steady breeze."
+        spoken = await self.say("How do kites fly so high")
+        self.assertEqual(spoken[0], "Kites ride,")
+        self.assertEqual(" ".join(spoken), "Kites ride, and they love a steady breeze.")
+
+    async def test_an_interjection_is_held_until_the_next_words_and_then_said(self):
+        self.cortex_server.reply = lambda _: "[joy] Sure, kites ride the wind."
+        spoken = await self.say("How do kites fly so high")
+        self.assertEqual(spoken, ["Sure,", "kites ride the wind."])
+        self.assertEqual(self.mind.last_timing["retries"], 0)
+        # Both clauses were handed over together, in order, with their numbers.
+        self.assertEqual([e["seq"] for e in self.bus.of("say.request") if e["text"]], [1, 2])
+
+    async def test_a_reply_that_ends_while_its_opening_is_held_is_still_said(self):
+        self.cortex_server.reply = lambda _: "[joy] Sure,"
+        spoken = await self.say("How do kites fly so high")
+        self.assertEqual(spoken, ["Sure,"])
+
+    async def test_boilerplate_behind_an_interjection_is_never_said_by_the_first_try(self):
+        replies = iter(["[neutral] Sure, how can I help you today?", "[joy] Kites ride the wind."])
+        self.cortex_server.reply = lambda _: next(replies)
+        spoken = await self.say("How do kites fly so high")
+        self.assertEqual(" ".join(spoken), "Kites ride the wind.")
+
+    async def test_three_words_with_no_mark_make_the_first_clause(self):
+        self.cortex_server.reply = lambda _: "[joy] Kites ride the wind and love a steady breeze."
+        spoken = await self.say("How do kites fly so high")
+        self.assertEqual(spoken[0], "Kites ride the")
+
+
+class Splitter(unittest.TestCase):
+    def run_splitter(self, text, **options):
+        from mind.speech import ClauseSplitter
+        splitter = ClauseSplitter(**options)
+        out = []
+        for char in text:
+            out += splitter.feed(char)
+        rest = splitter.flush()
+        return out + ([rest] if rest else [])
+
+    def test_the_short_first_clause_is_cut_on_the_mark_itself(self):
+        from mind.speech import ClauseSplitter
+        splitter = ClauseSplitter(short_first=True)
+        self.assertEqual(splitter.feed("Sure"), [])
+        self.assertEqual(splitter.feed(","), ["Sure,"], "no waiting for the space after it")
+
+    def test_numbers_and_abbreviations_do_not_end_it(self):
+        self.assertEqual(self.run_splitter("Version 3.5 is out.", short_first=True)[0], "Version 3.5 is")
+        self.assertEqual(self.run_splitter("1,000 kites fly.", short_first=True)[0], "1,000 kites fly.")
+        self.assertEqual(self.run_splitter("Dr. Smith is here.", short_first=True)[0], "Dr. Smith is")
+
+    def test_later_clauses_are_cut_as_before(self):
+        self.assertEqual(self.run_splitter("Yes, it is. The sea is wide, and it is very very deep indeed.",
+                                           short_first=True)[:2], ["Yes,", "it is."])
+        old = self.run_splitter("Yes, it is. The sea is wide.", short_first=False)
+        self.assertEqual(old, ["Yes, it is.", "The sea is wide."])
+
+    def test_the_old_default_is_unchanged(self):
+        self.assertEqual(self.run_splitter("Sure, I can help with that."), ["Sure, I can help with that."])
+
+
+class Opening(unittest.TestCase):
+    def test_what_may_still_become_boilerplate_or_a_claim(self):
+        from mind.speech import reply_open
+        for text in ("Sure,", "Of course,", "Hmm,", "I", "I see", "I'm just", "How can", "As an", "Well, how can I"):
+            self.assertTrue(reply_open(text), text)
+        for text in ("Kites ride", "I see a", "How do kites", "Sure, kites ride", "The sea is", ""):
+            self.assertFalse(reply_open(text), text)
 
 
 if __name__ == "__main__":
