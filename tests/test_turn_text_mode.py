@@ -91,6 +91,60 @@ class Replies(TextModeCase):
         self.assertEqual(len(self.bus.of("say.played")), before)
 
 
+class ReviewFixes(TextModeCase):
+    async def test_private_and_camera_fields_travel_with_the_receipt_and_a_final_comes_too(self):
+        self.text_mode()
+        await self.settle()
+        await self.mind._send_reply("say.request", text="A secret.", seq=1, last=True, private=True, camera_seq=4)
+        receipts = self.bus.of("say.played")
+        self.assertEqual([("text" in r, r.get("final", False)) for r in receipts], [(True, False), (False, True)])
+        self.assertTrue(all(r.get("private") is True and r.get("camera_seq") == 4 for r in receipts))
+        self.assertEqual(self.bus.of("say.request"), [])
+
+    async def test_a_mode_change_in_the_middle_of_a_reply_does_not_split_it(self):
+        self.text_mode()
+        await self.settle()
+        self.mind._begin_reply()
+        self.text_mode(False)
+        await self.settle()
+        await self.mind._send_reply("say.request", text="One.", seq=1, last=False, reply="a" * 16)
+        await self.mind._send_reply("say.request", text="", seq=2, last=True, reply="a" * 16)
+        self.assertEqual(self.bus.of("say.request"), [], "the whole reply stays on the screen")
+        self.assertEqual(len(self.bus.of("say.played")), 2)
+        await self.mind._send_reply("mind.reply_done", spoke=True)
+        self.assertEqual(self.bus.of("mind.reply_done")[-1]["spoke"], False)
+        self.assertIsNone(self.mind._reply_text, "the next reply decides afresh")
+
+    async def test_a_cancelled_text_reply_ends_stopped_at_once(self):
+        self.text_mode()
+        await self.settle()
+        played = __import__("mind.played", fromlist=["PlayedReply"]).PlayedReply()
+        played.hand(1, "One.")
+        self.mind._register_played(played)
+        self.mind._begin_reply()
+        self.mind._cancel()
+        await self.settle()
+        self.assertTrue(played.settled.is_set())
+        self.assertTrue(played.stopped)
+        finals = [r for r in self.bus.of("say.played") if r.get("final")]
+        self.assertEqual([(r["reply"], r["stopped"]) for r in finals], [(played.token, True)])
+
+    async def test_a_new_connection_is_spoken_until_a_mode_is_heard_on_it(self):
+        self.text_mode()
+        await self.settle()
+        self.assertTrue(self.mind._text_reply())
+        self.bus.generation += 1
+        self.assertFalse(self.mind._text_reply())
+        self.text_mode()
+        await self.settle()
+        self.assertTrue(self.mind._text_reply())
+
+    async def test_an_unknown_mode_is_not_called_a_guest_refusal(self):
+        await VoicePhrases.phrase(self, "Pip, let's go quiet now", "loud")
+        said = " ".join(e["text"] for e in self.bus.of("say.request"))
+        self.assertNotIn("owner", said)
+
+
 class Confirmations(TextModeCase):
     def question(self, answered):
         from mind.reply import Confirm, Reply

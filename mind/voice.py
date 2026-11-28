@@ -1264,6 +1264,9 @@ class Voice:
         self._open_replies.clear()
 
     def connection_lost(self):
+        # A restarted brainstem replays the retained mode only if it kept one: until a
+        # chat.mode arrives on the new connection, the owner is spoken to and heard.
+        self.typed_input = False
         self.disarm()
         self.clear_prepared_speech()
         self._night_policy.reset()
@@ -1403,13 +1406,15 @@ class Voice:
             if type(guest) is not bool:
                 return
             needs_capture_check = not self.privacy_known
+            guest_changed = guest != self.guest
             self.privacy_known = True
             if guest != self.guest:
                 self.guest = guest
                 if self.transcripts or LOG.isEnabledFor(logging.DEBUG):
                     LOG.info("guest mode %s: transcript text %s the log", "on" if guest else "off",
                              "stays out of" if guest else "goes back into")
-            if needs_capture_check:
+            if needs_capture_check or guest_changed:
+                # A guest arriving or leaving changes whether typed input shuts the microphone.
                 await self.sync_capture()
         elif topic == "body.state":
             hour, minute = event.get("hour"), event.get("minute")
@@ -2922,7 +2927,7 @@ class Voice:
         elif state == "asleep" and previous == "drowsy":
             await self.chirp("sigh")
 
-    async def ring_bell(self):
+    async def ring_bell(self, announce=False):
         """The bell before a ring's first words. The mind has already decided
         the ring may sound (quiet hours allow an alarm); the owner's chirp
         switch, the lid and mute still decide whether the bell plays."""
@@ -2934,7 +2939,7 @@ class Voice:
             path = await asyncio.to_thread(self.chirp_bank.path, "bell", self.gain)
             if not (self.chirps_on and self.lid_open and not self.muted):
                 return False  # muted, switched off or shut while the bell was made
-            return await self.play_chirp(path)
+            return await self.play_chirp(path, announce=announce)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -3485,7 +3490,11 @@ class Voice:
                             if not started and not ready and not self.reply_failures and self._bell_first:
                                 # A ring with no words (written chat): the bell alone.
                                 self._bell_first = False
-                                started = await self.ring_bell()
+                                started = await self.ring_bell(announce=True)
+                                if not self._start_sent:
+                                    # No bell could play: the brainstem still hears the reply begin.
+                                    await self.send_audio("say.started")
+                                    self._start_sent = True
                             if not started and self.reply_failures:
                                 # Nothing could be said. A short troubled sound is honest audio,
                                 # and lets the brainstem leave thinking at once.

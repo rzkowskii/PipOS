@@ -775,6 +775,8 @@ class Mind:
         # chat.mode reply=text: replies are shown, not spoken. A ring that must
         # sound (an alarm) speaks whatever the mode (`_voiced`).
         self._chat_text = False
+        self._chat_generation = None  # the bus connection the mode was heard on
+        self._reply_text = None       # text or spoken, decided once when a reply starts
         self._voiced = False
         self._utterance_senses = None
         self._last_partial = None
@@ -1820,6 +1822,7 @@ class Mind:
             self._observe_played(event)
         elif topic == "chat.mode":
             self._chat_text = event.get("reply") == "text"
+            self._chat_generation = self.bus.generation
         elif topic == "camera.look_result":
             self._camera_look_result(event)
         elif event["t"] == "say.done" and event.get("final") and event.get("announcement"):
@@ -2018,6 +2021,10 @@ class Mind:
         for played in list(self._plays.values()):
             if played.closed:
                 continue
+            if self._reply_text and not played.settled.is_set():
+                # Shown, not spoken: nothing will report the end, so it ends here, stopped.
+                played.observe({"t": "say.played", "reply": played.token, "final": True, "stopped": True})
+                asyncio.ensure_future(self.bus.send("say.played", reply=played.token, final=True, stopped=True))
             if played.written:
                 self._played_cancelled(played)
             elif not self.lid_open:
@@ -2132,11 +2139,23 @@ class Mind:
     def _text_reply(self):
         """Replies are shown and not spoken: written chat with written replies.
         A guest always hears the spoken voice, and an alarm still rings."""
-        return self._chat_text and self._guest_memory is None and not self._voiced
+        # A restarted brainstem keeps no mode: until one is heard on this
+        # connection, replies are spoken.
+        return (self._chat_text and self._chat_generation == self.bus.generation
+                and self._guest_memory is None and not self._voiced)
+
+    def _begin_reply(self):
+        """Decide once whether this reply is shown or spoken; a mode change
+        mid-reply must not split it between the screen and the voice."""
+        self._reply_text = self._text_reply()
+        return self._reply_text
 
     async def _send_reply(self, topic, **fields):
         if self.lid_open and not self._cancelled:
-            if self._text_reply():
+            text_reply = self._reply_text if self._reply_text is not None else self._text_reply()
+            if topic == "mind.reply_done":
+                self._reply_text = None
+            if text_reply:
                 if topic == "say.request" and not fields.get("chirp"):
                     # Nothing is spoken: the mind itself reports each clause as
                     # shown, with its words, so the captions, the typed chat and
@@ -2156,16 +2175,21 @@ class Mind:
         if not (isinstance(reply, str) and PLAYED_TOKEN.fullmatch(reply)):
             reply = uuid.uuid4().hex[:16]
         text = fields.get("text")
+        receipts = []
         if isinstance(text, str) and text.strip():
-            receipt = {"reply": reply, "seq": fields.get("seq"), "text": text}
-        elif fields.get("last") is True:
-            receipt = {"reply": reply, "final": True, "stopped": False}
-        else:
-            return
-        if self.lid_seq is not None:
-            receipt["lid_seq"] = self.lid_seq
-        await self.bus.send("say.played", **receipt)
-        self._observe_played({"t": "say.played", **receipt})
+            receipts.append({"reply": reply, "seq": fields.get("seq"), "text": text})
+        if fields.get("last") is True:
+            receipts.append({"reply": reply, "final": True, "stopped": False})
+        for receipt in receipts:
+            # What the request carried about who may see it travels with the receipt.
+            if fields.get("private") is True:
+                receipt["private"] = True
+            if "camera_seq" in fields:
+                receipt["camera_seq"] = fields["camera_seq"]
+            if self.lid_seq is not None:
+                receipt["lid_seq"] = self.lid_seq
+            await self.bus.send("say.played", **receipt)
+            self._observe_played({"t": "say.played", **receipt})
 
     async def _on_event(self, event):
         topic = event.get("t")
@@ -4914,7 +4938,7 @@ class Mind:
             self._register_played(played)
         self._said_all_ok = False
         self._said_all.clear()
-        text_mode = self._text_reply()
+        text_mode = self._begin_reply()
         for i, clause in enumerate(clauses, 1):
             # In text mode the chime is its own request, after the words are shown.
             extra = {"chirp": chirp} if chirp and i == 1 and not text_mode else {}
@@ -5241,6 +5265,7 @@ class Mind:
         # of them played (mind/played.py). A parroted try hands nothing over.
         played = PlayedReply()
         self._register_played(played)
+        self._begin_reply()
 
         async def hand(item):
             nonlocal first_clause
@@ -5673,7 +5698,10 @@ class Mind:
                             if opening else "[neutral] Okay.", keep=False)
         elif kind == "chat_mode":
             # "Let's type", "Silent mode", "Back to talking" (mind/chat_bridge.py owns the mode).
-            if self._guest_memory is not None or speaker != self.cfg.owner or arg not in CHAT_MODES:
+            if arg not in CHAT_MODES:
+                await self._say("[neutral] I don't know that way of talking.", keep=False)
+                return
+            if self._guest_memory is not None or speaker != self.cfg.owner:
                 await self._say("[neutral] Written chat is for my owner.", keep=False)
                 return
             await self._say("[neutral] Okay." if arg == "spoken" else "[neutral] Okay, type to me.", keep=False)

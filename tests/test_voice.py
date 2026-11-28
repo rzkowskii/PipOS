@@ -114,6 +114,31 @@ class LidPrivacy(unittest.IsolatedAsyncioTestCase):
             voice.connection_lost()
             await voice.stop_capture()
 
+    async def test_a_guest_arriving_or_leaving_reopens_or_shuts_the_microphone_while_typing(self):
+        voice = TestVoice()
+        async with asyncio.TaskGroup() as voice.tasks:
+            await voice.event("app.privacy", guest=False)
+            await voice.event("state.changed", state="idle", muted=False)
+            await voice.event("body.lid", closed=False)
+            await voice.event("chat.mode", mode="typed_voice", input="typed", reply="voice")
+            self.assertIsNone(voice.capture)
+            voice.recording_started.clear()
+            await voice.event("app.privacy", guest=True)       # a guest arrives: spoken to, heard
+            await asyncio.wait_for(voice.recording_started.wait(), 1)
+            await voice.event("app.privacy", guest=False)      # leaves: the owner's typed mode shuts it again
+            self.assertIsNone(voice.capture)
+            voice.connection_lost()
+            await voice.stop_capture()
+
+    async def test_a_reconnect_forgets_the_typed_mode_until_it_is_replayed(self):
+        voice = TestVoice()
+        async with asyncio.TaskGroup() as voice.tasks:
+            await voice.event("chat.mode", mode="typed_voice", input="typed", reply="voice")
+            self.assertTrue(voice.typed_input)
+            voice.connection_lost()
+            self.assertFalse(voice.typed_input)
+            await voice.stop_capture()
+
     async def test_a_restarted_voice_starts_spoken(self):
         self.assertFalse(TestVoice().typed_input)
 

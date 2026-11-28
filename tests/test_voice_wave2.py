@@ -510,7 +510,7 @@ class RingBell(unittest.IsolatedAsyncioTestCase):
             setattr(voice, key, value)
         voice.chirp_bank = Mock(path=Mock(return_value="/unused/bell.wav"))
         order = []
-        voice.play_chirp = AsyncMock(side_effect=lambda path: order.append(("bell", path)) or True)
+        voice.play_chirp = AsyncMock(side_effect=lambda path, **kw: order.append(("bell", path)) or True)
         voice.play = AsyncMock(side_effect=lambda audio, first: order.append(("words", first)))
         voice.send_audio = AsyncMock()
         voice.synthesize = AsyncMock()
@@ -546,7 +546,7 @@ class RingBell(unittest.IsolatedAsyncioTestCase):
         voice.chirps_on, voice.lid_open, voice.muted = True, True, False
         voice.chirp_bank = Mock(path=Mock(return_value="/unused/bell.wav"))
         order = []
-        voice.play_chirp = AsyncMock(side_effect=lambda path: order.append("bell") or True)
+        voice.play_chirp = AsyncMock(side_effect=lambda path, **kw: order.append("bell") or True)
         voice.play = AsyncMock(side_effect=lambda audio, first: order.append("words"))
         voice.send_audio = AsyncMock()
         voice.clauses.put_nowait(voice_module.clause_request(
@@ -555,6 +555,7 @@ class RingBell(unittest.IsolatedAsyncioTestCase):
         with patch("mind.voice.tempfile.TemporaryDirectory", return_value=nullcontext("/unused")):
             await asyncio.wait_for(voice.speak(), 2)
         self.assertEqual(order, ["bell"])
+        voice.play_chirp.assert_awaited_once_with("/unused/bell.wav", announce=True)
         done = [c for c in voice.send_audio.await_args_list if c.args[0] == "say.done"]
         self.assertEqual(done[-1].kwargs, {"final": True, "announcement": "tok"})
 
@@ -569,6 +570,9 @@ class RingBell(unittest.IsolatedAsyncioTestCase):
         with patch("mind.voice.tempfile.TemporaryDirectory", return_value=nullcontext("/unused")):
             await asyncio.wait_for(voice.speak(), 2)
         voice.play_chirp.assert_not_awaited()
+        topics = [c.args[0] for c in voice.send_audio.await_args_list]
+        self.assertEqual(topics.count("say.started"), 1, "the brainstem still hears the reply begin")
+        self.assertLess(topics.index("say.started"), topics.index("say.done"))
 
     async def test_a_chirp_still_playing_stops_before_the_bell(self):
         voice = Voice(Mock(), "Richard", [], "")
