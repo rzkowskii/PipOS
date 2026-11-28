@@ -145,7 +145,7 @@ fn allowed_from(topic: &str, from: &str, hardware_body: bool) -> bool {
     }
     // Typing over Pip from the local menu's typing chat stops it speaking, as
     // Esc does; that is the only key the typing chat may press.
-    if topic == "key.interrupt" && from == "keyboard" {
+    if topic == "key.interrupt" && matches!(from, "keyboard" | "chat") {
         return true;
     }
     if topic_matches("key.*", topic) && hardware_body && from != "face" {
@@ -159,7 +159,9 @@ fn allowed_from(topic: &str, from: &str, hardware_body: bool) -> bool {
     if topic_matches("hear.*", topic) && hardware_body {
         return match from {
             "voice" => true,
-            "keyboard" => matches!(topic, "hear.wake" | "hear.speech_start" | "hear.partial" | "hear.final" | "hear.cancel"),
+            // The dock's chat bridge (mind/chat_bridge.py) puts the lines the
+            // owner types on the face in the same way.
+            "keyboard" | "chat" => matches!(topic, "hear.wake" | "hear.speech_start" | "hear.partial" | "hear.final" | "hear.cancel"),
             _ => false,
         };
     }
@@ -183,7 +185,13 @@ fn allowed_from(topic: &str, from: &str, hardware_body: bool) -> bool {
         // the mind decides the step).
         "being.brightness" | "being.kbd_light" => from == "mind",
         "screen.prefs" | "screen.quick_menu" | "screen.night" | "screen.online" => from == "mind",
-        "screen.prefs_state" | "ui.action" => from == "face",
+        "screen.prefs_state" | "ui.action" | "ui.text" => from == "face",
+        // How the owner talks to Pip (spoken, typed with spoken replies, typed
+        // with written replies): the chat bridge holds it, the voice and the
+        // face follow it; a spoken request to change it comes from the mind.
+        "chat.mode" => matches!(from, "chat" | "mind"),
+        "chat.notice" => from == "chat",
+        "chat.mode.request" => from == "mind",
         "app.calc_display" | "app.lookup_query" => from == "mind",
         // The owner's "louder" or "no chirps" reaches the voice through the
         // mind; the voice answers with what it really set. "Which voice"
@@ -547,7 +555,7 @@ fn blocked_by_lid(topic: &str) -> bool {
             "say.request" | "say.started" | "say.level" | "say.done" | "say.played"
                 | "mind.emotion" | "mind.reply_done" | "mind.announce" | "mind.announce_cancel" | "being.sleep"
                 | "app.calc_display" | "app.lookup_query"
-                | "screen.quick_menu" | "screen.night" | "screen.online" | "ui.action"
+                | "screen.quick_menu" | "screen.night" | "screen.online" | "ui.action" | "ui.text"
         )
 }
 
@@ -734,6 +742,8 @@ fn main() {
     let started = Instant::now();
     let mut hub = Hub { peers: HashMap::new(), log, started };
     let mut screen_prefs = None;
+    // How the owner is talking to Pip now; replayed to every organ that joins.
+    let mut chat_mode: Option<Event> = None;
     // Owner-only preparation waits for an explicit privacy report from Mind.
     let mut caption_privacy = guest_latched(appliance_body)
         .then(|| Event::new("app.privacy").with("guest", true));
@@ -909,6 +919,7 @@ fn main() {
                             snaps.extend(ears.latch_event().map(|event| event.with("snapshot", true)));
                             snaps.extend(life.as_ref().map(|l| l.event()));
                             snaps.extend(screen_prefs.clone());
+                            snaps.extend(chat_mode.clone());
                             if guest_latched(appliance_body) {
                                 snaps.push(Event::new("app.privacy").with("guest", true));
                             } else {
@@ -1004,6 +1015,10 @@ fn main() {
                             "being.kbd_light" => pending.push((kbd_light.request(&ev), None)),
                             "screen.prefs" => {
                                 screen_prefs = Some(ev.clone());
+                                pending.push((ev, Some(id)));
+                            }
+                            "chat.mode" => {
+                                chat_mode = Some(ev.clone());
                                 pending.push((ev, Some(id)));
                             }
                             "voice.install_status" => {
@@ -1481,6 +1496,8 @@ fn quick_menu_routes_use_the_correct_organs_and_the_lid_gate() {
         assert!(!allowed_from("screen.quick_menu", "face", hardware));
     }
     assert!(blocked_by_lid("ui.action") && blocked_by_lid("screen.quick_menu"));
+    assert!(blocked_by_lid("ui.text"), "a typed line is dropped while the lid is closed");
+    assert!(!blocked_by_lid("chat.mode") && !blocked_by_lid("chat.notice"), "the mode survives the lid");
 }
 
 #[cfg(test)]
@@ -1556,4 +1573,29 @@ fn the_boot_local_guest_latch_is_read_only_on_an_appliance_body() {
     let owner = Some(Event::new("app.privacy").with("guest", false));
     assert!(!guest_now(&owner, false));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(test)]
+#[test]
+fn written_chat_topics_have_one_sender_each() {
+    for hardware in [true, false] {
+        assert!(allowed_from("ui.text", "face", hardware));
+        assert!(allowed_from("chat.mode", "chat", hardware) && allowed_from("chat.mode", "mind", hardware));
+        assert!(allowed_from("chat.notice", "chat", hardware) && !allowed_from("chat.notice", "mind", hardware));
+        assert!(allowed_from("chat.mode.request", "mind", hardware));
+        for organ in ["face", "voice", "hands", "eyes", "rogue"] {
+            assert!(!allowed_from("chat.mode", organ, hardware), "{organ} cannot change how the owner talks");
+            assert!(!allowed_from("chat.mode.request", organ, hardware), "{organ}");
+        }
+        for organ in ["mind", "chat", "voice", "hands", "eyes", "rogue"] {
+            assert!(!allowed_from("ui.text", organ, hardware), "{organ} cannot type as the owner's face");
+        }
+    }
+    // The bridge may put the typed line on the bus as the owner's words, and stop Pip, nothing more.
+    for topic in ["hear.wake", "hear.speech_start", "hear.partial", "hear.final", "hear.cancel", "key.interrupt"] {
+        assert!(allowed_from(topic, "chat", true), "{topic}");
+    }
+    for topic in ["hear.sound", "hear.missed", "key.mute", "key.attend", "see.presence", "say.played"] {
+        assert!(!allowed_from(topic, "chat", true), "{topic}");
+    }
 }

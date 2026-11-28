@@ -22,6 +22,9 @@ pub const PROTECTED: &[(&str, &[&str])] = &[
     // The typing chat (mind/type_chat.py) runs from the local menu, and its
     // words count as the owner's, so no other unit may take its name.
     ("keyboard", &["being-local-screen.service"]),
+    // The face's typed lines (the dock's composer) are passed on as the
+    // owner's words by mind/chat_bridge.py, so its name is its own unit's.
+    ("chat", &["being-chat.service"]),
 ];
 
 /// The unit our own process runs in, if it is the appliance brainstem.
@@ -114,6 +117,8 @@ mod tests {
         assert!(may_claim("keyboard", Some("being-local-screen.service")), "the typing chat");
         assert!(!may_claim("keyboard", Some("being-eyes.service")), "the camera sandbox cannot type as the owner");
         assert!(!may_claim("keyboard", None));
+        assert!(may_claim("chat", Some("being-chat.service")), "the dock's chat bridge");
+        assert!(!may_claim("chat", Some("being-local-screen.service")) && !may_claim("chat", None));
         assert!(may_claim("soak", None), "lab tools keep their own names");
         assert!(may_claim("hardware-timing-12", Some("being-lab-observe.service")));
     }
