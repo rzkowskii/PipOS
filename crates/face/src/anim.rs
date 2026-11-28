@@ -3067,12 +3067,16 @@ mod tests {
         assert!((a.breath_scale - 1.0).abs() < 0.03);
     }
 
-    const TUNED: [ExprId; 11] = [ExprId::Sad, ExprId::Laugh, ExprId::Love, ExprId::Embarrassed, ExprId::Scared,
-        ExprId::Annoyed, ExprId::Smug, ExprId::Confused, ExprId::Wink, ExprId::Bored, ExprId::Relieved];
+    /// Every tuned name, taken from the table so each later batch is pinned without a list here.
+    fn tuned_ids() -> Vec<ExprId> {
+        let ids: Vec<_> = ExprId::ALL.iter().copied().filter(|id| id.is_tuned()).collect();
+        assert!(ids.len() >= 19, "the tuned set only grows");
+        ids
+    }
 
     #[test]
     fn express_accepts_the_tuned_names_and_still_refuses_concepts_and_dreaming() {
-        for id in TUNED {
+        for id in tuned_ids() {
             let mut a = awake(5);
             a.gaze_next = a.t + 20.0;
             a.blink_next = a.t + 10.0;
@@ -3092,7 +3096,7 @@ mod tests {
 
     #[test]
     fn tuned_poses_keep_the_audition_clamp() {
-        for id in TUNED {
+        for id in tuned_ids() {
             let name = id.name();
             let mut a = awake(5);
             a.gaze_next = a.t + 20.0;
@@ -3122,8 +3126,8 @@ mod tests {
 
     #[test]
     fn tuned_kicks_keep_the_face_active_for_the_kick_window() {
-        let kicking: Vec<_> = TUNED.into_iter().filter(|id| id.motion().kick != Kick::None).collect();
-        assert_eq!(kicking.len(), 3);
+        let kicking: Vec<_> = tuned_ids().into_iter().filter(|id| id.motion().kick != Kick::None).collect();
+        assert!(kicking.len() >= 3, "the earlier kicking poses stay kicking");
         for id in kicking {
             let name = id.name();
             let mut a = awake(5);
@@ -3143,7 +3147,7 @@ mod tests {
 
     #[test]
     fn tuned_poses_stay_safe_through_transitions() {
-        for id in TUNED {
+        for id in tuned_ids() {
             let mut a = awake(21);
             a.audition(id, 1.0, 0.9);
             for i in 0..120 {

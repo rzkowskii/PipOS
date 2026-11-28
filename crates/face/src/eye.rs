@@ -379,9 +379,10 @@ fn rest() -> Eye {
 mod tests {
     use super::*;
 
-    /// The tuned poses promoted to model-expressible names, in catalogue order.
-    const TUNED: [&str; 11] = ["sad", "laugh", "love", "embarrassed", "scared", "annoyed", "smug",
-                               "confused", "wink", "bored", "relieved"];
+    /// Every tuned name, in catalogue order, taken from the table.
+    fn tuned_names() -> Vec<&'static str> {
+        ExprId::ALL.iter().filter(|id| id.is_tuned()).map(|id| id.name()).collect()
+    }
 
     #[test]
     fn the_existing_expressions_keep_every_channel_and_their_public_order() {
@@ -389,7 +390,7 @@ mod tests {
                       "surprise", "skepticism", "concern", "sleepy", "asleep", "dreaming", "tired", "muted", "dazed"];
         // The legacy block comes first and unchanged; the promoted names follow it.
         assert!(ExprId::PUBLIC[..public.len()].iter().map(|id| id.name()).eq(public));
-        assert!(ExprId::PUBLIC[public.len()..].iter().map(|id| id.name()).eq(TUNED));
+        assert!(ExprId::PUBLIC[public.len()..].iter().map(|id| id.name()).eq(tuned_names()));
         let legacy: Vec<_> = public.into_iter().chain(["loading"]).collect();
         assert!(ExprId::ALL.iter().take(legacy.len()).map(|id| id.name()).eq(legacy.iter().copied()));
         for name in legacy {
@@ -425,13 +426,19 @@ mod tests {
 
     #[test]
     fn the_tuned_poses_are_public_and_guarded_and_only_the_concepts_remain_auditions() {
-        assert_eq!(ExprId::PUBLIC.len(), 16 + TUNED.len());
-        for name in TUNED {
+        let tuned = tuned_names();
+        assert!(tuned.len() >= 19);
+        assert_eq!(ExprId::PUBLIC.len(), 16 + tuned.len());
+        for name in tuned {
             let id = ExprId::from_name(name).unwrap();
             assert!(ExprId::PUBLIC.contains(&id) && !ExprId::AUDITIONS.contains(&id), "{name}");
             assert!(id.is_tuned() && !id.is_audition() && id.is_guarded() && !id.is_concept_only(), "{name}");
         }
-        assert_eq!(ExprId::AUDITIONS.len(), 63);
+        // The catalogue has 91 names in all (89 Face Lab rows plus speaking and
+        // dreaming). Promoting a name moves it between lists; it never adds or loses one.
+        assert_eq!(ExprId::ALL.len(), 91);
+        // 17 legacy rows (sixteen public and loading), the tuned rows, and the rest are auditions.
+        assert_eq!(ExprId::AUDITIONS.len(), ExprId::ALL.len() - 17 - tuned_names().len());
         for &id in ExprId::AUDITIONS {
             assert!(id.is_audition() && id.is_guarded() && !id.is_tuned() && id.is_concept_only());
             assert!(!ExprId::PUBLIC.contains(&id));

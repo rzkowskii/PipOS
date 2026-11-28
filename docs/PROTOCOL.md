@@ -114,6 +114,7 @@ RAM-only counts by `mind.route` category and up to ten route IDs.
 | `app.lookup_query` | mind | `app: lookup`, `query`, `req`, `lid_seq` | Submit an explicit spoken lookup. Hands also opens `lookup` through the regular app-open route. Typed queries and results travel over the root-only local Organizer socket, with owner Internet mode and web lookup permission checked on each request. Suppressed while the lid is closed and omitted from the bus journal. |
 | `screen.night` | mind | `stages`, `lid_seq` | The current wake may show the number of finished night-shift stages for eight seconds. It clears on lid or guest changes and is hidden behind an open panel, captions or level bar. The Journal's Last night page has the stage names. |
 | `app.state` | hands | `app`, `view` (`shown`, `minimised` or `closed`), `session`, `job`, `req` | What the workshop now shows. A small app carries `session` and `job` as null. A small app whose renderer ends is announced closed without a request. |
+| `term.status` | hands | `id`, `phase`, `source`, `file`, `lines`, `seconds`, `exit`, `reason`, `speakable`, `describe`, `kind`, optional `sha256`, `fixed`, `req` | The state of the one terminal job. `phase` is one of `reading`, `writing`, `held`, `paused`, `checking`, `waiting`, `countdown`, `running`, `frozen`, `done`, `failed` or `cancelled` (and `forgotten` when a finished job is dropped). `exit` is the process's exit code once it ran. `reason` explains a stop (for example `exit_unknown`, `heat`, `policy:*`). `speakable` marks a line the mind may announce; guests never hear workshop news. A status can be re-sent on a query, so receivers de-duplicate by `id` and `phase`. The mind builds its sentence from it in code. The brainstem also reacts to `failed` with a non-zero `exit` and to `done` with `exit` 0 by sending `face.express` (see Expressions). It is not lid-gated. |
 | `app.refused` | hands | `req`, `reason`, `app`, optional `job` | The workshop would not do it (for example `busy`, `no_session`, `low_battery`, `too_warm`). `no_face`: the Try menu has the screen (`being-face.service` is not running and `being-local-screen.service` is), so a panel opened now could not be seen. The mind says "Close the Try menu to see my terminal." (or clock, or monitor), and a job that needed the terminal brought forward does not start. |
 | `app.privacy` | mind | `guest` | A guest arrived (`true`) or left. The hub replays privacy to reconnecting organs. On the appliance `/run/being/guest` preserves guest mode across organ restarts within a boot. A restarted Mind starts with an empty guest conversation. Hands clears the workshop. Voice suppresses transcript logging, and Face clears and suppresses words and routing indicators in captions. |
 | `screen.prefs` | mind | `glow`, `shape`, `strength`, `size`, `brows`, `mouth`, `revision`, `menu_position`, `menu_labels`, `captions`, `caption_heard`, `caption_cost`, `idle_glances`, the three `*_widget` flags and their `*_widget_position` fields | Saved display settings. Menu position is left, center, right or off. Each widget accepts top-left, top-right, bottom-left or bottom-right. Captions default off. The brainstem retains the latest message for a new face connection. |
@@ -196,8 +197,10 @@ Two overlays ride on top: `muted` and `unwell`.
 
 `neutral`, `attentive`, `listening`, `thinking`, `speaking`, `joy`, `curiosity`,
 `surprise`, `skepticism`, `concern`, `sleepy`, `asleep`, `tired`, `muted`, `dazed`,
-and the eleven tuned expressions `sad`, `laugh`, `love`, `embarrassed`, `scared`,
-`annoyed`, `smug`, `confused`, `wink`, `bored`, `relieved`. `face.express` accepts
+and the tuned expressions `sad`, `laugh`, `love`, `embarrassed`, `scared`,
+`annoyed`, `smug`, `confused`, `wink`, `bored`, `relieved`, and the shock family
+`shocked`, `startled`, `gasp`, `amazed`, `bewildered`, `speechless`, `horror`,
+`stunned`. `face.express` accepts
 exactly these names; any other name is ignored. (`dreaming` is a demo-only pose
 and `loading` is the face's own state before the brainstem first answers; neither
 can be requested.) The model still chooses only from its seven tags
