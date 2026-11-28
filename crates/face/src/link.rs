@@ -2,6 +2,7 @@
 //! the animation when the brainstem has gone quiet.
 
 use crate::anim::{Anim, Drives};
+use crate::dock::Dock;
 use crate::keys::LevelBar;
 use crate::look::Prefs;
 use crate::options::Options;
@@ -53,6 +54,9 @@ const SUBS: &[&str] = &[
     "screen.online",
     "screen.night",
     "app.refused",
+    // How Pip is talked to, and what the typing bridge tells the owner.
+    "chat.mode",
+    "chat.notice",
 ];
 const RETRY: Duration = Duration::from_millis(700);
 const MENU_DISMISSED: &str = "shell.quick_menu.dismissed";
@@ -89,6 +93,7 @@ pub struct Side {
     night: Option<(u64, Instant)>,
     pub menu: Menu,
     pub options: Options,
+    pub dock: Dock,
     birth: BirthGate,
 }
 
@@ -285,6 +290,22 @@ impl Link {
             action = action.with("lid_seq", seq);
         }
         self.send(action);
+    }
+
+    /// Ask the mind for the next way of talking to Pip (the dock's chip, or
+    /// the mode key).
+    pub fn chat_mode_next(&mut self) {
+        self.menu_action("chat.mode.next");
+    }
+
+    /// A line typed into the dock, for the typing bridge to say to Pip. The
+    /// brainstem blocks it while the lid is closed, as it blocks `ui.action`.
+    pub fn ui_text(&mut self, text: &str) {
+        let mut line = Event::new("ui.text").with("text", text);
+        if let Some(seq) = self.lid_seq {
+            line = line.with("lid_seq", seq);
+        }
+        self.send(line);
     }
 
     pub fn night_notice(&self, now: Instant) -> Option<u64> {
@@ -584,6 +605,11 @@ fn apply(ev: &Event, anim: &mut Anim, side: &mut Side) {
             if let Some(app) = ev.str("app") {
                 side.menu.refused(app);
             }
+        }
+        "chat.mode" | "chat.notice" => {
+            side.dock.event(ev, Instant::now());
+            // Written chat shows Pip's words whatever the Captions setting is.
+            side.captions.set_typed(side.dock.mode().typed());
         }
         "body.drives" => anim.set_drives(Drives {
             energy: drive(ev, "energy"),
@@ -901,5 +927,74 @@ mod tests {
         assert!(!anim.panel_blank());
         anim.set_link_lost(true);
         assert_eq!(anim.target_name(), "dazed");
+    }
+
+    #[test]
+    fn the_dock_asks_for_modes_and_sends_typed_lines_with_the_lid_sequence() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+
+        let path = std::env::temp_dir().join(format!("face-chat-{}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut link = Link::new(path.clone(), None);
+        link.client = Some(Client::connect(&path, "face", &[]).unwrap());
+        let (stream, _) = listener.accept().unwrap();
+        std::fs::remove_file(path).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut event = || {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            Event::parse(&line).unwrap()
+        };
+        assert_eq!(event().topic, "hello");
+        link.lid_seq = Some(31);
+
+        link.chat_mode_next();
+        let ask = event();
+        assert_eq!((ask.topic.as_str(), ask.str("id")), ("ui.action", Some("chat.mode.next")));
+        assert_eq!(ask.data["lid_seq"].as_u64(), Some(31));
+
+        link.ui_text("set a timer for ten minutes");
+        let line = event();
+        assert_eq!((line.topic.as_str(), line.str("text")), ("ui.text", Some("set a timer for ten minutes")));
+        assert_eq!(line.data["lid_seq"].as_u64(), Some(31));
+
+        // With no lid reading the line carries no sequence (the brainstem decides).
+        link.lid_seq = None;
+        link.ui_text("hello");
+        assert!(event().data.get("lid_seq").is_none());
+    }
+
+    #[test]
+    fn chat_mode_messages_set_the_dock_and_force_captions_for_written_modes() {
+        let mut anim = Anim::new(7);
+        let mut side = Side::default();
+        let now = Instant::now();
+        assert!(!side.captions.displaying(now));
+        apply(&Event::new("chat.mode").with("mode", "typed_text").with("input", "typed").with("reply", "text"),
+              &mut anim, &mut side);
+        assert_eq!(side.dock.mode(), crate::dock::Mode::TypedText);
+        apply(&Event::new("say.request").with("text", "Done.").with("reply", "r").with("seq", 0), &mut anim, &mut side);
+        apply(&Event::new("say.played").with("reply", "r").with("seq", 0), &mut anim, &mut side);
+        assert!(side.captions.displaying(now), "typed replies show with the Captions setting off");
+        assert!(!side.captions.on);
+        // A guest arriving ends it, whatever mode the mind last said.
+        apply(&Event::new("app.privacy").with("guest", true), &mut anim, &mut side);
+        assert!(!side.captions.displaying(now));
+        apply(&Event::new("app.privacy").with("guest", false), &mut anim, &mut side);
+        apply(&Event::new("chat.mode").with("mode", "spoken"), &mut anim, &mut side);
+        assert!(!side.captions.displaying(now));
+        assert_eq!(side.dock.mode(), crate::dock::Mode::Spoken);
+        apply(&Event::new("chat.notice").with("text", "Pip is muted."), &mut anim, &mut side);
+        assert_eq!(side.dock.mode(), crate::dock::Mode::Spoken, "a notice does not change the mode");
+    }
+
+    #[test]
+    fn the_dock_topics_are_subscribed() {
+        for topic in ["chat.mode", "chat.notice"] {
+            assert!(SUBS.contains(&topic), "{topic}");
+        }
+        assert_eq!(SUBS.last(), Some(&"chat.notice"), "appended at the end, clear of other lanes' entries");
     }
 }
