@@ -204,7 +204,9 @@ and the tuned expressions `sad`, `laugh`, `love`, `embarrassed`, `scared`,
 `excited`, `victorious`, `angry`, `disappointed`, `grateful`, `amused`,
 `giggle`, `bashful`, `hopeful`, `encouraging`, `reassuring`, and the playful and warm
 set `starstruck`, `proud`, `idea`, `crying`, `nervous`, `mischief`, `determined`,
-`cheeky`, `sing`, `dizzy`, `ko`, `cozy`, `flirty`, `dreamy`, `adoring`. `face.express` accepts
+`cheeky`, `sing`, `dizzy`, `ko`, `cozy`, `flirty`, `dreamy`, `adoring`, and the tense and
+unhappy family `heartbroken`, `guilty`, `jealous`, `raging`, `disgusted`, `panicked`,
+`freezing`, `lonely`, `pouting`, `grumpy`, `resigned`, `awkward`. `face.express` accepts
 exactly these names; any other name is ignored. (`dreaming` is a demo-only pose
 and `loading` is the face's own state before the brainstem first answers; neither
 can be requested.) The model still chooses only from its seven tags

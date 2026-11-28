@@ -3212,7 +3212,7 @@ mod tests {
         let mut a = awake(3);
         a.gaze_next = a.t + 20.0;
         a.blink_next = a.t + 10.0;
-        a.express("heartbroken", 3.0);
+        a.express("sick", 3.0);
         a.express("dreaming", 3.0);
         assert_eq!(a.target_name(), "neutral");
         a.audition(ExprId::Embarrassed, 0.5, 3.0);
@@ -3254,7 +3254,7 @@ mod tests {
             run(&mut a, 2.5);
             assert_ne!(a.target_name(), id.name(), "{} outlives its hold", id.name());
         }
-        for refused in ["heartbroken", "dreaming", "no-such-name"] {
+        for refused in ["sick", "dreaming", "no-such-name"] {
             let mut a = awake(5);
             a.express(refused, 1.5);
             run(&mut a, 0.6);
@@ -3325,7 +3325,7 @@ mod tests {
 
     #[test]
     fn express_invalid_blend_is_dropped_and_the_pose_plays_alone() {
-        for blend in [("heartbroken", 0.5), ("dreaming", 0.5), ("joy", 0.5), ("sad", f64::NAN), ("sad", f64::INFINITY)] {
+        for blend in [("sick", 0.5), ("dreaming", 0.5), ("joy", 0.5), ("sad", f64::NAN), ("sad", f64::INFINITY)] {
             let mut a = awake(5);
             a.express_with("joy", 3.0, Some(0.7), Some(blend));
             let held = a.emotion.as_ref().unwrap();
@@ -3336,7 +3336,7 @@ mod tests {
 
     #[test]
     fn express_unknown_main_name_is_ignored_with_options() {
-        for name in ["heartbroken", "dreaming", "no-such-name"] {
+        for name in ["sick", "dreaming", "no-such-name"] {
             let mut a = awake(5);
             a.express_with(name, 1.5, Some(0.5), Some(("sad", 0.5)));
             run(&mut a, 0.6);
