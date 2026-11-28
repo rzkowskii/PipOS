@@ -106,6 +106,41 @@ with `lab/build.sh build grub2-rebuild linux-reconfigure being-rebuild all`.
 For an earlier L3 cache with standalone RAUC, add `rauc-reconfigure` to the
 same invocation to enable the install service.
 
+### Fill the offline builder's caches
+
+The builder container has no network. Source tarballs live in `/work/dl/<package>/` and the Rust crates in `/work/dl/br-cargo-home`, both in the `beingos-work` volume.
+
+A tree that adds a package or a crate stops offline:
+- a new package fails with `unable to resolve host address 'sources.buildroot.net'`;
+- a new crate, dev-dependencies included, fails with ``failed to get `<crate>` as a dependency``.
+
+Fill the caches from the Mac, then build again:
+
+```bash
+lab/build.sh laptop-config      # with the same BEING_LAPTOP_* variables as the build
+lab/builder_cache.sh check laptop-cable
+lab/builder_cache.sh fill laptop-cable
+```
+
+`fill` handles both caches:
+- **Tarballs:** fetched from `sources.buildroot.net`. Each one is checked against the hash its Buildroot `.hash` file pins, or the tree's own under `os/patches/`, before it is copied in. A file with no pinned hash, or a mismatch, stops the script.
+- **Crates:** come from `cargo fetch --locked`, so `Cargo.lock` decides them. Only files the cache lacks are added.
+
+Run `check` after `laptop-config`: it reads the configured tree.
+
+Filled on 28 November 2026 for the cryptsetup chain and the face crate's GLSL test:
+
+| Tarball | Pinned hash (Buildroot 2026.08.2) |
+|---|---|
+| `cryptsetup/cryptsetup-2.8.7.tar.xz` | sha256 `e776f0d381e86ca61042c457069491fe8e0ac286780c7c3b1e4f9921abc961da` |
+| `json-c/json-c-0.18.tar.gz` | sha256 `876ab046479166b869afc6896d288183bbc0e5843f141200c677b3e8dfb11724` |
+| `libaio/libaio-0.3.113.tar.gz` | sha512 `65c30a102433bf8386581b03fc706d84bd341be249fbdee11a032b237a7b239e8c27413504fef15e2797b1acd67f752526637005889590ecb380e2e120ab0b71` |
+| `libargon2/libargon2-20190702.tar.gz` | sha256 `daf972a89577f8772602bf2eb38b6a3dd3d922bf5724d45e7f9589b5e830442c` |
+| `lvm2/LVM2.2.03.31.tgz` | sha512 `254131e28b22d55531d211886afbfdc219e77a4df802e3ec9b66d889ff22bf6d0a6c2df9c5ff017592d92e1dce0f658a6628fb321c1e90152ff7257492218242` |
+| `popt/popt-1.19.tar.gz` | sha256 `c25a4838fc8e4c1c8aacb8bd620edb3084a3d63bf8987fdad3ca2758c63240f9` |
+
+The crates were `glslang` 0.9.1 and `glslang-sys` 0.9.2+e1b562a, a dev-dependency of `crates/face`; their hashes are in `Cargo.lock`.
+
 ## Build the laptop image
 
 The images above are lab images: they keep a passwordless root getty on
