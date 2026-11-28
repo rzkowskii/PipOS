@@ -408,7 +408,7 @@ impl Hub {
     /// not take it and must be dropped.
     fn route(&self, ev: &Event, from: Option<u64>, guest: bool) -> Vec<u64> {
         let voice_private = matches!(ev.topic.as_str(), "voice.prepare" | "voice.clear_prepared");
-        let local_speech = ev.topic == "say.request" && ev.bool("private") == Some(true);
+        let local_speech = is_local_speech(ev);
         let guest_speech = guest && ev.data.contains_key("text");
         if self.log && !voice_private && !local_speech && !guest_speech && !matches!(ev.topic.as_str(), "say.level" | "stem.beat" | "face.gaze" | "body.presence"
             | "app.calc_display" | "app.lookup_query" | "screen.online") {
@@ -558,6 +558,27 @@ fn played_report_allowed(from: &str, current_voice: bool, current_mind: bool, ch
         "mind" => current_mind && chat_mode.and_then(|ev| ev.str("reply")) == Some("text"),
         _ => false,
     }
+}
+
+/// Private local speech: said by the voice and shown by the face, never logged or
+/// passed on to anything else. A written reply's receipt marked private is the
+/// same text as the say.request that would have carried it.
+fn is_local_speech(ev: &Event) -> bool {
+    matches!(ev.topic.as_str(), "say.request" | "say.played") && ev.bool("private") == Some(true)
+}
+
+/// May this camera-derived clause (a say.request, or the mind's say.played in
+/// written replies) go on? Only from the current mind, private, for this lid
+/// reading, while a turn is open, unmuted, under the grant it came from.
+fn camera_speech_allowed(
+    ev: &Event, from: &str, current_mind: bool, lid_seq: u64, lid_blocked: bool, muted: bool, turn_open: bool,
+    granted_seq: Option<u64>,
+) -> bool {
+    from == "mind" && current_mind
+        && ev.bool("private") == Some(true)
+        && ev.data.get("lid_seq").and_then(Value::as_u64) == Some(lid_seq)
+        && !lid_blocked && !muted && turn_open
+        && granted_seq.is_some_and(|current| ev.data.get("camera_seq").and_then(Value::as_u64) == Some(current))
 }
 
 /// How the owner talks when nothing holds a written mode: out loud.
@@ -1101,14 +1122,15 @@ fn main() {
                                 &from, hub.active("voice") == Some(id), hub.active("mind") == Some(id), chat_mode.as_ref(),
                             ) => {}
                             "say.request" if ev.bool("private") == Some(true) && from != "mind" => {}
-                            "say.request" if ev.data.contains_key("camera_seq")
-                                && !(from == "mind" && hub.active("mind") == Some(id)
-                                    && ev.bool("private") == Some(true)
-                                    && ev.data.get("lid_seq").and_then(Value::as_u64) == Some(seq)
-                                    && !body.lid_blocked() && !machine.muted()
-                                    && matches!(machine.state(), machine::State::Thinking | machine::State::Speaking)
-                                    && camera.granted_peer().is_some_and(|(_, current)|
-                                        ev.data.get("camera_seq").and_then(Value::as_u64) == Some(current))) => {}
+                            // A camera description is said (or, in written replies, reported as
+                            // shown) only under the grant that produced it, for this lid reading.
+                            "say.request" | "say.played" if ev.data.contains_key("camera_seq")
+                                && !camera_speech_allowed(
+                                    &ev, &from, hub.active("mind") == Some(id), seq, body.lid_blocked(),
+                                    machine.muted(),
+                                    matches!(machine.state(), machine::State::Thinking | machine::State::Speaking),
+                                    camera.granted_peer().map(|(_, current)| current),
+                                ) => {}
                             topic if blocked_by_lid(topic)
                                 && (body.lid_blocked()
                                     || ev.data.get("lid_seq").is_some_and(|value| value.as_u64() != Some(seq))) => {}
@@ -1650,4 +1672,34 @@ fn the_mind_reports_played_clauses_only_for_written_replies() {
     for organ in ["face", "chat", "keyboard", "hands", "rogue"] {
         assert!(!played_report_allowed(organ, true, true, Some(&text)), "{organ}");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn private_written_receipts_are_local_speech_like_the_say_request_they_stand_for() {
+    let private = |topic: &str| Event::new(topic).with("private", true);
+    assert!(is_local_speech(&private("say.request")));
+    assert!(is_local_speech(&private("say.played")), "a written reply's private receipt is kept out of logs");
+    assert!(!is_local_speech(&Event::new("say.played").with("private", false)));
+    assert!(!is_local_speech(&Event::new("say.played")));
+    assert!(!is_local_speech(&private("say.done")));
+}
+
+#[cfg(test)]
+#[test]
+fn a_camera_clause_needs_the_current_mind_the_grant_and_an_open_unmuted_turn() {
+    let clause = |camera_seq: u64, lid_seq: u64, private: bool| {
+        Event::new("say.played").with("camera_seq", camera_seq).with("lid_seq", lid_seq).with("private", private)
+    };
+    let ok = |ev: &Event| camera_speech_allowed(ev, "mind", true, 7, false, false, true, Some(3));
+    assert!(ok(&clause(3, 7, true)));
+    assert!(!ok(&clause(3, 7, false)), "not private");
+    assert!(!ok(&clause(2, 7, true)), "a grant that is no longer current");
+    assert!(!ok(&clause(3, 6, true)), "an earlier lid reading");
+    assert!(!camera_speech_allowed(&clause(3, 7, true), "mind", false, 7, false, false, true, Some(3)), "replaced mind");
+    assert!(!camera_speech_allowed(&clause(3, 7, true), "voice", true, 7, false, false, true, Some(3)));
+    assert!(!camera_speech_allowed(&clause(3, 7, true), "mind", true, 7, true, false, true, Some(3)), "lid closed");
+    assert!(!camera_speech_allowed(&clause(3, 7, true), "mind", true, 7, false, true, true, Some(3)), "muted");
+    assert!(!camera_speech_allowed(&clause(3, 7, true), "mind", true, 7, false, false, false, Some(3)), "no open turn");
+    assert!(!camera_speech_allowed(&clause(3, 7, true), "mind", true, 7, false, false, true, None), "no grant");
 }

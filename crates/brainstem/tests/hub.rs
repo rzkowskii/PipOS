@@ -948,3 +948,21 @@ fn the_mind_can_report_played_clauses_only_while_replies_are_written() {
     chat.send(&receipt(4)).unwrap();
     assert!(quiet(&watcher, |e| e.topic == "say.played"));
 }
+
+#[test]
+fn a_private_written_receipt_reaches_only_the_voice_and_the_face() {
+    let stem = Stem::start("privplay", "mind");
+    let mut mind = stem.join("mind", &[]);
+    let mut chat = stem.join("chat", &[]);
+    let face = stem.join("face", &["say.played"]);
+    let keyboard = stem.join("keyboard", &["say.played"]);
+    chat.send(&Event::new("chat.mode").with("mode", "typed_text").with("input", "typed").with("reply", "text")).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let receipt = |private: bool| Event::new("say.played").with("reply", "0123456789abcdef").with("seq", 1u64)
+        .with("text", "A private clause.").with("private", private);
+    mind.send(&receipt(true)).unwrap();
+    wait_for(&face, "the face shows a private written clause", |e| e.topic == "say.played");
+    assert!(quiet(&keyboard, |e| e.topic == "say.played"), "no other organ is told a private clause");
+    mind.send(&receipt(false)).unwrap();
+    wait_for(&keyboard, "an ordinary written clause reaches the typing chat", |e| e.topic == "say.played");
+}
