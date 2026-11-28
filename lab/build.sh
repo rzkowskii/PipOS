@@ -633,10 +633,13 @@ laptop_verify() {
                 if [ ! -e "$t/$f" ]; then echo "The cable development image lacks /$f" >&2; bad=1; fi
             done
         fi
-        if grep -q "ttyS0\|^serial " "$out/images/efi-part/EFI/BOOT/grub.cfg" "$t/usr/share/being/installed-grub.cfg"; then
+        # A diagnostic image has no installed-grub.cfg (post-build removes it).
+        grubs="$out/images/efi-part/EFI/BOOT/grub.cfg"
+        [ "$diagnostic" = 1 ] || grubs="$grubs $t/usr/share/being/installed-grub.cfg"
+        if grep -q "ttyS0\|^serial " $grubs; then
             echo "Laptop boot configuration still names the serial console" >&2; bad=1
         fi
-        if grep -q "oops=panic\|BEING_[A-Z]*_ARGS" "$out/images/efi-part/EFI/BOOT/grub.cfg" "$t/usr/share/being/installed-grub.cfg"; then
+        if grep -q "oops=panic\|BEING_[A-Z]*_ARGS" $grubs; then
             echo "Laptop boot configuration panics on an oops or holds an unexpanded token" >&2; bad=1
         fi
         if [ "$diagnostic" = 1 ]; then
