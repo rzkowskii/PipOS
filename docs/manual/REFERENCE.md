@@ -190,6 +190,7 @@ Options on the face and under **L** in Setup.
 | "Move the clock widget to the bottom right" | A widget's corner: top left, top right, bottom left or bottom right |
 | "Show the captions" / "Show the route badge" / "Show the heard line" / "Show the Quick Menu labels" / "Hide the idle glances" | Captions and their two extras, the Quick Menu's labels, and the idle glances |
 | "Set the Quick Menu to off" | Turns the Quick Menu shortcut off. "Open the Quick Menu" brings it back |
+| "Hide the dock" / "Show the dock" / "Set the dock to always" | The Quick Menu dock at the top of the screen: off, or on and fading to a pill when idle (the default), or always full (`dock`: `fades`, `always` or `off`) |
 | "What is your current look?" | Says the current look and which layers are on |
 
 | Say | Behaviour |
@@ -197,6 +198,9 @@ Options on the face and under **L** in Setup.
 | "Open the Quick Menu" / "Show the Quick Menu" / "Close the Quick Menu" | Opens or dismisses it |
 | "Move the Quick Menu to the left" / "Put the menu on the right" / "Move the Quick Menu to the center" | Moves it. Right after that, "Actually put it on the left" moves it again |
 | "Open the options" / "Close the options" | Opens or closes the Options surface |
+| "Let's type" / "Written chat" / "Switch to written chat" | Written chat with spoken replies: type in the dock, Pip answers aloud and the words show as they are spoken. The microphone is off (`chat.mode`: `typed_voice`) |
+| "Silent mode" / "Written replies only" / "Text only" | Written chat with written replies: Pip says nothing, still does what you ask, and shows confirmations as text. Alarms still ring (`typed_text`) |
+| "Back to talking" / "Voice mode" / "Let's talk" | Spoken, as at every start. Only heard while the microphone is on, so from a written mode use the dock's chip or F7 |
 
 ### Greetings (local replies, no model)
 
@@ -268,7 +272,8 @@ external keyboard without media keys sends them as before.
 | **Launchpad** (F4) | Open the workshop terminal; pressed again, put it away, then show it again (`key.apps`). Nothing is said; a refusal (a guest, no hands) is logged | — |
 | **Keyboard light** (F5, F6) | The keyboard's backlight (applesmc `smc::kbd_backlight`) in sixteenths (`key.kbd_light` with `dir` `down` or `up`, then `being.kbd_light`). A keyboard's own light toggle key sends `dir: "toggle"`: off, and back on at the level it had. It goes out while the panel is dark and comes back with it | Same, without the bar |
 | **Play/pause** (F8) | While the eyes rest and no app panel has the keyboard: listen (`key.attend`). Otherwise: stop the reply (`key.interrupt`) | — |
-| **Previous**, **Next** (F7, F9), **Eject** | Nothing; the face logs the press | Nothing |
+| **Previous** (F7) | Change the chat mode: Spoken, then Written + voice, then Written only, then Spoken (`ui.action` `chat.mode.next`, which the chat bridge answers with `chat.mode`). Owner only, with the lid open and the eyes awake; not offered to a guest | Nothing |
+| **Next** (F9), **Eject** | Nothing; the face logs the press | Nothing |
 | **Mute** (F10) | The speaker off, and on again at the level it had (`key.mute_speaker`). The microphone's mute is **M** or **fn+F10**. A key mute is for now only: `voice.volume` goes with `level: 0, persist: false`, which the voice applies without saving it or storing the sound card's state; the mind keeps the level from before it, the face keeps a faint "speaker muted" up, and a ring, a battery plea or a restart of the mind brings the sound back (`mind/keys.py`). A restart of the voice ends a key mute: it plays at the saved level and reports it (`voice.volume_state`), which clears the note and the mind's mute. A stored level under 10 never starts the voice quieter than 10; that level is saved and reported, and reported again when the mind connects | Same, without the note |
 | **Volume** (F11, F12) | The speaker in sixteenths (0, 6, 12 … 94, 100) (`key.volume`, then `voice.volume` with `feedback: true`). Each press clicks once at the new level, as a Mac does: a 30 ms tick that replaces one still playing, under the chirp rules (chirps on, lid open, microphone not muted, not while Pip speaks or in quiet hours) and never while the microphone is open for your words. The lowest step is silence, a key mute like the mute key's, and makes no click. Held, it keeps stepping | Same, without the bar |
 | **Click or tap** | Pip glances down (`key.touch`); while the eyes rest it also listens, as for "Hey Pip" | — |

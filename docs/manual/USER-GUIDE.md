@@ -213,9 +213,10 @@ Panel**, **fn F3 Hide**.
 | **Mute** (F10) | *New.* Pip's speaker off, and back on at the same level. This is the speaker, not the microphone: Pip still hears you. "speaker muted" stays on the face while it is off. A timer, alarm or reminder, or a low-battery warning, turns the speaker back on before it rings, and so does restarting Pip |
 | **Volume** (F11, F12) | *New.* Pip's speaker quieter or louder. A bar shows it, and a short click at the new loudness, as on a Mac (not while Pip is listening to you or talking, or with its sounds switched off). The lowest step is silence, the same as the mute key |
 | **Space**, **Return** or a click | While the eyes rest: listen, as if you had said "Hey Pip". Not while the terminal has the keyboard, and not while muted |
-| **Mission Control** or **fn+F2**, then **6** (Try stick) or **Y** (installed) | Type to Pip instead of talking. It answers out loud, and each part shows on screen as it is spoken. **Esc** leaves |
+| **Previous** (F7) | Change how you talk to Pip: out loud, typing with spoken replies, or typing with written replies. See [Talking by typing](#talking-by-typing) |
+| **Mission Control** or **fn+F2**, then **6** (Try stick) or **Y** (installed) | The older typing screen: it takes the whole screen. The dock below is easier |
 
-The previous, next and eject keys do nothing. None of the top row's printed
+The next and eject keys do nothing. None of the top row's printed
 keys is ever typed into the terminal. On the start menu and setup screens
 the brightness, keyboard-light, volume and speaker-mute keys work as they do
 on the face, with **fn+F9** and **fn+F10**, but no bar or "speaker muted"
@@ -630,6 +631,39 @@ to search for an app or setting. Use the arrow keys and **Enter** to open
 the highlighted result. Choosing a setting focuses the matching control
 in Options. **Esc** leaves search or returns from Options to the menu.
 At the menu, press **Esc** to dismiss it.
+
+A slim **dock** sits at the top of the screen all the time, between the
+corners, and never over the eyes. It shows **Menu**, a few app names and
+a **mode chip** (Spoken, Written + voice, or Written only). Click it or
+press **Enter** with it focused to open the Quick Menu. After 20 seconds
+without use it fades to a faint pill. In Options → Layout, **Dock** can be
+set to *fades* (the default), *always* or *off*; say “Hide the dock” or
+“Show the dock”. The dock is not drawn while Pip sleeps, with the lid
+closed, or when a guest is here.
+
+## Talking by typing
+
+The mode chip, the **Previous** key (**F7**) and your voice change how you
+talk to Pip. There are three modes, and every start is **Spoken**:
+
+| Mode | You | Pip |
+|---|---|---|
+| **Spoken** | talk | answers out loud |
+| **Written + voice** (say “Let's type” or “Written chat”) | type in the dock | answers out loud, and the words show on screen as they are spoken |
+| **Written only** (say “Silent mode” or “Written replies only”) | type in the dock | answers in writing only, and still does what you ask: timers, lists, settings. It asks "yes or no" on screen, and you answer with **Y**, **N** or by typing. A timer or reminder shows as text with one short chime. **Alarms still ring.** |
+
+Say “Back to talking” (while the microphone is on), use the chip, or press
+**F7** to cycle: Spoken, Written + voice, Written only, Spoken.
+
+In both written modes the microphone is off, so Pip does not listen for
+“Hey Pip” and nothing it hears can start a reply while you type. (The mute
+key is a different thing and is not used.) A guest always gets Spoken, no
+dock and no captions of your words. Written chat works with the voice off or
+broken too; a reply then shows when it is over. Press **Enter** to send a
+line and **Esc** to leave the box.
+
+The older typing screen (**fn+F2**, then **6** or **Y**) still works but
+takes over the whole screen.
 
 Say “Move the Quick Menu left.” For 15 seconds after an explicit open or move, you can follow it with “Actually, put it on the right.”
 
@@ -1164,7 +1198,7 @@ commands need one of these:
 | Black screen after the boot menu | On a Try stick, reboot and choose **safe graphics** (**s**) or **show boot messages** (**v**) to see what happened. Diagnostics are saved to the stick's `PIPLOGS` partition. On an installed PipOS, press **Esc** within the first second after power-on to show its hidden boot menu, then choose **safe graphics** (**s**), **show messages** (**v**) or **previous slot** (**p**). After three starts in a row that never became healthy, it shows its messages by itself |
 | Screen blank with the lid open | Press **F9** |
 | Pip doesn't react to "Hey Pip" | Check the face isn't showing *muted* (press **M**). Wait for the chirp and for the eyes to lock on before speaking. Get closer and reduce background noise. The wake phrase must be one the recognizer knows. Or press **Space** |
-| Pip hears "Hey Pip" but not the rest | Ask "How well can you hear me?". Check the levels in **F2 → A**. On a Try stick, run **8 – Run diagnostics** (below), or reboot and try **alternative microphone** (**m**) or **alternative microphone 2** (**n**). Meanwhile, type to it (**F2**, then **6** or **Y**) |
+| Pip hears "Hey Pip" but not the rest | Ask "How well can you hear me?". Check the levels in **F2 → A**. On a Try stick, run **8 – Run diagnostics** (below), or reboot and try **alternative microphone** (**m**) or **alternative microphone 2** (**n**). Meanwhile, press **F7** and type to it in the dock (or **F2**, then **6** or **Y**) |
 | Pip's voice sounds garbled or broken up | On a Try stick, run **8 – Run diagnostics**, **2 – Full**: it plays test sounds through the speakers and records them, which tells a speaker or timing fault from the voice itself |
 | Pip wakes when you didn't call it | Phrases that sound like the wake phrase can sometimes trigger it, especially with background speech or TV. Choose a more distinctive wake phrase in setup |
 | Pip says "I can't think right now. My language model isn't answering." | The model is still loading or has restarted. Wait 20–30 seconds. Direct commands (time, reminders, memory) still work |

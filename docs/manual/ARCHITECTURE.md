@@ -362,7 +362,8 @@ Only a hardware body (or a test naming `--poweroff-cmd`) powers off.
   | Mute | `key.mute_speaker` (the speaker) |
   | Launchpad | `key.apps` |
   | Play/pause | `key.attend` while the eyes rest and no panel has focus, else `key.interrupt` |
-  | Previous, next, eject | Nothing; logged, never typed anywhere |
+  | Previous (F7) | `ui.action` `chat.mode.next`: Spoken, Written + voice, Written only, Spoken |
+  | Next, eject | Nothing; logged, never typed anywhere |
   | Click or touch | `key.touch`: a brief downward glance |
   | Space, Return, or a click, while the eyes rest and no panel has focus | `key.attend`: the brainstem treats it like hearing its name |
   | Other keys while a workshop panel has focus | Sent to the hands organ (never the top row's printed keys) |
