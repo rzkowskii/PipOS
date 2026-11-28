@@ -136,8 +136,9 @@ class Bridge(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(finals), 1)
         self.assertEqual(len(finals[0]["text"]), 400)
 
-    async def test_a_line_waits_for_the_being_to_wake_without_blocking_the_receive_loop(self):
-        # The state updates arrive through the same loop that takes the line.
+    async def wake_scenario(self, state):
+        """A line typed while the being is in `state`; its state updates reach
+        the bridge only through the same receive loop that takes the line."""
         bus = FakeBus()
         woke = []
         real_send = bus.send
@@ -154,17 +155,25 @@ class Bridge(unittest.IsolatedAsyncioTestCase):
         try:
             await bridge.set_mode("typed_text")
             bus._queue.put_nowait({"t": "body.lid", "closed": False, "seq": 4, "snapshot": True})
-            bus._queue.put_nowait({"t": "state.changed", "state": "idle", "muted": False})
+            bus._queue.put_nowait({"t": "state.changed", "state": state, "muted": False})
             bus._queue.put_nowait({"t": "ui.text", "text": "what time is it"})
             for _ in range(200):
                 if bus.of("hear.final"):
                     break
                 await asyncio.sleep(0.01)
-            self.assertEqual([e["text"] for e in bus.of("hear.final")], ["what time is it"])
-            self.assertEqual(woke, [True])
-            self.assertEqual(bus.of("chat.notice"), [], "no false 'did not answer'")
         finally:
             await bridge.stop()
+        return bus, woke
+
+    async def test_a_line_typed_while_the_being_is_idle_or_drowsy_is_not_dropped(self):
+        for state in ("idle", "drowsy"):
+            bus, woke = await self.wake_scenario(state)
+            self.assertEqual([e["text"] for e in bus.of("hear.final")], ["what time is it"], state)
+            self.assertEqual(woke, [True], state)
+
+    async def test_waking_the_being_for_a_line_never_shows_a_false_did_not_answer(self):
+        bus, _ = await self.wake_scenario("idle")
+        self.assertEqual(bus.of("chat.notice"), [])
 
     async def test_a_guest_arriving_while_a_line_waits_stops_the_line(self):
         bus = FakeBus()
