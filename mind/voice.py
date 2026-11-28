@@ -2097,6 +2097,8 @@ class Voice:
                          "the rest is a command", dropped, "" if dropped == 1 else "s")
                 fields["text"] = rest
                 return
+        if self.short_command(fields, text):
+            return
         audio = self.recognizer.utterance_audio() if callable(getattr(self.recognizer, "utterance_audio", None)) \
             else b""
         seconds = len(audio) / (2 * RATE) if isinstance(audio, (bytes, bytearray)) else 0.0
@@ -2122,6 +2124,28 @@ class Voice:
         posterior = result.get("log_posterior")
         self.final_scores = (math.exp(posterior) if isinstance(posterior, float) else None, posterior,
                              f"{self.asr} grammar")
+
+    def short_command(self, fields, text):
+        """Read a one- or two-word transcript that is no command as "brighter"
+        or "dimmer" when it sounds like one (mind/short_commands.py; Moonshine
+        tiny mishears these said alone). Never in the follow-up window, where
+        the reply's own tail is heard. True when it did."""
+        if self.followup:
+            return False
+        try:
+            from .short_commands import device_word
+
+            word = device_word(text)
+        except Exception as error:
+            LOG.warning("could not check a short transcript against the brightness words: %r", error)
+            return False
+        if word is None:
+            return False
+        LOG.info("short command: a transcript of %d words sounds like a brightness step; it replaces the transcript",
+                 len(spoken_words(text)))
+        fields["text"] = word
+        self.final_scores = (None, None, f"{self.asr} short command")
+        return True
 
     async def nbest_rescue(self, fields, text, nbest, oneshot, debug=False):
         """Take an n-best alternative that is a safe command (CommandGrammar.
