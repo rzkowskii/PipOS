@@ -74,10 +74,13 @@ fn is_mount_point(path: &Path) -> bool {
 
 /// The installed service and the QEMU appliance share the boot-local latch.
 fn guest_latched(appliance_body: bool) -> bool {
+    guest_latched_at(appliance_body, Path::new("/run/being/guest"))
+}
+
+fn guest_latched_at(appliance_body: bool, path: &Path) -> bool {
     if !appliance_body {
         return false;
     }
-    let path = Path::new("/run/being/guest");
     match std::fs::symlink_metadata(path) {
         Ok(_) => true,
         Err(error) => error.kind() != std::io::ErrorKind::NotFound,
@@ -1532,4 +1535,23 @@ fn nobody_is_the_owner_until_mind_says_so() {
     assert!(!guest_now(&report(false), false));
     // A report without the field is no answer either.
     assert!(guest_now(&Some(Event::new("app.privacy")), false));
+}
+
+#[cfg(test)]
+#[test]
+fn the_boot_local_guest_latch_is_read_only_on_an_appliance_body() {
+    let dir = std::env::temp_dir().join(format!("bt-latch-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let latch = dir.join("guest");
+    assert!(!guest_latched_at(true, &latch), "no file, no latch");
+    std::fs::write(&latch, "").unwrap();
+    assert!(guest_latched_at(true, &latch), "the file is the latch");
+    assert!(!guest_latched_at(false, &latch), "a dev machine ignores the latch");
+    // Any answer but "not found" (a path that cannot be read) fails closed.
+    let blocked = latch.join("below-a-file");
+    assert!(guest_latched_at(true, &blocked), "an unreadable latch counts as latched");
+    // A guest latch beats an owner report.
+    let owner = Some(Event::new("app.privacy").with("guest", false));
+    assert!(!guest_now(&owner, false));
+    let _ = std::fs::remove_dir_all(&dir);
 }

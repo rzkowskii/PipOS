@@ -823,27 +823,77 @@ fn a_mind_restart_while_thinking_opens_the_ears_at_once() {
     assert_eq!(heard.str("text"), Some("what time is it"));
 }
 
-/// A finished job moves the face only for the owner: before Mind has reported
-/// on privacy the guest question is unanswered, and unknown counts as a guest.
-#[test]
-fn the_face_reacts_to_a_job_only_once_the_owner_is_known() {
-    let stem = Stem::start("guestjob", "mind");
-    let watcher = stem.join("watcher", &["state.changed", "face.*"]);
+/// A finished job moves the face only for the owner. Mind's report on privacy
+/// decides who is here, and until it arrives the person may be a guest. These
+/// are separate tests so that undoing the fix names exactly what broke.
+///
+/// Absence is proved by order, not by waiting: the hub handles one organ's
+/// events in the order they were sent, and a reaction to a job is queued
+/// right behind that job. So a marker job sent after it must reach the watcher
+/// after the reaction would have, and a `face.express` before the marker is a
+/// reaction.
+fn idle_stem(tag: &str) -> (Stem, Client, Client, Client) {
+    let stem = Stem::start(tag, "mind");
+    let watcher = stem.join("watcher", &["state.changed", "face.*", "term.status", "app.privacy"]);
     let mut mind = stem.join("mind", &[]);
-    let mut shell = stem.join("shell", &[]);
+    let shell = stem.join("shell", &[]);
     mind.send(&Event::new("mind.ready").with("cortex", true)).unwrap();
     wait_for(&watcher, "idle", state_is("idle"));
-    let failed = |id: &str| Event::new("term.status").with("id", id).with("phase", "failed").with("exit", 2i64);
+    (stem, watcher, mind, shell)
+}
 
-    shell.send(&failed("before-any-report")).unwrap();
-    assert!(quiet(&watcher, |e| e.topic == "face.express"), "reacted before Mind said who is here");
+fn failed_job(id: &str) -> Event {
+    Event::new("term.status").with("id", id).with("phase", "failed").with("exit", 2i64)
+}
 
-    mind.send(&Event::new("app.privacy").with("guest", false)).unwrap();
-    shell.send(&failed("owner")).unwrap();
+/// Mind reports who is here, and wait until the hub has acted on it: it
+/// forwards the report only after it has updated the guest flag, and the
+/// organs' readers are separate threads, so nothing else orders them.
+fn report_guest(mind: &mut Client, watcher: &Client, guest: bool) {
+    mind.send(&Event::new("app.privacy").with("guest", guest)).unwrap();
+    wait_for(watcher, "the privacy report to be applied", |e| {
+        e.topic == "app.privacy" && e.bool("guest") == Some(guest)
+    });
+}
+
+/// True if no `face.express` reached the watcher before the marker did.
+fn no_reaction_before_marker(watcher: &Client, shell: &mut Client, marker: &str) -> bool {
+    shell.send(&Event::new("term.status").with("id", marker).with("phase", "running")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        match watcher.recv_timeout(Duration::from_millis(50)) {
+            Ok(Some(ev)) if ev.topic == "face.express" => return false,
+            Ok(Some(ev)) if ev.topic == "term.status" && ev.str("id") == Some(marker) => return true,
+            Ok(_) => {}
+            Err(_) => panic!("bus closed while waiting for the marker"),
+        }
+    }
+    panic!("the marker never arrived");
+}
+
+#[test]
+fn guest_flag_unknown_until_mind_reports_so_a_failed_job_is_quiet() {
+    let (_stem, watcher, _mind, mut shell) = idle_stem("guestunk");
+    shell.send(&failed_job("before-any-report")).unwrap();
+    assert!(no_reaction_before_marker(&watcher, &mut shell, "m1"), "reacted before Mind said who is here");
+}
+
+#[test]
+fn guest_flag_clear_after_an_owner_report_so_a_failed_job_shows() {
+    let (_stem, watcher, mut mind, mut shell) = idle_stem("guestown");
+    report_guest(&mut mind, &watcher, false);
+    shell.send(&failed_job("owner")).unwrap();
     let face = wait_for(&watcher, "face.express for the owner", |e| e.topic == "face.express");
     assert_eq!(face.str("name"), Some("sad"));
+}
 
-    mind.send(&Event::new("app.privacy").with("guest", true)).unwrap();
-    shell.send(&failed("guest")).unwrap();
-    assert!(quiet(&watcher, |e| e.topic == "face.express"), "reacted to a guest's job");
+#[test]
+fn guest_flag_set_after_a_guest_report_even_when_the_owner_was_known_before() {
+    let (_stem, watcher, mut mind, mut shell) = idle_stem("guestgst");
+    report_guest(&mut mind, &watcher, false);
+    shell.send(&failed_job("owner")).unwrap();
+    wait_for(&watcher, "face.express for the owner", |e| e.topic == "face.express");
+    report_guest(&mut mind, &watcher, true);
+    shell.send(&failed_job("guest")).unwrap();
+    assert!(no_reaction_before_marker(&watcher, &mut shell, "m2"), "reacted to a guest's job");
 }
