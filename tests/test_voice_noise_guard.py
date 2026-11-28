@@ -14,12 +14,14 @@ from mind.voice import CommandGrammar, command_phrases
 from tests.test_voice_feedback import Harness, ScriptedRecognizer, tone
 
 # Moonshine and PocketSphinx on the laptop, from noise or a cut-off window.
-NOISE = ("You", "You.", "So", "It's", "Oh my", "Oh.", "Um.", "of", "up", "but", "and", "if")
+NOISE = ("You", "You.", "So", "It's", "Oh my", "Oh.", "Um.", "of", "but", "and", "if")
 # The name said again, misheard.
 NAME_ALONE = ("Hey, Pip.", "Hey, kip.", "Pay-pip", "A tip.", "Pip.", "Hey Pip", "Okay Pip.")
 # Short requests and answers that must still reach the mind.
 SHORT_REQUESTS = ("Yes.", "No.", "Yep.", "Stop.", "Cancel.", "Okay.", "Thank you.", "Brighter.", "Hello.",
-                  "What time is it?", "Open a terminal.", "You can stop now.", "So what's the time?")
+                  "What time is it?", "Open a terminal.", "You can stop now.", "So what's the time?",
+                  # Answers that only look like the name or noise (Integration's review, 28 Nov).
+                  "Pop.", "Peep.", "Pit.", "Up.", "Beep.", "Hip.")
 
 
 class NoiseGuard(unittest.IsolatedAsyncioTestCase):

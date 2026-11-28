@@ -267,7 +267,7 @@ SHORT_WAKE_WORDS = 3
 # model turns, and "So", "It's" and "Oh my" in the replays; PocketSphinx wrote
 # the short words. Never passed on, after any wake or in the follow-up window.
 NOISE_TRANSCRIPTS = frozenset((
-    "you", "so", "it's", "its", "oh", "oh my", "uh", "um", "hmm", "mm", "ah", "of", "up", "but", "and", "if",
+    "you", "so", "it's", "its", "oh", "oh my", "uh", "um", "hmm", "mm", "ah", "of", "but", "and", "if",
     "it", "they", "the", "a",
 ))
 NAME_ALONE = "the name alone, so still listening"
@@ -1974,10 +1974,13 @@ class Voice:
 
     def name_alone(self, rest):
         """True if `rest`, the words left once greeting words are dropped, is the name or a mishearing of it."""
-        from .recognition import name_like
+        from .recognition import name_remnant
 
+        # Only what the name itself turns into (pip, pep, kip, bip; "tip" and
+        # "dip" heard on the laptop), not every name-like word: "Pop.",
+        # "Peep." or "Pit." may be an answer (Integration's review, 28 Nov).
         return len(rest) == 1 and rest[0] not in NOT_THE_NAME_ALONE and (
-            rest[0] == self.wake_name or name_like(rest[0], self.wake_name)
+            rest[0] == self.wake_name or name_remnant(rest[0], self.wake_name)
             or (self.wake_name == "pip" and rest[0] in ("tip", "dip")))
 
     def not_a_request(self, fields):
