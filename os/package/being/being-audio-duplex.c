@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include <alloca.h>
 #include <alsa/asoundlib.h>
 #include <errno.h>
 #include <fcntl.h>

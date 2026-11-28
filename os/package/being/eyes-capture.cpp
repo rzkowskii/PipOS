@@ -289,8 +289,6 @@ struct Mapping {
     }
 };
 
-class Camera {
-public:
 const char* authorised_path(const char* path, const char* usb_parent) {
     if (usb_parent) {
         const std::string parent(usb_parent);
