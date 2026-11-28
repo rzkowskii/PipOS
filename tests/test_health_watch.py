@@ -192,6 +192,80 @@ class HealthWatchTests(unittest.TestCase):
         self.assertEqual((self.state / "being-face.service.good").read_text().strip(), "400")
         self.assertIn("has not been up for 300 s", self.run_pass(700))
 
+    def stuck_face(self):
+        self.run_pass(400)
+        self.unit("being-face.service", ActiveState="failed", SubState="failed", Result="core-dump", MainPID="0")
+
+    def persist_env(self, now, **extra):
+        return {"BEING_HEALTH_PERSIST": str(self.persist), "BEING_HEALTH_NOW": str(now), **extra}
+
+    def test_reboot_loop_breaker_stops_after_the_limit_and_leaves_pip_up(self):
+        self.persist = self.root / "mind-log"
+        self.persist.mkdir()
+        counter = self.persist / "health-reboots"
+        # Each boot is a fresh /run (state) and a fresh uptime; the counter stays.
+        for boot in range(3):
+            shutil.rmtree(self.state, ignore_errors=True)
+            self.stuck_face()
+            out = self.run_pass(700, **self.persist_env(1000 + boot * 600))
+            self.assertIn("Pip restarts now", out, boot)
+            self.assertEqual(self.reboots(), boot + 1)
+        self.assertEqual(counter.read_text().split(), ["3", "1000"])
+        shutil.rmtree(self.state, ignore_errors=True)
+        self.stuck_face()
+        out = self.run_pass(700, **self.persist_env(2500))
+        self.assertIn("already restarted 3 times", out)
+        self.assertIn("stays up", out)
+        self.assertEqual(self.reboots(), 3, "no fourth reboot")
+        self.assertIn("restart limit reached", (self.state / "being-face.service.stuck").read_text())
+        self.assertEqual(self.run_pass(710, **self.persist_env(2510)), "", "said once")
+        # The window passes: one more try is allowed, counted afresh.
+        shutil.rmtree(self.state, ignore_errors=True)
+        self.stuck_face()
+        self.assertIn("Pip restarts now", self.run_pass(700, **self.persist_env(1000 + 86400)))
+        self.assertEqual(self.reboots(), 4)
+        self.assertEqual(counter.read_text().split(), ["1", str(1000 + 86400)])
+
+    def test_reboot_breaker_survives_a_corrupt_or_future_counter(self):
+        self.persist = self.root / "mind-log"
+        self.persist.mkdir()
+        counter = self.persist / "health-reboots"
+        for junk in ("garbage\n", "", "3\n", "-1 x\n", "\x00\x01\xff"):
+            with self.subTest(junk=junk):
+                shutil.rmtree(self.state, ignore_errors=True)
+                counter.write_bytes(junk.encode("latin-1"))
+                before = self.reboots()
+                self.stuck_face()
+                self.assertIn("Pip restarts now", self.run_pass(700, **self.persist_env(5000)))
+                self.assertEqual(self.reboots(), before + 1)
+                self.assertEqual(counter.read_text().split(), ["1", "5000"], "rewritten valid")
+        # Stamped in the future (clock not set yet): at the limit, stays up.
+        shutil.rmtree(self.state, ignore_errors=True)
+        counter.write_text("1 9999999\n")
+        before = self.reboots()
+        self.stuck_face()
+        self.assertIn("stays up", self.run_pass(700, **self.persist_env(5000)))
+        self.assertEqual(self.reboots(), before)
+
+    def test_reboot_count_clears_after_sustained_health(self):
+        self.persist = self.root / "mind-log"
+        self.persist.mkdir()
+        counter = self.persist / "health-reboots"
+        counter.write_text("2 1000\n")
+        self.assertEqual(self.run_pass(1000, **self.persist_env(2000)), "")
+        self.assertTrue(counter.exists(), "not healthy long enough yet")
+        self.assertEqual(self.run_pass(1800, **self.persist_env(2800)),
+                         "all organs have been up for 1800 s; the restart count is cleared\n")
+        self.assertFalse(counter.exists())
+
+    def test_without_a_mind_partition_the_old_behaviour_stands(self):
+        # Try images and a locked mind volume have no place to count in.
+        self.stuck_face()
+        out = self.run_pass(700, BEING_HEALTH_PERSIST=str(self.root / "absent"), BEING_HEALTH_NOW="1000")
+        self.assertIn("not limiting restarts", out)
+        self.assertIn("Pip restarts now", out)
+        self.assertEqual(self.reboots(), 1)
+
 
 class HealthWatchUnitTests(unittest.TestCase):
     def test_the_unit_runs_the_script_and_keeps_its_findings(self):
@@ -199,7 +273,7 @@ class HealthWatchUnitTests(unittest.TestCase):
         self.assertIn("ExecStart=/usr/libexec/being/being-health-watch\n", unit)
         for line in ("Restart=always", "StartLimitIntervalSec=0", "RuntimeDirectory=being-health",
                      "RuntimeDirectoryPreserve=yes", "Conflicts=shutdown.target", "PrivateNetwork=yes",
-                     "NoNewPrivileges=yes", "ProtectSystem=strict"):
+                     "NoNewPrivileges=yes", "ProtectSystem=strict", "ReadWritePaths=-/mind/log"):
             self.assertIn(line + "\n", unit)
         self.assertNotIn("WatchdogSec", unit, "a shell loop cannot ping it reliably; Restart= is enough")
         script = SCRIPT.read_text()

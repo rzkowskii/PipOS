@@ -17,8 +17,10 @@ The partition is only ever looked for on the disk that holds the running
 root file system, and only when that disk is attached over USB. Nothing here
 opens, mounts or writes any other disk.
 
-``being-usb-logs mic-test`` measures the microphone for three seconds, once,
-early in a Try boot before the voice organ listens (being-audio-init runs it).
+``being-usb-logs mic-test`` measures the microphone for three seconds, once.
+Only being-audio-measure.service runs it: with being.try=1 and being.mic_test=1,
+after the voice and ears are up, and only with the lid open. being-audio-init
+never opens the microphone; a boot without those options never does.
 The sound stays in memory and only its peak and RMS level are kept.
 """
 

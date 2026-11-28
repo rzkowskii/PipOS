@@ -22,6 +22,19 @@
 #     reboots, as for the brainstem's crash-loop rule: a reboot would hide
 #     the failure. It logs what it found once, and writes it to
 #     $BEING_HEALTH_STATE/<unit>.stuck for pip-diag.
+# A reboot that does not cure the fault would repeat every boot, so the
+# reboots are counted on the mind partition (BEING_HEALTH_PERSIST, which
+# survives a reboot; /run does not): at most BEING_HEALTH_MAX_REBOOTS in
+# BEING_HEALTH_WINDOW seconds. After that it logs clearly, writes the .stuck
+# file and leaves the machine up (the system watchdog stays armed). The count
+# is cleared once every watched unit has been fine for BEING_HEALTH_CLEAR
+# seconds of uptime. Where there is no writable mind partition (Try images
+# are RAM-only, and never reboot anyway) the counter is skipped, so an
+# installed boot whose mind volume is locked still gets its reboot. A
+# missing or corrupt counter file counts as no history and is rewritten; one
+# stamped in the future (the clock is not set yet) counts as the limit, so a
+# bad clock cannot start a loop. There is no owner or battery context in this
+# script, so it does not look at either.
 # The limits sit after the brainstem's own rule (eight failures in ten
 # minutes) and well past every systemd timeout in the units, so this only
 # acts when systemd's own recovery has had its chance.
@@ -37,6 +50,11 @@ settle=${BEING_HEALTH_SETTLE:-300}
 proc=${BEING_HEALTH_PROC:-/proc}
 state=${BEING_HEALTH_STATE:-/run/being-health}
 systemctl=${BEING_HEALTH_SYSTEMCTL:-systemctl}
+persist=${BEING_HEALTH_PERSIST:-/mind/log}
+max_reboots=${BEING_HEALTH_MAX_REBOOTS:-3}
+window=${BEING_HEALTH_WINDOW:-86400}
+clear_after=${BEING_HEALTH_CLEAR:-1800}
+counter="$persist/health-reboots"
 
 once=0
 case "${1:-}" in
@@ -62,6 +80,42 @@ no_reboot_boot() {
     return 1
 }
 
+# Whole seconds of wall-clock time (BEING_HEALTH_NOW is for tests).
+epoch_s() {
+    e=${BEING_HEALTH_NOW:-$(date +%s 2>/dev/null)} || return 1
+    case "$e" in ''|*[!0-9]*) return 1 ;; esac
+    echo "$e"
+}
+
+# May this boot ask for a reboot? Counts it when it may. 0 yes, 1 no (limit).
+reboot_allowed() {
+    if [ ! -d "$persist" ] || [ ! -w "$persist" ]; then
+        echo "no persistent place for the reboot count ($persist); not limiting restarts"
+        return 0
+    fi
+    cnt=0 first=0
+    read -r cnt first <"$counter" 2>/dev/null || :
+    case "$cnt" in ''|*[!0-9]*) cnt=0 first=0 ;; esac
+    case "$first" in ''|*[!0-9]*) cnt=0 first=0 ;; esac
+    stamp=$(epoch_s) || stamp=0
+    if [ "$cnt" -gt 0 ] && [ "$stamp" -ge "$first" ] && [ $((stamp - first)) -ge "$window" ]; then
+        cnt=0   # an old count: start again
+    fi
+    if [ "$cnt" -gt "$max_reboots" ] || [ "$first" -gt "$stamp" ]; then
+        cnt=$max_reboots   # more than allowed, or stamped in the future: stay careful
+    fi
+    if [ "$cnt" -ge "$max_reboots" ]; then
+        return 1
+    fi
+    [ "$cnt" -gt 0 ] || first=$stamp
+    if { echo "$((cnt + 1)) $first" >"$counter.new" && mv -f "$counter.new" "$counter"; } 2>/dev/null; then
+        sync 2>/dev/null || :
+    else
+        echo "could not record the restart in $counter; not limiting restarts"
+    fi
+    return 0
+}
+
 # What the kernel says about a process: its state letter and where it waits.
 process_line() {
     pid=$1
@@ -82,7 +136,7 @@ process_line() {
 check_unit() {
     unit=$1 limit=$2 now=$3
     shown=$("$systemctl" show -p LoadState -p ActiveState -p SubState -p Result -p MainPID \
-        -p ActiveEnterTimestampMonotonic "$unit" 2>/dev/null) || return 0
+        -p ActiveEnterTimestampMonotonic "$unit" 2>/dev/null) || { allfine=0; return 0; }
     load='' active='' sub='' result='' pid='' entered=
     while IFS='=' read -r key value; do
         case "$key" in
@@ -96,7 +150,7 @@ check_unit() {
     done <<EOF
 $shown
 EOF
-    [ -n "$active" ] || return 0
+    [ -n "$active" ] || { allfine=0; return 0; }   # no answer from systemd is not health
     case "$entered" in ''|*[!0-9]*) entered=0 ;; esac
     fine=0
     if [ "$load" != loaded ]; then
@@ -106,6 +160,7 @@ EOF
     elif [ "$active" = inactive ]; then
         case "$result" in success|exec-condition) fine=1 ;; esac
     fi
+    [ "$fine" = 1 ] || allfine=0
     good_file="$state/$unit.good"
     stuck_file="$state/$unit.stuck"
     if [ "$fine" = 1 ]; then
@@ -133,6 +188,9 @@ EOF
         echo "$what" >"$stuck_file"
     elif [ "$now" -lt "$settle" ]; then
         echo "$what; not restarting in the first $settle s after boot"
+    elif ! reboot_allowed; then
+        echo "$what; Pip has already restarted $max_reboots times within $window s for this and it did not help, so it stays up now: the journal keeps the evidence"
+        echo "$what; restart limit reached" >"$stuck_file"
     else
         echo "$what; systemd cannot bring it back, so Pip restarts now"
         echo "$what" >"$stuck_file"
@@ -144,12 +202,17 @@ pass() {
     running=$("$systemctl" is-system-running 2>/dev/null) || true
     case "$running" in stopping|offline) return 0 ;; esac
     now=$(uptime_s) || return 0
+    allfine=1
     for entry in $units; do
         unit=${entry%%:*}
         limit=${entry#*:}
         case "$limit" in ''|*[!0-9]*|"$entry") limit=600 ;; esac
         check_unit "$unit" "$limit" "$now"
     done
+    # Healthy for long enough: the restarts did their job, forget them.
+    if [ "$allfine" = 1 ] && [ "$now" -ge "$clear_after" ] && [ -e "$counter" ]; then
+        rm -f "$counter" 2>/dev/null && echo "all organs have been up for $clear_after s; the restart count is cleared"
+    fi
 }
 
 if [ "$once" = 1 ]; then

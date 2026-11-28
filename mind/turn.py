@@ -190,6 +190,8 @@ ANNOUNCE_IN = ("idle", "drowsy", "attending")
 # turn on the new mind's hello does so at once; an older one kept it for its
 # whole 300 s budget, deaf to the owner throughout (cable log, 25 Nov).
 INHERITED_TURN_GRACE = 1.0
+# Most replies tracked for Voice's playback receipts at once (mind/played.py).
+PLAYS_OPEN = 8
 # Its name was heard but not the words after it: it may say so while it is
 # attending, or just after its attention lapsed back to rest, but not asleep.
 MISSED_IN = ("attending", "listening", "idle", "drowsy")
@@ -716,11 +718,11 @@ class Mind:
         self._weather_task = None
         self._cancelled = False
         self._discard_reply = False
-        # The last model reply until Voice reports how much of it played, and
-        # the bus connection on which Voice was seen reporting playback at all
-        # (mind/played.py). A voice that never reports keeps replies as written.
-        self._played = None
-        self._played_wait = None
+        # Replies handed to Voice, by token, until it reports how much of each
+        # played, and the bus connection on which Voice was seen reporting
+        # playback at all (mind/played.py). A voice that never reports keeps
+        # replies as written.
+        self._plays = {}
         self._voice_reports = None
         self._utterance_senses = None
         self._last_partial = None
@@ -1872,6 +1874,13 @@ class Mind:
             self._library_focus.clear()
 
     def _connection_lost(self):
+        # The next snapshot comes from a bus connection this mind has not
+        # heard a state on: a thinking one may be a turn a lost one left open
+        # (an old brainstem keeps it for 300 s), so the watch starts over.
+        self._first_state_seen = False
+        if self._inherited_turn_task is not None:
+            self._inherited_turn_task.cancel()
+            self._inherited_turn_task = None
         self._close_lid()
         self._camera_seq = None
         self._camera_allowed = False
@@ -1924,6 +1933,9 @@ class Mind:
         if self.state != "thinking" or self._turn_open():
             return
         log("the brainstem was still thinking for the mind before this one; that turn is given up")
+        # No turn of this mind is open (checked above), so a cancel left over
+        # from before a reconnect must not swallow the reply it is sending.
+        self._cancelled = False
         await self._send_reply("mind.reply_done", spoke=False)
 
     def _cancel(self):
@@ -1946,8 +1958,9 @@ class Mind:
         # A reply already written down may still be playing: what Voice
         # reports decides what of it is kept. One still being generated is
         # settled by its own turn (_converse_stream).
-        played = self._played
-        if played is not None and not played.closed:
+        for played in list(self._plays.values()):
+            if played.closed:
+                continue
             if played.written:
                 self._played_cancelled(played)
             elif not self.lid_open:
@@ -1963,9 +1976,20 @@ class Mind:
         if not isinstance(reply, str) or not PLAYED_TOKEN.fullmatch(reply):
             return
         self._voice_reports = self.bus.generation
-        played = self._played
+        played = self._plays.get(reply)
         if played is not None and played.observe(event) and played.settled.is_set() and played.written:
             self._amend_played(played)
+
+    def _register_played(self, played):
+        """Track a reply handed to Voice. Few are ever open at once; a voice
+        that never reports would leave them, so the oldest are let go."""
+        self._plays[played.token] = played
+        while len(self._plays) > PLAYS_OPEN:
+            self._forget_played(next(iter(self._plays.values())))
+
+    def _forget_played(self, played):
+        played.close()
+        self._plays.pop(played.token, None)
 
     def _voice_reports_playback(self):
         """Voice has sent playback receipts on this bus connection. One that
@@ -1983,7 +2007,7 @@ class Mind:
                 await played.settle()
                 self._amend_played(played)
 
-            played.task = self._played_wait = asyncio.create_task(settle())
+            played.task = asyncio.create_task(settle())
 
     def _amend_played(self, played):
         """Voice has settled a reply that was already written down. A reply it
@@ -1991,52 +2015,62 @@ class Mind:
         the next prompt cached). One cut short keeps the clauses that started,
         marked cut off, in the history and the archive. One of which nothing
         played is no longer kept as said, and its question leaves the history
-        with it, as for a reply cut off before anything was handed over."""
+        with it, as for a reply cut off before anything was handed over. A
+        fixed reply (`_say`) has no history entry: its archive row, when it
+        has one, and `last_said` follow what played."""
         if played.closed:
             return
-        played.close()
-        if self._played is played:
-            self._played = None
+        self._forget_played(played)
         if played.task is not None and played.task is not asyncio.current_task():
             played.task.cancel()
         if played.complete() or not self._voice_reports_playback():
             return
         kept = " ".join(played.kept())
         message = played.message
-        if kept:
-            message["content"] = f"[{played.emotion}] {kept} —"
-        else:
-            index = next((i for i, m in enumerate(self.messages) if m is message), None)
-            if index is not None:
-                del self.messages[index]
-                if index > 0 and self.messages[index - 1] is played.question:
-                    del self.messages[index - 1]
+        if message is not None:
+            if kept:
+                message["content"] = f"[{played.emotion}] {kept} —"
+            else:
+                index = next((i for i, m in enumerate(self.messages) if m is message), None)
+                if index is not None:
+                    del self.messages[index]
+                    if index > 0 and self.messages[index - 1] is played.question:
+                        del self.messages[index - 1]
+            # The prompt changed: what was primed or saved for it no longer matches.
+            self._slot_generation += 1
+            self._warmed_prefix = ()
+            # The saved conversation still holds the full reply; a power loss
+            # now must not bring back words that were never said.
+            self.save_context()
         # Only while it still holds this reply: a closed lid or a guest has
         # already forgotten it (_forget_wake).
         if self.last_said is not None and self.last_said == played.last_said_set:
             self.last_said = kept or played.last_said_before
         if played.episode_id is not None:
-            try:
-                played.memory.cut_said(played.episode_id, kept, was=played.said)
-            except sqlite3.Error as exc:
-                log("could not correct a reply that was cut off:", exc)
-        # The prompt changed: what was primed or saved for it no longer matches.
-        self._slot_generation += 1
-        self._warmed_prefix = ()
+            written = " ".join(played.kept(played.archive_upto))
+            # The archive may hold less than was spoken (a fixed reply's extra
+            # words): when all of it played, its row is already right.
+            if written != played.said:
+                try:
+                    played.memory.cut_said(played.episode_id, written, was=played.said)
+                except sqlite3.Error as exc:
+                    log("could not correct a reply that was cut off:", exc)
         log(f"a reply was cut off after {len(played.started)} of {len(played.clauses)} clauses played")
 
     async def _settle_played(self):
-        """A new turn starts from what was really said in the last one."""
-        played = self._played
-        if played is None or played.closed or not played.written:
-            return
-        if played.task is not None:
-            await asyncio.wait([played.task])
-        if not played.closed:
-            # Neither ended by Voice nor cancelled: keep it as written.
-            played.close()
-            if self._played is played:
-                self._played = None
+        """A new turn starts from what was really said in the last replies."""
+        for played in list(self._plays.values()):
+            if played.closed or not played.written:
+                continue
+            if played.task is not None:
+                await asyncio.wait([played.task])
+            elif not played.settled.is_set():
+                # Voice has not ended it: it may still be playing, and a later
+                # cancel or final receipt must still be able to trim it. The
+                # cap on open replies bounds a voice that never reports.
+                continue
+            if not played.closed:
+                self._forget_played(played)
 
     async def _send_reply(self, topic, **fields):
         if self.lid_open and not self._cancelled:
@@ -4747,6 +4781,10 @@ class Mind:
         The reply is finished on the bus before anything is written down: a
         busy database must never leave the voice waiting. `chirp` names a
         sound the voice plays before the first clause (a ring's bell).
+
+        Like a model reply, its clauses carry a token, and Voice reports which
+        of them played (mind/played.py): if it is cut off, its archive row and
+        `last_said` keep only what played.
         """
         if self._cancelled:
             return
@@ -4769,16 +4807,24 @@ class Mind:
         rest = splitter.flush()
         if rest:
             clauses.append(rest)
+        said_before = self.last_said
         if private:
             self.last_said = None
         elif clauses:
             self.last_said = " ".join(clauses)
+        played = None
+        if clauses:
+            played = PlayedReply()
+            self._register_played(played)
         self._said_all_ok = False
         self._said_all.clear()
         for i, clause in enumerate(clauses, 1):
             extra = {"chirp": chirp} if chirp and i == 1 else {}
             if private:
                 extra["private"] = True
+            if played is not None:
+                played.hand(i, clause)
+                extra["reply"] = played.token
             await self._send_reply("say.request", text=clause, seq=i, last=False,
                                    face_cue=clause_cue(clause, tags.emotion), **extra)
         if clauses:
@@ -4786,8 +4832,10 @@ class Mind:
             if (announcement is None and isinstance(confirm_ack, str)
                     and re.fullmatch(r"[0-9a-f]{32}", confirm_ack)):
                 marker["confirm_ack"] = confirm_ack
-            await self._send_reply("say.request", text="", seq=len(clauses) + 1, last=True, **marker)
+            await self._send_reply("say.request", text="", seq=len(clauses) + 1, last=True,
+                                   reply=played.token, **marker)
         await self._send_reply("mind.reply_done", spoke=bool(clauses))
+        said = reply_id = None
         if keep and not private and not self._cancelled:
             sources.setdefault("canned", True)
             said = " ".join(clauses)
@@ -4795,9 +4843,22 @@ class Mind:
                 # Today's reminders are not copied into the archive with it.
                 said = said.removesuffix(_plain(suffix)).rstrip()
             try:
-                self._record("said", said, self.cfg.name, emotion=tags.emotion or "neutral", **sources)
+                reply_id = self._record("said", said, self.cfg.name, emotion=tags.emotion or "neutral", **sources)
             except sqlite3.Error as exc:
                 log("could not write down a reply:", exc)
+        if played is not None:
+            # Voice is most likely still speaking it. If it is stopped short,
+            # what it reports playing replaces what was written.
+            played.written = True
+            played.memory, played.episode_id, played.said = self.memory, reply_id, said
+            played.emotion = tags.emotion or "neutral"
+            played.last_said_before, played.last_said_set = said_before, self.last_said
+            played.archive_upto = next((i for i in range(len(clauses) + 1)
+                                        if " ".join(clauses[:i]) == said), len(clauses))
+            if played.settled.is_set():
+                self._amend_played(played)
+            elif self._cancelled or not self.lid_open:
+                self._played_cancelled(played)
 
     def _recall_note(self, facts, speaker):
         parts = []
@@ -5068,9 +5129,8 @@ class Mind:
         echoed = False
         # Every clause carries this reply's token; Voice's receipts say which
         # of them played (mind/played.py). A parroted try hands nothing over.
-        if self._played is not None:
-            self._played.close()
-        played = self._played = PlayedReply()
+        played = PlayedReply()
+        self._register_played(played)
 
         async def out(visible):
             nonlocal parroted, first_clause
@@ -5173,9 +5233,7 @@ class Mind:
             # follows at once, or a voice that crashed leaves the receipts
             # already here (mind/played.py).
             await played.settle()
-            played.close()
-            if self._played is played:
-                self._played = None
+            self._forget_played(played)
             if self._discard_reply:
                 return  # the lid closed meanwhile
             said = " ".join(played.kept() if self._voice_reports_playback() else spoken)
@@ -5206,9 +5264,7 @@ class Mind:
             log(f"cortex failed mid-reply: {failed}" if self._durable_context else "cortex failed during a private reply")
 
         if self._discard_reply or not spoken:
-            played.close()
-            if self._played is played:
-                self._played = None
+            self._forget_played(played)
         if self._discard_reply:
             return
         if not spoken:
@@ -5227,8 +5283,10 @@ class Mind:
                 "generation": self.bus.generation,
                 "lid_seq": self.lid_seq,
             }
+            # Its token lets the captions show it as it plays; it is not part
+            # of what the reply kept (PlayedReply counts handed clauses only).
             await self._send_reply("say.request", text=curiosity, seq=len(spoken) + 1, last=False,
-                                   face_cue="curiosity", private=True)
+                                   face_cue="curiosity", private=True, reply=played.token)
         # The voice and the brainstem hear the end first; then it is written down.
         await self._send_reply("say.request", text="", seq=len(spoken) + (2 if curiosity else 1), last=True,
                                reply=played.token)

@@ -36,11 +36,48 @@ class InheritedTurn(MindCase):
             await self.settle()
         self.assertEqual(self.bus.of("mind.reply_done"), [])
 
-    async def test_only_the_first_state_this_process_hears(self):
+    async def test_only_the_first_state_of_a_connection_is_inherited(self):
         with patch("mind.turn.INHERITED_TURN_GRACE", GRACE):
             self.bus.push("state.changed", state="idle", muted=False, unwell=False)
-            # A later snapshot (the brainstem restarted and resumed) is not inherited.
+            # A later snapshot on the same connection is not inherited.
             self.bus.push("state.changed", state="thinking", muted=False, unwell=False)
+            await self.settle()
+        self.assertEqual(self.bus.of("mind.reply_done"), [])
+
+    async def test_a_reconnect_in_the_same_process_watches_again(self):
+        with patch("mind.turn.INHERITED_TURN_GRACE", GRACE):
+            self.bus.push("state.changed", state="idle", muted=False, unwell=False)
+            for _ in range(200):
+                if self.mind._first_state_seen:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(self.mind._first_state_seen)
+            self.mind._connection_lost()
+            self.bus.push("body.lid", closed=False)  # a new connection reports the lid again
+            self.bus.push("state.changed", state="thinking", muted=False, unwell=False)
+            done = await self.bus.wait("mind.reply_done", timeout=2.0)
+        self.assertIs(done["spoke"], False)
+
+    async def test_losing_the_connection_drops_a_pending_give_up(self):
+        with patch("mind.turn.INHERITED_TURN_GRACE", 30.0):
+            self.bus.push("state.changed", state="thinking", muted=False, unwell=False)
+            for _ in range(100):
+                if self.mind._inherited_turn_task is not None:
+                    break
+                await asyncio.sleep(0.01)
+            task = self.mind._inherited_turn_task
+            self.assertIsNotNone(task)
+            self.mind._connection_lost()
+            await asyncio.sleep(0)
+            self.assertTrue(task.cancelled() or task.cancelling())
+            self.assertIsNone(self.mind._inherited_turn_task)
+
+    async def test_thinking_with_the_reply_with_the_voice_is_left_to_the_voice(self):
+        # The dead mind's whole reply is already with the voice, which
+        # finishes it; an empty reply_done would cut it off.
+        with patch("mind.turn.INHERITED_TURN_GRACE", GRACE):
+            self.bus.push("state.changed", state="thinking", reply_with_voice=True,
+                          muted=False, unwell=False)
             await self.settle()
         self.assertEqual(self.bus.of("mind.reply_done"), [])
 

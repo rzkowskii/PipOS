@@ -555,7 +555,11 @@ impl Machine {
             "hear.partial" => self.last_activity = now,
             "hear.final" => {
                 if matches!(self.state, State::Attending | State::Listening) && !self.muted {
-                    let said = ev.str("text").is_some_and(|t| !t.trim().is_empty());
+                    // With no mind connected nothing would answer: Thinking
+                    // would last the whole blind cap (300 s) with the ears
+                    // shut. Such a sentence is a missed one: back to attending.
+                    let said = ev.str("text").is_some_and(|t| !t.trim().is_empty())
+                        && self.up.contains("mind");
                     if said {
                         self.last_stimulus = now;
                         self.go(State::Thinking, now, &mut out);
@@ -1340,6 +1344,25 @@ mod tests {
         assert_eq!(m.state(), State::Thinking, "a name while thinking is not taken");
         assert!(m.on_tick(311.9).is_empty());
         assert_eq!(m.on_tick(312.1)[0].str("reason"), Some("think_timeout"));
+    }
+
+    #[test]
+    fn a_sentence_while_the_mind_is_down_is_missed_not_thought_about() {
+        // With no mind connected nothing would answer, and Thinking would
+        // shut the ears for the whole blind cap (300 s).
+        let mut m = awake();
+        m.on_event(&down("mind"), 10.5);
+        m.on_event(&ev("hear.wake"), 11.0);
+        assert_eq!(m.state(), State::Attending);
+        m.on_event(&Event::new("hear.final").with("text", "tell me a long story about the sea"), 12.0);
+        assert_eq!(m.state(), State::Attending, "no mind, no turn");
+        assert!(m.on_tick(14.0).iter().all(|e| e.str("reason") != Some("think_timeout")));
+        // Once the mind is back the same sentence is taken.
+        m.on_event(&up("mind"), 20.0);
+        m.on_event(&ev("mind.ready"), 20.5);
+        hears_again(&mut m, 21.0);
+        m.on_event(&Event::new("hear.final").with("text", "tell me a long story about the sea"), 22.0);
+        assert_eq!(m.state(), State::Thinking);
     }
 
     #[test]

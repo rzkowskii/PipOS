@@ -24,6 +24,8 @@ RuntimeDirectoryPreserve=yes
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
+# The reboot count lives on the mind partition (absent on Try images).
+ReadWritePaths=-/mind/log
 PrivateTmp=yes
 PrivateNetwork=yes
 IPAddressDeny=any

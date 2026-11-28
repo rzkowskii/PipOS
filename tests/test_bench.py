@@ -154,6 +154,22 @@ class FullRun(unittest.TestCase):
                           bench.CORTEX_BATCHES["flash_attn"]))
         self.assertEqual(env["LLAMA_ARG_LOAD_MODE"], bench.LOAD_MODE)
 
+    def test_dream_server_matches_the_dream_unit(self):
+        root = Path(__file__).resolve().parents[1] / "os/package/cortex"
+        unit = (root / "being-dream-cortex.service").read_text()
+        env = dict(word.split("=", 1) for line in unit.splitlines() if line.startswith("Environment=")
+                   for word in line.partition("=")[2].split())
+        self.assertEqual((env["LLAMA_ARG_BATCH"], env["LLAMA_ARG_UBATCH"]),
+                         (str(bench.DREAM_SERVER["batch"]), str(bench.DREAM_SERVER["ubatch"])))
+        self.assertEqual(env["LLAMA_ARG_LOAD_MODE"], bench.LOAD_MODE)
+        self.assertEqual(env["LLAMA_ARG_CTX_CHECKPOINTS"], "6")
+        # The bench leaves attention to the server: so must the unit.
+        self.assertIsNone(bench.DREAM_SERVER["flash_attn"])
+        self.assertNotIn("LLAMA_ARG_FLASH_ATTN", env)
+        self.assertNotIn("--flash-attn", unit)
+        self.assertIn("--ctx-size %d --parallel %d" % (bench.DREAM_SERVER["ctx_size"],
+                                                       bench.DREAM_SERVER["parallel"]), unit)
+
     def test_voice_falls_back_to_flite_and_pocketsphinx_without_voice_bench(self):
         with patch.dict(sys.modules, {"mind.voice_bench": None}), \
                 patch.object(bench, "speech_rtf", return_value={"tts": {"rtf": 0.05}}):

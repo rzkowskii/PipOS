@@ -383,11 +383,12 @@ pub fn busy_share(before: Option<(u64, u64)>, now: Option<(u64, u64)>) -> Option
     Some((busy as f64 / total as f64).clamp(0.0, 1.0))
 }
 
-/// The next floor: at most one step toward the target per step period, held
-/// steady while the mic is open, and raised only when the lid is closed or
-/// it is not listening.
+/// The next floor: at most one step toward the target per step period. It is
+/// never lowered while the mic is open (the fan stays steady while the owner
+/// speaks), but it is always raised: the target is above the factory floor
+/// only under load or over `hot_package_c`, and cooling comes before quiet.
 pub fn fan_next(cfg: &Config, current: i64, target: i64, listening: bool) -> i64 {
-    if listening || current == target {
+    if current == target || (listening && target <= current) {
         return current;
     }
     if target > current {
@@ -557,8 +558,8 @@ mod tests {
         assert_eq!(fan_next(&cfg, 2000, 4000, false), 2250);
         assert_eq!(fan_next(&cfg, 3900, 4000, false), 4000);
         assert_eq!(fan_next(&cfg, 3000, 2000, false), 2750);
-        assert_eq!(fan_next(&cfg, 2000, 4000, true), 2000, "held while listening");
-        assert_eq!(fan_next(&cfg, 3000, 2000, true), 3000, "held either way");
+        assert_eq!(fan_next(&cfg, 2000, 4000, true), 2250, "raised even while listening");
+        assert_eq!(fan_next(&cfg, 3000, 2000, true), 3000, "never lowered while listening");
         let lid_shut = Being { state: Some("attending".into()), lid_closed: Some(true), dreaming: false, state_fresh: true, state_epoch: Some(1) };
         assert!(!lid_shut.listening());
         assert!(being("listening").listening() && being("attending").listening() && !being("thinking").listening());

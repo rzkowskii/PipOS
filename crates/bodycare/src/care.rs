@@ -39,6 +39,13 @@ impl Mode {
 
 /// How often to look for controls that appeared late, seconds.
 const REDISCOVER: f64 = 60.0;
+/// A failed package read keeps the last smoothed value this many seconds
+/// before the controller goes blind (one flapping sensor read must not drop
+/// the hot cap or the dream limiter).
+const PACKAGE_HOLD: f64 = 5.0;
+/// Blind after a reading over `fan_start_c` this recent: the fan floor is
+/// never lowered, whatever the factory-floor target says.
+const BLIND_FLOOR_HOLD: f64 = 120.0;
 
 pub struct Care {
     root: PathBuf,
@@ -49,6 +56,10 @@ pub struct Care {
     discovered_at: f64,
     last_at: Option<f64>,
     package: Option<f64>,
+    /// When the package reads first failed (None while it reads), and when
+    /// the smoothed package was last over `fan_start_c`.
+    package_missed_since: Option<f64>,
+    package_warm_at: Option<f64>,
     dream_pause: Latch,
     cpu_gate: Latch,
     dream: DreamLoop,
@@ -105,6 +116,8 @@ impl Care {
             discovered_at: 0.0,
             last_at: None,
             package: None,
+            package_missed_since: None,
+            package_warm_at: None,
             dream_pause: Latch::default(),
             cpu_gate: Latch::default(),
             dream: DreamLoop::default(),
@@ -142,7 +155,7 @@ impl Care {
         if care.hw.fan_min.is_some() {
             let c = &care.cfg;
             care.notes.push(format!(
-                "fan floor: the factory minimum until the package passes {:.0} C under sustained load (CPU busy over {:.0}%, smoothed over {:.0} s{}), rising to {:.0}% of the maximum by {:.0} C, where the SMC's own curve starts; over {:.0} C whatever the load; held while listening",
+                "fan floor: the factory minimum until the package passes {:.0} C under sustained load (CPU busy over {:.0}%, smoothed over {:.0} s{}), rising to {:.0}% of the maximum by {:.0} C, where the SMC's own curve starts; over {:.0} C whatever the load; never lowered while listening",
                 c.fan_start_c,
                 c.fan_load_on * 100.0,
                 c.fan_load_tau,
@@ -264,8 +277,17 @@ impl Care {
         let dt = self.last_at.map_or(1.0, |at| (now - at).max(0.0));
         self.last_at = Some(now);
         self.package = policy::smooth(self.package, r.package_c, dt, self.cfg.smoothing);
-        if r.package_c.is_none() {
-            self.package = None;
+        if r.package_c.is_some() {
+            self.package_missed_since = None;
+        } else {
+            // Keep the smoothed value for a short hold, then go blind.
+            let since = *self.package_missed_since.get_or_insert(now);
+            if now - since >= PACKAGE_HOLD {
+                self.package = None;
+            }
+        }
+        if self.package.is_some_and(|c| c > self.cfg.fan_start_c) {
+            self.package_warm_at = Some(now);
         }
         let mut cfg = self.cfg.clone();
         cfg.dream_min_pct = cfg.dream_min_pct.clamp(r.min_perf.unwrap_or(1), 100);
@@ -333,7 +355,12 @@ impl Care {
             let target = policy::fan_target(&cfg, self.package, loaded, factory, r.fan_max);
             self.fan_target = Some(target);
             if now - self.fan_stepped_at >= cfg.fan_step_every {
-                let next = policy::fan_next(&cfg, floor, target, being.listening());
+                let mut next = policy::fan_next(&cfg, floor, target, being.listening());
+                // Blind just after a hot reading: never lower the floor.
+                let recently_hot = self.package_warm_at.is_some_and(|at| now - at < BLIND_FLOOR_HOLD);
+                if self.package.is_none() && recently_hot {
+                    next = next.max(floor);
+                }
                 if next != floor {
                     self.fan_stepped_at = now;
                     self.fan_floor = Some(next);
@@ -648,12 +675,13 @@ mod tests {
         assert_eq!(floor(&t), 2250, "no faster than one step per 10 s");
         care.step(&being("thinking", false), 10.0);
         assert_eq!(floor(&t), 2500);
-        // The owner is talking: held steady.
+        // The owner is talking: the floor still rises toward the target (the
+        // package is hot) but is never lowered.
         for s in 11..60 {
             care.step(&being("listening", false), f64::from(s));
         }
-        assert_eq!(floor(&t), 2500);
-        // The lid closes: raised again even in an attending state.
+        assert_eq!(floor(&t), 2850, "raised while listening, up to the 90 C target");
+        // The lid closes, attending: no change at the target.
         for s in 60..400 {
             care.step(&being("attending", true), f64::from(s));
         }
@@ -801,6 +829,45 @@ mod tests {
         }
         assert!(t.get(&format!("{SMC}/fan1_min")).parse::<i64>().unwrap() > 2000);
         assert_eq!(care.report().bool("fan_load"), Some(false), "not load: heat");
+    }
+
+    #[test]
+    fn a_hot_package_raises_the_floor_even_while_listening() {
+        let t = macbook("hot-listening");
+        let mut stat = Stat { busy: 0, total: 0 };
+        stat.advance(&t, 1.0, 0.1);
+        let mut care = act(&t, Config::default());
+        for s in 0..30u32 {
+            t.file("sys/class/hwmon/hwmon3/temp1_input", "98000\n");
+            stat.advance(&t, 1.0, 0.1);
+            care.step(&being("attending", false), f64::from(s));
+        }
+        assert!(t.get(&format!("{SMC}/fan1_min")).parse::<i64>().unwrap() > 2000);
+    }
+
+    #[test]
+    fn one_failed_package_read_keeps_the_cap_and_the_floor() {
+        let t = macbook("flap");
+        let mut care = act(&t, Config::default());
+        for s in 0..40u32 {
+            t.file("sys/class/hwmon/hwmon3/temp1_input", "98000\n");
+            care.step(&being("idle", false), f64::from(s));
+        }
+        let raised = t.get(&format!("{SMC}/fan1_min")).parse::<i64>().unwrap();
+        assert!(raised > 2000);
+        // A read error for 3 s: still capped, floor not lowered.
+        t.file("sys/class/hwmon/hwmon3/temp1_input", "junk\n");
+        for s in 40..43u32 {
+            care.step(&being("idle", false), f64::from(s));
+            assert_eq!(care.cap.as_ref().unwrap().max_perf_pct, 70, "hot cap held at {s}");
+        }
+        // Blind for a long time right after a hot reading: the cap goes, the
+        // floor is held until the blind hold is over, never stepped down early.
+        for s in 43..150u32 {
+            care.step(&being("idle", false), f64::from(s));
+            assert!(t.get(&format!("{SMC}/fan1_min")).parse::<i64>().unwrap() >= raised, "lowered while blind at {s}");
+        }
+        assert!(care.package.is_none());
     }
 
     #[test]

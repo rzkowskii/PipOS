@@ -27,6 +27,12 @@ ExecStart=/usr/bin/llama-server \
     --reasoning-budget 0 \
     --cache-ram 0 \
     --no-webui
+# Batches, checkpoints and load mode are stated here, not left to llama-server's
+# defaults, so the bench (mind/bench.py DREAM_SERVER) measures what runs: 512
+# tokens a batch, six context checkpoints, the model mapped and not locked.
+# Attention stays llama-server's own choice.
+Environment=LLAMA_ARG_BATCH=512 LLAMA_ARG_UBATCH=512
+Environment=LLAMA_ARG_CTX_CHECKPOINTS=6 LLAMA_ARG_LOAD_MODE=mmap
 # Same-origin browser requests only, as for the cortex: the night shift's own
 # requests carry no Origin header.
 Environment=LLAMA_ARG_CORS_ORIGINS=localhost

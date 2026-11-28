@@ -49,6 +49,25 @@ pub struct Body {
     last_stimulus: f64,
 }
 
+/// The temperature scale the being feels, from the measured idle of the
+/// laptop (package 71-82 C, 25 November 2026) up to bodycare's `hot_package_c`
+/// (92 C, where the CPU is capped). Normal idle must never read as hot.
+const COOL_BELOW_C: f64 = 70.0;
+const HOT_OVER_C: f64 = 92.0;
+/// Comfort is full up to the top of the measured idle, and falls to nothing
+/// at the Ivy Bridge's TjMax (105 C); at `HOT_OVER_C` it is just under 0.6,
+/// where `body_drives::tiredness` starts to count heat.
+const COMFORT_FULL_TO_C: f64 = 82.0;
+const COMFORT_ZERO_AT_C: f64 = 105.0;
+
+fn temperature_word(temp: f64) -> &'static str {
+    if temp < COOL_BELOW_C { ", cool" } else if temp <= HOT_OVER_C { ", warm" } else { ", hot" }
+}
+
+fn comfort_of(temp: f64) -> f64 {
+    1.0 - (temp - COMFORT_FULL_TO_C).max(0.0) / (COMFORT_ZERO_AT_C - COMFORT_FULL_TO_C)
+}
+
 impl Body {
     pub fn new(now: f64) -> Body {
         Body {
@@ -353,7 +372,7 @@ impl Body {
             }
         }
         if let Some(temp) = self.temp {
-            line.push_str(if temp < 55.0 { ", cool" } else if temp < 75.0 { ", warm" } else { ", hot" });
+            line.push_str(temperature_word(temp));
         }
         if let Some(lux) = self.lux {
             line.push_str(if self.dark() { ", room dark" } else if lux < 50.0 { ", room dim" } else { ", room bright" });
@@ -387,7 +406,7 @@ impl Body {
             let round = |v: f64| (v.clamp(0.0, 1.0) * 100.0).round() / 100.0;
             let energy = if self.on_ac == Some(true) { Some(1.0) } else { self.battery.map(|v| round(v / 100.0)) };
             let social = round((-(now - self.last_contact) / 3600.0).exp());
-            let comfort = self.temp.map(|v| round(1.0 - (v - 50.0) / 40.0));
+            let comfort = self.temp.map(|v| round(comfort_of(v)));
             out.push(
                 Event::new("body.drives")
                     .with("energy", energy)
@@ -840,16 +859,27 @@ pub mod sysfs {
             if chip_name(&chip).as_deref() != Some("coretemp") {
                 continue;
             }
-            let mut inputs = temp_inputs(&chip);
+            let mut dir = chip.clone();
+            let mut inputs = temp_inputs(&dir);
             if inputs.is_empty() {
                 // Older kernels keep the channels on the platform device.
-                inputs = temp_inputs(&chip.join("device"));
+                dir = chip.join("device");
+                inputs = temp_inputs(&dir);
+            }
+            // Same rule as bodycare: the channel labelled "Package id 0"
+            // when there is one, else the hottest of the channels.
+            if let Some(package) = inputs
+                .iter()
+                .find(|(channel, _)| read_text(&dir.join(format!("temp{channel}_label"))).as_deref() == Some("Package id 0"))
+                .cloned()
+            {
+                inputs = vec![package];
             }
             // A coretemp chip with no channels at all is not a reading; let
             // the SMC stand in rather than leaving the temperature unknown.
             found |= !inputs.is_empty();
             for (_, input) in inputs {
-                let Some(value) = read_number(&input).filter(|v| (0..=150_000).contains(v)) else {
+                let Some(value) = read_number(&input).filter(|v| (1_000..=150_000).contains(v)) else {
                     return Some(None);
                 };
                 hottest = Some(hottest.map_or(value, |current| current.max(value)));
@@ -1273,7 +1303,7 @@ mod tests {
             &Event::new("sim.body")
                 .with("battery", 12.0)
                 .with("charging", false)
-                .with("temp", 80.0)
+                .with("temp", 95.0)
                 .with("lux", 1.0)
                 .with("hour", 23.0),
             1.0,
@@ -1284,6 +1314,39 @@ mod tests {
         assert!(line.contains("hot"), "{line}");
         assert!(line.contains("room dark"), "{line}");
         assert!(b.dark() && b.night());
+    }
+
+    #[test]
+    fn normal_idle_is_warm_and_comfortable_not_hot() {
+        // Measured idle package: 71-82 C. Hot starts over bodycare's 92 C.
+        for temp in [71.0, 76.0, 82.0, 92.0] {
+            assert_eq!(temperature_word(temp), ", warm", "{temp}");
+        }
+        assert_eq!(temperature_word(60.0), ", cool");
+        assert_eq!(temperature_word(92.5), ", hot");
+        for temp in [71.0, 82.0] {
+            assert_eq!(comfort_of(temp), 1.0, "{temp}");
+        }
+        assert!(comfort_of(92.0) < 0.6 && comfort_of(92.0) > 0.5);
+        assert!(comfort_of(105.0) <= 0.0);
+        let mut b = Body::new(0.0);
+        b.on_event(&Event::new("sim.body").with("temp", 80.0), 1.0);
+        assert!(!b.senses_line().contains("hot"), "{}", b.senses_line());
+        assert_eq!(b.tick(99999.0).iter().find(|e| e.topic == "body.drives").unwrap().f64("comfort"), Some(1.0));
+    }
+
+    #[test]
+    fn coretemp_reads_the_package_channel_and_rejects_zero() {
+        let tree = Tree::new("pkg");
+        let root = tree.0.clone();
+        tree.file("hwmon0/name", "coretemp\n");
+        tree.file("hwmon0/temp1_label", "Package id 0\n");
+        tree.file("hwmon0/temp1_input", "72000\n");
+        tree.file("hwmon0/temp2_label", "Core 0\n");
+        tree.file("hwmon0/temp2_input", "80000\n");
+        assert_eq!(sysfs::read_core_temperature(&root), Some(72.0));
+        tree.file("hwmon0/temp1_input", "0\n");
+        assert_eq!(sysfs::read_core_temperature(&root), None, "a stuck zero is not a cool reading");
     }
 
     #[test]
