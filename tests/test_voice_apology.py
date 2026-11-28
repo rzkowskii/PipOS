@@ -281,5 +281,85 @@ for _name in [name for name in vars(Apology) if name.startswith("test_")]:
     setattr(QuietAfterTheWake, _name, None)
 
 
+class ApologyLimits(QuietAfterTheWake):
+    """Coordinator's limits on the quiet apology (28 Nov): at most one spoken a
+    minute, no typing hint after a wake with nothing said, never talking over a
+    new attention, and a request said right after it is heard."""
+
+    async def test_a_second_miss_within_a_minute_is_not_spoken(self):
+        harness = self.harness([])
+        voice = harness.voice
+        voice.state = "attending"
+        self.player.release.set()
+        async with asyncio.TaskGroup() as voice.tasks:
+            for later in (0.0, 30.0, 20.0):   # at 0, 30 and 50 s
+                harness.clock.now += later
+                voice.apology_owed, voice.missed_sent = True, False   # a new wake each time
+                await voice.missed("no_speech")
+                await settle(voice)
+            voice.tasks = None
+        self.assertEqual(self.missed(harness), [{"reason": "no_speech"}] * 3, "the face still hears of it")
+        self.assertEqual(len(self.player.played), 1, "but it is not said again within a minute")
+
+    async def test_no_typing_hint_after_a_wake_with_nothing_said(self):
+        harness = self.harness([])
+        voice = harness.voice
+        voice.last_apology_at = harness.clock.now - 120.0   # a miss two minutes ago: the hint would be due
+        voice.hint_text = lambda: "You can also type to me."
+        voice.apology_owed = True
+        voice.state = "attending"
+        self.player.release.set()
+        async with asyncio.TaskGroup() as voice.tasks:
+            await voice.missed("no_speech")
+            await settle(voice)
+            voice.tasks = None
+        command = self.synthesis.commands[0]
+        self.assertEqual(command[command.index("-t") + 1], APOLOGY)
+
+    async def test_a_new_attention_stops_the_apology(self):
+        harness = self.harness([])
+        voice = harness.voice
+        voice.apology_owed = True
+        voice.state = "idle"
+        async with asyncio.TaskGroup() as voice.tasks:
+            await voice.missed("unclear")
+            async with asyncio.timeout(1):
+                while not self.player.played:
+                    await real_sleep(0)
+            apology = voice.apology
+            await harness.event("state.changed", state="attending", prev="idle", muted=False)
+            async with asyncio.timeout(1):
+                while not apology.done():
+                    await real_sleep(0)
+            voice.disarm()
+        self.assertTrue(apology.cancelled())
+
+    async def test_a_request_said_right_after_the_apology_is_heard(self):
+        steps = [(1.0, tone(10), False)] * 7
+        script = [WAKE] + [(False, [])] * 7 + [START, (False, [("hear.final", {"text": "What time is it?"})])]
+        harness = self.harness(script)
+        voice = harness.voice
+        self.player.release.set()
+        async with asyncio.TaskGroup() as voice.tasks:
+            voice.capture = voice.tasks.create_task(voice.listen())
+            await harness.frames(tone(500))
+            for seconds, frame, _ in steps:
+                harness.clock.now += seconds
+                await harness.frames(frame)
+            await settle(voice)
+            self.assertEqual(len(self.player.played), 1)
+            harness.clock.now += CHIRP_TAIL_SECONDS + 0.01   # the moment playback has ended
+            await harness.frames(tone(4000), tone(4000))
+            fed = [frame for frame, _ in harness.recognizer.fed[-2:]]
+            voice.disarm()
+        self.assertEqual(fed, [tone(4000)] * 2, "the microphone is open again at once")
+        finals = [fields for topic, fields in harness.sent if topic == "hear.final"]
+        self.assertEqual([fields["text"] for fields in finals], ["What time is it?"])
+
+
+for _name in [name for name in vars(QuietAfterTheWake) if name.startswith("test_")]:
+    setattr(ApologyLimits, _name, None)
+
+
 if __name__ == "__main__":
     unittest.main()

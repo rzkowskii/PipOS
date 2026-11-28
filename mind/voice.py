@@ -161,6 +161,8 @@ VOICED_OVER_FLOOR_DB = 10.0
 # he was still talking). Raw level is the judge, not Silero, which missed his
 # quiet speech there.
 MISS_AFTER_WAKE_SECONDS = 4.0
+# At most one spoken apology in this long; further misses get the face's cue only.
+APOLOGY_MIN_INTERVAL_SECONDS = 60
 MISS_QUIET_SECONDS = 2.0
 # The microphone's per-frame cost is measured over this many frames, once.
 COST_FRAMES = 1000
@@ -1340,6 +1342,10 @@ class Voice:
                 self.wake_pending = False
             self.state_seen.set()
             await self.follow_attention(before)
+            if self.apologising and previous is not None and (
+                    state in ("listening", "thinking") or (before in AT_REST and state in ATTENDING)):
+                # A new attention: the owner is never talked over.
+                await self.stop_apology()
             self.follow_state(previous, self.state)
             await self.sync_capture()
             if previous is not None:
@@ -2044,6 +2050,7 @@ class Voice:
         self.apology_owed = True
         self.plain_wake = True
         self.missed_sent = False
+        self.plain_wake_at = self.now()
         LOG.info("the name alone: listening for the request")
 
     def room_noise(self, fields, oneshot):
@@ -2338,7 +2345,11 @@ class Voice:
         if (self.reply is not None and not self.reply.done()) or self.apologising or self.install_playing:
             return
         self.apology_owed = False
-        self.apology = self.spawn(self.apologise())
+        if self.now() - self.last_apology_at < APOLOGY_MIN_INTERVAL_SECONDS:
+            # Said once already this minute: the face shows it (hear.missed), no more words.
+            LOG.info("not saying sorry again within %d s; the face shows it", APOLOGY_MIN_INTERVAL_SECONDS)
+            return
+        self.apology = self.spawn(self.apologise(reason))
 
     @property
     def apologising(self):
@@ -2376,14 +2387,16 @@ class Voice:
         self.last_apology_at = now
         return line
 
-    async def apologise(self):
+    async def apologise(self, reason="unclear"):
         """Speak the apology through the reply's own synthesis and playback. The
         microphone is fed silence meanwhile, as for an earcon."""
         window = self.deafen(math.inf)
         try:
             if self.chirp_task is not None:
                 await asyncio.gather(self.chirp_task, return_exceptions=True)
-            hint = await asyncio.to_thread(self.hint_text) if self.hint_due() else None
+            # How to type belongs with words heard but not made out, never
+            # after a wake with nothing said (coordinator, 28 Nov).
+            hint = await asyncio.to_thread(self.hint_text) if reason != "no_speech" and self.hint_due() else None
             line = self.apology_line(hint)
             with tempfile.TemporaryDirectory(prefix="pip-", dir=self.work_dir) as work:
                 audio = Path(work) / "sorry.wav"
