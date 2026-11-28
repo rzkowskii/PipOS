@@ -184,7 +184,13 @@ async def hear(mind, text):
         "input": text,
         "reply": " ".join(e["text"] for e in clauses),
         "clauses": clauses,
-        "emotion": next((e["name"] for e in bus.events if e["topic"] == "mind.emotion"), None),
+        # The mind reports a model reply's emotion as the face_cue of each say.request (lab/persona_eval.py reads it
+        # the same way); the old mind.emotion event is no longer sent for replies, so it is only the fallback.
+        "emotion": next((e["face_cue"] for e in bus.events if e["topic"] == "say.request" and e.get("text")
+                         and e.get("face_cue")), next((e["name"] for e in bus.events if e["topic"] == "mind.emotion"), None)),
+        "face_cues": [e.get("face_cue") for e in bus.events if e["topic"] == "say.request" and e.get("text")],
+        # What the model wrote, tag included, for the last attempt.
+        "raw": last[0].raw if last else None,
         "completed": any(e["spoke"] for e in bus.events if e["topic"] == "mind.reply_done"),
         "model_turns": len(mind.cortex.requests),
         "model_turn": mind.cortex.requests[-1][-1]["content"] if mind.cortex.requests else None,
