@@ -151,18 +151,18 @@ class Bridge(unittest.IsolatedAsyncioTestCase):
 
         bus.send = send
         bridge = ChatBridge(bus, name="Pip", owner="Richard", guest=lambda: False, log=lambda *a: None)
-        await bridge.start()
-        try:
-            await bridge.set_mode("typed_text")
-            bus._queue.put_nowait({"t": "body.lid", "closed": False, "seq": 4, "snapshot": True})
-            bus._queue.put_nowait({"t": "state.changed", "state": state, "muted": False})
-            bus._queue.put_nowait({"t": "ui.text", "text": "what time is it"})
-            for _ in range(200):
-                if bus.of("hear.final"):
-                    break
-                await asyncio.sleep(0.01)
-        finally:
-            await bridge.stop()
+        # The wake wait is 8 s for real; a short one lets a loop that cannot see the
+        # being wake run out of patience inside the test (the old bridge did).
+        with patch.object(chat_bridge.type_chat, "WAKE_WAIT", 0.3):
+            await bridge.start()
+            try:
+                await bridge.set_mode("typed_text")
+                bus._queue.put_nowait({"t": "body.lid", "closed": False, "seq": 4, "snapshot": True})
+                bus._queue.put_nowait({"t": "state.changed", "state": state, "muted": False})
+                bus._queue.put_nowait({"t": "ui.text", "text": "what time is it"})
+                await asyncio.sleep(0.8)  # well past the wake wait
+            finally:
+                await bridge.stop()
         return bus, woke
 
     async def test_a_line_typed_while_the_being_is_idle_or_drowsy_is_not_dropped(self):
@@ -265,6 +265,20 @@ class Bridge(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.1)
         notices = [e["text"] for e in bus.of("chat.notice")]
         self.assertEqual(len([n for n in notices if "Too many" in n]), 2, notices)
+
+    async def test_leaving_written_chat_while_a_line_waits_stops_the_line(self):
+        bus, bridge = await self.stalled()
+        bus._queue.put_nowait({"t": "ui.text", "text": "first"})
+        await asyncio.sleep(0.05)  # it has woken the being and holds the lock
+        bus._queue.put_nowait({"t": "state.changed", "state": "speaking", "muted": False})
+        bus._queue.put_nowait({"t": "ui.text", "text": "second"})
+        bus._queue.put_nowait({"t": "ui.action", "id": "chat.mode.spoken", "via": "key"})
+        await asyncio.sleep(0.8)
+        await bridge.idle()
+        self.assertEqual(bridge.mode, "spoken")
+        self.assertEqual(len(bus.of("hear.wake")), 1, "only the first line's own wake")
+        self.assertEqual(bus.of("key.interrupt"), [], "the second line did not stop Pip's reply")
+        self.assertEqual(bus.of("hear.final"), [])
 
     async def test_written_replies_do_not_wait_for_the_voice(self):
         # The mode the owner falls back on when hearing or the voice fails.
