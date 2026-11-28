@@ -152,6 +152,79 @@ class Chat(unittest.IsolatedAsyncioTestCase):
             ("first_reply", "It's 7:05"), ("reply", "in the evening."), ("first_reply", "Next."),
         ])
 
+    def model_reply(self, reply, *clauses):
+        for seq, text in enumerate((*clauses, ""), 1):
+            self.chat.on_event({"t": "say.request", "text": text, "seq": seq, "last": not text, "reply": reply})
+
+    async def test_a_model_reply_is_shown_as_the_voice_plays_it(self):
+        self.assertTrue({"say.played", "say.done"} <= set(type_chat.SUBS))
+        self.ready("speaking")
+        self.model_reply("a" * 16, "One.", "Two.", "Three.", "Four.")
+        self.assertEqual(self.shown, [], "handed to the voice is not said")
+        self.chat.on_event({"t": "say.played", "reply": "a" * 16, "seq": 1})
+        self.chat.on_event({"t": "say.played", "reply": "a" * 16, "seq": 3})
+        self.chat.on_event({"t": "say.played", "reply": "a" * 16, "seq": 2})
+        # Typed over: the voice stops, and the fourth clause never played.
+        self.chat.on_event({"t": "mind.cancel"})
+        self.chat.on_event({"t": "say.played", "reply": "a" * 16, "final": True, "stopped": True})
+        self.chat.on_event({"t": "say.played", "reply": "a" * 16, "seq": 4})
+        self.chat.on_event({"t": "say.done", "final": True})
+        self.assertEqual(self.shown, [("first_reply", "One."), ("reply", "Three.")],
+                         "a skipped clause and one that never played are not shown")
+        self.model_reply("b" * 16, "Next.")
+        self.chat.on_event({"t": "say.played", "reply": "b" * 16, "seq": 1})
+        self.assertEqual(self.shown[-1], ("first_reply", "Next."))
+
+    async def test_a_voice_that_reports_no_playback_shows_the_reply_when_it_is_over(self):
+        self.ready("speaking")
+        self.model_reply("a" * 16, "One.", "Two.")
+        self.chat.on_event({"t": "say.done", "final": True})
+        self.assertEqual(self.shown, [("first_reply", "One."), ("reply", "Two.")])
+        # No voice at all: shown a little after the reply was handed over.
+        with patch.object(type_chat, "RECEIPT_WAIT", 0.01):
+            self.model_reply("b" * 16, "Three.")
+            self.chat.on_event({"t": "mind.reply_done", "spoke": True})
+            await asyncio.sleep(0.05)
+        self.assertEqual(self.shown[-1], ("first_reply", "Three."))
+
+    async def test_a_voice_that_has_begun_speaking_is_not_second_guessed(self):
+        self.ready("speaking")
+        with patch.object(type_chat, "RECEIPT_WAIT", 0.01):
+            self.model_reply("a" * 16, "Slow to play.")
+            self.chat.on_event({"t": "say.started"})
+            self.chat.on_event({"t": "mind.reply_done", "spoke": True})
+            await asyncio.sleep(0.05)
+        self.assertEqual(self.shown, [], "its receipts decide")
+
+    async def test_once_the_voice_reports_only_what_it_played_is_shown(self):
+        self.ready("speaking")
+        self.model_reply("a" * 16, "One.")
+        self.chat.on_event({"t": "say.played", "reply": "a" * 16, "seq": 1})
+        self.chat.on_event({"t": "say.played", "reply": "a" * 16, "final": True, "stopped": False})
+        with patch.object(type_chat, "RECEIPT_WAIT", 0.01):
+            self.model_reply("b" * 16, "Never played.")
+            self.chat.on_event({"t": "mind.reply_done", "spoke": True})
+            self.chat.on_event({"t": "say.done", "final": True})
+            await asyncio.sleep(0.05)
+        self.assertEqual(self.texts(), ["One."])
+
+    async def test_with_the_voice_gone_replies_show_as_they_are_sent(self):
+        self.ready("speaking")
+        self.model_reply("a" * 16, "Half said.")
+        self.chat.on_event({"t": "organ.down", "name": "voice"})
+        self.model_reply("b" * 16, "Only here.")
+        self.assertEqual(self.texts(), [
+            "Pip's voice has stopped, so it can't speak aloud. Pip's replies still show here.",
+            "Only here.",
+        ], "what the voice had not begun is dropped")
+
+    async def test_a_closed_lid_drops_what_was_waiting(self):
+        self.ready("speaking")
+        self.model_reply("a" * 16, "Shut in.")
+        self.chat.on_event({"t": "body.lid", "closed": True, "seq": 5})
+        self.chat.on_event({"t": "say.done", "final": True})
+        self.assertEqual(self.shown, [])
+
     async def test_a_reply_with_nothing_to_say_or_a_lost_one_is_explained(self):
         self.ready("thinking")
         self.chat.on_event({"t": "mind.reply_done", "spoke": False})

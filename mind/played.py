@@ -14,6 +14,10 @@ playing, in order, marked as cut off, and nothing that never started. A
 clause cut off partway counts: the owner heard its start. A reply of which
 nothing played is not kept as said at all. Receipts that arrive after the
 mind has closed a reply are ignored. See docs/PROTOCOL.md, `say.played`.
+
+The same holds for a fixed reply (turn.py `_say`: a command's answer, a
+reminder, a stock line). It is never in the model's history, so only its
+archive row (when it has one) and `last_said` follow what played.
 """
 
 import asyncio
@@ -41,11 +45,14 @@ class PlayedReply:
         self.task = None  # the wait after a cancellation, if one began
         # Set once the whole reply was written down (turn.py _converse_stream).
         self.written = False
-        self.message = None  # its assistant entry in the history
+        self.message = None  # its assistant entry in the history (model replies)
         self.question = None  # the user entry it answers
         self.memory = None  # the archive it was written to, and its row
         self.episode_id = None
         self.said = None  # the words written there
+        # The archive keeps the first clauses only: a fixed reply's extra
+        # words (the morning brief's reminders) are never written down.
+        self.archive_upto = None
         self.emotion = "neutral"
         self.last_said_before = None  # turn.py's last_said before this reply
         self.last_said_set = None  # and what this reply set it to
@@ -77,9 +84,11 @@ class PlayedReply:
         except TimeoutError:
             pass
 
-    def kept(self):
-        """The clauses that count as said, in the order they were handed."""
-        return [self.clauses[seq] for seq in sorted(self.clauses) if seq in self.started]
+    def kept(self, upto=None):
+        """The clauses that count as said, in the order they were handed
+        (only those numbered up to `upto`, when given)."""
+        return [self.clauses[seq] for seq in sorted(self.clauses)
+                if seq in self.started and (upto is None or seq <= upto)]
 
     def complete(self):
         """Every clause handed to Voice played."""

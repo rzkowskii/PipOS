@@ -3244,6 +3244,10 @@ class Voice:
                     await self.send_audio("say.done", final=True, failed=True)
                 except Exception as send_error:
                     log(f"Could not report the failed reply: {send_error!r}")
+        # A reply handed over while the last one was still playing waits in the
+        # queue behind its end: speak it now, or its token stays open unheard.
+        if self.reply is None and self.lid_open and not self.clauses.empty() and self.state in TALKING:
+            self.reply = self.spawn(self.speak())
         # Wake spotting resumes in thinking if the brainstem stays there (task 5.5).
         await self.sync_capture()
 

@@ -83,11 +83,11 @@ RAM-only counts by `mind.route` category and up to ten route IDs.
 | `voice.chirps` | mind | `on` | Turn the chirps (earcons) on or off; the voice keeps the choice in `voice.json`. No spoken command sends it yet |
 | `stem.chirp` | brainstem | `name` | Play one named chirp. The voice listens for it; the brainstem does not send it yet |
 | `voice.engine` | mind | `tts`: `piper`, `flite` or `auto` | Choose the speaking voice. `auto` uses the natural voice (Piper, Alba) from the first reply and changes to the original voice (Flite) only if the natural voice fails to verify or load, or measures slower than 0.7 of real time on this laptop. The voice keeps the choice in `voice.json`. `being.tts=` on the kernel command line, or `BEING_TTS` in the voice's environment, overrides the choice for that boot. |
-| `say.request` | mind | `text`, `seq`, `last`, optional `announcement`, `chirp`, `private`, `face_cue`, `confirm_ack`, `reply` | Speak this accepted clause. `face_cue` is a reply emotion for this clause only. An empty final marker ends the reply and carries the attempt token for a reminder, timer or greeting. A confirmation question may put one opaque 32-hex `confirm_ack` on that empty final marker only; Voice never speaks it. `private: true` sends the clause only to the local Voice and Face and omits it from the hub journal. `chirp: "bell"` requests the bell for an eligible ring. A model reply's clauses and its final marker carry `reply`, one opaque 16-hex token per reply, so Voice can report which clauses played (`say.played`). |
+| `say.request` | mind | `text`, `seq`, `last`, optional `announcement`, `chirp`, `private`, `face_cue`, `confirm_ack`, `reply` | Speak this accepted clause. `face_cue` is a reply emotion for this clause only. An empty final marker ends the reply and carries the attempt token for a reminder, timer or greeting. A confirmation question may put one opaque 32-hex `confirm_ack` on that empty final marker only; Voice never speaks it. `private: true` sends the clause only to the local Voice and Face and omits it from the hub journal. `chirp: "bell"` requests the bell for an eligible ring. Every reply's clauses (a model reply's, and a fixed reply's such as a command's answer, a reminder or a stock line), the curiosity question that may follow a model reply, and the final marker carry `reply`, one opaque 16-hex token per reply, so Voice can report which clauses played (`say.played`). Only the camera's private description has none. |
 | `say.started` | voice | | First audio is playing |
 | `say.level` | voice | `v`, optional `face_cue` | Loudness of its own voice right now, 0 to 1. Voice sends a clause cue once, with its first audible playback sample. The face clears it when playback ends or is interrupted. |
 | `say.done` | voice | `final`, optional `announcement`, `confirm_ack` | Queue is empty. `final` is true after the last clause. After successful announcement playback the voice echoes the attempt token. After a confirmation question completes without a synthesis or playback failure, authenticated Voice echoes its opaque `confirm_ack`; Mind requires the exact receipt plus its current bus and lid session before opening the yes/no window. Failed or unrelated replies cannot acknowledge it. |
-| `say.played` | voice | `reply` with `seq`, or `reply` with `final: true` and `stopped` | Playback receipts for a `say.request` that carried `reply`. With `seq`: that clause's first audio is playing, whichever way it was made (Piper, Flite, a stock clip or prepared night speech); a clause the speaker rejects is never reported. With `final`: every clause receipt of that reply has been sent, and `stopped` is true when Voice stopped before the reply's end (`say.stop`, a failure, or an end that never came). Voice ends each reply it accepted this way, before its `say.done`, except while the lid is closed or the bus is gone. Brainstem accepts it only from the current Voice connection in the current lid state. See [Interrupted replies](#interrupted-replies). |
+| `say.played` | voice | `reply` with `seq`, or `reply` with `final: true` and `stopped` | Playback receipts for a `say.request` that carried `reply`. With `seq`: that clause's first audio is playing, whichever way it was made (Piper, Flite, a stock clip or prepared night speech); a clause the speaker rejects is never reported. With `final`: every clause receipt of that reply has been sent, and `stopped` is true when Voice stopped before the reply's end (`say.stop`, a failure, or an end that never came). Voice ends each reply it accepted this way, before its `say.done`, except while the lid is closed or the bus is gone. Brainstem accepts it only from the current Voice connection in the current lid state. Mind keeps what played; Face captions follow it. See [Interrupted replies](#interrupted-replies). |
 | `say.stop` | brainstem | optional `reason` | Stop speaking at once. `speak_timeout` indicates stalled playback. |
 | `mind.ready` | mind | `cortex` | The mind is up; `cortex` says whether the model answers |
 | `mind.emotion` | mind | `name`, `hold` | An immediate non-speech expression from Mind, such as curiosity or a missed-word reaction |
@@ -142,10 +142,13 @@ RAM-only counts by `mind.route` category and up to ten route IDs.
 
 ## Interrupted replies
 
-The mind hands a model reply to Voice clause by clause, usually faster than
+The mind hands a reply to Voice clause by clause, usually faster than
 Voice can speak it, so an interruption (Esc today, barge-in later) can leave
 clauses queued that were never heard. Pip remembers saying only what played
-(`mind/played.py`):
+(`mind/played.py`). This holds for a model reply and for a fixed reply
+alike. A fixed reply is never in the conversation history, so for it only
+its archive row, when it has one, and what Pip remembers having just said
+follow what played:
 
 - A clause counts as said once Voice reports its first audio (`say.played`
   with its `seq`). A clause stopped partway counts: its start was heard.
@@ -162,15 +165,27 @@ clauses queued that were never heard. Pip remembers saying only what played
   It normally follows `say.stop` within milliseconds. A Voice that crashed
   never sends it, and the receipts already received decide. A closed lid
   decides at once. Receipts for a reply the mind has closed are ignored.
-- The model writes most replies down before Voice has finished speaking
-  them. If such a reply is stopped short, the mind corrects its history
-  entry and archive row. The next turn waits for that correction.
+- Replies are written down before Voice has finished speaking them. If
+  such a reply is stopped short, the mind corrects its history entry and
+  archive row. The next turn waits for that correction. A fixed reply that
+  carried the morning brief's reminders never had them archived, so only the
+  leading clauses it did archive count: if they all played, its row stays
+  as written.
+- Several replies can be open at once, each settled by its own token.
 - A Voice that has never sent `say.played` on this bus connection (an
   older Voice, or a stand-in) does not report playback. Its replies are
   kept as they were handed over, as before.
 
-The same receipts are meant for barge-in. Captions and the typing chat
-still show each clause when it is handed to Voice, not when it plays.
+Face captions follow the same receipts. A reply's clause appears when
+Voice reports it playing, and clauses still waiting when the reply's final
+receipt arrives never appear. A clause without `reply` (the camera's
+private description) appears when handed over. With a Voice that never
+reports playback, a reply's clauses appear when its `say.done` arrives.
+The typing chat (`keyboard`) follows the receipts the same way. It also
+shows a reply twelve seconds after `mind.reply_done` if no Voice has
+reported playback or begun speaking (`say.started`) yet. Once it has seen Voice go down,
+it shows replies as they are handed over, because nothing can play them.
+The same receipts are meant for barge-in.
 
 ## States
 

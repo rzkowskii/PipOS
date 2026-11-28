@@ -5,7 +5,10 @@ the way the voice organ reports speech addressed to the being: its name heard,
 then the finished words, with the owner as the speaker. The brainstem and the
 mind treat it like anything else said to the being, so the being's state, the
 lid and the mute key still decide whether it listens. What the being says
-back is shown here as it is sent to the voice, which also speaks it aloud.
+back is shown here as the voice speaks it: a reply's clause appears when
+the voice reports it playing (`say.played`, mind/played.py), so a reply cut
+short shows only what was said. Without a voice that reports, the reply is
+shown when it is over.
 
 Enter sends a line. Enter on an empty line goes back to the menu, and so does
 Esc where the terminal passes it on.
@@ -27,8 +30,8 @@ from .profile import FACTORY_CONFIG, load_profile
 
 # A name of its own: an organ that joins under an existing name replaces it.
 ORGAN = "keyboard"
-SUBS = ("state.changed", "body.lid", "say.request", "mind.reply_done", "mind.cancel",
-        "hear.missed", "organ.up", "organ.down")
+SUBS = ("state.changed", "body.lid", "say.request", "say.played", "say.started", "say.done", "mind.reply_done",
+        "mind.cancel", "hear.missed", "organ.up", "organ.down")
 HEARING = ("attending", "listening")
 BUSY = ("thinking", "speaking")
 SHOWN = {"listening": "is listening", "thinking": "is thinking", "speaking": "is speaking",
@@ -39,6 +42,11 @@ INTERRUPT_WAIT = 3.0
 WAKE_WAIT = 8.0
 ASLEEP_WAKE_WAIT = 20.0
 MAX_LINE = 400
+# Clauses held back for the voice's receipts, at most.
+HELD = 64
+# After a reply is over, how long a voice that has not reported any playback
+# yet has to begin before the reply is shown anyway (an older voice, or none).
+RECEIPT_WAIT = 12.0
 MIND_DIR = "/mind"
 
 
@@ -97,6 +105,14 @@ class TypeChat:
         self._changed = asyncio.Event()
         self._lock = asyncio.Lock()
         self._replying = False
+        # The reply whose words are on screen, by its token, and the
+        # clauses of replies waiting for the voice to play them.
+        self._shown_reply = None
+        self._held = []
+        # The voice has reported playback on this connection.
+        self._receipts = False
+        # A voice has begun to speak (say.started) and not yet finished.
+        self._speaking = False
         self._listener = None
 
     async def start(self):
@@ -129,9 +145,14 @@ class TypeChat:
         topic = event.get("t")
         if topic == "body.lid":
             self.lid = event
+            if event.get("closed") is not False:
+                self._held.clear()  # the voice stops with the lid
         elif topic in ("organ.up", "organ.down") and event.get("name") == "voice":
             # Only the voice is worth a word here. The brainstem's "unwell" flag
             # cannot be used: the face always stops while this menu is open.
+            if topic == "organ.down":
+                # What it had not begun to say, it never will.
+                self._held.clear()
             if topic == "organ.down" and not self.voice_lost:
                 self.voice_lost = True
                 self.show(f"{self.name}'s voice has stopped, so it can't speak aloud. "
@@ -151,17 +172,44 @@ class TypeChat:
         elif topic == "say.request":
             text = event.get("text")
             text = printable(text) if isinstance(text, str) else ""
+            reply, seq = event.get("reply"), event.get("seq")
+            if isinstance(reply, str) and reply and type(seq) is int:
+                # A reply with a token: shown as the voice plays it. With the voice
+                # gone nothing will play, and its words only show here.
+                if text and self.voice_lost:
+                    self._show_reply(text, reply)
+                elif text:
+                    if len(self._held) == HELD:
+                        self._held.pop(0)
+                    self._held.append((reply, seq, text))
+                return
             if text:
-                if self._replying:
-                    self.show(text, "reply")
-                else:
-                    self._replying = True
-                    self.show(text, "first_reply")
+                self._show_reply(text)
             if event.get("last"):
                 self._replying = False
+        elif topic == "say.played":
+            self._played(event)
+        elif topic == "say.started":
+            self._speaking = True
+        elif topic == "say.done":
+            if event.get("final") is True:
+                self._speaking = False
+            if event.get("final") is True and not self._receipts:
+                # A voice that does not report playback finished its reply.
+                for reply in dict.fromkeys(held[0] for held in self._held):
+                    self._release(reply)
         elif topic == "mind.reply_done":
-            if event.get("spoke") is False and not self._replying:
+            if event.get("spoke") is False and not self._replying and not self._held:
                 self.show(f"{self.name} had nothing to say.", "muted")
+            elif self._held and not self._receipts:
+                # No voice has reported playback yet: if none begins soon,
+                # show the reply rather than nothing.
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop is not None:
+                    loop.call_later(RECEIPT_WAIT, self._release, self._held[-1][0])
         elif topic == "hear.missed":
             # Spoken words it could not make out. The voice says sorry aloud.
             self.show(f"{self.name} didn't catch that. Say it again, or type it here.", "muted")
@@ -169,6 +217,45 @@ class TypeChat:
             self._replying = False
             if event.get("reason") == "think_timeout":
                 self.show(f"{self.name} took too long to answer.", "warning")
+
+    def _show_reply(self, text, reply=None):
+        """One clause of the being's reply, the first under its name."""
+        if reply is not None:
+            continuing = reply == self._shown_reply
+        else:
+            continuing = self._replying and self._shown_reply is None
+        self.show(text, "reply" if continuing else "first_reply")
+        self._replying = True
+        self._shown_reply = reply
+
+    def _played(self, event):
+        """The voice's receipt: a clause began to play, or a reply ended."""
+        reply = event.get("reply")
+        if not isinstance(reply, str):
+            return
+        self._receipts = True
+        if event.get("final") is True:
+            # What of it is still held never played.
+            self._held = [held for held in self._held if held[0] != reply]
+            if self._shown_reply == reply:
+                self._shown_reply = None
+                self._replying = False
+            return
+        seq = event.get("seq")
+        playing = next((held for held in self._held if held[:2] == (reply, seq)), None)
+        if playing is None:
+            return
+        # Its earlier clauses still held were skipped.
+        self._held = [held for held in self._held if held[0] != reply or held[1] > seq]
+        self._show_reply(playing[2], reply)
+
+    def _release(self, reply):
+        """Show a reply's held clauses when no voice reports playback."""
+        if self._receipts or self._speaking:
+            return  # a voice is at work: its receipts or say.done decide
+        held, self._held = [h for h in self._held if h[0] == reply], [h for h in self._held if h[0] != reply]
+        for _, _, text in held:
+            self._show_reply(text, reply)
 
     def lid_open(self):
         return self.lid is not None and self.lid.get("closed") is False

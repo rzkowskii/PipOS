@@ -215,6 +215,21 @@ class Speaking(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.events, [])
 
 
+    async def test_a_reply_queued_behind_the_one_playing_is_spoken_too(self):
+        other = "fedcba9876543210"
+        await self.say("Alpha.", 1)
+        await self.say("", 2, last=True)
+        await self.say("Beta.", 1, reply=other)
+        await self.say("", 2, last=True, reply=other)
+        async with asyncio.timeout(3):
+            while sum(e["t"] == "say.done" for e in self.events) < 2:
+                await asyncio.sleep(0.01)
+        self.assertEqual(self.played, ["Alpha.", "Beta."])
+        finals = [e["reply"] for e in self.events if e["t"] == "say.played" and e.get("final")]
+        self.assertEqual(finals, [TOKEN, other])
+        self.assertEqual(self.voice._open_replies, {})
+
+
 class Requests(unittest.TestCase):
     def test_only_a_well_formed_token_and_a_spoken_clause_carry_receipt_marks(self):
         self.assertEqual(clause_request({"text": "Hi.", "last": False, "seq": 1, "reply": TOKEN})["seq"], 1)
