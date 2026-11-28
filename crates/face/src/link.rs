@@ -152,6 +152,18 @@ impl Side {
     pub fn new(birth_marker: Option<PathBuf>) -> Side {
         Side { birth: BirthGate::with_marker(birth_marker), ..Side::default() }
     }
+
+    /// A new connection to the brainstem: a restarted one retains no `chat.mode`,
+    /// so until its snapshot says otherwise Pip is talked to out loud. Without
+    /// this the chip could keep saying "Written only" while a restarted voice
+    /// listens, and typed words would keep showing.
+    pub fn chat_reconnected(&mut self) {
+        self.dock.event(
+            &Event::new("chat.mode").with("mode", "spoken").with("input", "voice").with("reply", "voice"),
+            Instant::now(),
+        );
+        self.captions.set_typed(false);
+    }
 }
 
 fn unix_now() -> u64 {
@@ -399,6 +411,7 @@ impl Link {
             self.side.readings = None;
             self.side.online = None;
             self.side.camera = false;
+            self.side.chat_reconnected();
             self.lid_seq = None;
             self.pending_panel_ready = None;
             if self.client.is_some() {
@@ -988,6 +1001,23 @@ mod tests {
         assert_eq!(side.dock.mode(), crate::dock::Mode::Spoken);
         apply(&Event::new("chat.notice").with("text", "Pip is muted."), &mut anim, &mut side);
         assert_eq!(side.dock.mode(), crate::dock::Mode::Spoken, "a notice does not change the mode");
+    }
+
+    #[test]
+    fn a_reconnect_goes_back_to_spoken_until_the_new_brainstem_says_otherwise() {
+        let mut anim = Anim::new(7);
+        let mut side = Side::default();
+        apply(&Event::new("chat.mode").with("mode", "typed_text").with("input", "typed").with("reply", "text"),
+              &mut anim, &mut side);
+        assert_eq!(side.dock.mode(), crate::dock::Mode::TypedText);
+        assert!(side.captions.typed());
+        side.chat_reconnected();
+        assert_eq!(side.dock.mode(), crate::dock::Mode::Spoken, "the chip no longer says Written only");
+        assert!(!side.captions.typed(), "typed words no longer force captions on");
+        // And its snapshot, if a bridge is still there, puts the mode back.
+        apply(&Event::new("chat.mode").with("mode", "typed_voice").with("input", "typed").with("reply", "voice"),
+              &mut anim, &mut side);
+        assert_eq!(side.dock.mode(), crate::dock::Mode::TypedVoice);
     }
 
     #[test]

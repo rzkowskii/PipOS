@@ -85,6 +85,10 @@ impl Captions {
 
     /// A written chat mode begins or ends. Ending it with the Captions setting
     /// off drops the words it had been showing.
+    pub fn typed(&self) -> bool {
+        self.typed
+    }
+
     pub fn set_typed(&mut self, typed: bool) {
         if typed != self.typed {
             self.typed = typed;
