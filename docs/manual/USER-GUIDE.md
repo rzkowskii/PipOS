@@ -650,7 +650,7 @@ talk to Pip. There are three modes, and every start is **Spoken**:
 |---|---|---|
 | **Spoken** | talk | answers out loud |
 | **Written + voice** (say “Let's type” or “Written chat”) | type in the dock | answers out loud, and the words show on screen as they are spoken |
-| **Written only** (say “Silent mode” or “Written replies only”) | type in the dock | answers in writing only, and still does what you ask: timers, lists, settings. It asks "yes or no" on screen, and you answer with **Y**, **N** or by typing. A timer or reminder shows as text with one short chime. **Alarms still ring.** |
+| **Written only** (say “Silent mode” or “Written replies only”) | type in the dock | answers in writing only, and still does what you ask: timers, lists, settings. It asks "yes or no" on screen, and you answer by typing **yes** or **no** in the dock. A timer or reminder shows as text with one short chime. **Alarms still ring.** |
 
 Say “Back to talking” (while the microphone is on), use the chip, or press
 **F7** to cycle: Spoken, Written + voice, Written only, Spoken.
@@ -661,6 +661,11 @@ key is a different thing and is not used.) A guest always gets Spoken, no
 dock and no captions of your words. Written chat works with the voice off or
 broken too; a reply then shows when it is over. Press **Enter** to send a
 line and **Esc** to leave the box.
+
+Not there yet: the Quick Menu and Options have no entry for the mode (use the
+chip, **F7** or your voice), the dock does not answer touch, and a question
+that needs "yes" is plain text on screen with no Yes and No buttons: type
+**yes** or **no** in the dock.
 
 The older typing screen (**fn+F2**, then **6** or **Y**) still works but
 takes over the whole screen.
