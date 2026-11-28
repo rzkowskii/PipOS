@@ -679,6 +679,24 @@ class CableNeverInstalls(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("never becomes an ISO", result.stderr)
 
+    def test_make_iso_refuses_the_diagnostic_tree_by_name(self):
+        result = subprocess.run(["bash", str(ROOT / "lab/make-iso.sh"),
+                                 str(Path(self.enterContext(tempfile.TemporaryDirectory())))],
+                                env=dict(os.environ, BEING_ISO_IMAGES="/work/output/laptop-diagnostic/images"),
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("diagnostic build, which never becomes an ISO", result.stderr)
+
+    def test_make_iso_checks_the_rootfs_for_the_diagnostic_marker(self):
+        # The diagnostic image keeps a passwordless root console, so a rootfs
+        # carrying its marker is refused even when the path does not say so.
+        text = (ROOT / "lab/make-iso.sh").read_text()
+        check = "grep -qx 'squashfs-root/usr/share/being/diagnostic' \"$stage/rootfs-listing\""
+        self.assertIn(check, text)
+        after = text.split(check, 1)[1].split("fi", 1)[0]
+        self.assertIn("exit 1", after)
+        self.assertLess(text.index(check), text.index("uuid() {"))
+
     def test_every_media_path_checks_the_rootfs_for_the_cable(self):
         pattern = "^squashfs-root/usr/share/being/cable(/|"
         self.assertIn(pattern, (ROOT / "lab/make-iso.sh").read_text())

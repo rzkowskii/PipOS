@@ -39,11 +39,16 @@ HOST=${BEING_ISO_HOST:-/work/output/laptop/host}
 OUTPUT=${1:-$ROOT/out/iso}
 NAME=${BEING_ISO_NAME:-pipos-macbook}
 
-# A cable development build (BEING_LAPTOP_CABLE=1) is never made into an
-# installable ISO: refused here by name, and inside by what its rootfs holds.
+# A cable development build (BEING_LAPTOP_CABLE=1) or a diagnostic build
+# (BEING_LAPTOP_DIAGNOSTIC=1, which keeps a passwordless root console) is never
+# made into an installable ISO: refused here by name, and inside by what its
+# rootfs holds.
 case "$IMAGES/" in
     */laptop-cable/*)
         echo "Refusing: $IMAGES is the cable development build, which never becomes an ISO." >&2
+        exit 1 ;;
+    */laptop-diagnostic/*)
+        echo "Refusing: $IMAGES is the diagnostic build, which never becomes an ISO." >&2
         exit 1 ;;
 esac
 
@@ -111,6 +116,10 @@ trap 'rm -rf -- "$stage"' EXIT
 unsquashfs -l -no-progress "$rootfs" > "$stage/rootfs-listing"
 if grep -Eq '^squashfs-root/usr/share/being/cable(/|$)' "$stage/rootfs-listing"; then
     echo "Refusing: this rootfs holds the cable development link (BEING_LAPTOP_CABLE=1); it never becomes an ISO." >&2
+    exit 1
+fi
+if grep -qx 'squashfs-root/usr/share/being/diagnostic' "$stage/rootfs-listing"; then
+    echo "Refusing: this rootfs is the diagnostic build (BEING_LAPTOP_DIAGNOSTIC=1); it never becomes an ISO." >&2
     exit 1
 fi
 
