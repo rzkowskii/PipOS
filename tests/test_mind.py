@@ -2235,7 +2235,53 @@ class HonestTime(MindCase):
         with patch.object(self.mind, "_clock_doubt", return_value="behind"):
             await self.hear("What time is it?", 1)
         self.assertIn("I'm not sure of the time", said(self.bus))
-        self.assertIn("set the time to", said(self.bus))
+        self.assertIn("date and the time", said(self.bus))
+        self.assertIn("28th of November", said(self.bus), "it shows how to say it")
+
+    async def test_a_clock_in_doubt_is_explained_once_per_boot_not_every_time(self):
+        with patch.object(self.mind, "_clock_doubt", return_value="reset"):
+            await self.hear("What time is it?", 1)
+            first = said(self.bus)
+            self.bus.sent.clear()
+            await self.hear("What time is it?", 1)
+            second = said(self.bus)
+            self.bus.sent.clear()
+            await self.hear("What's the date?", 1)
+            third = said(self.bus)
+        self.assertIn("My clock was reset", first)
+        self.assertNotIn("reset", second)
+        self.assertNotIn("reset", third)
+        self.assertIn("still not sure of the time", second)
+        self.assertIn("still not sure of the date", third)
+
+    async def test_the_date_and_time_can_be_given_in_one_sentence_and_set_on_a_yes(self):
+        from mind import clock_set
+
+        self.mind.skills.zone = ZoneInfo("Australia/Sydney")
+        with patch.object(self.mind, "_clock_doubt", return_value="reset"), \
+                patch.object(clock_set, "appliance", return_value=True), \
+                patch.object(clock_set.care, "set_clock", return_value=True) as setter:
+            await self.hear("It's the 28th of November 2026, twenty to four in the afternoon", 1)
+            self.assertIn("Saturday 28 November 2026, 3:40 in the afternoon", said(self.bus))
+            setter.assert_not_called()
+            self.bus.sent.clear()
+            await self.hear("yes", 1)
+        expected = datetime(2026, 11, 28, 15, 40, tzinfo=ZoneInfo("Australia/Sydney")).timestamp()
+        setter.assert_called_once()
+        self.assertEqual(setter.call_args.args[1], expected)
+        self.assertIn("my clock says so now", said(self.bus))
+
+    async def test_a_no_leaves_the_clock_alone(self):
+        from mind import clock_set
+
+        self.mind.skills.zone = ZoneInfo("Australia/Sydney")
+        with patch.object(self.mind, "_clock_doubt", return_value="reset"), \
+                patch.object(clock_set, "appliance", return_value=True), \
+                patch.object(clock_set.care, "set_clock", return_value=True) as setter:
+            await self.hear("It's the 28th of November 2026, twenty to four in the afternoon", 1)
+            self.bus.sent.clear()
+            await self.hear("no", 1)
+        setter.assert_not_called()
 
     async def test_the_time_can_be_set_by_voice(self):
         self.mind.skills.zone = ZoneInfo("Australia/Sydney")

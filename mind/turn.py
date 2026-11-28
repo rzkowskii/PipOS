@@ -6346,11 +6346,21 @@ class Mind:
         return self._plea_due is not None or thanks
 
     def _doubtful_clock_line(self, doubt, what="time"):
-        if doubt == "reset":
-            return (f"[concern] I'm not sure of the {what}. My clock was reset, maybe when my power ran out. "
-                    "Could you tell me? Say: set the time to, and then the time.")
-        return (f"[concern] I'm not sure of the {what}. My clock seems to have gone backwards. "
-                "Could you tell me? Say: set the time to, and then the time.")
+        """What Pip says when asked the time or date it cannot be sure of.
+
+        The first ask in a boot gets the whole story and how to put it right
+        (mind/clock_set.py takes the date and time in one sentence, spoken or
+        typed); asked again, Pip only says it is still not sure, so a clock that
+        stays wrong does not become a nag.
+        """
+        if getattr(self, "_clock_asked", False):
+            return (f"[concern] I'm still not sure of the {what}. "
+                    "Tell me the date and time whenever you like, and I'll set my clock.")
+        self._clock_asked = True
+        why = ("My clock was reset, maybe when my power ran out." if doubt == "reset"
+               else "My clock seems to have gone backwards.")
+        return (f"[concern] I'm not sure of the {what}. {why} Could you tell me the date and the time? "
+                "Say it like: it's the 28th of November 2026, twenty to four in the afternoon.")
 
     async def _set_time_command(self, arg):
         wanted = commands.clock_time(arg)
@@ -6363,8 +6373,8 @@ class Mind:
             return
         doubt = self._clock_doubt()
         if doubt == "reset":
-            await self._say("[concern] My date is wrong too, so I can't set the clock by voice. "
-                            "The setup screen can set the date and time.")
+            await self._say("[concern] My date is wrong too, so I need both. Say it like: it's the 28th of "
+                            "November 2026, twenty to four in the afternoon. The setup screen can set it as well.")
             return
         # Only the time of day is said. If the clock was in doubt before (a
         # lost battery clock that still reads a plausible date), the date is
