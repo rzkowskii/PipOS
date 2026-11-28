@@ -504,6 +504,35 @@ class ChooseAsrTests(unittest.TestCase):
         self.assertIs(engine, built[0])
         self.assertIn("0.14", note)
 
+    def test_after_adoption_nothing_is_measured_again(self):
+        self.enterContext(patch.dict(ve._failures, clear=True))
+        self.enterContext(patch.dict("os.environ", {"BEING_ASR_ENGINE": "auto"}))
+        self.install()
+        wake, adopted = FakeWake(), object()
+        with patch.object(ve, "measure_asr", side_effect=AssertionError("measured again")):
+            result = asyncio.run(ve.refresh_asr(adopted, wake, state_dir=self.state, build="b1", root=self.root,
+                                                library=self.library, idle=lambda: True, now=self.now,
+                                                factory=lambda: None))
+        self.assertIsNone(result)
+
+    def test_a_measurement_that_ran_slow_is_kept_and_not_repeated(self):
+        self.enterContext(patch.dict(ve._failures, clear=True))
+        self.enterContext(patch.dict("os.environ", {"BEING_ASR_ENGINE": "auto"}))
+        self.install()
+        calls = []
+
+        def slow(*args, **kwargs):
+            calls.append(1)
+            return {"rtf": 0.45, "runs": [0.45], "text": "x"}
+
+        def factory():
+            return type("Engine", (), {"recognizer": FakeMoonshine(), "vad": FakeMoonshine()})()
+
+        with patch.object(ve, "measure_asr", side_effect=slow):
+            for _ in range(5):
+                self.assertIsNone(self.refresh(factory)[1])
+        self.assertEqual(calls, [1], "one measurement, then the kept verdict decides")
+
     def test_a_failed_smoke_stays_on_pocketsphinx_and_loads_nothing(self):
         self.enterContext(patch.dict(ve._failures, clear=True))
         self.enterContext(patch.dict("os.environ", {"BEING_ASR_ENGINE": "auto"}))
