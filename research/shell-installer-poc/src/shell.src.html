@@ -553,7 +553,10 @@ function faceFrame(n){
   const open=S.mode==='desktop'&&Object.values(W).find(w=>!w.min),fk=open?(T.typing&&open.id==='terminal'?'typing':'watching'):'';
   if(fk!==FD.focus){FD.focus=fk;FD.anim.setFocus(fk?{kind:fk,at:PipGL.gazeAt(640,fk==='typing'?420:240,1280,640)}:null)}
   if(O&&!O.drift&&!fk&&!FD.anim.presence)FD.anim.setGaze(0,0);
-  const fr=FD.anim.frame(step);FD.hz=fr.hz||60;FD.tier=fr.activity;
+  const fr=FD.anim.frame(step);FD.tier=fr.activity;
+  // main.rs rate floors: Active while the dock moves, at least Calm while a surface is open.
+  const surfaceOpen=S.mode==='desktop'&&Object.values(W).some(w=>!w.min);
+  FD.hz=FD.amount>0&&FD.amount<1?PipAnim.hz('active'):surfaceOpen?Math.max(fr.hz,PipAnim.hz('calm')):fr.hz;
   const u=shapeAndStrength(Float32Array.from(fr.u));
   const rect=FD.mode==='guide'?{x:40,y:800-24-160,w:256,h:160}:deskRect();FD.rect=rect;
   FD.gl.clear();FD.gl.draw(rect,u,lookNow());
