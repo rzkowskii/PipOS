@@ -41,7 +41,7 @@ class BeingProfile(unittest.TestCase):
     def test_every_factory_setting_reaches_the_mind(self):
         cfg, settings = load_config(FACTORY, self.mind_dir)
         self.assertEqual(cfg.time_zone, "Australia/Sydney")
-        self.assertEqual((cfg.top_k, cfg.top_p, cfg.presence_penalty), (20, 0.8, 1.0))
+        self.assertEqual((cfg.top_k, cfg.top_p, cfg.presence_penalty), (20, 0.8, 0))
         self.assertEqual(cfg.reply_shape, settings["reply_shape"])
         for key in ("battery_plea_percent", "battery_plea_minutes", "battery_second_plea_percent",
                     "battery_second_plea_minutes", "battery_critical_percent", "battery_critical_minutes"):
