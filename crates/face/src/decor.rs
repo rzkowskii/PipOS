@@ -19,6 +19,12 @@ pub struct Motion {
     pub pupil_kick: f32,
     pub time: f64,
     pub reflected: bool,
+    /// Live path only, [X, spiral]: 1 where the Effects layer is on and the
+    /// allow-list names the pupil, so it may show even while the Eye details layer is off (no other detail does).
+    pub special_pupils: [f32; 2],
+    /// Scales the X and spiral pupils: 0 while the honest cues own the face
+    /// (unwell, link lost, loading and a short settle after), else 1.
+    pub pupil_guard: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -35,6 +41,9 @@ impl Default for Decor {
         }
     }
 }
+
+/// The X (cross) and spiral pupil slots in the packed values.
+const SPECIAL_PUPILS: std::ops::Range<usize> = 33..35;
 
 pub fn allowed(expression: ExprId) -> bool {
     !matches!(
@@ -60,6 +69,8 @@ impl Decor {
             pupil_kick: 0.0,
             time,
             reflected: false,
+            special_pupils: [0.0; 2],
+            pupil_guard: 1.0,
         };
         Self {
             values: Self::target(layers, motion),
@@ -72,7 +83,7 @@ impl Decor {
             *self = Self::default();
             return;
         };
-        if !layers.brows && !layers.mouth && !layers.details && !self.active() {
+        if !layers.brows && !layers.mouth && !layers.details && motion.special_pupils == [0.0; 2] && !self.active() {
             return;
         }
         let target = Self::target(layers, motion);
@@ -175,10 +186,17 @@ impl Decor {
         if !layers.mouth {
             values[29] = 0.0;
         }
+        let guard = motion.pupil_guard.clamp(0.0, 1.0);
         if layers.details {
             values[36] = (values[36] - motion.pupil_kick).max(0.0);
+            values[SPECIAL_PUPILS].iter_mut().for_each(|value| *value *= guard);
         } else {
+            let mut kept = [0.0; 2];
+            for ((kept, value), allowed) in kept.iter_mut().zip(&values[SPECIAL_PUPILS]).zip(motion.special_pupils) {
+                *kept = value * allowed.clamp(0.0, 1.0) * guard;
+            }
             values[32..39].fill(0.0);
+            values[SPECIAL_PUPILS].copy_from_slice(&kept);
         }
         values
     }
@@ -217,6 +235,8 @@ mod tests {
             pupil_kick: 0.0,
             time: 0.0,
             reflected: false,
+            special_pupils: [0.0; 2],
+            pupil_guard: 1.0,
         }
     }
 

@@ -40,7 +40,7 @@ Three principles drive the design:
 2. **The mind partition is the being, and the OS is disposable.** You can
    reflash the system image, and memory survives it.
 3. **Honest body, inspectable memory.** Pip only states sensor facts it
-   actually read, and you can correct or delete any memory.
+   actually read, and you can correct or delete any memory. The optional Effects layer never contradicts a sensor-true cue: flame and steam stand down while the body reads hot, and X or spiral pupils stand down while Pip is unwell, link-lost or loading.
 
 ## 2. The organs
 

@@ -4,6 +4,7 @@
 use crate::{audition, decor, emote};
 use crate::eye::{self, ExprId, Eye, Kick, Pose, M};
 use crate::pace::Activity;
+use std::cell::Cell;
 use std::f64::consts::TAU;
 
 /// Small deterministic random source; the face needs no more than this.
@@ -147,6 +148,36 @@ const HEAT_TTL_CAP: f64 = 12.0;
 /// lapsed still continues the run, so jitter cannot restart the sustain clock.
 /// A single stale reading is still far short of `HEAT_SUSTAIN`.
 const HEAT_REFRESH_SLACK: f64 = 3.0;
+
+/// The only marks Pip may show by itself in a live conversation, and only
+/// while the Effects layer is on: the owner's allow-list. Effect channels are
+/// named as in `emote::NAMES`; `cross` (X pupils) and `spiral` (spiral pupils)
+/// are the two special pupils. Anything not named here is stripped from every
+/// live pose; remove a name here and it disappears everywhere live. Audition
+/// and developer previews never read this list. The state-true question mark,
+/// thinking dots and battery cue are separate cues and are not governed by it.
+const LIVE_MARKS: [&str; 10] =
+    ["blush", "hearts", "cry", "sweat", "bubble", "flame", "steam", "snow", "cross", "spiral"];
+/// Poses that stay audition-only: no live mark is ever produced for them,
+/// whatever an audition or a hold names. (The catalogue flag `is_concept_only`
+/// is wider than this; most of those poses may show allowed marks live.)
+const LAB_ONLY: [&str; 4] = ["sick", "queasy", "p_sneeze", "p_hiccup"];
+/// Flame and steam never show while the body is hot; they ease back in over
+/// this many seconds once the hot reading stops being fresh.
+const HEAT_MARK_RETURN: f32 = 0.4;
+/// X and spiral pupils stay away for this long after unwell, link-lost or
+/// loading clear, so the honest cues own the face a moment longer.
+const PUPIL_SETTLE: f64 = 5.0;
+
+/// Whether an effect channel is on the live allow-list.
+fn live_channel(index: usize) -> bool {
+    LIVE_MARKS.contains(&emote::NAMES[index])
+}
+
+/// Whether a special pupil (`cross` or `spiral`) is on the live allow-list.
+fn live_pupil(name: &str) -> bool {
+    LIVE_MARKS.contains(&name)
+}
 
 fn ease(t: f32, start: f32, end: f32) -> f32 {
     let x = ((t - start) / (end - start)).clamp(0.0, 1.0);
@@ -606,6 +637,15 @@ pub struct Anim {
     preview_dream: bool,
     concept_preview: bool,
     preview_effects: [bool; emote::CHANNELS],
+    /// The Effects layer is on: forced by `set_effects_layer` (tests), or seen
+    /// from the render loop asking for emotes (`effects_called_t`).
+    effects_layer: bool,
+    /// When the render loop last asked for live emotes. It only does so with
+    /// the Effects layer on and room for it, so this is how the face learns the
+    /// layer state without the loop having to tell it.
+    effects_called_t: Cell<f64>,
+    /// The last time unwell, link-lost or loading was seen (X/spiral guard).
+    pupil_blocked_at: f64,
     preview_flash: Option<(ExprId, f64)>,
     preview_burst: Option<f64>,
     preview_gesture: Option<(audition::Gesture, f64)>,
@@ -710,6 +750,9 @@ impl Anim {
             preview_dream: false,
             concept_preview: false,
             preview_effects: [false; emote::CHANNELS],
+            effects_layer: false,
+            effects_called_t: Cell::new(f64::NEG_INFINITY),
+            pupil_blocked_at: f64::NEG_INFINITY,
             preview_flash: None,
             preview_burst: None,
             preview_gesture: None,
@@ -889,7 +932,8 @@ impl Anim {
             || (self.concept_preview && !self.dazed() && !self.muted && self.acting_intensity > 0.0
                 && (self.preview_effect_values(self.acting)[emote::SHIVER..=emote::SWAY].iter().any(|value| *value > 0.0)
                     || (self.acting.is_concept_only() && self.acting.visual().kick.pop > 0.0 && self.t - self.acted_at < 0.7)))
-            || (self.engaged() && !self.muted);
+            || (self.engaged() && !self.muted)
+            || (!self.asleep() && self.live_marks().is_some());
         if busy {
             Activity::Active
         } else if self.asleep() {
@@ -1392,6 +1436,75 @@ impl Anim {
             && self.birth.is_none() && !self.loading && self.state != "waking"
     }
 
+    /// Force the Effects layer on or off (tests). In the app the face sees the
+    /// layer from the render loop calling `emote_motion`, which it only does
+    /// with Effects on. Off (the default) means every live pose is eyes-only:
+    /// no mark is produced and none keeps the frame rate up.
+    #[cfg(test)]
+    pub fn set_effects_layer(&mut self, on: bool) {
+        self.effects_layer = on;
+    }
+
+    /// How long after the last request for emotes the Effects layer still counts
+    /// as on. A few frames, so one skipped frame does not flicker the pupils.
+    const EFFECTS_SEEN: f64 = 0.3;
+
+    fn effects_on(&self) -> bool {
+        self.effects_layer || self.t - self.effects_called_t.get() < Self::EFFECTS_SEEN
+    }
+
+    /// Unwell, link lost or still loading: the honest cues own the face.
+    fn pupils_blocked_now(&self) -> bool {
+        self.unwell || self.link_lost || self.loading
+    }
+
+    fn pupil_guard(&self) -> f32 {
+        if self.pupils_blocked_now() || self.t < self.pupil_blocked_at + PUPIL_SETTLE { 0.0 } else { 1.0 }
+    }
+
+    /// How much flame and steam may show: nothing while a fresh hot or critical
+    /// thermal reading stands (immediately), easing back once it is no longer
+    /// fresh. With no reading at all (no Bodycare) they show.
+    fn heat_mark_scale(&self) -> f32 {
+        if self.t < self.heat.fresh_until {
+            0.0
+        } else if self.heat.fresh_until <= 0.0 {
+            1.0
+        } else {
+            ease((self.t - self.heat.fresh_until) as f32, 0.0, HEAT_MARK_RETURN)
+        }
+    }
+
+    /// Live effect channels from the current expression's own authored values,
+    /// filtered through the allow-list and the heat guard. `None` when nothing
+    /// is showing, the Effects layer is off or a state-true cue owns the face.
+    fn live_marks(&self) -> Option<[f32; emote::CHANNELS]> {
+        let expression = self.target_expression();
+        let speaking = self.state == "speaking" && !self.speech_ended;
+        // The sleep bubble is authored on the sleeping poses, so those two pass.
+        let sleeping = matches!(expression, ExprId::Asleep | ExprId::Dreaming);
+        if !self.effects_on() || !self.layers_visible() || LAB_ONLY.contains(&expression.name())
+            || self.battery_cue.is_some() || self.heat.cue.is_some() || self.state == "drowsy"
+            || (!decor::allowed(expression) && !speaking && !sleeping)
+        {
+            return None;
+        }
+        let age = (self.t - self.acted_at).max(0.0) as f32;
+        let release = self.emotion.as_ref().filter(|held| held.id == expression)
+            .map_or(1.0, |held| ease((held.until - self.t) as f32, 0.0, 0.18));
+        let fade = ease(age, 0.0, 0.15) * release;
+        let heat = self.heat_mark_scale();
+        let authored = self.authored_effect_values(expression);
+        let mut values = [0.0; emote::CHANNELS];
+        for (index, value) in values.iter_mut().enumerate() {
+            if live_channel(index) {
+                let guard = if matches!(emote::NAMES[index], "flame" | "steam") { heat } else { 1.0 };
+                *value = authored[index] * fade * guard;
+            }
+        }
+        values.iter().any(|value| *value > 0.012).then_some(values)
+    }
+
     pub fn decor_motion(&self, preview: bool) -> Option<decor::Motion> {
         let expression = self.target_expression();
         let speaking = self.state == "speaking" && !self.speech_ended;
@@ -1412,10 +1525,26 @@ impl Anim {
             speech: if self.state == "speaking" { self.level } else { 0.0 },
             time: self.t,
             reflected: self.facing_left(),
+            special_pupils: if !preview && self.effects_on() && !LAB_ONLY.contains(&expression.name()) {
+                [f32::from(u8::from(live_pupil("cross"))), f32::from(u8::from(live_pupil("spiral")))]
+            } else {
+                [0.0; 2]
+            },
+            pupil_guard: if preview || !self.effects_on() { 1.0 } else { self.pupil_guard() },
         })
     }
 
     pub fn emote_motion(&self, preview: bool) -> Option<([f32; emote::CHANNELS], f32, f64)> {
+        let motion = self.emote_motion_now(preview);
+        // Asked for after answering, so the layer counts as on from the next
+        // frame and turning it on never changes the answer it was seen from.
+        if !preview {
+            self.effects_called_t.set(self.t);
+        }
+        motion
+    }
+
+    fn emote_motion_now(&self, preview: bool) -> Option<([f32; emote::CHANNELS], f32, f64)> {
         if !self.layers_visible() {
             return None;
         }
@@ -1447,6 +1576,8 @@ impl Anim {
         {
             // Only the battery has a glyph; heat shows the tired eyes alone.
             effects[emote::BATTERY] = 0.8;
+        } else if let Some(marks) = self.live_marks() {
+            effects = marks;
         } else {
             return None;
         }
@@ -1562,6 +1693,17 @@ impl Anim {
     }
 
     fn preview_effect_values(&self, expression: ExprId) -> [f32; emote::CHANNELS] {
+        let mut values = self.authored_effect_values(expression);
+        for (index, value) in values.iter_mut().enumerate() {
+            if self.preview_effects[index] {
+                *value = value.max(if index == emote::BREATH { 1.8 } else { 1.0 });
+            }
+        }
+        values
+    }
+
+    /// The expression's own effect values at its current strength and blend.
+    fn authored_effect_values(&self, expression: ExprId) -> [f32; emote::CHANNELS] {
         let blend = self.blend(expression);
         let neutral = &ExprId::Neutral.visual().effects;
         let intensity = self.intensity(expression);
@@ -1570,8 +1712,7 @@ impl Anim {
             let target = blend.map_or(primary[index], |(other, amount)| {
                 mix(primary[index], other.visual().effects[index], amount)
             });
-            let value = mix(neutral[index], target, intensity).max(0.0);
-            if self.preview_effects[index] { value.max(if index == emote::BREATH { 1.8 } else { 1.0 }) } else { value }
+            mix(neutral[index], target, intensity).max(0.0)
         })
     }
 
@@ -1617,6 +1758,9 @@ impl Anim {
         self.t = now;
         receive(self);
         self.step_heat();
+        if self.pupils_blocked_now() {
+            self.pupil_blocked_at = self.t;
+        }
 
         // Notice a new expression arriving, so its entrance can be acted.
         let arriving = self.target_expression();
@@ -3702,5 +3846,295 @@ mod tests {
                 assert!(e.h >= 0.012);
             }
         }
+    }
+
+    // ---- Live marks (Effects layer) ----
+
+    fn marks_on(seed: u32) -> Anim {
+        let mut a = awake(seed);
+        a.set_effects_layer(true);
+        a
+    }
+
+    /// The emotes the live path would draw. Asking for them is what tells the
+    /// face the Effects layer is on, so these helpers put that back as it was:
+    /// a test about the layer being off must not switch it on by looking.
+    fn live(a: &Anim, name: &str) -> f32 {
+        let before = a.effects_called_t.get();
+        let value = a.emote_motion(false).map_or(0.0, |(effects, _, _)| effects[emote::channel(name).unwrap()]);
+        a.effects_called_t.set(before);
+        value
+    }
+
+    fn live_is_none(a: &Anim) -> bool {
+        let before = a.effects_called_t.get();
+        let none = a.emote_motion(false).is_none();
+        a.effects_called_t.set(before);
+        none
+    }
+
+    fn lab(a: &Anim, name: &str) -> f32 {
+        a.emote_motion(true).map_or(0.0, |(effects, _, _)| effects[emote::channel(name).unwrap()])
+    }
+
+    /// The X or spiral pupil (slot 33 or 34) the eyes would be drawn with,
+    /// through the real fade, for the given layers.
+    fn pupil(a: &Anim, details: bool, slot: usize) -> f32 {
+        let mut decor = decor::Decor::default();
+        let layers = decor::Layers { details, ..decor::Layers::default() };
+        decor.update(layers, a.decor_motion(false), 1.0);
+        decor.uniforms()[slot]
+    }
+
+    #[test]
+    fn the_face_sees_the_effects_layer_from_the_render_loop_asking_for_emotes() {
+        // No call to set_effects_layer: the way the app really runs.
+        let mut a = awake(5);
+        a.express("sad", 5.0);
+        run(&mut a, 1.0);
+        let pupils = |a: &Anim| a.decor_motion(false).map_or([0.0; 2], |m| m.special_pupils);
+        assert_eq!(pupils(&a), [0.0; 2], "Effects off: nothing until emotes are asked for");
+        a.express("ko", 5.0);
+        run(&mut a, 1.0);
+        assert_eq!(pupils(&a), [0.0; 2], "still off while nothing asks for emotes");
+        // The render loop asks for emotes each frame once Effects is on.
+        for _ in 0..10 {
+            a.frame(0.05, |_| {});
+            let _ = a.emote_motion(false);
+        }
+        assert!(pupils(&a)[0] > 0.0 || pupils(&a)[1] > 0.0, "ko shows its X pupil once the loop asks for emotes");
+        // A preview request never turns the layer on.
+        let mut b = awake(5);
+        b.express("ko", 5.0);
+        for _ in 0..10 {
+            b.frame(0.05, |_| {});
+            let _ = b.emote_motion(true);
+        }
+        assert_eq!(pupils(&b), [0.0; 2]);
+        // And it lapses shortly after the loop stops asking (Effects switched off).
+        run(&mut a, 1.0);
+        assert_eq!(pupils(&a), [0.0; 2]);
+    }
+
+    #[test]
+    fn allowed_marks_show_live_only_with_the_effects_layer() {
+        let mut a = awake(5);
+        a.express("bashful", 100.0);
+        run(&mut a, 1.0);
+        assert_eq!(live(&a, "blush"), 0.0, "layer off: eyes only");
+        assert!(live_is_none(&a));
+        a.set_effects_layer(true);
+        assert!(live(&a, "blush") > 0.9, "authored blush at full strength");
+        assert!(lab(&a, "blush") > 0.9, "a preview still shows it");
+        a.set_effects_layer(false);
+        assert!(live_is_none(&a));
+    }
+
+    #[test]
+    fn live_marks_fade_in_and_out_rather_than_pop() {
+        let mut a = marks_on(5);
+        a.express("bashful", 3.0);
+        a.frame(0.02, |_| {});
+        let early = live(&a, "blush");
+        assert!(early < 0.5, "starts faint: {early}");
+        run(&mut a, 1.0);
+        assert!(live(&a, "blush") > 0.9);
+        a.frame(2.0 - 0.1, |_| {});
+        a.frame(0.05, |_| {});
+        let fading = live(&a, "blush");
+        assert!(fading > 0.0 && fading < 0.9, "easing out at the end of the hold: {fading}");
+    }
+
+    #[test]
+    fn marks_outside_the_allow_list_never_show_live_but_do_in_a_preview() {
+        let mut a = marks_on(5);
+        a.express("angry", 100.0);
+        run(&mut a, 1.0);
+        assert!(live(&a, "steam") > 0.0, "steam is allowed");
+        for name in ["anger", "shiver", "breath"] {
+            assert_eq!(live(&a, name), 0.0, "{name} is stripped live");
+            assert!(lab(&a, name) > 0.0, "{name} still previews");
+        }
+        // Every channel off the list is zero live, whatever the pose.
+        for id in ExprId::ALL {
+            let mut a = marks_on(5);
+            a.audition(*id, 1.0, 100.0);
+            run(&mut a, 1.0);
+            if let Some((effects, burst, _)) = a.emote_motion(false) {
+                assert_eq!(burst, 0.0);
+                for (index, value) in effects.iter().enumerate() {
+                    let cue = matches!(index, emote::QUESTION | emote::DOTS | emote::BATTERY);
+                    assert!(*value == 0.0 || live_channel(index) || cue, "{} {}", id.name(), emote::NAMES[index]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_expression_with_only_disallowed_marks_shows_nothing_and_settles() {
+        let mut a = marks_on(5);
+        a.express("amazed", 100.0);
+        run(&mut a, 6.0);
+        assert!(a.emote_motion(false).is_none(), "sparkle alone is stripped");
+        assert!(a.emote_motion(true).is_some(), "but the preview has it");
+        a.express("annoyed", 100.0);
+        run(&mut a, 6.0);
+        assert!(a.emote_motion(false).is_none());
+        assert_eq!(a.activity(), Activity::Calm, "no mark showing, so the face settles");
+    }
+
+    #[test]
+    fn a_showing_mark_keeps_the_face_active_and_a_hidden_one_does_not() {
+        let mut a = marks_on(5);
+        a.express("bashful", 100.0);
+        run(&mut a, 6.0);
+        assert_eq!(a.activity(), Activity::Active, "a mark is on screen");
+        a.set_effects_layer(false);
+        assert_eq!(a.activity(), Activity::Calm, "layer off: nothing draws, nothing keeps the rate up");
+    }
+
+    #[test]
+    fn lab_only_poses_never_promote_to_live_marks() {
+        for name in LAB_ONLY {
+            let id = ExprId::from_name(name).unwrap();
+            let mut a = marks_on(5);
+            a.audition(id, 1.0, 100.0);
+            run(&mut a, 1.0);
+            assert!(a.emote_motion(false).is_none(), "{name}");
+            assert!(a.emote_motion(true).is_some(), "{name} still previews");
+        }
+        // Only the public names the director may send reach live marks at all.
+        for name in LAB_ONLY {
+            assert!(!ExprId::PUBLIC.iter().any(|id| id.name() == name), "{name}");
+        }
+    }
+
+    #[test]
+    fn flame_and_steam_vanish_on_a_fresh_hot_reading_and_return_after() {
+        let mut a = marks_on(5);
+        a.audition(ExprId::from_name("raging").unwrap(), 1.0, 600.0);
+        run(&mut a, 1.0);
+        assert!(live(&a, "flame") > 0.9 && live(&a, "steam") > 0.9, "no reading at all: they show");
+        a.frame(0.0, hot);
+        assert_eq!(live(&a, "flame"), 0.0, "immediately");
+        assert_eq!(live(&a, "steam"), 0.0);
+        run(&mut a, 3.0);
+        assert_eq!(live(&a, "flame"), 0.0, "still hot");
+        // A critical reading counts the same.
+        a.frame(0.0, |a| a.thermal_budget(Some("critical"), Some("thermal"), true, 12_000.0));
+        assert_eq!(live(&a, "steam"), 0.0);
+        // Not refreshed: the 12 s ttl lapses and they come back.
+        a.frame(12.1, |_| {});
+        assert!(live(&a, "flame") < 0.9, "easing back, not popping");
+        run(&mut a, 1.0);
+        assert!(live(&a, "flame") > 0.9 && live(&a, "steam") > 0.9);
+    }
+
+    #[test]
+    fn a_revoke_or_a_cooler_reading_lifts_the_flame_guard() {
+        for lift in 0..3 {
+            let mut a = marks_on(5);
+            a.audition(ExprId::from_name("raging").unwrap(), 1.0, 600.0);
+            run(&mut a, 1.0);
+            a.frame(0.0, hot);
+            assert_eq!(live(&a, "flame"), 0.0);
+            a.frame(0.5, |a| match lift {
+                0 => a.thermal_budget(None, None, false, 0.0),
+                1 => a.thermal_budget(Some("warm"), Some("thermal"), true, 12_000.0),
+                _ => a.thermal_budget(Some("hot"), Some("battery"), true, 12_000.0),
+            });
+            run(&mut a, 1.0);
+            assert!(live(&a, "flame") > 0.9, "lift {lift}");
+        }
+    }
+
+    #[test]
+    fn x_and_spiral_pupils_stand_down_for_the_honest_cues_and_a_settle() {
+        let ko = ExprId::from_name("ko").unwrap();
+        let dizzy = ExprId::from_name("dizzy").unwrap();
+        for (cause, id, slot) in [("unwell", ko, 33), ("link", ko, 33), ("loading", dizzy, 34), ("unwell", dizzy, 34)] {
+            let mut a = marks_on(5);
+            a.audition(id, 1.0, 600.0);
+            run(&mut a, 1.0);
+            assert!(pupil(&a, false, slot) > 0.9, "{cause} before");
+            match cause {
+                "unwell" => a.set_state("idle", false, true),
+                "link" => a.set_link_lost(true),
+                _ => {
+                    a.set_link_lost(true);
+                    a.set_loading(true);
+                }
+            }
+            run(&mut a, 2.0);
+            assert_eq!(pupil(&a, false, slot), 0.0, "{cause} while it lasts");
+            match cause {
+                "unwell" => a.set_state("idle", false, false),
+                "link" => a.set_link_lost(false),
+                _ => {
+                    a.set_loading(false);
+                    a.set_link_lost(false);
+                }
+            }
+            run(&mut a, PUPIL_SETTLE as f32 - 1.0);
+            assert_eq!(pupil(&a, false, slot), 0.0, "{cause} during the settle");
+            run(&mut a, 2.0);
+            assert!(pupil(&a, false, slot) > 0.9, "{cause} returns");
+        }
+    }
+
+    #[test]
+    fn with_effects_on_and_details_off_only_x_and_spiral_pupils_show() {
+        let id = |name: &str| ExprId::from_name(name).unwrap();
+        let mut a = marks_on(5);
+        a.audition(id("ko"), 1.0, 600.0);
+        run(&mut a, 1.0);
+        assert!(pupil(&a, false, 33) > 0.9);
+        a.audition(id("dizzy"), 1.0, 600.0);
+        run(&mut a, 1.0);
+        assert!(pupil(&a, false, 34) > 0.9);
+        // Heart and star pupils stay under Eye details.
+        let mut love = marks_on(5);
+        love.audition(id("love"), 1.0, 600.0);
+        run(&mut love, 1.0);
+        assert_eq!(pupil(&love, false, 32), 0.0);
+        assert!(pupil(&love, true, 32) > 0.9, "details on: as today");
+        let mut star = marks_on(5);
+        star.audition(id("starstruck"), 1.0, 600.0);
+        run(&mut star, 1.0);
+        assert_eq!(pupil(&star, false, 35), 0.0);
+        assert!(pupil(&star, true, 35) > 0.9);
+        // Effects off: nothing from this feature shows.
+        a.set_effects_layer(false);
+        assert_eq!(pupil(&a, false, 34), 0.0);
+        // Effects off, details on: the guard does not apply, as before.
+        let mut off = marks_on(5);
+        off.audition(ExprId::from_name("ko").unwrap(), 1.0, 600.0);
+        run(&mut off, 1.0);
+        off.set_link_lost(true);
+        run(&mut off, 1.0);
+        off.set_link_lost(false);
+        off.set_effects_layer(false);
+        run(&mut off, 1.5);
+        assert!(pupil(&off, true, 33) > 0.9, "effects off: details pupils unguarded");
+        // A preview ignores the layer switch and the guards.
+        assert_eq!(a.decor_motion(true).unwrap().special_pupils, [0.0; 2]);
+    }
+
+    #[test]
+    fn heart_eyes_do_not_gate_on_the_effects_layer_when_details_are_on() {
+        let mut a = awake(5);
+        a.audition(ExprId::from_name("love").unwrap(), 1.0, 600.0);
+        run(&mut a, 1.0);
+        assert!(pupil(&a, true, 32) > 0.9);
+    }
+
+    #[test]
+    fn state_true_cues_are_unchanged_by_the_live_marks() {
+        let mut a = marks_on(5);
+        a.set_state("thinking", false, false);
+        run(&mut a, 1.0);
+        let (effects, _, _) = a.emote_motion(false).unwrap();
+        assert_eq!(effects[emote::DOTS], 0.8);
+        assert_eq!(effects.iter().filter(|value| **value > 0.0).count(), 1);
     }
 }

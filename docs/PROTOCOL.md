@@ -210,6 +210,18 @@ can be requested.) The model still chooses only from its seven tags
 the other names are sent only by the brainstem and the mind, and only when the
 state behind them is true. Nothing shows while muted, dazed, asleep or dark.
 
+Effects layer (off by default): with it on, a live pose shows only these marks,
+as the expression itself authors them: blush, hearts, tears, sweat drops, the
+sleep bubble, flame, steam, snow, and X or spiral pupils. Every other mark
+(sparkle, zzz, exclaim, anger, notes, bulb, gloom, shiver, bounce, sway, glitch,
+scan, check, warn) is lab-only, and so are the expressions `sick`, `queasy`,
+`p_sneeze` and `p_hiccup`. The question mark, thinking dots and battery cue are
+state-true and unchanged. Two guards: flame and steam never show while a fresh
+`stem.budget` reading says `hot` or `critical` for a thermal reason (they show
+where Bodycare gives no reading); X and spiral pupils never show while Pip is
+unwell, link-lost or loading, nor for 5 s after. With the layer off every pose
+is eyes-only.
+
 What shows, and when:
 
 | State | Expression | For | Who |

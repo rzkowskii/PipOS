@@ -159,6 +159,13 @@ skepticism, concern or sleepiness. Click or tap the trackpad and it
 glances down. If it heard you but could not make out the words, it
 looks puzzled for a moment, the way someone says "pardon?".
 
+If you switch on Pip's emotes (the Effects layer, off at the factory), a
+feeling can also draw a small mark: a blush, hearts, tears, sweat drops, a
+sleep bubble, flame, steam, snow, or X or spiral pupils. No other marks appear
+in conversation. Pip never shows flame or steam while its body is actually
+hot, and never shows X or spiral pupils while it is unwell, has lost its link
+or is still loading. With the layer off, Pip shows eyes only.
+
 Pip also makes small sounds, unless the lid is closed, it is muted or it
 is quiet hours: a chirp when it starts listening, another when it has
 heard you, a soft purr while a long thought goes on, a sigh as it falls

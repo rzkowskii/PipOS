@@ -184,7 +184,7 @@ Options on the face and under **L** in Setup.
 | "Make your eyes round" / "sharp" / "soft" | Eye shape |
 | "Set your glow to seventy percent" / "Make your eyes brighter" / "dimmer" | Glow strength, 40 to 160 percent; brighter and dimmer move it 20 points |
 | "Make your face smaller" / "Set your face size to full" | Face size: small, medium or full |
-| "Show your brows" / "Hide your mouth" / "Show your emotes" / "Show your eye details" / "Show your mood colour" | The optional face layers (all off at the factory) |
+| "Show your brows" / "Hide your mouth" / "Show your emotes" / "Show your eye details" / "Show your mood colour" | The optional face layers (all off at the factory). Emotes allow only blush, hearts, tears, sweat, sleep bubble, flame, steam, snow and X or spiral pupils; flame and steam hide while the body is hot, X and spiral pupils while unwell, link lost or loading |
 | "Show the clock widget" / "Hide the system widget" / "Show the weather widget" | The corner widgets. The weather widget appears in Internet mode |
 | "Move the clock widget to the bottom right" | A widget's corner: top left, top right, bottom left or bottom right |
 | "Show the captions" / "Show the route badge" / "Show the heard line" / "Show the Quick Menu labels" / "Hide the idle glances" | Captions and their two extras, the Quick Menu's labels, and the idle glances |
