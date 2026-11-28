@@ -1085,13 +1085,37 @@ impl Anim {
     }
 
     pub fn express(&mut self, name: &str, hold: f64) {
-        let Some(expression) = ExprId::PUBLIC.iter().copied().find(|id| id.name() == name) else {
+        self.express_with(name, hold, None, None);
+    }
+
+    /// `express` with the optional strength and blend of `face.express`.
+    /// `intensity` is clamped to 0..1 and ignored (full strength) when it is
+    /// not finite. `blend` is a public name and a mix; a bad name, the main
+    /// pose's own name or a non-finite mix drops the blend and the pose plays
+    /// alone, and a mix is clamped to 0..1.
+    pub fn express_event(&mut self, name: &str, hold: f64, intensity: Option<f64>, blend: Option<&serde_json::Value>) {
+        // The blend arrives as untrusted JSON: only an object with a string name and a
+        // numeric mix counts, and anything else plays the pose alone.
+        let blend = blend.and_then(|value| {
+            let object = value.as_object()?;
+            Some((object.get("name")?.as_str()?, object.get("mix")?.as_f64()?))
+        });
+        self.express_with(name, hold, intensity, blend);
+    }
+
+    pub fn express_with(&mut self, name: &str, hold: f64, intensity: Option<f64>, blend: Option<(&str, f64)>) {
+        let public = |name: &str| {
+            ExprId::PUBLIC.iter().copied().find(|id| id.name() == name).filter(|id| *id != ExprId::Dreaming)
+        };
+        let Some(expression) = public(name) else {
             return;
         };
-        if expression == ExprId::Dreaming {
-            return;
-        }
-        self.audition(expression, 1.0, hold);
+        let intensity = intensity.filter(|v| v.is_finite()).map_or(1.0, |v| v.clamp(0.0, 1.0)) as f32;
+        let blend = blend.and_then(|(other, mix)| {
+            let other = public(other).filter(|id| *id != expression)?;
+            mix.is_finite().then(|| (other, mix.clamp(0.0, 1.0) as f32))
+        });
+        self.audition_blend(expression, intensity, hold, blend);
     }
 
     /// Show a typed pose from the local visual audition, with its strength
@@ -3239,6 +3263,123 @@ mod tests {
     }
 
     #[test]
+    fn express_with_no_options_matches_plain_express() {
+        let mut a = awake(5);
+        a.express_with("joy", 3.0, None, None);
+        let held = a.emotion.as_ref().unwrap();
+        assert_eq!((held.id, held.intensity, held.blend), (ExprId::Joy, 1.0, None));
+        run(&mut a, 1.0);
+        assert_eq!(a.spring.target, ExprId::Joy.pose().to_array());
+        assert_eq!(a.spring.intensity, 1.0);
+        assert_eq!(a.spring.blend, None);
+    }
+
+    #[test]
+    fn express_intensity_reaches_the_spring_and_scales_from_neutral() {
+        for level in [0.55_f32, 0.3] {
+            let mut a = awake(5);
+            a.gaze_next = a.t + 20.0;
+            a.blink_next = a.t + 10.0;
+            a.express_with("embarrassed", 3.0, Some(f64::from(level)), None);
+            run(&mut a, 0.8);
+            assert_eq!(a.spring.intensity, level);
+            let want = blend_pose(ExprId::Neutral.pose(), ExprId::Embarrassed.pose(), level);
+            assert_eq!(a.spring.target, want.to_array());
+            assert!((a.acting_intensity - level).abs() < 1e-6);
+            assert!((a.blink_interval() - mix(1.0, ExprId::Embarrassed.motion().blink_interval, level)).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn express_intensity_is_clamped_or_ignored() {
+        let held = |v: Option<f64>| {
+            let mut a = awake(5);
+            a.express_with("joy", 3.0, v, None);
+            a.emotion.as_ref().unwrap().intensity
+        };
+        assert_eq!(held(Some(7.0)), 1.0);
+        assert_eq!(held(Some(-2.0)), 0.0);
+        assert_eq!(held(Some(f64::NAN)), 1.0);
+        assert_eq!(held(Some(f64::INFINITY)), 1.0);
+        assert_eq!(held(None), 1.0);
+    }
+
+    #[test]
+    fn express_blend_mixes_then_intensity_scales_from_neutral() {
+        let mut a = awake(5);
+        a.express_with("joy", 3.0, Some(0.5), Some(("sad", 0.25)));
+        assert_eq!(a.emotion.as_ref().unwrap().blend, Some((ExprId::Sad, 0.25)));
+        run(&mut a, 1.0);
+        assert_eq!(a.spring.blend, Some((ExprId::Sad, 0.25)));
+        assert_eq!(a.spring.intensity, 0.5);
+        let mixed = blend_pose(ExprId::Joy.pose(), ExprId::Sad.pose(), 0.25);
+        let want = blend_pose(ExprId::Neutral.pose(), mixed, 0.5);
+        assert_eq!(a.spring.target, want.to_array());
+        // Mix out of range is clamped.
+        for (given, want) in [(3.0, 1.0), (-1.0, 0.0)] {
+            let mut a = awake(5);
+            a.express_with("joy", 3.0, None, Some(("sad", given)));
+            assert_eq!(a.emotion.as_ref().unwrap().blend, Some((ExprId::Sad, want)));
+        }
+    }
+
+    #[test]
+    fn express_invalid_blend_is_dropped_and_the_pose_plays_alone() {
+        for blend in [("starstruck", 0.5), ("dreaming", 0.5), ("joy", 0.5), ("sad", f64::NAN), ("sad", f64::INFINITY)] {
+            let mut a = awake(5);
+            a.express_with("joy", 3.0, Some(0.7), Some(blend));
+            let held = a.emotion.as_ref().unwrap();
+            assert_eq!((held.id, held.blend), (ExprId::Joy, None), "{blend:?}");
+            assert_eq!(held.intensity, 0.7);
+        }
+    }
+
+    #[test]
+    fn express_unknown_main_name_is_ignored_with_options() {
+        for name in ["starstruck", "dreaming", "no-such-name"] {
+            let mut a = awake(5);
+            a.express_with(name, 1.5, Some(0.5), Some(("sad", 0.5)));
+            run(&mut a, 0.6);
+            assert!(a.emotion.is_none(), "{name}");
+            assert_eq!(a.target_name(), "neutral", "{name}");
+        }
+    }
+
+    #[test]
+    fn express_hold_is_still_clamped_with_options() {
+        let until = |hold: f64| {
+            let mut a = awake(5);
+            let t = a.t;
+            a.express_with("joy", hold, Some(0.5), Some(("sad", 0.5)));
+            a.emotion.as_ref().unwrap().until - t
+        };
+        assert!((until(0.0) - 0.2).abs() < 1e-9);
+        assert!((until(9999.0) - 600.0).abs() < 1e-9);
+        assert!((until(5.0) - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn express_options_keep_the_suppression_rules() {
+        let mut a = awake(5);
+        a.set_state("asleep", false, false);
+        a.express_with("joy", 3.0, Some(0.5), Some(("sad", 0.5)));
+        assert!(a.emotion.is_none(), "asleep");
+        let mut a = Anim::new(5);
+        a.set_lid(Some(false), false, true);
+        a.set_state("idle", false, false);
+        a.set_lid(Some(true), false, false);
+        run(&mut a, 0.5);
+        a.express_with("joy", 3.0, Some(0.5), None);
+        assert!(a.emotion.is_none(), "dark");
+        let mut a = awake(5);
+        a.set_state("idle", true, false);
+        run(&mut a, 1.0);
+        a.express_with("joy", 3.0, Some(0.5), None);
+        run(&mut a, 1.0);
+        assert_eq!(a.target_name(), "muted");
+    }
+
+    #[test]
     fn tuned_poses_keep_the_audition_clamp() {
         for id in tuned_ids() {
             let name = id.name();
@@ -3914,6 +4055,27 @@ mod tests {
         // And it lapses shortly after the loop stops asking (Effects switched off).
         run(&mut a, 1.0);
         assert_eq!(pupils(&a), [0.0; 2]);
+    }
+
+    #[test]
+    fn the_blend_field_on_the_bus_only_counts_as_an_object_with_a_name_and_a_mix() {
+        use serde_json::json;
+        let held = |value: serde_json::Value| {
+            let mut a = awake(5);
+            a.express_event("concern", 5.0, None, Some(&value));
+            a.emotion.as_ref().map(|held| held.blend)
+        };
+        let some = Some(Some((ExprId::from_name("joy").unwrap(), 0.4)));
+        assert_eq!(held(json!({"name": "joy", "mix": 0.4})), some);
+        assert_eq!(held(json!({"name": "joy", "mix": 0.4, "extra": {"deep": [1, 2]}})), some, "extra keys are ignored");
+        for bad in [json!("joy"), json!(null), json!(7), json!([]), json!({"name": "joy"}), json!({"mix": 0.4}),
+                    json!({"name": "joy", "mix": "0.4"}), json!({"name": 5, "mix": 0.4}), json!({"name": "dreaming", "mix": 0.4}),
+                    json!({"name": "no-such-face", "mix": 0.4}), json!({"name": "concern", "mix": 0.4})] {
+            assert_eq!(held(bad.clone()), Some(None), "{bad}: the pose plays alone");
+        }
+        let mut a = awake(5);
+        a.express_event("concern", 5.0, None, None);
+        assert_eq!(a.emotion.as_ref().map(|held| held.blend), Some(None), "no blend field");
     }
 
     #[test]

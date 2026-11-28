@@ -611,7 +611,7 @@ fn apply(ev: &Event, anim: &mut Anim, side: &mut Side) {
         }
         "face.express" => {
             if let Some(name) = ev.str("name") {
-                anim.express(name, ev.f64("hold").unwrap_or(2.5));
+                anim.express_event(name, ev.f64("hold").unwrap_or(2.5), ev.f64("intensity"), ev.data.get("blend"));
             }
         }
         "body.state" => {

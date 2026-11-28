@@ -63,7 +63,7 @@ RAM-only counts by `mind.route` category and up to ten route IDs.
 | `panel.ready` | face | `seq` | The first frame for this lid reading has been presented. The brainstem can restore panel power. |
 | `body.senses` | brainstem | `line` | One line of true facts about the body, for the mind to show the model |
 | `body.drives` | brainstem | `energy`, `arousal`, `social`, `comfort`, `tiredness`, `eagerness` | Slow internal numbers. The shared face formulas set tiredness up to 0.26 and the other scales run from 0 to 1. The opt-in reply experiment discards samples older than 15 seconds. |
-| `face.express` | brainstem | `name`, `hold` | Show an expression for `hold` seconds |
+| `face.express` | brainstem | `name`, `hold`, optional `intensity`, optional `blend` | Show an expression for `hold` seconds (clamped 0.2-600). `intensity` is a number 0..1 (clamped) that scales the pose from neutral; a non-number or non-finite value is ignored and counts as 1.0. `blend` is an object `{name, mix}`: `name` must be a name `face.express` accepts (not `dreaming`, not unknown, not the main pose's own name) and `mix` a finite number clamped to 0..1; the main pose is mixed with `blend.name` by `mix`, then `intensity` scales the result from neutral. An invalid `blend` is dropped and the pose plays alone. Missing fields mean full strength and no blend, as before. Marks and kicks scale with `intensity`. Suppression while muted, dazed, asleep or dark is unchanged |
 | `face.gaze` | brainstem | `x`, `y`, optional `hold`, or `present: false` | Track a point from -1 to 1, glance for `hold` seconds, or release the camera target |
 | `hear.wake` | voice | | Its name was heard |
 | `hear.speech_start` | voice | | Someone started talking |
