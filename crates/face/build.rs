@@ -265,6 +265,9 @@ fn main() {
         let right: [f32; CHANNELS.len()] = field(&mut row, "right");
         let private = field::<Option<bool>>(&mut row, "private").unwrap_or(false);
         let audition = field::<Option<bool>>(&mut row, "audition").unwrap_or(false);
+        // A tuned pose is public like a native one but keeps the audition poses'
+        // safety clamp and 60 Hz kick window.
+        let tuned = field::<Option<bool>>(&mut row, "tuned").unwrap_or(false);
         let concept_only = !native.contains(&name);
         let lively = field::<Option<bool>>(&mut row, "lively").unwrap_or(false);
         let damping = field::<Option<f32>>(&mut row, "damping").unwrap_or(default_damping);
@@ -297,6 +300,7 @@ fn main() {
         }
         assert!(damping > 0.0 && damping < 1.0, "invalid damping for {name}");
         assert!(!(private && audition), "conflicting visibility for {name}");
+        assert!(!(tuned && (private || audition)), "conflicting visibility for {name}");
         assert!(
             gaze.iter().all(|axis| (-0.5..=0.5).contains(axis))
                 && (-0.12..=0.12).contains(&roll)
@@ -321,7 +325,7 @@ fn main() {
             writeln!(public, "        Self::{id},").unwrap();
         }
         let eyes: Vec<_> = left.into_iter().chain(right).collect();
-        writeln!(table, "    Expression {{ name: {name:?}, eyes: {eyes:?}, lively: {lively}, damping: {damping:?}, audition: {audition}, concept_only: {concept_only},").unwrap();
+        writeln!(table, "    Expression {{ name: {name:?}, eyes: {eyes:?}, lively: {lively}, damping: {damping:?}, audition: {audition}, tuned: {tuned}, concept_only: {concept_only},").unwrap();
         writeln!(table, "        motion: Motion {{ gaze: {gaze:?}, roll: {roll:?}, blink_interval: {blink_interval:?}, breath: {breath:?}, kick: Kick::{kick} }},").unwrap();
         write_visual(&mut table, &name, &concepts);
         writeln!(table, "    }},").unwrap();

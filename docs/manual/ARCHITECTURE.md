@@ -301,10 +301,17 @@ Only a hardware body (or a test naming `--poweroff-cmd`) powers off.
   `skepticism`, `concern`, `sleepy`, `asleep`, `dreaming`, `tired`,
   `muted`, `loading` before the brainstem first answers, and `dazed`) and
   eleven more (`sad`, `laugh`, `love`, `embarrassed`, `scared`, `annoyed`,
-  `smug`, `confused`, `wink`, `bored`, `relieved`). The model can still
-  choose only one of seven emotions for its reply: neutral, joy,
-  curiosity, surprise, skepticism, concern and sleepy. A clause that
-  admits a failure ("I couldn't find …") shows `concern` whatever the tag.
+  `smug`, `confused`, `wink`, `bored`, `relieved`). The brainstem and
+  the face can ask for any of them except `dreaming` and `loading`; the
+  eleven tuned ones keep the pose clamp and the 60 Hz kick window the
+  audition poses had. The model can still choose only one of seven
+  emotions for its reply: neutral, joy, curiosity, surprise, skepticism,
+  concern and sleepy. A clause that admits a failure ("I couldn't find
+  …") shows `concern` whatever the tag. Live reactions: a failed job
+  shows `sad` and a finished one `relieved` (brainstem, from
+  `term.status`, once per job); a hearing that was unclear shows
+  `confused`; the charger going in after a low-battery warning shows
+  `relieved`; sustained heat shows the `tired` cue (below).
 - **Motion.** Every expression-shape parameter is driven by a slightly
   underdamped spring (damping 0.82). Lively arrivals such as joy and
   surprise use looser springs so they overshoot a little. Gaze, blinks
@@ -316,7 +323,12 @@ Only a hardware body (or a test naming `--poweroff-cmd`) powers off.
   drowsy. The lids grow heavier during long quiet spells alone. Breathing
   runs at 0.22 Hz awake and 0.13 Hz asleep. A speech envelope follows
   `say.level`. When the battery is low, the face shows a `tired` cue for
-  6 s every 45 s while idle.
+  6 s every 45 s while idle. Sustained heat does the same: after 30 s of
+  Bodycare's thermal `hot` or `critical` pressure (read from
+  `stem.budget`, with no temperature of its own) the cue runs until 60 s
+  pass without it. It appears only where Bodycare runs, so the lab image
+  never shows it; that is expected, not a fault. A low-battery cue wins
+  over it.
 - **Drives.** The brainstem's `body.drives` shape the idle face: a flat
   battery or heat makes the lids a little heavier, a long quiet slows the
   idle glances, and after about half an hour alone the face greets a

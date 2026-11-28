@@ -150,12 +150,14 @@ and a mouth independently in Setup's Look menu or by asking Pip.
 | Closed eyes, slow breathing | **Asleep** |
 | Eyes shrunk to short, dim, flat lines | **Muted**: the microphone is off |
 | Dazed, unfocused eyes | **Unwell**: part of Pip has stopped and is restarting. Give it a few seconds |
-| A tired look every so often | **Low battery**: unplugged, with 15 % or less or about 30 minutes left |
+| A tired look every so often | **Low battery**: unplugged, with 15 % or less or about 30 minutes left. It also shows when the laptop has been hot for a while, but only on the real laptop, where Bodycare runs; a test image never shows it |
+| A short sad look | A job you asked for **failed** |
+| A relieved look | A job finished **successfully**, or the charger went in after a low-battery warning |
 
 Pip also shows feelings while it talks: joy, curiosity, surprise,
 skepticism, concern or sleepiness. Click or tap the trackpad and it
 glances down. If it heard you but could not make out the words, it
-squints for a moment, the way someone says "pardon?".
+looks puzzled for a moment, the way someone says "pardon?".
 
 Pip also makes small sounds, unless the lid is closed, it is muted or it
 is quiet hours: a chirp when it starts listening, another when it has

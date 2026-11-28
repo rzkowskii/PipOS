@@ -25,6 +25,8 @@ const SUBS: &[&str] = &[
     // Which clauses of a model reply really played: captions follow it (no words).
     "say.played",
     "stem.beat",
+    // Sustained heat shows as a tired look (the brainstem names the pressure).
+    "stem.budget",
     "body.lid",
     "body.state",
     "body.plug",
@@ -613,10 +615,12 @@ fn apply(ev: &Event, anim: &mut Anim, side: &mut Side) {
             }
         }
         "body.state" => {
-            anim.set_low_battery(ev.bool("battery_low") == Some(true));
+            anim.set_low_battery(ev.bool("battery_low") == Some(true), ev.bool("on_ac"));
             anim.set_breath_effort(drive(ev, "effort"));
             side.readings = Some((Readings::from_body(ev), Instant::now()));
         }
+        "stem.budget" => anim.thermal_budget(
+            ev.str("pressure"), ev.str("priority"), ev.bool("active") == Some(true), ev.f64("ttl_ms").unwrap_or(0.0)),
         "body.plug" if ev.str("kind") == Some("storage") && ev.bool("attached") == Some(true)
             && !anim.panel_blank() && !anim.asleep() && !anim.muted() =>
         {
@@ -770,8 +774,10 @@ mod tests {
         anim.set_state("attending", false, false);
         side.captions.toggle();
         side.captions.take_changed();
-        apply(&Event::new("hear.missed").with("reason", "unclear"), &mut anim, &mut side);
+        apply(&Event::new("hear.missed").with("reason", "no_speech"), &mut anim, &mut side);
         assert_eq!(anim.target_name(), "skepticism");
+        apply(&Event::new("hear.missed").with("reason", "unclear"), &mut anim, &mut side);
+        assert_eq!(anim.target_name(), "confused");
         assert!(!side.captions.take_changed(), "a miss has no words to caption");
     }
 

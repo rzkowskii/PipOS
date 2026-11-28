@@ -65,7 +65,7 @@ impl Spring {
 
     fn step(&mut self, expression: ExprId, intensity: f32, blend: Option<(ExprId, f32)>, dt: f32, omega: f32) {
         if self.expression != expression || self.intensity != intensity || self.blend != blend || self.flip != self.flipped {
-            self.guarded |= expression.is_audition() || intensity != 1.0 || blend.is_some();
+            self.guarded |= expression.is_guarded() || intensity != 1.0 || blend.is_some();
             self.expression = expression;
             self.intensity = intensity;
             self.blend = blend;
@@ -105,7 +105,7 @@ impl Spring {
         if self.settled {
             self.x = self.target;
             self.v = [0.0; M];
-            self.guarded = self.expression.is_audition() || self.intensity != 1.0 || self.blend.is_some();
+            self.guarded = self.expression.is_guarded() || self.intensity != 1.0 || self.blend.is_some();
         }
     }
 }
@@ -126,6 +126,27 @@ const YAWN_STRETCH: f32 = 0.9;
 const CENTER: [f32; 2] = [0.0, 0.0];
 /// How long the "pardon?" squint lasts after words it could not make out.
 pub const MISSED_HOLD: f64 = 1.1;
+
+/// Face-only trigger rows: expression and hold in one named entry, so both are
+/// cheap to change. Words heard but not made out (`hear.missed` reason `unclear`): confusion.
+/// (`no_speech` keeps the skepticism squint of `MISSED_HOLD`.)
+const UNCLEAR_HEARING: (&str, f64) = ("confused", 1.1);
+/// The charger went in after a low-battery warning had been showing.
+const CHARGER_RELIEF: (&str, f64) = ("relieved", 2.0);
+/// Heat shows only after this many seconds of continuously fresh hot readings.
+const HEAT_SUSTAIN: f64 = 30.0;
+/// An armed heat cue ends after this many seconds without a fresh hot reading.
+const HEAT_CLEAR: f64 = 60.0;
+/// The heat cue (tired) shows this long, then repeats like the battery cue.
+const HEAT_CUE_ON: f64 = 6.0;
+const HEAT_CUE_EVERY: f64 = 45.0;
+/// The longest a budget reading may be trusted, whatever its ttl says.
+const HEAT_TTL_CAP: f64 = 12.0;
+/// Bodycare republishes about every 10 s against a 12 s ttl, and a busy (hot)
+/// laptop can be late. A hot reading that arrives this soon after the last one
+/// lapsed still continues the run, so jitter cannot restart the sustain clock.
+/// A single stale reading is still far short of `HEAT_SUSTAIN`.
+const HEAT_REFRESH_SLACK: f64 = 3.0;
 
 fn ease(t: f32, start: f32, end: f32) -> f32 {
     let x = ((t - start) / (end - start)).clamp(0.0, 1.0);
@@ -208,6 +229,19 @@ struct Blink {
 struct BatteryCue {
     next: f64,
     until: f64,
+}
+
+/// What the face knows of the body's heat. The brainstem names the pressure;
+/// the face keeps no temperatures of its own.
+#[derive(Default)]
+struct Heat {
+    /// The last hot reading is trusted until this time (also set to "now" by
+    /// a revoke or a non-hot reading, which makes the freshness end there).
+    fresh_until: f64,
+    /// When the current unbroken run of fresh hot readings began.
+    since: Option<f64>,
+    /// Sustained long enough: the cue runs until `HEAT_CLEAR` of no hot reading.
+    cue: Option<BatteryCue>,
 }
 
 impl Blink {
@@ -566,6 +600,9 @@ pub struct Anim {
     screen_concern_until: f64,
     unheard_until: f64,
     battery_cue: Option<BatteryCue>,
+    /// Sustained thermal pressure from `stem.budget`; its cue is a tired look
+    /// on the battery cue's schedule.
+    heat: Heat,
     preview_dream: bool,
     concept_preview: bool,
     preview_effects: [bool; emote::CHANNELS],
@@ -669,6 +706,7 @@ impl Anim {
             screen_concern_until: 0.0,
             unheard_until: 0.0,
             battery_cue: None,
+            heat: Heat::default(),
             preview_dream: false,
             concept_preview: false,
             preview_effects: [false; emote::CHANNELS],
@@ -847,7 +885,7 @@ impl Anim {
             || self.touch.is_some()
             || gaze_moving
             || self.head_v.abs() > 0.002
-            || (self.acting.is_audition() && self.acting.motion().kick != Kick::None && self.t - self.acted_at < 0.86)
+            || (self.acting.is_guarded() && self.acting.motion().kick != Kick::None && self.t - self.acted_at < 0.86)
             || (self.concept_preview && !self.dazed() && !self.muted && self.acting_intensity > 0.0
                 && (self.preview_effect_values(self.acting)[emote::SHIVER..=emote::SWAY].iter().any(|value| *value > 0.0)
                     || (self.acting.is_concept_only() && self.acting.visual().kick.pop > 0.0 && self.t - self.acted_at < 0.7)))
@@ -1038,12 +1076,64 @@ impl Anim {
         self.state_at = self.t;
     }
 
-    pub fn set_low_battery(&mut self, low: bool) {
+    /// `on_ac` is the charger reading (`None` when unknown). Leaving the low
+    /// state with the charger in is a relief; unplugging or an unknown
+    /// charger is not.
+    pub fn set_low_battery(&mut self, low: bool, on_ac: Option<bool>) {
         if low {
             self.battery_cue.get_or_insert(BatteryCue { next: self.t, until: self.t });
-        } else {
-            self.battery_cue = None;
+        } else if self.battery_cue.take().is_some() && on_ac == Some(true) {
+            self.express(CHARGER_RELIEF.0, CHARGER_RELIEF.1);
         }
+    }
+
+    /// A `stem.budget` readout. Only a hot or critical reading whose priority
+    /// is thermal counts as heat; a revoke (`active` false), another priority
+    /// or any cooler pressure counts as "not hot" and ends the reading's
+    /// freshness at once. The brainstem sends one budget at a time, so a
+    /// reading for another priority replaces a thermal one.
+    pub fn thermal_budget(&mut self, pressure: Option<&str>, priority: Option<&str>, active: bool, ttl_ms: f64) {
+        self.step_heat();
+        let hot = active && priority == Some("thermal") && matches!(pressure, Some("hot" | "critical"));
+        if hot {
+            if self.heat.since.is_none() || self.t >= self.heat.fresh_until + HEAT_REFRESH_SLACK {
+                self.heat.since = Some(self.t);
+            }
+            let ttl = (ttl_ms / 1000.0).clamp(0.001, HEAT_TTL_CAP);
+            self.heat.fresh_until = self.t + if ttl.is_finite() { ttl } else { 0.001 };
+        } else {
+            // A revoke or a cooler reading ends the run at once, slack or not.
+            self.heat.fresh_until = self.heat.fresh_until.min(self.t);
+            self.heat.since = None;
+        }
+        self.step_heat();
+    }
+
+    /// Arm the heat cue after `HEAT_SUSTAIN` of unbroken freshness; drop it
+    /// after `HEAT_CLEAR` without a fresh hot reading. Freshness is judged on
+    /// this clock, so a reading whose ttl lapsed counts as not hot.
+    fn step_heat(&mut self) {
+        let fresh = self.t < self.heat.fresh_until;
+        if fresh {
+            if self.heat.cue.is_none() && self.heat.since.is_some_and(|since| self.t - since >= HEAT_SUSTAIN) {
+                self.heat.cue = Some(BatteryCue { next: self.t, until: self.t });
+            }
+        } else {
+            if self.t >= self.heat.fresh_until + HEAT_REFRESH_SLACK {
+                self.heat.since = None;
+            }
+            if self.heat.cue.is_some() && self.t - self.heat.fresh_until >= HEAT_CLEAR {
+                self.heat.cue = None;
+            }
+        }
+    }
+
+    /// The tired look of a low battery or sustained heat is showing. A low
+    /// battery takes precedence: while it is flagged the heat cue stays
+    /// silent, so the two never double up or restart each other's timing.
+    fn tired_cue_showing(&self) -> bool {
+        let showing = |cue: &Option<BatteryCue>| cue.as_ref().is_some_and(|cue| self.t < cue.until);
+        if self.battery_cue.is_some() { showing(&self.battery_cue) } else { showing(&self.heat.cue) }
     }
 
     pub fn end_reply(&mut self) {
@@ -1125,6 +1215,9 @@ impl Anim {
             self.blink_repeat = false;
             self.double_blink = false;
             if let Some(cue) = &mut self.battery_cue {
+                cue.until = self.t;
+            }
+            if let Some(cue) = &mut self.heat.cue {
                 cue.until = self.t;
             }
             self.touch = None;
@@ -1303,7 +1396,7 @@ impl Anim {
         let expression = self.target_expression();
         let speaking = self.state == "speaking" && !self.speech_ended;
         if !self.layers_visible()
-            || (!preview && (self.battery_cue.is_some() || self.state == "drowsy"
+            || (!preview && (self.battery_cue.is_some() || self.heat.cue.is_some() || self.state == "drowsy"
                 || (!decor::allowed(expression) && !speaking)))
         {
             return None;
@@ -1352,6 +1445,7 @@ impl Anim {
         } else if self.state == "idle" && self.target_expression() == ExprId::Tired
             && self.battery_cue.as_ref().is_some_and(|cue| self.t < cue.until)
         {
+            // Only the battery has a glyph; heat shows the tired eyes alone.
             effects[emote::BATTERY] = 0.8;
         } else {
             return None;
@@ -1374,7 +1468,12 @@ impl Anim {
         }
     }
 
+    /// Called after `missed()` for an unclear hearing: the squint becomes
+    /// confusion (same suppression: nothing while muted, dazed, asleep or dark).
     pub fn unclear_hearing(&mut self) {
+        if !self.muted && !self.dazed() {
+            self.express(UNCLEAR_HEARING.0, UNCLEAR_HEARING.1);
+        }
         if self.layers_visible() && matches!(self.state.as_str(), "attending" | "listening") {
             self.unheard_until = self.t + MISSED_HOLD;
         }
@@ -1413,7 +1512,7 @@ impl Anim {
         if self.follows_focus() && self.t < self.screen_concern_until {
             return ExprId::Concern;
         }
-        if self.state == "idle" && self.battery_cue.as_ref().is_some_and(|cue| self.t < cue.until) {
+        if self.state == "idle" && self.tired_cue_showing() {
             return ExprId::Tired;
         }
         match self.state.as_str() {
@@ -1517,6 +1616,7 @@ impl Anim {
         }
         self.t = now;
         receive(self);
+        self.step_heat();
 
         // Notice a new expression arriving, so its entrance can be acted.
         let arriving = self.target_expression();
@@ -1600,6 +1700,11 @@ impl Anim {
                 if self.t >= cue.next {
                     cue.until = self.t + 6.0;
                     cue.next = self.t + 45.0;
+                }
+            } else if let Some(cue) = &mut self.heat.cue {
+                if self.t >= cue.next {
+                    cue.until = self.t + HEAT_CUE_ON;
+                    cue.next = self.t + HEAT_CUE_EVERY;
                 }
             }
         }
@@ -1759,7 +1864,7 @@ impl Anim {
                 self.start_gesture(Gesture::Yawn);
             } else if self.t >= self.gesture_next {
                 self.gesture_next = self.t + f64::from(self.rng.range(20.0, 38.0));
-                if self.heaviness < 0.2 && self.battery_cue.as_ref().is_none_or(|cue| self.t >= cue.until) {
+                if self.heaviness < 0.2 && !self.tired_cue_showing() {
                     self.start_gesture(Gesture::Content);
                 }
             }
@@ -2200,7 +2305,7 @@ mod tests {
         a.set_lid(Some(false), false, true);
         a.set_state("speaking", false, false);
         a.express("joy", 3.0);
-        a.frame(0.1, |a| a.set_low_battery(true));
+        a.frame(0.1, |a| a.set_low_battery(true, None));
         assert_eq!(a.target_name(), "joy");
         a.frame(0.1, |a| a.set_state("idle", false, false));
         assert_eq!(a.target_name(), "tired");
@@ -2210,7 +2315,7 @@ mod tests {
         a.frame(0.1, |a| a.set_state("idle", true, true));
         assert_eq!(a.target_name(), "dazed");
         a.frame(0.1, |a| {
-            a.set_low_battery(false);
+            a.set_low_battery(false, None);
             a.set_state("idle", false, false);
         });
         assert_eq!(a.target_name(), "neutral");
@@ -2221,13 +2326,13 @@ mod tests {
         let mut a = Anim::new(7);
         a.set_lid(Some(false), false, true);
         a.set_state("idle", false, false);
-        a.frame(0.0, |a| a.set_low_battery(true));
+        a.frame(0.0, |a| a.set_low_battery(true, None));
         assert_eq!(a.target_name(), "tired");
-        a.frame(5.0, |a| a.set_low_battery(true));
+        a.frame(5.0, |a| a.set_low_battery(true, None));
         assert_eq!(a.target_name(), "tired");
-        a.frame(1.1, |a| a.set_low_battery(true));
+        a.frame(1.1, |a| a.set_low_battery(true, None));
         assert_eq!(a.target_name(), "neutral");
-        a.frame(39.0, |a| a.set_low_battery(true));
+        a.frame(39.0, |a| a.set_low_battery(true, None));
         assert_eq!(a.target_name(), "tired");
         a.frame(0.1, |a| {
             a.set_lid(Some(true), false, false);
@@ -2235,6 +2340,231 @@ mod tests {
         });
         let blank = a.frame(0.0, |_| {});
         assert_eq!((blank.l.glow, blank.r.glow), (0.0, 0.0));
+    }
+
+    #[test]
+    fn leaving_low_battery_on_the_charger_is_a_relief_and_nothing_else_is() {
+        let mut a = awake(3);
+        a.frame(0.1, |a| a.set_low_battery(true, Some(false)));
+        a.frame(0.1, |a| a.set_low_battery(false, Some(true)));
+        assert_eq!(a.target_name(), "relieved");
+        run(&mut a, CHARGER_RELIEF.1 as f32 + 0.5);
+        assert_ne!(a.target_name(), "relieved");
+
+        let mut a = awake(3);
+        a.frame(0.1, |a| a.set_low_battery(false, Some(true)));
+        assert_ne!(a.target_name(), "relieved", "never low, nothing to relieve");
+
+        let mut a = awake(3);
+        a.frame(0.1, |a| a.set_low_battery(true, Some(false)));
+        a.frame(0.1, |a| a.set_low_battery(false, Some(false)));
+        assert_ne!(a.target_name(), "relieved", "the charger is not in");
+        let mut a = awake(3);
+        a.frame(0.1, |a| a.set_low_battery(true, Some(false)));
+        a.frame(0.1, |a| a.set_low_battery(false, None));
+        assert_ne!(a.target_name(), "relieved", "an unknown charger proves nothing");
+
+        let mut a = awake(3);
+        a.frame(0.1, |a| a.set_low_battery(true, None));
+        a.set_state("asleep", false, false);
+        a.frame(0.1, |a| a.set_low_battery(false, Some(true)));
+        assert_eq!(a.target_name(), "asleep");
+        // Muted and unwell outrank the relief, as they do every expression.
+        let mut a = awake(3);
+        a.frame(0.1, |a| a.set_low_battery(true, None));
+        a.set_state("idle", true, false);
+        a.frame(0.1, |a| a.set_low_battery(false, Some(true)));
+        assert_eq!(a.target_name(), "muted");
+        let mut a = awake(3);
+        a.frame(0.1, |a| a.set_low_battery(true, None));
+        a.set_state("idle", false, true);
+        a.frame(0.1, |a| a.set_low_battery(false, Some(true)));
+        assert_eq!(a.target_name(), "dazed");
+    }
+
+    fn hot(a: &mut Anim) {
+        a.thermal_budget(Some("hot"), Some("thermal"), true, 12_000.0);
+    }
+
+    /// Step half-second frames, feeding `feed` each frame, and list the times
+    /// at which the face looked tired.
+    fn tired_times(a: &mut Anim, secs: f64, mut feed: impl FnMut(&mut Anim)) -> Vec<f64> {
+        let mut seen = Vec::new();
+        for _ in 0..(secs * 2.0) as usize {
+            a.frame(0.5, |a| feed(a));
+            if a.target_name() == "tired" {
+                seen.push(a.t);
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn heat_shows_tired_only_after_thirty_seconds_of_fresh_hot_readings() {
+        let mut a = awake(5);
+        let start = a.t;
+        let mut n = 0;
+        let seen = tired_times(&mut a, 40.0, |a| {
+            n += 1;
+            if n % 4 == 0 {
+                hot(a);
+            }
+        });
+        assert!(!seen.is_empty());
+        let first = seen[0] - start;
+        assert!((29.0..=32.0).contains(&first), "first at {first}");
+        // Six seconds on, then off until the 45 s repeat.
+        assert!(seen.last().unwrap() - seen[0] <= HEAT_CUE_ON + 0.6, "{seen:?}");
+        let again = tired_times(&mut a, 50.0, |a| hot(a));
+        assert!(again.first().is_some_and(|t| (t - seen[0] - HEAT_CUE_EVERY).abs() < 1.5), "{again:?}");
+    }
+
+    #[test]
+    fn a_late_republish_keeps_the_run_but_a_long_gap_restarts_it() {
+        // Bodycare's real cadence is about 10 s against a 12 s ttl, and load
+        // makes it late: readings 14 s apart (2 s past the ttl) keep the run.
+        let mut a = awake(5);
+        let mut n = 0;
+        let seen = tired_times(&mut a, 48.0, |a| {
+            n += 1;
+            if n % 28 == 1 {
+                hot(a);
+            }
+        });
+        assert!(!seen.is_empty(), "late readings must still arm the cue");
+        // Readings 20 s apart (8 s past the ttl) never make 30 s in a row.
+        let mut b = awake(5);
+        let mut m = 0;
+        let seen = tired_times(&mut b, 120.0, |b| {
+            m += 1;
+            if m % 40 == 1 {
+                hot(b);
+            }
+        });
+        assert!(seen.is_empty(), "{seen:?}");
+    }
+
+    #[test]
+    fn a_revoke_inside_the_slack_still_breaks_the_run() {
+        let mut a = awake(5);
+        assert!(tired_times(&mut a, 20.0, |a| hot(a)).is_empty());
+        // A revoke right after a lapse is a break, and 20 s more is not 30.
+        a.frame(0.0, |a| a.thermal_budget(None, None, false, 0.0));
+        assert!(tired_times(&mut a, 20.0, |a| hot(a)).is_empty());
+    }
+
+    #[test]
+    fn critical_pressure_counts_as_heat() {
+        let mut a = awake(5);
+        let seen = tired_times(&mut a, 35.0, |a| a.thermal_budget(Some("critical"), Some("thermal"), true, 5000.0));
+        assert!(!seen.is_empty());
+    }
+
+    #[test]
+    fn one_hot_readout_that_lapses_before_thirty_seconds_never_starts_the_cue() {
+        let mut a = awake(5);
+        a.frame(0.0, |a| a.thermal_budget(Some("hot"), Some("thermal"), true, 12_000.0));
+        // The ttl is 12 s and nothing refreshes it: no cue, even much later.
+        let seen = tired_times(&mut a, 120.0, |_| {});
+        assert!(seen.is_empty(), "{seen:?}");
+        assert!(a.heat.cue.is_none());
+        // A ttl over the cap is held to 12 s as well.
+        a.frame(0.0, |a| a.thermal_budget(Some("hot"), Some("thermal"), true, 600_000.0));
+        assert!(tired_times(&mut a, 60.0, |_| {}).is_empty());
+    }
+
+    #[test]
+    fn a_gap_in_fresh_readings_restarts_the_sustain_clock() {
+        let mut a = awake(5);
+        // 20 s hot, a cooler reading, then 20 s hot: never 30 s in a row.
+        assert!(tired_times(&mut a, 20.0, |a| hot(a)).is_empty());
+        a.frame(0.0, |a| a.thermal_budget(Some("warm"), Some("thermal"), true, 12_000.0));
+        assert!(tired_times(&mut a, 20.0, |a| hot(a)).is_empty());
+        // Ten more seconds finish a run of 30 from the cooler reading.
+        assert!(!tired_times(&mut a, 12.0, |a| hot(a)).is_empty());
+    }
+
+    #[test]
+    fn another_priority_is_not_heat() {
+        let mut a = awake(5);
+        for priority in ["power_source", "lid", "cognitive", "power_unknown"] {
+            let seen = tired_times(&mut a, 40.0, |a| a.thermal_budget(Some("hot"), Some(priority), true, 12_000.0));
+            assert!(seen.is_empty(), "{priority}");
+        }
+        assert!(tired_times(&mut a, 40.0, |a| a.thermal_budget(Some("hot"), None, true, 12_000.0)).is_empty());
+    }
+
+    #[test]
+    fn a_revoke_in_the_middle_of_a_running_cue_clears_it_on_the_sixty_second_rule() {
+        let mut a = awake(5);
+        assert!(!tired_times(&mut a, 32.0, |a| hot(a)).is_empty());
+        assert!(a.heat.cue.is_some());
+        // State epoch change: the brainstem revokes the budget.
+        a.frame(0.0, |a| a.thermal_budget(None, None, false, 0.0));
+        // The cue is not cut short: its next repeat still comes inside 60 s.
+        let during = tired_times(&mut a, 55.0, |_| {});
+        assert!(!during.is_empty(), "the armed cue keeps its schedule");
+        // Past 60 s without a hot reading it is gone and stays gone.
+        let after = tired_times(&mut a, 10.0, |_| {});
+        assert!(a.heat.cue.is_none());
+        assert!(tired_times(&mut a, 120.0, |_| {}).is_empty());
+        assert!(after.iter().all(|t| *t < a.t));
+    }
+
+    #[test]
+    fn a_hot_reading_during_the_clearing_minute_keeps_the_cue_running() {
+        let mut a = awake(5);
+        tired_times(&mut a, 32.0, |a| hot(a));
+        a.frame(0.0, |a| a.thermal_budget(Some("nominal"), Some("thermal"), true, 12_000.0));
+        tired_times(&mut a, 40.0, |_| {});
+        assert!(a.heat.cue.is_some());
+        hot(&mut a);
+        tired_times(&mut a, 40.0, |_| {});
+        assert!(a.heat.cue.is_some(), "the minute starts again once hot readings stop");
+    }
+
+    #[test]
+    fn the_heat_cue_waits_for_idle_and_never_doubles_the_battery_cue() {
+        let mut a = awake(5);
+        a.set_state("thinking", false, false);
+        assert!(tired_times(&mut a, 40.0, |a| hot(a)).is_empty());
+        assert!(a.heat.cue.is_some(), "armed, but the face is busy");
+        a.frame(0.1, |a| a.set_state("idle", false, false));
+        assert!(!tired_times(&mut a, 3.0, |a| hot(a)).is_empty());
+        // A low battery takes the schedule: heat stays silent while it is flagged.
+        let mut a = awake(5);
+        tired_times(&mut a, 32.0, |a| hot(a));
+        a.frame(0.0, |a| a.set_low_battery(true, Some(false)));
+        a.frame(7.0, |a| hot(a));
+        let battery_until = a.battery_cue.as_ref().unwrap().until;
+        let heat_until = a.heat.cue.as_ref().unwrap().until;
+        assert!(battery_until > heat_until || a.t >= heat_until);
+        // No readings at all keep the factory face untouched.
+        let mut a = awake(5);
+        assert!(tired_times(&mut a, 120.0, |_| {}).is_empty());
+        assert!(a.heat.cue.is_none());
+    }
+
+    #[test]
+    fn an_unclear_hearing_looks_confused_and_a_silent_one_stays_sceptical() {
+        let mut a = awake(1);
+        a.set_state("attending", false, false);
+        a.missed();
+        a.unclear_hearing();
+        assert_eq!(a.target_name(), "confused");
+        run(&mut a, (UNCLEAR_HEARING.1 + 0.1) as f32);
+        assert_eq!(a.target_name(), "attentive");
+        a.missed();
+        assert_eq!(a.target_name(), "skepticism");
+        run(&mut a, (MISSED_HOLD + 0.1) as f32);
+        a.set_state("idle", true, false);
+        a.missed();
+        a.unclear_hearing();
+        assert_eq!(a.target_name(), "muted");
+        a.set_state("asleep", false, false);
+        a.missed();
+        a.unclear_hearing();
+        assert_eq!(a.target_name(), "asleep");
     }
 
     #[test]
@@ -2714,7 +3044,8 @@ mod tests {
         let mut a = awake(3);
         a.gaze_next = a.t + 20.0;
         a.blink_next = a.t + 10.0;
-        a.express("embarrassed", 3.0);
+        a.express("starstruck", 3.0);
+        a.express("dreaming", 3.0);
         assert_eq!(a.target_name(), "neutral");
         a.audition(ExprId::Embarrassed, 0.5, 3.0);
         run(&mut a, 0.8);
@@ -2734,6 +3065,99 @@ mod tests {
         assert_eq!(a.target_name(), "neutral");
         assert_eq!(a.spring.target, ExprId::Neutral.pose().to_array());
         assert!((a.breath_scale - 1.0).abs() < 0.03);
+    }
+
+    const TUNED: [ExprId; 11] = [ExprId::Sad, ExprId::Laugh, ExprId::Love, ExprId::Embarrassed, ExprId::Scared,
+        ExprId::Annoyed, ExprId::Smug, ExprId::Confused, ExprId::Wink, ExprId::Bored, ExprId::Relieved];
+
+    #[test]
+    fn express_accepts_the_tuned_names_and_still_refuses_concepts_and_dreaming() {
+        for id in TUNED {
+            let mut a = awake(5);
+            a.gaze_next = a.t + 20.0;
+            a.blink_next = a.t + 10.0;
+            a.express(id.name(), 1.5);
+            run(&mut a, 0.6);
+            assert_eq!(a.target_name(), id.name());
+            run(&mut a, 2.5);
+            assert_ne!(a.target_name(), id.name(), "{} outlives its hold", id.name());
+        }
+        for refused in ["starstruck", "dreaming", "no-such-name"] {
+            let mut a = awake(5);
+            a.express(refused, 1.5);
+            run(&mut a, 0.6);
+            assert_eq!(a.target_name(), "neutral", "{refused}");
+        }
+    }
+
+    #[test]
+    fn tuned_poses_keep_the_audition_clamp() {
+        for id in TUNED {
+            let name = id.name();
+            let mut a = awake(5);
+            a.gaze_next = a.t + 20.0;
+            a.blink_next = a.t + 10.0;
+            a.express(name, 3.0);
+            run(&mut a, 2.0);
+            assert!(a.spring.settled, "{name} still moving");
+            assert!(a.spring.guarded, "{name} is not guarded");
+            // An extreme pose, as a wide gaze or roll could drive through the spring.
+            let mut p = Pose::from_array(&a.spring.x);
+            for e in [&mut p.l, &mut p.r] {
+                e.w = 3.0;
+                e.h = 2.0;
+                e.round = 0.5;
+                e.glow = 5.0;
+                e.x = 1.4_f32.copysign(e.x);
+                e.y = 0.8;
+            }
+            a.spring.x = p.to_array();
+            let shown = a.frame(0.0, |_| {});
+            for e in [shown.l, shown.r] {
+                assert!(e.w <= 1.45 && e.h <= 0.85 && e.round >= 2.0 && e.glow <= 1.3, "{name}: {e:?}");
+                assert!(e.x.abs() + e.w < 1.5 && e.y.abs() + e.h < 0.9, "{name}: {e:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn tuned_kicks_keep_the_face_active_for_the_kick_window() {
+        let kicking: Vec<_> = TUNED.into_iter().filter(|id| id.motion().kick != Kick::None).collect();
+        assert_eq!(kicking.len(), 3);
+        for id in kicking {
+            let name = id.name();
+            let mut a = awake(5);
+            a.gaze_next = a.t + 20.0;
+            a.blink_next = a.t + 10.0;
+            a.express(name, 3.0);
+            run(&mut a, 2.0);
+            assert_eq!(a.target_name(), name);
+            assert!(a.spring.settled, "{name} still moving");
+            // Nothing else is busy, so only the kick window can keep the face at full rate.
+            a.acted_at = a.t - 0.5;
+            assert_eq!(a.activity(), Activity::Active, "{name} inside the kick window");
+            a.acted_at = a.t - 0.9;
+            assert_ne!(a.activity(), Activity::Active, "{name} after the kick window");
+        }
+    }
+
+    #[test]
+    fn tuned_poses_stay_safe_through_transitions() {
+        for id in TUNED {
+            let mut a = awake(21);
+            a.audition(id, 1.0, 0.9);
+            for i in 0..120 {
+                let p = a.frame(if i % 3 == 0 { 0.2 } else { 1.0 / 60.0 }, |a| {
+                    if i == 5 {
+                        a.glance(1.0, 1.0, 0.3);
+                    }
+                });
+                for e in [p.l, p.r] {
+                    assert!(e.w > 0.0 && e.h > 0.0 && e.round >= 2.0, "{id:?}: {e:?}");
+                    assert!(e.x.abs() + e.w < 1.5 && e.y.abs() + e.h < 0.9, "{id:?}: {e:?}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -3028,12 +3452,14 @@ mod tests {
         assert_eq!(a.target_name(), "listening");
         a.unclear_hearing();
         assert!(a.unheard_until > a.t);
+        assert_eq!(a.target_name(), "confused");
         a.set_state("thinking", false, false);
         assert!(matches!(a.gesture, Some((Gesture::Acknowledge, _, _))));
         let heard = a.gesture;
         a.set_state("thinking", false, false);
         assert_eq!(a.gesture, heard);
 
+        run(&mut a, 1.5);
         a.set_state("idle", false, false);
         a.screen_outcome(false);
         assert_eq!(a.target_name(), "concern");

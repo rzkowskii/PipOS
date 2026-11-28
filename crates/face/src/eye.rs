@@ -231,6 +231,7 @@ struct Expression {
     lively: bool,
     damping: f32,
     audition: bool,
+    tuned: bool,
     concept_only: bool,
     motion: Motion,
     visual: Visual,
@@ -266,6 +267,16 @@ impl ExprId {
 
     pub fn is_audition(self) -> bool {
         EXPRESSIONS[self as usize].audition
+    }
+
+    /// A tuned pose the model may express: public, but still held to the audition safety limits.
+    pub fn is_tuned(self) -> bool {
+        EXPRESSIONS[self as usize].tuned
+    }
+
+    /// Poses with large paths between lids, gaze and roll: clamped on screen and drawn at full rate while a kick plays.
+    pub fn is_guarded(self) -> bool {
+        self.is_audition() || self.is_tuned()
     }
 
     pub fn is_concept_only(self) -> bool {
@@ -368,11 +379,17 @@ fn rest() -> Eye {
 mod tests {
     use super::*;
 
+    /// The tuned poses promoted to model-expressible names, in catalogue order.
+    const TUNED: [&str; 11] = ["sad", "laugh", "love", "embarrassed", "scared", "annoyed", "smug",
+                               "confused", "wink", "bored", "relieved"];
+
     #[test]
     fn the_existing_expressions_keep_every_channel_and_their_public_order() {
         let public = ["neutral", "attentive", "listening", "thinking", "speaking", "joy", "curiosity",
                       "surprise", "skepticism", "concern", "sleepy", "asleep", "dreaming", "tired", "muted", "dazed"];
-        assert!(ExprId::PUBLIC.iter().map(|id| id.name()).eq(public));
+        // The legacy block comes first and unchanged; the promoted names follow it.
+        assert!(ExprId::PUBLIC[..public.len()].iter().map(|id| id.name()).eq(public));
+        assert!(ExprId::PUBLIC[public.len()..].iter().map(|id| id.name()).eq(TUNED));
         let legacy: Vec<_> = public.into_iter().chain(["loading"]).collect();
         assert!(ExprId::ALL.iter().take(legacy.len()).map(|id| id.name()).eq(legacy.iter().copied()));
         for name in legacy {
@@ -390,7 +407,8 @@ mod tests {
         // These were hard-coded before the table: a data edit must not quietly
         // change idle and conversation behaviour.
         let lively = ["attentive", "listening", "thinking", "joy", "curiosity", "surprise", "skepticism", "concern"];
-        for &id in &ExprId::ALL[..ExprId::PUBLIC.len() + 1] {
+        // The legacy block: the sixteen public names and then "loading".
+        for &id in &ExprId::ALL[..17] {
             let name = id.name();
             let damping = match name {
                 "joy" | "surprise" => 0.64,
@@ -406,17 +424,23 @@ mod tests {
     }
 
     #[test]
-    fn the_audition_catalogue_keeps_its_tuned_poses_before_the_concept_poses() {
-        let names = ["sad", "laugh", "love", "embarrassed", "scared", "annoyed", "smug",
-                     "confused", "wink", "bored", "relieved"];
-        let (tuned, concepts) = ExprId::AUDITIONS.split_at(names.len());
-        assert!(tuned.iter().map(|id| id.name()).eq(names));
-        assert!(tuned.iter().all(|id| !id.is_concept_only()));
-        assert!(concepts.iter().all(|id| id.is_concept_only()));
-        assert_eq!(concepts.len(), 63);
+    fn the_tuned_poses_are_public_and_guarded_and_only_the_concepts_remain_auditions() {
+        assert_eq!(ExprId::PUBLIC.len(), 16 + TUNED.len());
+        for name in TUNED {
+            let id = ExprId::from_name(name).unwrap();
+            assert!(ExprId::PUBLIC.contains(&id) && !ExprId::AUDITIONS.contains(&id), "{name}");
+            assert!(id.is_tuned() && !id.is_audition() && id.is_guarded() && !id.is_concept_only(), "{name}");
+        }
+        assert_eq!(ExprId::AUDITIONS.len(), 63);
         for &id in ExprId::AUDITIONS {
-            assert!(id.is_audition() && !ExprId::PUBLIC.contains(&id));
+            assert!(id.is_audition() && id.is_guarded() && !id.is_tuned() && id.is_concept_only());
+            assert!(!ExprId::PUBLIC.contains(&id));
             assert_eq!(ExprId::from_name(id.name()), Some(id));
+        }
+        for &id in &ExprId::ALL[..17] {
+            assert!(!id.is_guarded(), "{}", id.name());
+        }
+        for &id in ExprId::PUBLIC.iter().chain(ExprId::AUDITIONS) {
             let pose = id.pose();
             assert_eq!(Pose::from_array(&pose.to_array()), pose);
             assert_eq!(pose.l.mirror().mirror(), pose.l);

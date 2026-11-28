@@ -195,10 +195,38 @@ Two overlays ride on top: `muted` and `unwell`.
 ## Expressions
 
 `neutral`, `attentive`, `listening`, `thinking`, `speaking`, `joy`, `curiosity`,
-`surprise`, `skepticism`, `concern`, `sleepy`, `asleep`, `tired`, `muted`, `dazed`.
+`surprise`, `skepticism`, `concern`, `sleepy`, `asleep`, `tired`, `muted`, `dazed`,
+and the eleven tuned expressions `sad`, `laugh`, `love`, `embarrassed`, `scared`,
+`annoyed`, `smug`, `confused`, `wink`, `bored`, `relieved`. `face.express` accepts
+exactly these names; any other name is ignored. (`dreaming` is a demo-only pose
+and `loading` is the face's own state before the brainstem first answers; neither
+can be requested.) The model still chooses only from its seven tags
+(`neutral`, `joy`, `curiosity`, `surprise`, `skepticism`, `concern`, `sleepy`);
+the other names are sent only by the brainstem and the mind, and only when the
+state behind them is true. Nothing shows while muted, dazed, asleep or dark.
 
-A missed hearing (`hear.missed`) shows `skepticism` for about a second, a
-"pardon?" squint. Nothing shows while muted, dazed, asleep or dark.
+What shows, and when:
+
+| State | Expression | For | Who |
+|---|---|---|---|
+| `hear.missed`, `reason: no_speech` | `skepticism` | about 1.1 s | face |
+| `hear.missed`, `reason: unclear` | `confused` | about 1.1 s | face |
+| `term.status` `phase: failed` with a non-zero `exit` | `sad` | 1.5 s | brainstem |
+| `term.status` `phase: done` with `exit: 0` (not `reason: exit_unknown`) | `relieved` | 1.5 s | brainstem |
+| The charger goes in after a low-battery cue was showing | `relieved` | 2 s | face |
+| Bodycare reports `hot` or `critical` pressure for a thermal reason for 30 s | `tired` cue, 6 s every 45 s while idle | until 60 s without such a reading | face |
+
+The brainstem reacts to a job result only when the lid is open, the owner is
+not a guest, and it is Idle or Attending, and it reacts once per job id and
+phase. A status without a job id never reacts. The heat cue follows
+`stem.budget` (the face subscribes to it; no new message): a reading counts
+while its `ttl_ms` (at most 12 s) has not lapsed, and a reading up to 3 s late
+still continues a run, because Bodycare republishes about every 10 s. A
+revoke, a cooler pressure or another `priority` ends the run at once. A
+low-battery cue takes precedence over the heat cue. It appears only where
+Bodycare runs, so a lab image without Bodycare never shows it. This is not a
+fault. The face keeps no temperature of its own, so the threshold is
+Bodycare's own `hot_package_c` and moves with it.
 
 The face plays the waking gesture on a confirmed lid opening. The low-battery
 cue uses the `tired` pose during visible idle and clears when the body stops
