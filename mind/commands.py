@@ -451,6 +451,7 @@ def snooze_minutes(arg):
     return minutes if 1 <= minutes <= 120 else None
 
 
+_RING_STOP = re.compile(r"(?:(?:can|could|would) you )?stop (?:my|the|that) (?:alarm|timer|reminder)", re.I)
 _RING_ACK = re.compile(
     r"(?:(?:oh )?(?:ok(?:ay)?|alright|all right|right|thanks|thank you|cheers|got it|stop(?: it)?|enough|i heard(?: you)?"
     r"|i know|yes|yep|yeah|done|dismiss|that(?:'s| is) fine|fine|i(?:'m| am) (?:up|awake|on it|coming))"
@@ -467,6 +468,10 @@ def ring_reply(text, name=""):
     said = _without_address(text, name).replace("’", "'")
     if name:
         said = re.sub(rf"[, ]+{re.escape(name)}$", "", said, flags=re.I)
+    if _RING_STOP.fullmatch(said):
+        # "Stop the timer" acknowledges a ringing one; only outside a ring
+        # does it cancel (reminder_language._STOP_TIMER).
+        return Command("ack")
     command = parse(said)
     if command is not None and command.kind in ("ack", "snooze"):
         return command

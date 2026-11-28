@@ -38,8 +38,13 @@ _CANCEL = re.compile(
     r"(reminders?|timers?|alarms?)(?: (.+))?", re.I
 )
 _TIMER = re.compile(
-    _POLITE + r"(?:start|set)(?: a| an)? (?:timer(?: for(?: (.+))?)?|(.+) timer)", re.I,
+    _POLITE + r"(?:(?:start|set)(?: a| an)? (?:timer(?: for(?: (.+))?)?|(.+) timer)"
+    # "Timer for two minutes": the duration says it is one (route sweep, 28 Nov).
+    r"|(?:a )?timer for (?P<bare>.+))", re.I,
 )
+# "Stop the timer" with nothing ringing: it means cancel it. While it rings,
+# commands.ring_reply takes it as an acknowledgement first.
+_STOP_TIMER = re.compile(_POLITE + r"stop (?:my|the) timer", re.I)
 _COMMAND_START = re.compile(
     _POLITE + r"(?:remind\b"
     r"|(?:set|start|create)(?: me)?(?: a| an)?(?: (?:reminder|timer)\b|$)"
@@ -519,10 +524,14 @@ def parse_reminder(said, *, now=None):
             return ReminderRequest("cancel", task="Alarm" if noun == "alarm" else "", item_kind=item_kind)
         prompt = "Say its number or the exact task." if item_kind == "reminder" else "Say its number."
         return ReminderRequest("clarify", message=f"Which {item_kind}? {prompt}")
+    if _STOP_TIMER.fullmatch(said):
+        return ReminderRequest("cancel", task="Timer", item_kind="timer")
     if match := _TIMER.fullmatch(said):
-        duration = match[1] or match[2] or ""
+        duration = match[1] or match[2] or match["bare"] or ""
         seconds = _duration_seconds(duration.casefold())
         if not seconds:
+            if match["bare"]:
+                return None     # "the timer for the oven": not a duration, not a request
             return ReminderRequest("clarify", message=_ASK_TIMER)
         try:
             stamp = _relative_timestamp(now or datetime.now(), seconds)
