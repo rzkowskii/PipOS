@@ -34,6 +34,12 @@ class Reading(unittest.TestCase):
             ("it's the 28th of November 2026, quarter to twelve in the morning", (28, 11, 2026, (11, 45))),
             ("it's the 28th of November 2026, quarter past twelve at night", (28, 11, 2026, (0, 15))),
             ("it's the 28th of November 2026, quarter to one at night", (28, 11, 2026, (0, 45))),
+            ("it's the 28th of November 2026, quarter to six at night", (28, 11, 2026, (17, 45))),
+            ("it's the 28th of November 2026, half past five tonight", (28, 11, 2026, (17, 30))),
+            ("it's the 28th of November 2026, five at night", (28, 11, 2026, (17, 0))),
+            ("it's the 28th of November 2026, eleven at night", (28, 11, 2026, (23, 0))),
+            ("it's the 28th of November 2026, two at night", (28, 11, 2026, (2, 0))),
+            ("it's the 28th of November 2026, twelve at night", (28, 11, 2026, (0, 0))),
             ("it's the 28th of November 2026, half past twelve in the afternoon", (28, 11, 2026, (12, 30))),
             ("it's the 5th of May 2027, 3 pm", (5, 5, 2027, (15, 0))),
             ("set the time to 3:45 pm on the 28th of November 2026", (28, 11, 2026, (15, 45))),
@@ -298,6 +304,24 @@ class ReviewFixes(unittest.IsolatedAsyncioTestCase):
         heard = datetime(2026, 11, 28, 15, 40, tzinfo=SYDNEY).timestamp()
         self.assertEqual(setter.call_args.args[1], heard + 30)
 
+    async def test_the_correction_window_closes_after_ten_minutes(self):
+        floor = int(datetime(2026, 11, 23, 12, 0, tzinfo=SYDNEY).timestamp())
+        clock = [1000.0]
+        with patch.object(clock_set, "_clock", side_effect=lambda: clock[0]), \
+                patch.object(clock_epoch, "floor", return_value=floor), \
+                patch.object(clock_set, "appliance", return_value=True), \
+                patch.object(clock_set, "is_try_boot", return_value=False), \
+                patch.object(clock_set.care, "set_clock", return_value=True):
+            first = await clock_set.handle("it's the 29th of November 2026, 3 pm", self.ctx)
+            await first.confirm.on_yes()
+            self.ctx.clock_trusted = True
+            clock[0] += 300
+            self.assertIsNotNone(await clock_set.handle("it's the 28th of November 2026, 3 pm", self.ctx),
+                                 "within ten minutes a correction is still heard")
+            clock[0] += 400  # now more than ten minutes after the set
+            self.assertIsNone(await clock_set.handle("it's the 28th of November 2026, 3 pm", self.ctx),
+                              "later, a trusted clock is left alone")
+
     async def test_a_date_with_no_year_asks_for_it(self):
         reply = await clock_set.handle("it's the 28th of November, twenty to four in the afternoon", self.ctx)
         self.assertIsNone(reply.confirm)
@@ -305,7 +329,8 @@ class ReviewFixes(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_phrases_the_time_command_leaves_alone_reach_the_skill(self):
         for text in ("set the time to 3:45 pm on the 28th of November 2026",
-                     "the time is 3:45 pm on 28 November 2026"):
+                     "the time is 3:45 pm on 28 November 2026",
+                     "set the time to 2026-11-28 15:40"):
             self.assertTrue(clock_set.may_match(text), text)
             reply = await clock_set.handle(text, self.ctx)
             self.assertIsNotNone(reply.confirm, text)
@@ -323,7 +348,8 @@ class Wiring(unittest.TestCase):
         self.assertEqual(commands.parse("set the time to 3:45 pm", "Pip").kind, "set_time")
         for text in ("set the time to 3:45 pm on the 28th of November 2026",
                      "the time is 3:45 pm on 28 November 2026",
-                     "set the time to 3 pm on the 5th of May 2027"):
+                     "set the time to 3 pm on the 5th of May 2027",
+                     "set the time to 2026-11-28 15:40"):
             command = commands.parse(text, "Pip")
             self.assertTrue(command is None or command.kind != "set_time", text)
 

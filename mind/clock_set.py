@@ -36,6 +36,8 @@ from .try_mode import is_try_boot
 
 # How long a date said on its own waits for the time to follow.
 PENDING_SECONDS = 90.0
+# A wrong yes can be corrected by voice for this long, and no longer.
+CORRECTION_SECONDS = 600.0
 # The question stays open this long for the owner's yes.
 CONFIRM_SECONDS = 30.0
 # No date further ahead of what Pip remembers than this: a slip of a year (2036
@@ -230,7 +232,8 @@ def _find_time(text):
         if am:
             hour = clock12 % 12
         elif night:
-            hour = clock12 + 12 if 6 <= clock12 <= 11 else clock12 % 12
+            # Five to eleven at night are the evening hours; twelve and one to four, after midnight.
+            hour = clock12 + 12 if 5 <= clock12 <= 11 else clock12 % 12
         elif afternoon:
             if clock12 == 11:
                 raise ValueError("Eleven o'clock is not in the afternoon. Say it as morning, evening or night.")
@@ -347,14 +350,26 @@ def appliance():
     return Path("/etc/being").is_dir()
 
 
-_set_this_boot = {}  # state dir -> the clock floor from before this skill's own first set
+_set_this_boot = {}  # state dir -> (the clock floor from before this skill's own first set, when it was set)
+
+
+def _correcting(key):
+    """The floor from before this skill's own set, while a correction is still welcome."""
+    found = _set_this_boot.get(key)
+    if found is None:
+        return None
+    if _clock() - found[1] > CORRECTION_SECONDS:
+        del _set_this_boot[key]
+        return None
+    return found[0]
 
 
 async def handle(text, ctx):
     key = str(ctx.state_dir)
     # Only while the clock is in doubt, or to correct what this skill set in this boot: a
     # trusted clock is never moved by a sentence that happens to hold a date.
-    if getattr(ctx, "clock_trusted", True) and key not in _set_this_boot:
+    correcting = _correcting(key)
+    if getattr(ctx, "clock_trusted", True) and correcting is None:
         _pending.pop(key, None)
         return None
     heard = tidy_said(text, ctx)
@@ -381,7 +396,7 @@ async def handle(text, ctx):
         _pending[key] = (got.date, _clock() + PENDING_SECONDS)
         return Reply(ASK_FOR_TIME)
     try:
-        when = moment(got, now.tzinfo, now.date(), ctx.state_dir, floor=_set_this_boot.get(key))
+        when = moment(got, now.tzinfo, now.date(), ctx.state_dir, floor=correcting)
     except ValueError as reason:
         return Reply(f"[concern] {reason}")
     heard_at = _clock()
@@ -411,7 +426,8 @@ async def apply(ctx, when, *, waited=0.0):
         return Reply(f"[concern] I couldn't set my clock. {SETUP}")
     except (OSError, ValueError, sqlite3.Error):
         return Reply(f"[concern] I couldn't change my clock myself. {SETUP}")
-    _set_this_boot.setdefault(key, before)
+    # The earliest floor is kept for the correction, the window runs from the latest set.
+    _set_this_boot[key] = (_correcting(key) if _correcting(key) is not None else before, _clock())
     line = f"[joy] Thanks. It is {spoken_moment(when)}, and my clock says so now."
     if not write_rtc:
         line += " I will forget it when I restart."

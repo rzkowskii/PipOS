@@ -65,8 +65,8 @@ _PATTERNS = [
     ("remember", r"(?:please )?(?:can you |could you )?remember (?:that |this[:, ]+)?(?P<x>.+)"),
     ("remember", r"(?:please )?don'?t forget (?:that )?(?P<x>.+)"),
     # Not when a date comes with it: mind/clock_set.py takes date and time together.
-    ("set_time", rf"(?:set|change) (?:the|your) (?:time|clock) to (?P<x>(?!.*\b(?:{_MONTH_WORDS})\b).+)"),
-    ("set_time", rf"(?:actually[, ]+)?the time is (?:now |actually )?(?P<x>\d(?!.*\b(?:{_MONTH_WORDS})\b).*)"),
+    ("set_time", rf"(?:set|change) (?:the|your) (?:time|clock) to (?P<x>(?!.*\b(?:{_MONTH_WORDS})\b)(?!.*\d{{4}}-\d)\S.*)"),
+    ("set_time", rf"(?:actually[, ]+)?the time is (?:now |actually )?(?P<x>\d(?!.*\b(?:{_MONTH_WORDS})\b)(?!.*\d{{4}}-\d).*)"),
     ("world_time", r"(?:what(?:['’]s| is) the time|what time is it|what time(?:['’]s| is) it|tell me the time)"
                    r"(?: right now| now)? (?:in|over in) (?P<x>.+?)(?: right now| now| at the moment)?"),
     ("time_difference", r"what(?:['’]s| is) the time difference (?:to|with|from|for|in|between) (?P<x>.+)"),
