@@ -320,12 +320,22 @@ class TypeChat:
                 return False
         return True
 
-    async def say(self, text):
-        """Say one typed line to the being. True if it was passed on."""
+    async def say(self, text, *, expires=None):
+        """Say one typed line to the being. True if it was passed on.
+
+        `expires` is a time on the event loop's clock: a line still waiting its
+        turn after that is dropped, not sent late. `allow` is asked as soon as
+        the line has its turn and again before anything goes on the bus (a
+        wake, an interrupt, the words), so a line queued behind another never
+        acts after the owner has left written chat or a guest has arrived."""
         text = " ".join(text.split())[:MAX_LINE]
         if not text:
             return False
         async with self._lock:
+            if not self.allow():
+                return False
+            if expires is not None and asyncio.get_running_loop().time() > expires:
+                return False
             problem = self.blocked()
             if problem:
                 self.show(problem, "warning")
@@ -335,6 +345,8 @@ class TypeChat:
                     self.show(f'{self.name} is asleep. Type "wake up" to wake {self.name}.', "warning")
                     return False
                 # The same as saying its name to a sleeping being.
+                if not self.allow():
+                    return False
                 await self._send("hear.wake")
                 if not await self._wait_state(HEARING, ASLEEP_WAKE_WAIT):
                     self.show(self.not_woken(f"{self.name} did not wake. It is {self.state}."), "warning")
@@ -343,9 +355,13 @@ class TypeChat:
                 return True
             if self.state in BUSY:
                 # Talking over the being stops it, as Esc does.
+                if not self.allow():
+                    return False
                 await self.bus.send("key.interrupt")
                 await self._wait_state(HEARING + ("idle", "drowsy"), INTERRUPT_WAIT)
             if self.state not in HEARING:
+                if not self.allow():
+                    return False
                 await self._send("hear.wake")
                 if not await self._wait_state(HEARING, WAKE_WAIT):
                     self.show(self.not_woken(f"{self.name} did not answer to its name. It is {self.state}."),

@@ -56,6 +56,10 @@ SUBS = (*type_chat.SUBS, "ui.text", "ui.action", "chat.mode.request", "app.priva
 GUEST_LATCH = "/run/being/guest"
 NOTICE_MAX = 120
 GUEST_POLL = 1.0
+# A line waiting longer than this for its turn is dropped, not delivered late;
+# and only this many may wait at once.
+LINE_MAX_AGE = 10.0
+LINE_QUEUE = 8
 
 
 def _log(*parts):
@@ -90,6 +94,8 @@ class ChatBridge:
         self._published = None
         self._chat = type_chat.TypeChat(bus, name=name, owner=owner, show=self._chat_says, allow=self._may_send)
         self._tasks = set()
+        # Typed lines in flight (waiting for their turn or being said).
+        self._lines = set()
         self._listener = None
         self._watcher = None
 
@@ -149,7 +155,7 @@ class ChatBridge:
     def _chat_says(self, text, tone="text"):
         """What the typing chat would print. Only its problems reach the dock;
         replies are the face's captions."""
-        if tone in ("warning", "danger"):
+        if tone in ("warning", "danger") and self._may_send():
             task = asyncio.get_running_loop().create_task(self._notice(text, "warning"))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
@@ -172,7 +178,7 @@ class ChatBridge:
         if self.mode == DEFAULT:
             await self._notice("Switch to written chat to type to me.", "muted")
             return False
-        return await self._chat.say(text)
+        return await self._chat.say(text, expires=asyncio.get_running_loop().time() + LINE_MAX_AGE)
 
     def _line(self, text):
         """Say one line as its own task: waking the being waits for the state
@@ -184,12 +190,18 @@ class ChatBridge:
         return task
 
     async def _line_task(self, text):
+        if len(self._lines) >= LINE_QUEUE:
+            await self._notice("Too many lines waiting. Try again in a moment.", "warning")
+            return
+        self._lines.add(asyncio.current_task())
         try:
             await self.type_line(text)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self.log(f"typed line failed: {exc!r}")
+        finally:
+            self._lines.discard(asyncio.current_task())
 
     async def idle(self):
         """Wait until every typed line in flight is done (for tests)."""

@@ -202,6 +202,70 @@ class Bridge(unittest.IsolatedAsyncioTestCase):
         finally:
             await bridge.stop()
 
+    async def stalled(self, **limits):
+        """A bridge whose first line holds the lock (the being never wakes)."""
+        bus = FakeBus()
+        bridge = ChatBridge(bus, name="Pip", owner="Richard", guest=lambda: False, log=lambda *a: None)
+        for name, value in limits.items():
+            patcher = patch.object(chat_bridge, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch.object(chat_bridge.type_chat, "WAKE_WAIT", 0.4)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        await bridge.start()
+        self.addCleanup(lambda: asyncio.ensure_future(bridge.stop()))
+        await bridge.set_mode("typed_text")
+        bus._queue.put_nowait({"t": "body.lid", "closed": False, "seq": 4, "snapshot": True})
+        bus._queue.put_nowait({"t": "state.changed", "state": "idle", "muted": False})
+        await asyncio.sleep(0.02)
+        return bus, bridge
+
+    async def test_a_line_queued_behind_another_never_acts_after_a_guest_arrives(self):
+        bus, bridge = await self.stalled()
+        bus._queue.put_nowait({"t": "ui.text", "text": "first"})
+        await asyncio.sleep(0.05)  # it has woken the being and holds the lock
+        bus._queue.put_nowait({"t": "state.changed", "state": "speaking", "muted": False})
+        bus._queue.put_nowait({"t": "ui.text", "text": "second"})
+        bus._queue.put_nowait({"t": "app.privacy", "guest": True})
+        await asyncio.sleep(0.8)
+        await bridge.idle()
+        # Only the first line's own wake; the second never interrupted a reply to the guest.
+        self.assertEqual(len(bus.of("hear.wake")), 1)
+        self.assertEqual(bus.of("key.interrupt"), [])
+        self.assertEqual(bus.of("hear.final"), [])
+        self.assertEqual(bus.of("chat.notice"), [], "no notice about the owner's lines once a guest is here")
+
+    async def test_a_sleeping_beings_wake_is_also_gated(self):
+        bus, bridge = await self.stalled()
+        bus._queue.put_nowait({"t": "ui.text", "text": "first"})
+        await asyncio.sleep(0.05)
+        bus._queue.put_nowait({"t": "state.changed", "state": "asleep", "muted": False})
+        bus._queue.put_nowait({"t": "ui.text", "text": "wake up"})
+        bus._queue.put_nowait({"t": "app.privacy", "guest": True})
+        await asyncio.sleep(0.8)
+        await bridge.idle()
+        self.assertEqual(len(bus.of("hear.wake")), 1)
+
+    async def test_a_line_that_waited_too_long_is_dropped_not_delivered_late(self):
+        bus, bridge = await self.stalled(LINE_MAX_AGE=0.1)
+        bus._queue.put_nowait({"t": "ui.text", "text": "first"})
+        await asyncio.sleep(0.05)
+        bus._queue.put_nowait({"t": "ui.text", "text": "second"})
+        await asyncio.sleep(0.2)
+        bus._queue.put_nowait({"t": "state.changed", "state": "attending", "muted": False})
+        await asyncio.sleep(0.5)
+        await bridge.idle()
+        self.assertNotIn("second", [e["text"] for e in bus.of("hear.final")])
+
+    async def test_only_a_few_lines_may_wait_at_once(self):
+        bus, bridge = await self.stalled(LINE_QUEUE=2)
+        for text in ("a", "b", "c", "d"):
+            bus._queue.put_nowait({"t": "ui.text", "text": text})
+        await asyncio.sleep(0.1)
+        notices = [e["text"] for e in bus.of("chat.notice")]
+        self.assertEqual(len([n for n in notices if "Too many" in n]), 2, notices)
+
     async def test_written_replies_do_not_wait_for_the_voice(self):
         # The mode the owner falls back on when hearing or the voice fails.
         self.ready()
