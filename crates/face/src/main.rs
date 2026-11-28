@@ -8,6 +8,7 @@ mod audition;
 mod chrome;
 mod colour;
 mod decor;
+mod dock;
 mod dpms;
 mod emote;
 mod eye;
@@ -651,6 +652,8 @@ fn run() -> Result<(), String> {
     let mut menu_painted = None;
     let mut options_tex: Option<render::Texture> = None;
     let mut options_painted = None;
+    let mut dock_tex: Option<render::Texture> = None;
+    let mut dock_painted: Option<(u64, i32)> = None;
     // The picture changed while hidden, so the texture is out of date.
     let mut panel_behind = false;
     let mut panel_amount = 0f32;
@@ -737,6 +740,17 @@ fn run() -> Result<(), String> {
                         }
                         continue;
                     }
+                    // F7 (the printed key's own code on the laptop is Previous,
+                    // below) asks for the next way of talking to Pip.
+                    if key == Keycode::F7 {
+                        if !repeat {
+                            if let Some(link) = link.as_mut().filter(|link| link.side.dock.available()) {
+                                link.side.dock.used(frame_start);
+                                link.chat_mode_next();
+                            }
+                        }
+                        continue;
+                    }
                     // M is the plain keyboard's mic mute; it must still work
                     // while Options or the Quick Menu holds the keyboard.
                     if link.as_mut().is_some_and(|link| link.chrome_mute(key, repeat)) {
@@ -783,6 +797,27 @@ fn run() -> Result<(), String> {
                                 None => {}
                             }
                             continue;
+                        }
+                    }
+                    // The dock's box, in a written mode: Enter says the line, Esc
+                    // empties it (and stops Pip speaking once it is empty).
+                    if let Some(link) = link.as_mut().filter(|link| link.side.dock.capturing()) {
+                        match key {
+                            Keycode::Return | Keycode::KpEnter => {
+                                if !repeat {
+                                    if let Some(line) = link.side.dock.submit(frame_start) {
+                                        link.ui_text(&line);
+                                    }
+                                }
+                                continue;
+                            }
+                            Keycode::Backspace => {
+                                link.side.dock.backspace(frame_start);
+                                continue;
+                            }
+                            Keycode::Escape if link.side.dock.escape(frame_start) => continue,
+                            _ if ![Keycode::Escape, Keycode::F1, Keycode::F2, Keycode::F9, Keycode::F10].contains(&key) => continue,
+                            _ => {}
                         }
                     }
                     // Typing into an open, focused app panel goes to hands.
@@ -835,6 +870,8 @@ fn run() -> Result<(), String> {
                 SdlEvent::TextInput { text, .. } => {
                     if let Some(link) = link.as_mut().filter(|link| link.side.menu.searching()) {
                         link.side.menu.input(&text);
+                    } else if let Some(link) = link.as_mut().filter(|link| link.side.dock.capturing()) {
+                        link.side.dock.input(&text, Instant::now());
                     }
                 }
                 SdlEvent::MouseMotion { x, y, which, .. } if (args.follow_cursor || pointer_probe.is_some()) && which != u32::MAX => {
@@ -849,11 +886,31 @@ fn run() -> Result<(), String> {
                 SdlEvent::Window { win_event: WindowEvent::Leave, .. } if args.follow_cursor => anim.clear_gaze(),
                 // SDL may synthesize a mouse event from the same touch, or
                 // a touch from a mouse click. Ignore the synthetic copies.
-                SdlEvent::MouseButtonDown { mouse_btn: MouseButton::Left, which, .. } if which != u32::MAX => {
+                SdlEvent::MouseButtonDown { mouse_btn: MouseButton::Left, which, x, y, .. } if which != u32::MAX => {
                     if let Some(probe) = &mut pointer_probe { probe.mouse_click(); }
                     if offline_scene && !recording {
                         audition::Gesture::Poke.perform(&mut anim);
                     } else if let Some(link) = &mut link {
+                        // A click on the dock is the dock's: the chip asks for the
+                        // next mode, the rest of the pill opens the Quick Menu.
+                        let ((ww, wh), (dw, dh)) = (window.size(), window.drawable_size());
+                        if link.side.dock.visible() && ww > 0 && wh > 0 {
+                            let (px, py) = (x * dw as i32 / ww as i32, y * dh as i32 / wh as i32);
+                            let layout = link.side.dock.layout(dw as i32);
+                            if let Some(hit) = dock::click(&layout, dw as i32, dh as i32, px, py) {
+                                link.side.dock.used(frame_start);
+                                match hit {
+                                    dock::Hit::Chip => link.chat_mode_next(),
+                                    dock::Hit::Menu if !anim.panel_blank() && !anim.asleep()
+                                        && prefs.menu_position != "off" && !watch.get().guest && !link.quiet() =>
+                                    {
+                                        link.toggle_menu();
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+                        }
                         link.send(Event::new("key.touch"));
                         if !link.side.menu.open() && !link.side.options.open() && asks_attention(&anim, panel_focus) {
                             link.send(Event::new("key.attend"));
@@ -875,6 +932,14 @@ fn run() -> Result<(), String> {
         media.extend(media_rx.try_iter().map(|key| (key, false)));
         for (key, repeat) in media.drain(..) {
             if !repeats.admit(key, repeat, Instant::now()) {
+                continue;
+            }
+            if key == keys::Media::Previous {
+                // The printed F7: the next way of talking to Pip.
+                if let Some(link) = link.as_mut().filter(|link| link.side.dock.available()) {
+                    link.side.dock.used(Instant::now());
+                    link.chat_mode_next();
+                }
                 continue;
             }
             let dark_and_alone = anim.panel_blank() && link.as_ref().is_some_and(|l| l.quiet());
@@ -1103,7 +1168,20 @@ fn run() -> Result<(), String> {
                 }
             }
         }
-        let wants_text = menu_position.is_some();
+        // The dock is one small picture over the full face. It is not a surface:
+        // it stays out of `surface_open` below, so it never docks the eyes or
+        // raises the frame rate, and a surface (or leaving one) hides it.
+        if let Some(link) = &mut link {
+            let gate = dock::Gate {
+                guest,
+                blank: panel_blank,
+                asleep: anim.asleep(),
+                quiet: link.quiet(),
+                surface_open: shown.is_some() || menu_position.is_some() || options_visible || panel_amount > 0.0,
+            };
+            link.side.dock.update(gate, prefs.dock(), now);
+        }
+        let wants_text = menu_position.is_some() || link.as_ref().is_some_and(|link| link.side.dock.capturing());
         if wants_text != text_input.is_active() {
             if wants_text {
                 text_input.start();
@@ -1219,6 +1297,29 @@ fn run() -> Result<(), String> {
                 caption_style = Some(style);
             }
         }
+        let dock_key = link.as_ref().and_then(|link| link.side.dock.look_key());
+        match (link.as_ref().filter(|link| link.side.dock.visible()), text::font()) {
+            (Some(link), Some(font)) => {
+                let painted = (link.side.dock.revision(), w);
+                if dock_painted != Some(painted) || dock_tex.is_none() {
+                    let picture = link.side.dock.picture(font, w);
+                    unsafe {
+                        if let Some(old) = dock_tex.take() {
+                            renderer.delete(&gl, old);
+                        }
+                        dock_tex = Some(renderer.texture(&gl, picture.w as i32, picture.h as i32, &picture.rgba)?);
+                    }
+                    dock_painted = Some(painted);
+                }
+            }
+            _ => {
+                if let Some(old) = dock_tex.take() {
+                    unsafe { renderer.delete(&gl, old) };
+                }
+                dock_painted = None;
+            }
+        }
+        let dock_alpha = link.as_ref().map_or(1.0, |link| link.side.dock.alpha());
         if !panel_blank {
             // Shift+F1 keeps the hardware diagnostics available independently.
             if health_open {
@@ -1384,6 +1485,8 @@ fn run() -> Result<(), String> {
             night: night_notice.as_ref().map(|(_, texture)| texture),
             level: level_tex.as_ref(),
             level_alpha,
+            dock: dock_tex.as_ref().map(|texture| (texture, dock_alpha)),
+            dock_key,
         };
 
         if let Some(dir) = &args.frames {
@@ -1502,6 +1605,8 @@ fn run() -> Result<(), String> {
             night: None,
             level: level_tex.as_ref(),
             level_alpha,
+            dock: None,
+            dock_key: None,
         };
         let px = unsafe { render::capture(&gl, w, h, || scene.draw(&gl, &mut renderer, w as i32, h as i32, 1))? };
         write_png(path, w, h, &px)?;
@@ -1529,6 +1634,10 @@ struct Scene<'a> {
     /// The level bar, centred low on the screen at twice the text size.
     level: Option<&'a render::Texture>,
     level_alpha: f32,
+    /// The permanent dock over the full face, and what it looks like now
+    /// (`Dock::look_key`): a settled face repeats only while this holds still.
+    dock: Option<(&'a render::Texture, f32)>,
+    dock_key: Option<(u64, u8)>,
 }
 
 struct SettledEyes {
@@ -1539,6 +1648,7 @@ struct SettledEyes {
     grid: f32,
     glow_radius: f32,
     marks: render::Marks,
+    dock: Option<(u64, u8)>,
 }
 
 impl SettledEyes {
@@ -1546,6 +1656,7 @@ impl SettledEyes {
         let edge_tolerance = 0.5 / self.rect.h.max(1) as f32;
         self.rect == other.rect && self.output == other.output && self.colours == other.colours
             && self.grid == other.grid && self.glow_radius == other.glow_radius && self.marks == other.marks
+            && self.dock == other.dock
             && self.eyes.iter().zip(&other.eyes).enumerate().all(|(channel, (&a, &b))| {
                 let tolerance = if channel % 16 < 4 { edge_tolerance } else { 0.0001 };
                 (a - b).abs() <= tolerance
@@ -1571,6 +1682,7 @@ impl Scene<'_> {
             grid: self.look.grid,
             glow_radius: self.look.glow_r,
             marks: self.look.marks,
+            dock: self.dock_key,
         })
     }
 
@@ -1608,6 +1720,9 @@ impl Scene<'_> {
             }
             if let Some(widgets) = self.widgets {
                 widgets.draw(gl, renderer, w, h, self.prefs.widget_positions());
+            }
+            if let Some((tex, alpha)) = self.dock {
+                renderer.draw_texture(gl, tex, dock::draw_rect(tex.w, tex.h, w, h), w, h, alpha);
             }
         }
         let zoom = (h / 800).max(1);
@@ -2088,6 +2203,29 @@ mod tests {
         assert!(captions.on);
         assert!(!super::caption_on_screen(Some(&captions), now), "the setting alone shows nothing");
         assert!(!super::caption_on_screen(None, now));
+    }
+
+    #[test]
+    fn a_settled_face_repeats_the_same_picture_with_a_still_dock_and_redraws_when_it_changes() {
+        let eyes = |dock| super::SettledEyes {
+            rect: super::panel::Rect { x: 0, y: 0, w: 1280, h: 800 },
+            output: (1280, 800),
+            eyes: [0.0; 32],
+            colours: [[0.0; 3]; 3],
+            grid: 0.0,
+            glow_radius: 1.0,
+            marks: super::render::Marks::default(),
+            dock,
+        };
+        // No dock and a visible dock that stays put both let an unchanged face
+        // skip its swap: the dock adds no per-frame work of its own.
+        assert!(eyes(None).same_image(&eyes(None)));
+        assert!(eyes(Some((3, 16))).same_image(&eyes(Some((3, 16)))));
+        // A fade step, a new mode or new typed text is a different picture.
+        assert!(!eyes(Some((3, 16))).same_image(&eyes(Some((3, 15)))));
+        assert!(!eyes(Some((3, 16))).same_image(&eyes(Some((4, 16)))));
+        // And so is the dock appearing or leaving (a guest, a closed lid).
+        assert!(!eyes(None).same_image(&eyes(Some((3, 16)))));
     }
 
     #[test]
