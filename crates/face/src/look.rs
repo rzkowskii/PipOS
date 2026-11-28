@@ -45,6 +45,8 @@ pub struct Prefs {
     pub weather_widget: bool,
     pub menu_position: &'static str,
     pub menu_labels: bool,
+    /// The permanent dock under the Quick Menu: "always", "fades" or "off".
+    dock: &'static str,
     clock_widget_position: &'static str,
     system_widget_position: &'static str,
     weather_widget_position: &'static str,
@@ -60,7 +62,7 @@ impl Default for Prefs {
         Self { glow: "cyan", shape: "soft", strength: 1.0, size: "full", brows: false, mouth: false,
                effects: false, eye_details: false, mood_colour: false,
                clock_widget: false, system_widget: false, weather_widget: false, revision: 0,
-               menu_position: "center", menu_labels: false, clock_widget_position: "top-left",
+               menu_position: "center", menu_labels: false, dock: "fades", clock_widget_position: "top-left",
                system_widget_position: "top-right", weather_widget_position: "top-right",
                captions: false, caption_cost: true, caption_heard: true, idle_glances: true }
     }
@@ -95,6 +97,7 @@ impl Prefs {
             weather_widget: fields.get("weather_widget").and_then(Value::as_bool).unwrap_or_default(),
             menu_position: choice("menu_position", &["left", "center", "right", "off"], defaults.menu_position),
             menu_labels: flag("menu_labels", defaults.menu_labels),
+            dock: choice("dock", &["always", "fades", "off"], defaults.dock),
             clock_widget_position: choice("clock_widget_position", &CORNERS, defaults.clock_widget_position),
             system_widget_position: choice("system_widget_position", &CORNERS, defaults.system_widget_position),
             weather_widget_position: choice("weather_widget_position", &CORNERS, defaults.weather_widget_position),
@@ -129,11 +132,16 @@ impl Prefs {
             .with("clock_widget", self.clock_widget).with("system_widget", self.system_widget)
             .with("weather_widget", self.weather_widget)
             .with("menu_position", self.menu_position).with("menu_labels", self.menu_labels)
+            .with("dock", self.dock)
             .with("clock_widget_position", self.clock_widget_position)
             .with("system_widget_position", self.system_widget_position)
             .with("weather_widget_position", self.weather_widget_position)
             .with("captions", self.captions).with("caption_cost", self.caption_cost).with("caption_heard", self.caption_heard)
             .with("idle_glances", self.idle_glances)
+    }
+
+    pub fn dock(self) -> crate::dock::Setting {
+        crate::dock::Setting::parse(self.dock)
     }
 
     pub fn widget_positions(self) -> [Corner; 3] {
@@ -206,6 +214,20 @@ mod tests {
                                  brows: true, mouth: false, revision: 4, clock_widget: true, system_widget: false,
                                  ..Prefs::default() });
         assert_eq!(Prefs::requested(&look.applied()), look);
+    }
+
+    #[test]
+    fn the_dock_setting_defaults_to_fading_and_round_trips() {
+        assert_eq!(prefs(json!({})).dock(), crate::dock::Setting::Fades);
+        for (name, setting) in [("always", crate::dock::Setting::Always), ("fades", crate::dock::Setting::Fades),
+                                ("off", crate::dock::Setting::Off)] {
+            let look = prefs(json!({"dock": name}));
+            assert_eq!(look.dock(), setting);
+            assert_eq!(Prefs::requested(&look.applied()), look);
+            assert_eq!(look.applied().data["dock"], name);
+        }
+        assert_eq!(prefs(json!({"dock": "sideways"})).dock(), crate::dock::Setting::Fades, "an unknown value is the default");
+        assert_eq!(prefs(json!({"dock": true})).dock(), crate::dock::Setting::Fades);
     }
 
     #[test]

@@ -31,6 +31,9 @@ struct Pending {
 #[derive(Default)]
 pub struct Captions {
     pub on: bool,
+    /// Pip is being talked to by typing (`chat.mode`): what it says is shown
+    /// whatever the Captions setting is, since the words are the answer.
+    typed: bool,
     heard: String,
     hearing: String,
     said: String,
@@ -80,6 +83,23 @@ impl Captions {
         }
     }
 
+    /// A written chat mode begins or ends. Ending it with the Captions setting
+    /// off drops the words it had been showing.
+    pub fn set_typed(&mut self, typed: bool) {
+        if typed != self.typed {
+            self.typed = typed;
+            if !typed && !self.on {
+                self.forget();
+            }
+        }
+    }
+
+    /// Whether words are being collected and shown: the owner's setting or a
+    /// written chat mode, and never with a guest here.
+    fn collecting(&self) -> bool {
+        (self.on || self.typed) && !self.guest
+    }
+
     /// Drop every word heard or said.
     pub fn forget(&mut self) {
         self.heard.clear();
@@ -104,7 +124,7 @@ impl Captions {
     }
 
     pub fn displaying(&self, now: Instant) -> bool {
-        self.on && !self.guest
+        self.collecting()
             && self.last_caption.is_some_and(|at| now.saturating_duration_since(at) < CAPTION_HOLD)
     }
 
@@ -135,7 +155,7 @@ impl Captions {
                 }
             }
             // Words and routing indicators stay inside the opt-in owner overlay.
-            _ if !self.on || self.guest => {}
+            _ if !self.collecting() => {}
             "mind.route" => {
                 self.via = match ev.str("via") {
                     Some("code") => Some("Code"),
@@ -238,7 +258,7 @@ impl Captions {
     }
 
     pub fn picture(&self, font: &Font, columns: usize, show_heard: bool, show_cost: bool) -> Option<Picture> {
-        if !self.on || self.guest {
+        if !self.collecting() {
             return None;
         }
         let heard = if !show_heard { "" } else if self.hearing.is_empty() { self.heard.as_str() } else { self.hearing.as_str() };
@@ -625,5 +645,46 @@ mod tests {
         captions.event(&Event::new("app.privacy").with("guest", false));
         captions.event(&Event::new("mind.route").with("via", "model"));
         assert!(captions.lines(&health(), 100)[0].contains("[Model]"));
+    }
+
+    #[test]
+    fn a_written_mode_shows_the_owners_replies_without_the_captions_setting_but_never_a_guests() {
+        let font = crate::text::font().unwrap();
+        let now = Instant::now();
+        let reply = |text: &str, seq: u64| Event::new("say.request").with("text", text).with("reply", "r1").with("seq", seq);
+        let played = |seq: u64| Event::new("say.played").with("reply", "r1").with("seq", seq);
+        let mut captions = Captions::default();
+        assert!(!captions.on, "the setting stays off");
+        captions.event(&reply("Ten minutes.", 0));
+        captions.event(&played(0));
+        assert!(!captions.displaying(now), "off in a spoken mode");
+        captions.set_typed(true);
+        captions.event(&Event::new("hear.final").with("text", "set a timer"));
+        captions.event(&reply("Ten minutes.", 1));
+        captions.event(&played(1));
+        assert!(captions.displaying(now), "on while typing");
+        assert!(captions.picture(font, 80, true, false).is_some());
+        // A guest sees nothing, typed mode or not, and the words are dropped.
+        captions.event(&Event::new("app.privacy").with("guest", true));
+        assert!(!captions.displaying(now));
+        captions.event(&reply("Private.", 2));
+        captions.event(&played(2));
+        assert!(captions.picture(font, 80, true, false).is_none());
+        captions.event(&Event::new("app.privacy").with("guest", false));
+        assert!(captions.said.is_empty() && captions.heard.is_empty(), "nothing of the owner's survives the guest");
+        // Back to a spoken mode with the setting off: the words go.
+        captions.event(&reply("Hello again.", 3));
+        captions.event(&played(3));
+        assert!(captions.displaying(now));
+        captions.set_typed(false);
+        assert!(!captions.displaying(now));
+        assert!(captions.said.is_empty() && captions.heard.is_empty());
+        // With the setting on, ending the mode keeps the owner's captions.
+        captions.toggle();
+        captions.set_typed(true);
+        captions.event(&reply("Still here.", 4));
+        captions.event(&played(4));
+        captions.set_typed(false);
+        assert!(captions.displaying(now) && captions.said.contains("Still here."));
     }
 }

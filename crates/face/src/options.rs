@@ -92,6 +92,11 @@ const LAYOUT: &[Setting] = &[
         ]),
     ),
     Setting::new("menu_labels", "Quick Menu labels", Control::Toggle),
+    Setting::new(
+        "dock",
+        "Dock",
+        Control::Choices(&[("always", "Always"), ("fades", "Fades"), ("off", "Off")]),
+    ),
     Setting::new("clock_widget", "Clock widget", Control::Toggle),
     Setting::new(
         "clock_widget_position",
