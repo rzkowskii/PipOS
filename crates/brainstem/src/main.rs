@@ -189,8 +189,7 @@ fn allowed_from(topic: &str, from: &str, hardware_body: bool) -> bool {
         // How the owner talks to Pip (spoken, typed with spoken replies, typed
         // with written replies): the chat bridge holds it, the voice and the
         // face follow it; a spoken request to change it comes from the mind.
-        "chat.mode" => matches!(from, "chat" | "mind"),
-        "chat.notice" => from == "chat",
+        "chat.mode" | "chat.notice" => from == "chat",
         "chat.mode.request" => from == "mind",
         "app.calc_display" | "app.lookup_query" => from == "mind",
         // The owner's "louder" or "no chirps" reaches the voice through the
@@ -545,6 +544,11 @@ fn lid_changed(
     for event in machine.set_env(body.lid(), body.dark(), body.night(), now) {
         pending.push((event, None));
     }
+}
+
+/// How the owner talks when nothing holds a written mode: out loud.
+fn chat_mode_spoken() -> Event {
+    Event::new("chat.mode").with("mode", "spoken").with("input", "voice").with("reply", "voice")
 }
 
 fn blocked_by_lid(topic: &str) -> bool {
@@ -1324,6 +1328,14 @@ fn main() {
                         }
                         pending.push((down, None));
                         pending.extend(outs.into_iter().map(|e| (e, None)));
+                        // A bridge that is gone can no longer hold a written
+                        // mode: everyone goes back to spoken, and so does the
+                        // mode replayed to organs that join later.
+                        if name == "chat" && chat_mode.as_ref().and_then(|ev| ev.str("mode")) != Some("spoken") {
+                            let spoken = chat_mode_spoken();
+                            chat_mode = Some(spoken.clone());
+                            pending.push((spoken, None));
+                        }
                     }
                 }
                 // Dropping the peer shuts its socket, which ends its threads.
@@ -1580,7 +1592,8 @@ fn the_boot_local_guest_latch_is_read_only_on_an_appliance_body() {
 fn written_chat_topics_have_one_sender_each() {
     for hardware in [true, false] {
         assert!(allowed_from("ui.text", "face", hardware));
-        assert!(allowed_from("chat.mode", "chat", hardware) && allowed_from("chat.mode", "mind", hardware));
+        assert!(allowed_from("chat.mode", "chat", hardware) && !allowed_from("chat.mode", "mind", hardware),
+                "the bridge alone holds the mode; the mind asks with chat.mode.request");
         assert!(allowed_from("chat.notice", "chat", hardware) && !allowed_from("chat.notice", "mind", hardware));
         assert!(allowed_from("chat.mode.request", "mind", hardware));
         for organ in ["face", "voice", "hands", "eyes", "rogue"] {

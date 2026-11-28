@@ -5,6 +5,14 @@ from dataclasses import dataclass
 from .look import DISPLAY_FLAGS, FACE_LAYERS, WIDGET_POSITIONS, WIDGETS
 
 
+# Switching the chat mode by voice ("Let's type", "Silent mode", "Back to talking")
+# needs the turn loop to pass the request on (a `chat_mode` branch in mind/turn.py
+# that sends `chat.mode.request`, with "chat_mode" in ADDRESS_ONLY_COMMANDS). Until
+# that is there the phrases are neither understood nor advertised: the dock's chip
+# and F7 switch the mode. The branch's author sets this True.
+CHAT_MODE_BY_VOICE = False
+
+
 @dataclass(frozen=True)
 class Action:
     id: str
@@ -85,12 +93,12 @@ ACTIONS = (
     Action("keys.brightness", "Screen brightness", "keys", ("Brighter", "Dimmer"), "Brightness keys"),
     Action("keys.volume", "Speaker volume", "keys", ("Louder", "Quieter"), "Volume keys"),
     Action("keys.captions", "Show or hide captions", "keys", keys="fn+F1"),
-    Action("chat.mode.spoken", "Talk out loud", "chat", ("Back to talking",), "The dock's mode chip or F7",
-           owner_only=True),
-    Action("chat.mode.typed_voice", "Written chat, spoken replies", "chat", ("Let's type",),
+    Action("chat.mode.spoken", "Talk out loud", "chat", ("Back to talking",) if CHAT_MODE_BY_VOICE else (),
            "The dock's mode chip or F7", owner_only=True),
-    Action("chat.mode.typed_text", "Written chat, written replies", "chat", ("Silent mode",),
-           "The dock's mode chip or F7", owner_only=True),
+    Action("chat.mode.typed_voice", "Written chat, spoken replies", "chat",
+           ("Let's type",) if CHAT_MODE_BY_VOICE else (), "The dock's mode chip or F7", owner_only=True),
+    Action("chat.mode.typed_text", "Written chat, written replies", "chat",
+           ("Silent mode",) if CHAT_MODE_BY_VOICE else (), "The dock's mode chip or F7", owner_only=True),
     Action("chat.mode.next", "Next chat mode", "chat", keys="F7 (the previous-track key)", owner_only=True),
     Action("keys.setup", "Open Setup", "keys", keys="fn+F2"),
     Action("shell.quick_menu.open", "Open Quick Menu", "keys", ("Open the Quick Menu",), "Command+Space or fn+F6",

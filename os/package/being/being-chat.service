@@ -21,25 +21,28 @@ CPUWeight=20
 MemoryHigh=48M
 MemoryMax=64M
 # Reaches only the brainstem's socket; reads the owner's name and the guest
-# latch, writes nothing.
+# latch, writes nothing (the same sandbox as the eyes, without a device).
 NoNewPrivileges=yes
 LimitCORE=0
+CapabilityBoundingSet=
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/run/being
 ReadOnlyPaths=/mind
 PrivateTmp=yes
+DevicePolicy=closed
 PrivateNetwork=yes
 IPAddressDeny=any
 RestrictAddressFamilies=AF_UNIX
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
+ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
 LockPersonality=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
+RestrictNamespaces=yes
 SystemCallArchitectures=native
 
 [Install]

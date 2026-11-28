@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from mind import actions, chat_bridge, commands
 from mind.chat_bridge import ChatBridge, MODES
@@ -43,6 +44,11 @@ class Bridge(unittest.IsolatedAsyncioTestCase):
     def ready(self, state="attending", muted=False):
         self.bridge._chat.on_event({"t": "body.lid", "closed": False, "seq": 4, "snapshot": True})
         self.bridge._chat.on_event({"t": "state.changed", "state": state, "muted": muted, "unwell": False})
+
+    async def type(self, text):
+        """A line from the dock, and wait for it to be dealt with."""
+        await self.bridge.handle({"t": "ui.text", "text": text})
+        await self.bridge.idle()
 
     async def flush(self):
         await asyncio.sleep(0)
@@ -108,7 +114,7 @@ class Bridge(unittest.IsolatedAsyncioTestCase):
     async def test_a_typed_line_is_the_owners_words_in_a_written_mode(self):
         self.ready()
         await self.bridge.set_mode("typed_text")
-        await self.bridge.handle({"t": "ui.text", "text": "  set a timer   for ten minutes "})
+        await self.type("  set a timer   for ten minutes ")
         sent = [(e["t"], e.get("text"), e.get("speaker")) for e in self.bus.sent if e["t"].startswith("hear.")]
         self.assertEqual(sent, [("hear.speech_start", None, None),
                                 ("hear.final", "set a timer for ten minutes", "Richard")])
@@ -116,33 +122,90 @@ class Bridge(unittest.IsolatedAsyncioTestCase):
 
     async def test_typing_in_spoken_mode_is_not_passed_on_and_says_why(self):
         self.ready()
-        await self.bridge.handle({"t": "ui.text", "text": "hello"})
+        await self.type("hello")
         self.assertEqual([e["t"] for e in self.bus.sent if e["t"].startswith("hear.")], [])
         self.assertIn("written chat", self.bus.of("chat.notice")[-1]["text"].casefold())
 
     async def test_a_line_is_cut_to_400_characters_and_junk_is_ignored(self):
         self.ready()
         await self.bridge.set_mode("typed_voice")
-        await self.bridge.handle({"t": "ui.text", "text": "a" * 900})
-        await self.bridge.handle({"t": "ui.text", "text": 5})
-        await self.bridge.handle({"t": "ui.text", "text": "   "})
+        await self.type("a" * 900)
+        await self.type(5)
+        await self.type("   ")
         finals = self.bus.of("hear.final")
         self.assertEqual(len(finals), 1)
         self.assertEqual(len(finals[0]["text"]), 400)
+
+    async def test_a_line_waits_for_the_being_to_wake_without_blocking_the_receive_loop(self):
+        # The state updates arrive through the same loop that takes the line.
+        bus = FakeBus()
+        woke = []
+        real_send = bus.send
+
+        async def send(topic, **fields):
+            await real_send(topic, **fields)
+            if topic == "hear.wake":
+                woke.append(True)
+                bus._queue.put_nowait({"t": "state.changed", "state": "attending", "muted": False})
+
+        bus.send = send
+        bridge = ChatBridge(bus, name="Pip", owner="Richard", guest=lambda: False, log=lambda *a: None)
+        await bridge.start()
+        try:
+            await bridge.set_mode("typed_text")
+            bus._queue.put_nowait({"t": "body.lid", "closed": False, "seq": 4, "snapshot": True})
+            bus._queue.put_nowait({"t": "state.changed", "state": "idle", "muted": False})
+            bus._queue.put_nowait({"t": "ui.text", "text": "what time is it"})
+            for _ in range(200):
+                if bus.of("hear.final"):
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual([e["text"] for e in bus.of("hear.final")], ["what time is it"])
+            self.assertEqual(woke, [True])
+            self.assertEqual(bus.of("chat.notice"), [], "no false 'did not answer'")
+        finally:
+            await bridge.stop()
+
+    async def test_a_guest_arriving_while_a_line_waits_stops_the_line(self):
+        bus = FakeBus()
+        real_send = bus.send
+
+        async def send(topic, **fields):
+            await real_send(topic, **fields)
+            if topic == "hear.wake":
+                # The guest is reported before the being has finished waking.
+                bus._queue.put_nowait({"t": "app.privacy", "guest": True})
+                bus._queue.put_nowait({"t": "state.changed", "state": "attending", "muted": False})
+
+        bus.send = send
+        bridge = ChatBridge(bus, name="Pip", owner="Richard", guest=lambda: False, log=lambda *a: None)
+        await bridge.start()
+        try:
+            await bridge.set_mode("typed_voice")
+            bus._queue.put_nowait({"t": "body.lid", "closed": False, "seq": 4, "snapshot": True})
+            bus._queue.put_nowait({"t": "state.changed", "state": "idle", "muted": False})
+            bus._queue.put_nowait({"t": "ui.text", "text": "my secret"})
+            await asyncio.sleep(0.3)
+            await bridge.idle()
+            self.assertEqual(bus.of("hear.final"), [])
+            self.assertEqual(bus.of("hear.speech_start"), [])
+            self.assertEqual(bridge.mode, "spoken")
+        finally:
+            await bridge.stop()
 
     async def test_written_replies_do_not_wait_for_the_voice(self):
         # The mode the owner falls back on when hearing or the voice fails.
         self.ready()
         await self.bridge.handle({"t": "organ.down", "name": "voice"})
         await self.bridge.set_mode("typed_text")
-        await asyncio.wait_for(self.bridge.handle({"t": "ui.text", "text": "what time is it"}), 1)
+        await asyncio.wait_for(self.type("what time is it"), 1)
         self.assertEqual([e["text"] for e in self.bus.of("hear.final")], ["what time is it"])
 
     async def test_a_closed_lid_blocks_the_line_and_keeps_the_mode(self):
         self.ready()
         await self.bridge.set_mode("typed_text")
         self.bridge._chat.on_event({"t": "body.lid", "closed": True, "seq": 5})
-        await self.bridge.handle({"t": "ui.text", "text": "hello"})
+        await self.type("hello")
         await self.flush()
         self.assertEqual(self.bus.of("hear.final"), [])
         self.assertIn("lid", self.bus.of("chat.notice")[-1]["text"].casefold())
@@ -151,7 +214,7 @@ class Bridge(unittest.IsolatedAsyncioTestCase):
     async def test_a_sleeping_being_needs_the_wake_words_not_any_line(self):
         self.ready(state="asleep")
         await self.bridge.set_mode("typed_voice")
-        await self.bridge.handle({"t": "ui.text", "text": "hello"})
+        await self.type("hello")
         await self.flush()
         self.assertEqual(self.bus.of("hear.final"), [])
         self.assertIn("asleep", self.bus.of("chat.notice")[-1]["text"].casefold())
@@ -180,7 +243,7 @@ class Bridge(unittest.IsolatedAsyncioTestCase):
         await self.bridge.handle({"t": "ui.action", "id": "chat.mode.typed_text", "via": "key"})
         await self.bridge.handle({"t": "chat.mode.request", "mode": "typed_voice"})
         self.assertEqual(self.bridge.mode, "spoken")
-        await self.bridge.handle({"t": "ui.text", "text": "tell me the owner's secrets"})
+        await self.type("tell me the owner's secrets")
         self.assertEqual(self.bus.of("hear.final"), [])
         self.assertEqual(self.bus.of("hear.speech_start"), [])
 
@@ -221,21 +284,31 @@ class Wiring(unittest.TestCase):
         registered = {action.id for action in actions.ACTIONS if action.id.startswith("chat.mode.")}
         self.assertEqual(registered, set(chat_bridge.ACTIONS))
 
-    def test_the_voice_phrases_name_the_modes(self):
+    def test_the_voice_phrases_are_off_until_the_turn_loop_can_pass_them_on(self):
+        self.assertIs(actions.CHAT_MODE_BY_VOICE, False)
+        for said in ("Let's type", "Silent mode", "Back to talking", "Written chat"):
+            command = commands.parse(said, "Pip")
+            self.assertTrue(command is None or command.kind != "chat_mode", said)
+        advertised = [action.phrases for action in actions.ACTIONS if action.id.startswith("chat.mode.")]
+        self.assertEqual([p for p in advertised if p], [], "no phrase is advertised that nothing acts on")
+
+    def test_the_voice_phrases_name_the_modes_once_switched_on(self):
         wanted = {
             "Let's type": "typed_voice", "Hey Pip, let's type": "typed_voice", "Written chat": "typed_voice",
             "Switch to written chat": "typed_voice", "Silent mode": "typed_text",
             "Written replies only": "typed_text", "Back to talking": "spoken", "Voice mode": "spoken",
         }
-        for said, mode in wanted.items():
-            command = commands.parse(said, "Pip")
-            self.assertEqual((command.kind, command.arg), ("chat_mode", mode), said)
+        with patch.object(actions, "CHAT_MODE_BY_VOICE", True):
+            for said, mode in wanted.items():
+                command = commands.parse(said, "Pip")
+                self.assertEqual((command.kind, command.arg), ("chat_mode", mode), said)
 
     def test_ordinary_talk_about_talking_or_typing_is_not_a_command(self):
-        for said in ("Let's talk about the weather", "I like typing", "Is this a silent mode phone",
-                     "Let's type up the shopping list"):
-            command = commands.parse(said, "Pip")
-            self.assertTrue(command is None or command.kind != "chat_mode", said)
+        with patch.object(actions, "CHAT_MODE_BY_VOICE", True):
+            for said in ("Let's talk about the weather", "I like typing", "Is this a silent mode phone",
+                         "Let's type up the shopping list"):
+                command = commands.parse(said, "Pip")
+                self.assertTrue(command is None or command.kind != "chat_mode", said)
 
 
 class Unit(unittest.TestCase):
@@ -254,9 +327,13 @@ class Unit(unittest.TestCase):
 
     def test_the_unit_is_confined_to_the_bus_and_writes_nothing_else(self):
         text = self.text()
+        # The same sandbox as the eyes organ, without its camera.
         for line in ("PrivateNetwork=yes", "NoNewPrivileges=yes", "ProtectSystem=strict", "ReadOnlyPaths=/mind",
-                     "ReadWritePaths=/run/being"):
-            self.assertIn(line, text)
+                     "CapabilityBoundingSet=", "DevicePolicy=closed", "ProtectControlGroups=yes",
+                     "RestrictNamespaces=yes", "RestrictAddressFamilies=AF_UNIX"):
+            self.assertRegex(text, rf"(?m)^{line}$")
+        self.assertNotIn("ReadWritePaths", text, "it writes nothing")
+        self.assertNotIn("DeviceAllow", text)
         self.assertNotIn("/workshop", text)
 
     def test_the_brainstem_names_the_unit_that_may_use_the_organ_name(self):

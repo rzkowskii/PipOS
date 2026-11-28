@@ -643,29 +643,36 @@ closed, or when a guest is here.
 
 ## Talking by typing
 
-The mode chip, the **Previous** key (**F7**) and your voice change how you
-talk to Pip. There are three modes, and every start is **Spoken**:
+The mode chip and the **Previous** key (**F7**) change how you talk to Pip.
+There are three modes, and every start is **Spoken**:
 
 | Mode | You | Pip |
 |---|---|---|
 | **Spoken** | talk | answers out loud |
-| **Written + voice** (say “Let's type” or “Written chat”) | type in the dock | answers out loud, and the words show on screen as they are spoken |
-| **Written only** (say “Silent mode” or “Written replies only”) | type in the dock | answers in writing only, and still does what you ask: timers, lists, settings. It asks "yes or no" on screen, and you answer by typing **yes** or **no** in the dock. A timer or reminder shows as text with one short chime. **Alarms still ring.** |
+| **Written + voice** | type in the dock | answers out loud, and the words show on screen as they are spoken |
+| **Written only** | type in the dock | answers in writing only, and still does what you ask: timers, lists, settings. It asks "yes or no" on screen, and you answer by typing **yes** or **no** in the dock. A timer or reminder shows as text with one short chime. **Alarms still ring.** |
 
-Say “Back to talking” (while the microphone is on), use the chip, or press
-**F7** to cycle: Spoken, Written + voice, Written only, Spoken.
+Use the chip, or press **F7**, to cycle: Spoken, Written + voice, Written
+only, Spoken. Press **Enter** to send a line and **Esc** to leave the box.
 
-In both written modes the microphone is off, so Pip does not listen for
-“Hey Pip” and nothing it hears can start a reply while you type. (The mute
-key is a different thing and is not used.) A guest always gets Spoken, no
-dock and no captions of your words. Written chat works with the voice off or
-broken too; a reply then shows when it is over. Press **Enter** to send a
-line and **Esc** to leave the box.
+The aim in both written modes is that the microphone is off, so Pip does not
+listen for “Hey Pip” while you type (the mute key is a different thing and is
+not used). A guest always gets Spoken, no dock and no captions of your words.
+Written chat is meant to work with the voice off or broken too; a reply then
+shows when it is over.
 
-Not there yet: the Quick Menu and Options have no entry for the mode (use the
-chip, **F7** or your voice), the dock does not answer touch, and a question
-that needs "yes" is plain text on screen with no Yes and No buttons: type
-**yes** or **no** in the dock.
+**Status, 28 November (host tests only, never run on the laptop):** the dock,
+the chip, F7, the typing box, the text shown as Pip speaks, and a guest
+forcing Spoken are built. Silent replies, the microphone going off, spoken
+confirmations turning into text, and timers as text with a chime need the
+conversation code that is not in yet. Until it is, **Written only still
+speaks and the microphone stays on**, so this page describes the intended
+behaviour of the two written modes, not what Pip does today.
+
+Not there yet: switching by voice (“Let's type”, “Silent mode”, “Back to
+talking”), an entry for the mode in the Quick Menu or Options, touch on the
+dock, and Yes and No buttons: a question that needs “yes” is plain text, so
+type **yes** or **no** in the dock.
 
 The older typing screen (**fn+F2**, then **6** or **Y**) still works but
 takes over the whole screen.

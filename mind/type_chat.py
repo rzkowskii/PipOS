@@ -93,8 +93,11 @@ class TypeChat:
     `show(text, tone)` is called for everything the owner should read.
     """
 
-    def __init__(self, bus, *, name="Pip", owner="friend", show=None):
+    def __init__(self, bus, *, name="Pip", owner="friend", show=None, allow=None):
         self.bus = bus
+        # Asked again right before the words go out (after any wait for the
+        # being to wake): False drops the line, e.g. a guest arrived meanwhile.
+        self.allow = allow or (lambda: True)
         self.name = printable(name or "") or "Pip"
         self.owner = owner or "friend"
         self.show = show or (lambda text, tone="text": print(text, flush=True))
@@ -351,6 +354,8 @@ class TypeChat:
             problem = self.blocked()
             if problem:
                 self.show(problem, "warning")
+                return False
+            if not self.allow():
                 return False
             await self._send("hear.speech_start")
             await self._send("hear.final", text=text, speaker=self.owner)

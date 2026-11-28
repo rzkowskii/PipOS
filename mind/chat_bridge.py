@@ -88,7 +88,7 @@ class ChatBridge:
         self.mode = DEFAULT
         self._guest_event = None
         self._published = None
-        self._chat = type_chat.TypeChat(bus, name=name, owner=owner, show=self._chat_says)
+        self._chat = type_chat.TypeChat(bus, name=name, owner=owner, show=self._chat_says, allow=self._may_send)
         self._tasks = set()
         self._listener = None
         self._watcher = None
@@ -159,6 +159,10 @@ class ChatBridge:
         if text:
             await self.bus.send("chat.notice", text=text, tone=tone if tone in ("warning", "muted") else "muted")
 
+    def _may_send(self):
+        """Asked right before a line goes out: still a written mode, no guest."""
+        return self.mode != DEFAULT and not self.guest_here()
+
     async def type_line(self, text):
         """One typed line from the dock. True if it was passed on."""
         if not isinstance(text, str):
@@ -170,12 +174,37 @@ class ChatBridge:
             return False
         return await self._chat.say(text)
 
+    def _line(self, text):
+        """Say one line as its own task: waking the being waits for the state
+        updates that this same receive loop delivers, so it must never be
+        awaited here. The typing chat's lock keeps lines in order."""
+        task = asyncio.get_running_loop().create_task(self._line_task(text))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    async def _line_task(self, text):
+        try:
+            await self.type_line(text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.log(f"typed line failed: {exc!r}")
+
+    async def idle(self):
+        """Wait until every typed line in flight is done (for tests)."""
+        while self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+
     # -- the bus -----------------------------------------------------------
 
     async def handle(self, event):
         topic = event.get("t")
+        # What the being is doing reaches the typing chat first, always, so a
+        # line waiting for it to wake is never waiting on its own task.
+        self._chat.on_event(event)
         if topic == "ui.text":
-            await self.type_line(event.get("text"))
+            self._line(event.get("text"))
         elif topic == "ui.action":
             mode = ACTIONS.get(event.get("id"))
             if mode is not None:
@@ -187,8 +216,6 @@ class ChatBridge:
         elif topic == "app.privacy":
             if type(event.get("guest")) is bool:
                 await self.guest_changed(event["guest"])
-        else:
-            self._chat.on_event(event)
 
     async def start(self):
         await self.bus.start()
@@ -196,7 +223,7 @@ class ChatBridge:
         self._watcher = asyncio.create_task(self._watch())
 
     async def stop(self):
-        for task in (self._listener, self._watcher):
+        for task in (self._listener, self._watcher, *self._tasks):
             if task is not None:
                 task.cancel()
                 try:

@@ -897,3 +897,27 @@ fn guest_flag_set_after_a_guest_report_even_when_the_owner_was_known_before() {
     shell.send(&failed_job("guest")).unwrap();
     assert!(no_reaction_before_marker(&watcher, &mut shell, "m2"), "reacted to a guest's job");
 }
+
+#[test]
+fn the_chat_mode_is_replayed_to_joiners_and_goes_back_to_spoken_when_the_bridge_is_lost() {
+    let stem = Stem::start("chat", "mind");
+    let mut chat = stem.join("chat", &[]);
+    let mut rogue = stem.join("rogue", &[]);
+    let face = stem.join("face", &["chat.mode"]);
+    let typed = Event::new("chat.mode").with("mode", "typed_text").with("input", "typed").with("reply", "text");
+    chat.send(&typed).unwrap();
+    assert_eq!(wait_for(&face, "the written mode", |e| e.topic == "chat.mode"), typed);
+    // Nobody else can change how the owner talks.
+    rogue.send(&Event::new("chat.mode").with("mode", "spoken")).unwrap();
+    assert!(quiet(&face, |e| e.topic == "chat.mode"));
+    // A voice that joins now is told the mode at once.
+    let voice = stem.join("watcher", &["chat.mode"]);
+    assert_eq!(wait_for(&voice, "replayed mode", |e| e.topic == "chat.mode"), typed);
+    // The bridge goes away: everyone hears spoken, and so does the next joiner.
+    drop(chat);
+    let spoken = wait_for(&face, "back to spoken", |e| e.topic == "chat.mode");
+    assert_eq!(spoken.str("mode"), Some("spoken"));
+    assert_eq!((spoken.str("input"), spoken.str("reply")), (Some("voice"), Some("voice")));
+    let later = stem.join("late", &["chat.mode"]);
+    assert_eq!(wait_for(&later, "replayed spoken", |e| e.topic == "chat.mode").str("mode"), Some("spoken"));
+}

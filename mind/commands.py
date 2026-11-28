@@ -393,9 +393,10 @@ def _weather_command(said):
 def parse(text, name="", *, now=None):
     """Return the Command in `text`, or None if it is ordinary conversation."""
     said = _without_address(text, name)
-    for mode, pattern in _CHAT_MODES:
-        if pattern.fullmatch(said):
-            return Command("chat_mode", mode)
+    if actions.CHAT_MODE_BY_VOICE:
+        for mode, pattern in _CHAT_MODES:
+            if pattern.fullmatch(said):
+                return Command("chat_mode", mode)
     if menu := _QUICK_MENU_VISIBILITY.fullmatch(said):
         return Command("quick_menu", "open" if menu[1].casefold() in ("open", "show") else "close")
     if menu := _QUICK_MENU_POSITION.fullmatch(said):
