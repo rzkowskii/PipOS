@@ -50,6 +50,7 @@ Nothing here imports the speech library until an engine is used.
 """
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -1221,6 +1222,9 @@ async def refresh_asr(current, wake, *, state_dir, build=None, root=None, size="
         measure=found is None, now=now, factory=factory, wake_word=wake_word)
     if engine is wake and (found is not None or cached(state_dir, "asr", record_key, now) is None):
         _failed("asr", record_key)     # it would not load or measure; try again later, not every refresh
+    if engine is wake and note:
+        # Said once: the failure is remembered (a slow speed kept, or the back-off), so this is not asked again soon.
+        logging.getLogger("being.voice").info("%s", note)
     return (engine, note) if engine is not wake else None
 
 

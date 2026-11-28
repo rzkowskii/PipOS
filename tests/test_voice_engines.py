@@ -488,6 +488,50 @@ class ChooseAsrTests(unittest.TestCase):
                                                 library=self.library, idle=lambda: idle, now=self.now,
                                                 factory=factory))
 
+    def test_a_fresh_build_with_a_passed_smoke_and_no_record_ends_up_on_moonshine(self):
+        self.enterContext(patch.dict(ve._failures, clear=True))
+        self.enterContext(patch.dict("os.environ", {"BEING_ASR_ENGINE": "auto"}))
+        self.install()
+        built = []
+
+        def factory():
+            built.append(type("Engine", (), {"recognizer": FakeMoonshine(), "vad": FakeMoonshine()})())
+            return built[-1]
+
+        with patch.object(ve, "measure_asr", return_value={"rtf": 0.14, "runs": [0.14], "text": "x"}):
+            wake, result = self.refresh(factory)
+        engine, note = result
+        self.assertIs(engine, built[0])
+        self.assertIn("0.14", note)
+
+    def test_a_failed_smoke_stays_on_pocketsphinx_and_loads_nothing(self):
+        self.enterContext(patch.dict(ve._failures, clear=True))
+        self.enterContext(patch.dict("os.environ", {"BEING_ASR_ENGINE": "auto"}))
+        self.install()
+        built = []
+        with patch.object(ve, "smoke", lambda *args, **kwargs: (False, "SIGILL")):
+            wake, result = self.refresh(lambda: built.append(1))
+        self.assertIsNone(result)
+        self.assertEqual(built, [])
+
+    def test_a_measurement_that_is_too_slow_stays_on_pocketsphinx_and_says_why_once(self):
+        self.enterContext(patch.dict(ve._failures, clear=True))
+        self.enterContext(patch.dict("os.environ", {"BEING_ASR_ENGINE": "auto"}))
+        self.install()
+
+        def factory():
+            return type("Engine", (), {"recognizer": FakeMoonshine(), "vad": FakeMoonshine()})()
+
+        with patch.object(ve, "measure_asr", return_value={"rtf": 0.45, "runs": [0.45], "text": "x"}):
+            with self.assertLogs("being.voice", "INFO") as logs:
+                wake, result = self.refresh(factory)
+            self.assertIsNone(result)
+            self.assertEqual(len(logs.output), 1)
+            self.assertIn("0.45 of real time", logs.output[0])
+            self.assertIn("Using PocketSphinx", logs.output[0])
+            with self.assertNoLogs("being.voice", "INFO"):
+                self.assertIsNone(self.refresh(factory)[1])
+
     def test_refresh_loads_nothing_without_a_recording_and_backs_off_after_a_failure(self):
         self.enterContext(patch.dict(ve._failures, clear=True))
         self.enterContext(patch.dict("os.environ", {"BEING_ASR_ENGINE": "auto"}))

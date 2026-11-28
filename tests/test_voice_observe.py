@@ -432,7 +432,8 @@ class TryMeasurement(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engines.asked, [])
         self.assertTrue(any("never went quiet" in line for line in logs.output))
 
-    async def test_an_installed_boot_waits_for_the_usual_refresh(self):
+    async def test_an_installed_boot_still_on_pocketsphinx_measures_moonshine_alone_early(self):
+        # A fresh install has no speed record: Moonshine waits for one measurement, not for the 900 s refresh.
         engines = FakeEngines([])
         voice = self.voice(engines, try_boot=False)
         voice.mind_ready.set()
@@ -441,7 +442,28 @@ class TryMeasurement(unittest.IsolatedAsyncioTestCase):
             await real_sleep(0.05)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            voice.try_task.cancel()
+            await asyncio.gather(voice.try_task, return_exceptions=True)
+        self.assertEqual([entry[0] for entry in engines.asked], ["asr"], "no voice measurement on an installed boot")
+
+    async def test_an_installed_boot_already_on_moonshine_measures_nothing_early(self):
+        engines = FakeEngines([])
+        voice = self.voice(engines, try_boot=False)
+        voice.mind_ready.set()
+        moonshine = type("Moonshine", (), {"wake": voice.recognizer, "name": "moonshine"})()
+        engines.choose_asr = lambda wake, state_dir=None, wake_word="Hey Pip": (moonshine, None)
+
+        async def adopt(engine, wake):
+            voice.recognizer = engine
+
+        voice.adopt_recognizer = adopt
+        with patch.object(voice_module, "TRY_MEASURE_AFTER", 0):
+            task = asyncio.create_task(voice.choose_engines())
+            await real_sleep(0.05)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         self.assertEqual(engines.asked, [])
+        self.assertIsNone(getattr(voice, "try_task", None))
 
     async def test_a_forced_voice_is_chosen_without_the_speed_rule_and_never_refreshed(self):
         for saved in ("flite", "auto"):

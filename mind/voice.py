@@ -2323,9 +2323,13 @@ class Voice:
         except Exception as error:
             LOG.warning("could not choose the speech recognizer: %r", error)
         startup_log("asr_ready", self.startup_started, phase_s=time.monotonic() - began)
-        if self.try_boot and self.settings_dir is not None:
+        if self.settings_dir is not None and (self.try_boot or self.recognizer is wake):
             # Its own task: waiting for it must never hold up the refresh below.
-            self.try_task = self.spawn(self.try_measurement_logged(wake))
+            # A Try boot measures everything due. Any other boot still on
+            # PocketSphinx (a fresh install has no speed record yet) measures
+            # Moonshine alone, so it does not wait 900 s; the first listening
+            # never waits for it either way.
+            self.try_task = self.spawn(self.try_measurement_logged(wake, only_asr=not self.try_boot))
         while True:
             await asyncio.sleep(ENGINE_REFRESH_SECONDS)
             if self.state not in AT_REST or self.settings_dir is None:
@@ -2338,16 +2342,17 @@ class Voice:
             except Exception as error:
                 LOG.warning("could not re-measure the speech engines: %r", error)
 
-    async def try_measurement_logged(self, wake):
+    async def try_measurement_logged(self, wake, only_asr=False):
         try:
-            await self.try_measurement(wake)
+            await self.try_measurement(wake, only_asr=only_asr)
         except asyncio.CancelledError:
             raise
         except Exception as error:
             LOG.warning("could not measure the speech engines in this Try session: %r", error)
 
-    async def try_measurement(self, wake):
+    async def try_measurement(self, wake, only_asr=False):
         """One measurement early in a Try session, which is too short for the 900 s refresh.
+        With `only_asr`, a boot that is not a Try session measures Moonshine alone.
 
         TRY_MEASURE_AFTER seconds after the mind is ready (mind.ready, or the
         brainstem past waking; or TRY_READY_PATIENCE seconds after this voice
@@ -2370,20 +2375,21 @@ class Voice:
             await asyncio.sleep(TRY_MEASURE_POLL)
             waited += TRY_MEASURE_POLL
         LOG.info("Try session: measuring the speech engines that are due")
-        await self.refresh_engines(wake, idle=quiet)
+        await self.refresh_engines(wake, idle=quiet, only_asr=only_asr)
 
-    async def refresh_engines(self, wake, idle=None):
+    async def refresh_engines(self, wake, idle=None, only_asr=False):
         if self.measuring.locked():
             LOG.info("a speech engine measurement is already under way; not starting another")
             return
         async with self.measuring:
-            await self.measure_engines(wake, idle)
+            await self.measure_engines(wake, idle, only_asr=only_asr)
 
-    async def measure_engines(self, wake, idle=None):
+    async def measure_engines(self, wake, idle=None, only_asr=False):
         # The quiet check for each run, when the caller has a better one than the default.
         options = {"idle": idle} if idle is not None else {}
         refresh = getattr(self.engines, "refresh_tts", None)
-        if refresh is not None and not self.changing_engine() and not self.tts_forced and not self.tts_override:
+        if (refresh is not None and not only_asr and not self.changing_engine() and not self.tts_forced
+                and not self.tts_override):
             current, choice = self.tts, self.tts_choice
             found = await refresh(current, choice, state_dir=self.settings_dir, **options)
             if found is not None:
