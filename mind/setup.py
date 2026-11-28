@@ -351,7 +351,7 @@ def _draw_look(entries, current):
     keyed = dict(zip(actions.LOOK_FIELDS, entries[:-1]))
     sections = (("Face", ("glow", "shape", "strength", "size")),
                 ("Expression", ("brows", "mouth", *look.FACE_LAYERS)), ("Widgets", look.WIDGETS),
-                ("Layout", ("menu_position", "menu_labels", *look.WIDGET_POSITIONS)),
+                ("Layout", ("menu_position", "dock", "menu_labels", *look.WIDGET_POSITIONS)),
                 ("Voice and text", ("captions", "caption_cost", "caption_heard")),
                 ("Behaviour", ("idle_glances",)))
     space = ui.room() - len(entries)

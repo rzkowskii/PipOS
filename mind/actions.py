@@ -32,6 +32,7 @@ GROUPS = {
     "habits": "Phrase habits",
     "guide": "Guide",
     "settings": "Settings",
+    "chat": "Written chat",
 }
 
 _TOPICS = {
@@ -41,6 +42,7 @@ _TOPICS = {
     "daily commands": "everyday", "memory commands": "memory",
     "guest mode": "privacy", "night jobs": "night_jobs", "voice shortcuts": "voice_shortcuts",
     "options": "settings", "phrase habits": "habits",
+    "written chat": "chat", "typing": "chat", "chat": "chat",
 }
 
 _LOOK = {
@@ -54,6 +56,7 @@ _LOOK = {
     **{key: (label.capitalize(), (f"Show your {label}", f"Hide your {label}")) for key, label in FACE_LAYERS.items()},
     **{key: (name.capitalize(), (f"Show the {name}", f"Hide the {name}")) for key, name in WIDGETS.items()},
     "menu_position": ("Quick Menu position", ("Set the Quick Menu to left", "Set the Quick Menu to off")),
+    "dock": ("Quick Menu dock", ("Hide the dock", "Show the dock")),
     **{key: (f"{name.capitalize()} position", (f"Move the {name} to the bottom right",))
        for key, name in WIDGET_POSITIONS.items()},
     **{key: (label[0].upper() + label[1:], (f"Show the {label}", f"Hide the {label}"))
@@ -82,6 +85,13 @@ ACTIONS = (
     Action("keys.brightness", "Screen brightness", "keys", ("Brighter", "Dimmer"), "Brightness keys"),
     Action("keys.volume", "Speaker volume", "keys", ("Louder", "Quieter"), "Volume keys"),
     Action("keys.captions", "Show or hide captions", "keys", keys="fn+F1"),
+    Action("chat.mode.spoken", "Talk out loud", "chat", ("Back to talking",), "The dock's mode chip or F7",
+           owner_only=True),
+    Action("chat.mode.typed_voice", "Written chat, spoken replies", "chat", ("Let's type",),
+           "The dock's mode chip or F7", owner_only=True),
+    Action("chat.mode.typed_text", "Written chat, written replies", "chat", ("Silent mode",),
+           "The dock's mode chip or F7", owner_only=True),
+    Action("chat.mode.next", "Next chat mode", "chat", keys="F7 (the previous-track key)", owner_only=True),
     Action("keys.setup", "Open Setup", "keys", keys="fn+F2"),
     Action("shell.quick_menu.open", "Open Quick Menu", "keys", ("Open the Quick Menu",), "Command+Space or fn+F6",
            owner_only=True, panel=True),

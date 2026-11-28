@@ -29,6 +29,9 @@ CHOICES = {
     "shape": ("soft", "sharp", "round"),
     "size": ("small", "medium", "full"),
     "menu_position": ("left", "center", "right", "off"),
+    # The always-visible Quick Menu dock at the top: "fades" is always there and
+    # shrinks to a pill when idle; "off" hides it (the menu keys still work).
+    "dock": ("fades", "always", "off"),
     **dict.fromkeys(WIDGET_POSITIONS, CORNERS),
 }
 DISPLAY_FLAGS = {
@@ -66,6 +69,7 @@ class Look:
     weather_widget: bool = False
     menu_position: str = "center"
     menu_labels: bool = False
+    dock: str = "fades"
     clock_widget_position: str = "top-left"
     system_widget_position: str = "top-right"
     weather_widget_position: str = "top-right"
@@ -182,6 +186,8 @@ _VOICE = (
     *((field, rf"(?:move|put) (?:the )?{label} (?:to |in |at )?(?:the )?(?P<value>(?:top|bottom)[ -](?:left|right))")
       for field, label in WIDGET_POSITIONS.items()),
     ("menu_position", r"set (?:the )?quick menu to (?P<value>left|center|centre|right|off)"),
+    ("dock", r"(?P<value>show|hide) (?:the )?dock"),
+    ("dock", r"set (?:the )?dock to (?P<value>always|fades|off)"),
     *((field, rf"(?P<value>show|hide) (?:the )?{label.casefold()}") for field, label in DISPLAY_FLAGS.items()),
     ("captions", r"turn (?:the )?captions (?P<value>on|off)"),
     ("idle_glances", r"(?P<value>stop|start) looking around"),
@@ -223,6 +229,8 @@ def spoken_value(key, phrase, current, number_word):
         return phrase.replace(" ", "-")
     if key == "menu_position":
         return "center" if phrase == "centre" else phrase
+    if key == "dock":
+        return {"show": "fades", "hide": "off"}.get(phrase, phrase)
     if key == "shape":
         return "sharp" if phrase == "square" else phrase
     if key == "size":

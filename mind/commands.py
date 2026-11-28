@@ -136,6 +136,19 @@ _NOT_A_FACT = re.compile(r"^(?:when|how|what|why|where|who|whom|whose|which|if|w
 _COMPILED = [(kind, re.compile(rf"^(?:{pattern})$", re.I)) for kind, pattern in _PATTERNS]
 _QUICK_MENU_VISIBILITY = re.compile(r"^(open|show|close|hide) (?:the )?quick menu$", re.I)
 _QUICK_MENU_POSITION = re.compile(r"^(?:move|put) (?:the )?(?:quick )?menu (?:(?:to|on) the )?(left|right|centre|center)$", re.I)
+# How to talk: out loud, typing with spoken replies, or typing with written
+# replies (mind/chat_bridge.py holds the mode; the mind only passes the request).
+_CHAT_MODES = (
+    ("spoken", re.compile(
+        r"^(?:back to (?:talking|voice|speaking)|(?:voice|spoken|talking) mode|"
+        r"(?:switch|go) (?:back )?to (?:voice|talking|spoken chat)|let'?s talk(?: out loud)?|let us talk)$", re.I)),
+    ("typed_voice", re.compile(
+        r"^(?:let'?s|let us) type|(?:switch to|use|start|go to) (?:written|typed|typing) chat|"
+        r"(?:written|typed|typing) chat(?: with (?:spoken|voice) replies)?$", re.I)),
+    ("typed_text", re.compile(
+        r"^(?:(?:switch to|use|start|go to|turn on) )?(?:silent mode|written replies(?: only)?|text only|"
+        r"written chat with written replies|written only)$", re.I)),
+)
 _QUICK_MENU_FOLLOWUPS = {
     f"actually put it on the {said}": position
     for said, position in (("left", "left"), ("right", "right"), ("centre", "center"), ("center", "center"))
@@ -380,6 +393,9 @@ def _weather_command(said):
 def parse(text, name="", *, now=None):
     """Return the Command in `text`, or None if it is ordinary conversation."""
     said = _without_address(text, name)
+    for mode, pattern in _CHAT_MODES:
+        if pattern.fullmatch(said):
+            return Command("chat_mode", mode)
     if menu := _QUICK_MENU_VISIBILITY.fullmatch(said):
         return Command("quick_menu", "open" if menu[1].casefold() in ("open", "show") else "close")
     if menu := _QUICK_MENU_POSITION.fullmatch(said):

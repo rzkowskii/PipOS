@@ -280,6 +280,8 @@ define BEING_INSTALL_INIT_SYSTEMD
 		$(TARGET_DIR)/usr/lib/systemd/system/being-usb-screen-start.service
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-mind.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/being-mind.service
+	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-chat.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/being-chat.service
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-voice.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/being-voice.service
 	$(INSTALL) -D -m 0644 $(BEING_PKGDIR)/being-ears.service \

@@ -1,0 +1,46 @@
+[Unit]
+Description=Being: written chat (the mode, and lines typed on the face)
+# Holds how the owner talks to Pip (out loud, typed with spoken replies, typed
+# with written replies) and passes the lines typed in the face's dock on as the
+# owner's words (mind/chat_bridge.py). It saves nothing: every boot is spoken.
+ConditionPathExists=!/mind/.being-restore-in-progress
+After=being-brainstem.service
+Requires=being-brainstem.service
+StartLimitIntervalSec=0
+
+[Service]
+EnvironmentFile=/etc/being/env
+Environment=PYTHONPATH=/usr/lib/being PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m mind.chat_bridge --bus ${BEING_BUS}
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+# Typing must never take the CPU from the face or the voice.
+Nice=10
+CPUWeight=20
+MemoryHigh=48M
+MemoryMax=64M
+# Reaches only the brainstem's socket; reads the owner's name and the guest
+# latch, writes nothing.
+NoNewPrivileges=yes
+LimitCORE=0
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/being
+ReadOnlyPaths=/mind
+PrivateTmp=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

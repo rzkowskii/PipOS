@@ -39,6 +39,8 @@ class ActionRegistryTests(unittest.TestCase):
                             self.assertEqual(result.kind, "look_current")
                         elif action.id == "keys.volume":
                             self.assertIn(result.kind, ("volume_up", "volume_down"))
+                        elif action.id.startswith("chat.mode."):
+                            self.assertEqual((result.kind, result.arg), ("chat_mode", action.id.removeprefix("chat.mode.")))
                         elif action.id.startswith("shell.quick_menu."):
                             self.assertEqual(result.kind, "quick_menu")
                             self.assertIn(result.arg, ("open", "close", "left", "center", "right"))
