@@ -54,7 +54,9 @@ face: the being's eyes
                                (each tile is WxH if given, else 640x400)
 
 For tests: --hidden shows no window, --exit-after SECS quits by itself, and
---record FILE.png saves what the face looked like at the moment it quit.
+--record FILE.png saves what the face looked like at the moment it quit,
+and --dock-text TEXT types TEXT into the dock's box once a written mode is on
+(for stills of the typing box).
 
 For reviewing motion off-screen:
   face --audition NAME [--intensity 0..1.5] [--gesture NAME]
@@ -140,6 +142,8 @@ struct Args {
     scale: Option<i32>,
     exit_after: Option<f64>,
     record: Option<PathBuf>,
+    /// Typed into the dock's box when a written mode is on (stills only).
+    dock_text: Option<String>,
     script: Option<String>,
     frames: Option<PathBuf>,
     fps: f64,
@@ -203,6 +207,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         scale: None,
         exit_after: None,
         record: None,
+        dock_text: None,
         script: None,
         frames: None,
         fps: 30.0,
@@ -327,6 +332,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
                 a.scale = Some(n);
             }
             "--record" => a.record = Some(PathBuf::from(value("--record")?)),
+            "--dock-text" => a.dock_text = Some(value("--dock-text")?),
             "--exit-after" => {
                 let secs: f64 = value("--exit-after")?.parse().map_err(|_| "--exit-after wants seconds")?;
                 if !secs.is_finite() || secs < 0.0 {
@@ -653,6 +659,7 @@ fn run() -> Result<(), String> {
     let mut options_tex: Option<render::Texture> = None;
     let mut options_painted = None;
     let mut dock_tex: Option<render::Texture> = None;
+    let mut pending_dock_text = args.dock_text.clone();
     let mut dock_painted: Option<(u64, i32)> = None;
     // The picture changed while hidden, so the texture is out of date.
     let mut panel_behind = false;
@@ -1180,6 +1187,11 @@ fn run() -> Result<(), String> {
                 surface_open: shown.is_some() || menu_position.is_some() || options_visible || panel_amount > 0.0,
             };
             link.side.dock.update(gate, prefs.dock(), now);
+            if link.side.dock.capturing() {
+                if let Some(text) = pending_dock_text.take() {
+                    link.side.dock.input(&text, now);
+                }
+            }
         }
         let wants_text = menu_position.is_some() || link.as_ref().is_some_and(|link| link.side.dock.capturing());
         if wants_text != text_input.is_active() {
@@ -1605,8 +1617,10 @@ fn run() -> Result<(), String> {
             night: None,
             level: level_tex.as_ref(),
             level_alpha,
-            dock: None,
-            dock_key: None,
+            dock: dock_tex.as_ref().map(|texture| {
+                (texture, link.as_ref().map_or(1.0, |link| link.side.dock.alpha()))
+            }),
+            dock_key: link.as_ref().and_then(|link| link.side.dock.look_key()),
         };
         let px = unsafe { render::capture(&gl, w, h, || scene.draw(&gl, &mut renderer, w as i32, h as i32, 1))? };
         write_png(path, w, h, &px)?;
