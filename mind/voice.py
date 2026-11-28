@@ -1113,6 +1113,7 @@ class Voice:
         self.state = "waking"
         self.muted = True
         self.typed_input = False  # chat.mode input=typed; never kept across a restart
+        self._typed_logged = False
         self.lid_open = False
         self.lid_closed_seen = False
         self.lid_seq = None
@@ -1267,6 +1268,7 @@ class Voice:
         # A restarted brainstem replays the retained mode only if it kept one: until a
         # chat.mode arrives on the new connection, the owner is spoken to and heard.
         self.typed_input = False
+        self._typed_logged = False
         self.disarm()
         self.clear_prepared_speech()
         self._night_policy.reset()
@@ -1287,6 +1289,14 @@ class Voice:
         if topic == "body.mic_policy" and event.get("breach") is True:
             self.disarm()
             return
+        if topic == "chat.mode" and event.get("input") == "typed" and not self.private_audio:
+            # The screen says "Written only": the microphone shuts here, as the lid does,
+            # not when this event reaches the end of a busy queue (handle() follows).
+            self.typed_input = True
+            self.expecting = False
+            self.dictation_until = 0.0
+            if self.capture is not None and not self.capture.done() and not self.capture.cancelling():
+                self.capture.cancel()
         if topic == "voice.prepare":
             self._night_request = event
         if (topic == "voice.clear_prepared" or topic == "app.privacy"
@@ -1359,14 +1369,16 @@ class Voice:
             await self.sync_capture()
         elif topic == "chat.mode":
             typed = event.get("input") == "typed"
-            if typed != self.typed_input:
-                self.typed_input = typed
+            if typed != self._typed_logged:
+                self._typed_logged = typed
                 LOG.info("microphone %s: the owner %s", "off" if typed else "on again",
                          "types to Pip" if typed else "talks to Pip")
-                if typed:
-                    self.expecting = False
-                    self.apology_owed = False
-                await self.sync_capture()
+            self.typed_input = typed
+            if typed:
+                self.expecting = False
+                self.apology_owed = False
+                self.dictation_until = 0.0
+            await self.sync_capture()
         elif topic == "voice.mute":
             self.muted = event["on"]
             if self.muted:

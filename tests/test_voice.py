@@ -139,6 +139,40 @@ class LidPrivacy(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(voice.typed_input)
             await voice.stop_capture()
 
+    async def test_capture_is_cancelled_before_handle_runs(self):
+        voice = TestVoice()
+        async with asyncio.TaskGroup() as voice.tasks:
+            await voice.event("app.privacy", guest=False)
+            await voice.event("state.changed", state="idle", muted=False)
+            await voice.event("body.lid", closed=False)
+            await asyncio.wait_for(voice.recording_started.wait(), 1)
+            running = voice.capture
+            self.assertFalse(running.done())
+            # What the receive path does on arrival; handle() is still queued behind other work.
+            voice.on_event_received({"t": "chat.mode", "mode": "typed_voice", "input": "typed", "reply": "voice"})
+            self.assertTrue(voice.typed_input)
+            self.assertTrue(running.cancelling() or running.cancelled() or running.done())
+            self.assertEqual(voice.dictation_until, 0.0)
+            # And the queued handle() afterwards keeps it shut.
+            await voice.handle({"t": "chat.mode", "mode": "typed_voice", "input": "typed", "reply": "voice"})
+            self.assertIsNone(voice.capture)
+            voice.connection_lost()
+            await voice.stop_capture()
+
+    async def test_a_guest_is_not_cut_off_by_the_receive_path(self):
+        voice = TestVoice()
+        async with asyncio.TaskGroup() as voice.tasks:
+            await voice.event("state.changed", state="idle", muted=False)
+            await voice.event("body.lid", closed=False)
+            await asyncio.wait_for(voice.recording_started.wait(), 1)
+            voice.guest = True
+            running = voice.capture
+            voice.on_event_received({"t": "chat.mode", "mode": "typed_voice", "input": "typed", "reply": "voice"})
+            self.assertFalse(voice.typed_input)
+            self.assertFalse(running.cancelling())
+            voice.connection_lost()
+            await voice.stop_capture()
+
     async def test_a_restarted_voice_starts_spoken(self):
         self.assertFalse(TestVoice().typed_input)
 
