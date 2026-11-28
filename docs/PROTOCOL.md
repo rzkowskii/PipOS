@@ -200,7 +200,9 @@ Two overlays ride on top: `muted` and `unwell`.
 and the tuned expressions `sad`, `laugh`, `love`, `embarrassed`, `scared`,
 `annoyed`, `smug`, `confused`, `wink`, `bored`, `relieved`, and the shock family
 `shocked`, `startled`, `gasp`, `amazed`, `bewildered`, `speechless`, `horror`,
-`stunned`. `face.express` accepts
+`stunned`, and the warm ladder `pleased`,
+`excited`, `victorious`, `angry`, `disappointed`, `grateful`, `amused`,
+`giggle`, `bashful`, `hopeful`, `encouraging`, `reassuring`. `face.express` accepts
 exactly these names; any other name is ignored. (`dreaming` is a demo-only pose
 and `loading` is the face's own state before the brainstem first answers; neither
 can be requested.) The model still chooses only from its seven tags
