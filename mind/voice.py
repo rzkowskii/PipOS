@@ -261,6 +261,21 @@ NBEST_LIMIT = 10
 # not passed on, unless it is one of SHORT_WAKE_KEPT. A one-breath request
 # ("Hey Pip, thanks") is never dropped this way.
 SHORT_WAKE_WORDS = 3
+# What the recognisers wrote for noise or for a window cut off before the
+# request, never a request in itself: the whole transcript, punctuation aside.
+# Real laptop, 28 Nov 2026: Moonshine wrote "You" for 11 of 14 of the owner's
+# model turns, and "So", "It's" and "Oh my" in the replays; PocketSphinx wrote
+# the short words. Never passed on, after any wake or in the follow-up window.
+NOISE_TRANSCRIPTS = frozenset((
+    "you", "so", "it's", "its", "oh", "oh my", "uh", "um", "hmm", "mm", "ah", "of", "up", "but", "and", "if",
+    "it", "they", "the", "a",
+))
+NAME_ALONE = "the name alone, so still listening"
+# Said with the name, and nothing else: "Hey, kip.", "Pay-pip", "A tip." (the
+# owner saying the name again in the follow-up window, 28 Nov).
+NAME_ONLY_FILLER = frozenset(("hey", "hi", "ok", "okay", "a", "pay", "hay", "oh"))
+# Name-like words that are answers of their own (recognition.name_like takes them).
+NOT_THE_NAME_ALONE = frozenset(("yep", "yes", "yeah", "yup"))
 SHORT_WAKE_KEPT = frozenset(("stop", "cancel", "wait", "never mind", "nevermind", "cancel it", "stop it"))
 # Its own reply is not heard as a follow-up: the microphone reads silence for
 # this long after the last clause ends (five follow-up dictations opened 0.6 to
@@ -1891,13 +1906,16 @@ class Voice:
             if not oneshot:
                 self.without_address(fields)
             await self.second_pass(fields)
-            noise = self.room_noise(fields, oneshot)
+            alone = self.not_a_request(fields)
+            noise = self.room_noise(fields, oneshot) or alone
             if noise is not None:
                 # Not passed on: the brainstem hears that the dictation ended
                 # without words, and nothing is asked again for it.
                 LOG.info("%s; not passed on", noise)
                 await self.send_audio("hear.cancel")
                 await self.dictation_ended("hear.cancel", {}, noise=True)
+                if alone == NAME_ALONE:
+                    self.heard_the_name()
                 return
             fields["speaker"] = self.speaker
             if self.followup and not oneshot:
@@ -1922,10 +1940,76 @@ class Voice:
         if not isinstance(text, str) or not text.strip():
             return
         rest = strip_address(text, self.wake_name)
+        if rest == text:
+            rest = self.without_misheard_name(text)
         if rest != text:
             LOG.info("dictation began with the name; it is left out of the %d-word transcript",
                      len(spoken_words(rest)))
             fields["text"] = rest
+
+    def without_misheard_name(self, text):
+        """`text` without a misheard name and a greeting word or two at its start
+        ("A tip open a terminal", "Pay-pip what time is it"), else `text`.
+        Stricter than the name alone: the name word must be one the name
+        leaves (recognition.name_remnant) or be set apart by a comma, so "hey
+        bob is here" stays."""
+        from .recognition import name_remnant
+
+        words = text.split()
+        for cut in (1, 2, 3):
+            if cut >= len(words):
+                break
+            head = spoken_words(" ".join(words[:cut]))
+            rest = [word for word in head if word not in NAME_ONLY_FILLER]
+            if len(rest) != 1 or not self.name_alone(rest):
+                continue
+            word = rest[0]
+            if not (word == self.wake_name or name_remnant(word, self.wake_name) or word in ("tip", "dip")
+                    or words[cut - 1].endswith(",")):
+                continue
+            remainder = " ".join(words[cut:]).lstrip(" ,.!:;-")
+            if spoken_words(remainder):
+                return remainder
+        return text
+
+    def name_alone(self, rest):
+        """True if `rest`, the words left once greeting words are dropped, is the name or a mishearing of it."""
+        from .recognition import name_like
+
+        return len(rest) == 1 and rest[0] not in NOT_THE_NAME_ALONE and (
+            rest[0] == self.wake_name or name_like(rest[0], self.wake_name)
+            or (self.wake_name == "pip" and rest[0] in ("tip", "dip")))
+
+    def not_a_request(self, fields):
+        """Why a final is noise or the name alone rather than a request, or None.
+
+        A transcript that is all a known noise reading (NOISE_TRANSCRIPTS), or
+        only the name with a greeting word or two ("Hey, kip."), is never passed
+        on: the dictation ends without words and the being keeps listening.
+        Text-free."""
+        text = fields.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return None
+        words = spoken_words(text)
+        if not words:
+            return None
+        if " ".join(words) in NOISE_TRANSCRIPTS:
+            return f"a transcript of {len(words)} word{'' if len(words) == 1 else 's'} that the recogniser writes for noise"
+        if self.name_alone([word for word in words if word not in NAME_ONLY_FILLER]):
+            return NAME_ALONE
+        return None
+
+    def heard_the_name(self):
+        """The name was said alone (in the follow-up window, or again after a
+        wake): what comes next is addressed, as after a plain wake. The
+        dictation stays open for it, past the follow-up window."""
+        self.followup = False
+        self.dictation_until = math.inf
+        self.expecting = True
+        self.apology_owed = True
+        self.plain_wake = True
+        self.missed_sent = False
+        LOG.info("the name alone: listening for the request")
 
     def room_noise(self, fields, oneshot):
         """Why a final looks like the room rather than the owner, or None.

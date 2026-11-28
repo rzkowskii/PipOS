@@ -70,7 +70,9 @@ _PATTERNS = [
     ("time_difference", r"how (?:many hours|far) (?:ahead|behind|ahead or behind) (?:is|are) (?P<x>.+?)"
                         r"(?: (?:from|of|than) (?:here|us|me|you))?"),
     ("time_difference", r"is (?P<x>.+?) ahead (?:of (?:us|me|here) )?or behind(?: (?:us|me|here))?"),
-    ("time", r"(?:what(?:['’]s| is) the time|what time is it|tell me the time|do you know what time it is)(?: now)?"),
+    # "Well time is it": Moonshine's reading of the owner's "what time is it" (laptop, 28 Nov).
+    ("time", r"(?:what(?:['’]s| is) the time|(?:what|well) time is it|tell me the time|do you know what time it is)"
+             r"(?: now)?"),
     ("date", r"(?:what(?:['’]s| is) (?:the|today['’]s) date|what date is it|tell me the date)(?: today)?"),
     ("day", r"what day(?: of the week)? (?:is it(?: today)?|is today)"),
     ("date_tomorrow", r"what(?:['’]s| is) tomorrow['’]s date|what (?:day|date) is (?:it )?tomorrow"),
@@ -141,6 +143,7 @@ _COMMAND_START = re.compile(
     r"|(?:that(?:'s| is)|no[, ]+that|go to|good night|sleep now|time to|(?:take a )?look at)\b"
     r"|what(?:'s| is) (?:the (?:time|date|weather)|today's date|tomorrow's date|it like outside)\b"
     r"|what (?:time|day|date|can you do|could you do|skills|commands|else can you do|can i say|did we do)\b"
+    r"|well time is it\b"
     r"|what reminders do i have\b|(?:read|list|show me) (?:(?:my )?reminders|(?:today|tomorrow)['’]s reminders)\b"
     r"|(?:show|give) me (?:the )?voice commands\b"
     r"|(?:open|show|close|hide|move|put) (?:the )?quick menu\b|(?:move|put) (?:the )?menu\b"
