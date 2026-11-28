@@ -47,7 +47,8 @@ from .reminder_language import ReminderRequest
 from .reminders import RING_GAP, Reminder, mentions, wall_stamp
 from .retention import SECONDS_PER_DAY, load_policy as load_memory_policy
 from .skills import Skills, find_zone, number_words, speakable_date, speakable_time
-from .speech import GRAMMAR, STRICT_GRAMMAR, ClauseSplitter, EchoGuard, TagParser, ThinkFilter, boilerplate, clause_cue
+from .speech import (GRAMMAR, STRICT_GRAMMAR, ClauseSplitter, EchoGuard, TagParser, ThinkFilter, boilerplate, clause_cue,
+                     perception_claim)
 from .storage import atomic_write, sync_directory
 from .try_mode import installed_trial_pending, is_try_boot
 from .weather import SAMPLE_SECONDS as WEATHER_SAMPLE_SECONDS
@@ -367,6 +368,25 @@ def _parrots(reply, heard):
         return contained and len(said) >= 0.6 * len(asked)
     new_words = set(search_terms(reply)) - set(search_terms(heard))
     return contained and len(said) >= 0.8 * len(asked) and not new_words
+
+
+def reply_fault(reply, heard, *, last_try=False):
+    """Why a reply, as far as it has grown, must not be said: "parrot", "perception"
+    (it claims to see or hear something) or "boilerplate", else None.
+
+    It is asked of the whole reply so far, before the first clause is handed to
+    Voice (a fault then asks again) and after each later clause (a fault then
+    stops the reply there). The perception and boilerplate checks can be wrong, so
+    on the last try only a parrot is a fault: a reply is never emptied by them."""
+    if _parrots(reply, heard):
+        return "parrot"
+    if last_try:
+        return None
+    if perception_claim(reply):
+        return "perception"
+    if boilerplate(reply, heard):
+        return "boilerplate"
+    return None
 
 
 def _shared_terms(terms, text):
@@ -5124,6 +5144,7 @@ class Mind:
         raw = []
         failed = None
         parroted = False
+        stopped_late = False
         rest = ""
         started = time.monotonic()
         first_clause = None
@@ -5136,12 +5157,21 @@ class Mind:
         self._register_played(played)
 
         async def out(visible):
-            nonlocal parroted, first_clause
+            nonlocal parroted, first_clause, stopped_late
             raw.append(visible)
             piece = tags.feed(visible)
             for clause in splitter.feed(piece):
-                if not spoken and (_parrots(clause, text) or (not last_try() and boilerplate(clause, text))):
+                # The guards read the reply as it grows: a short first clause
+                # ("Sure,") can pass alone and be followed by boilerplate.
+                fault = reply_fault(" ".join([*spoken, clause]), text, last_try=last_try())
+                if fault and not spoken:
                     parroted = True
+                    return
+                if fault:
+                    # Already speaking: nothing said is taken back; no more is said.
+                    stopped_late = True
+                    log(f"a later clause broke the {fault} guard; the reply stops after {len(spoken)} "
+                        f"clause{'' if len(spoken) == 1 else 's'}")
                     return
                 spoken.append(clause)
                 played.hand(len(spoken), clause)
@@ -5177,6 +5207,7 @@ class Mind:
             attempt += 1
             think, guard, tags, splitter = ThinkFilter(), EchoGuard(body), TagParser(), ClauseSplitter()
             parroted = False
+            stopped_late = False
             raw.clear()
             self._slot_generation += 1
             self._slot_empty = False
@@ -5189,9 +5220,10 @@ class Mind:
                     if self._cancelled:
                         break
                     await out(guard.feed(think.feed(delta)))
-                    if guard.stopped or parroted:
-                        # Reciting its own notes ends the reply; a parrot ends this try.
-                        echoed = echoed or guard.stopped
+                    if guard.stopped or parroted or stopped_late:
+                        # Reciting its own notes ends the reply; a parrot ends this try;
+                        # a guard fault after speech ends the reply where it is.
+                        echoed = echoed or guard.stopped or stopped_late
                         stream.cancel()
                         break
             except CortexError as exc:
@@ -5217,8 +5249,13 @@ class Mind:
                 await out(guard.feed(think.flush()))
                 await out(guard.flush())
                 rest = (tags.flush() + " " + splitter.flush()).strip()
-                if rest and not spoken and (_parrots(rest, text) or (not last_try() and boilerplate(rest, text))):
+                fault = reply_fault(" ".join([*spoken, rest]), text, last_try=last_try()) if rest else None
+                if fault and not spoken:
                     parroted, rest = True, ""
+                elif fault:
+                    stopped_late, echoed, rest = True, True, ""
+                    log(f"the end of the reply broke the {fault} guard; it stops after {len(spoken)} "
+                        f"clause{'' if len(spoken) == 1 else 's'}")
             if not parroted or failed is not None or self._cancelled or self._discard_reply:
                 break
             retries += 1
@@ -5309,7 +5346,7 @@ class Mind:
             content = exact
         else:
             generated = "".join(raw).strip()
-            content = (generated if failed is None and generated and tags.emotion is not None
+            content = (generated if failed is None and generated and tags.emotion is not None and not stopped_late
                        else f"[{emotion}] {said}")
         self.messages.append({"role": "assistant", "content": content, **sources})
         reply_id = self._safe_record("said", said, self.cfg.name, emotion=emotion, reply_to=episode_id, **sources)

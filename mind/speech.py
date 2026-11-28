@@ -73,6 +73,32 @@ def boilerplate(text, heard=""):
     return not (heard and f" {phrase} " in f" {_plain_words(heard)} ")
 
 
+# A small model sometimes describes what it supposedly sees or hears ("I see a
+# quiet blue lamp."), when nothing in its notes says it can: it has no eyes or
+# ears of its own and only code tells it what the camera or microphone found.
+# Only a claim with something seen or heard counts; "I see." and "I hear you."
+# are ordinary talk, and a refusal ("I can't see the sea") is honest.
+_PERCEPTION = re.compile(
+    r"\bI(?:'m| am)?\s+(?:(?:can|could|just|now)\s+)?(?:see|seeing|hear|hearing|smell|smelling|watch|watching)"
+    r"\s+(?:a|an|some|something|the|those|these|this)\b"
+    r"(?!\s+(?:point|difference|idea|problem|reason|answer|pattern|connection|logic|appeal|issue)\b)",
+    re.I,
+)
+_REFUSAL = re.compile(r"\b(?:can't|cannot|can not|couldn't|don't|do not|not|never|unable to)\b", re.I)
+
+
+def perception_claim(text):
+    """True when a reply says it sees, hears or smells something. A sentence that
+    also says it cannot ("I can't see the sea, but I hear the waves") is split
+    at the comma: the claim after the refusal still counts."""
+    for sentence in re.split(r"(?<=[.!?])\s+", text.replace("\u2019", "'")):
+        for part in re.split(r",\s*(?:but|and|yet)?\s*", sentence):
+            match = _PERCEPTION.search(part)
+            if match and not _REFUSAL.search(part[:match.start()]):
+                return True
+    return False
+
+
 class ThinkFilter:
     """Drops <think>...</think> from a stream, even when tags arrive in pieces."""
 
