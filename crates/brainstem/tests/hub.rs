@@ -921,3 +921,30 @@ fn the_chat_mode_is_replayed_to_joiners_and_goes_back_to_spoken_when_the_bridge_
     let later = stem.join("late", &["chat.mode"]);
     assert_eq!(wait_for(&later, "replayed spoken", |e| e.topic == "chat.mode").str("mode"), Some("spoken"));
 }
+
+#[test]
+fn the_mind_can_report_played_clauses_only_while_replies_are_written() {
+    let stem = Stem::start("mplayed", "mind");
+    let mut mind = stem.join("mind", &[]);
+    let mut chat = stem.join("chat", &[]);
+    let watcher = stem.join("watcher", &["say.played"]);
+    let receipt = |seq: u64| Event::new("say.played").with("reply", "0123456789abcdef").with("seq", seq);
+
+    // Spoken (no mode yet, then an explicit spoken one): the mind's receipt is dropped.
+    mind.send(&receipt(1)).unwrap();
+    chat.send(&Event::new("chat.mode").with("mode", "typed_voice").with("input", "typed").with("reply", "voice")).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    mind.send(&receipt(2)).unwrap();
+    assert!(quiet(&watcher, |e| e.topic == "say.played"), "the mind may not report playback of speech");
+
+    // Written replies, and no voice organ at all: the mind's receipts stand.
+    chat.send(&Event::new("chat.mode").with("mode", "typed_text").with("input", "typed").with("reply", "text")).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    mind.send(&receipt(3)).unwrap();
+    let played = wait_for(&watcher, "a written clause reported", |e| e.topic == "say.played");
+    assert_eq!(played.data.get("seq").and_then(|v| v.as_u64()), Some(3));
+
+    // Nobody else can, in any mode.
+    chat.send(&receipt(4)).unwrap();
+    assert!(quiet(&watcher, |e| e.topic == "say.played"));
+}

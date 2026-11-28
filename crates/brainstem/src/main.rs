@@ -171,7 +171,10 @@ fn allowed_from(topic: &str, from: &str, hardware_body: bool) -> bool {
     }
     // Which clauses of a reply really played decides what Pip remembers
     // saying (mind/played.py), so only the voice may report it, everywhere.
-    if topic == "say.played" && from != "voice" {
+    // The one exception is written replies: with no speech to play (and maybe
+    // no voice at all) the mind reports its own text clauses as shown
+    // (`played_report_allowed` checks the connection and the chat mode).
+    if topic == "say.played" && !matches!(from, "voice" | "mind") {
         return false;
     }
     match topic {
@@ -543,6 +546,17 @@ fn lid_changed(
     pending.push((reading, None));
     for event in machine.set_env(body.lid(), body.dark(), body.night(), now) {
         pending.push((event, None));
+    }
+}
+
+/// May this `say.played` stand? The current voice's always; the current mind's
+/// only while the owner is in written-replies mode (`chat.mode` `reply: "text"`),
+/// when it reports its own clauses as shown because nothing is played.
+fn played_report_allowed(from: &str, current_voice: bool, current_mind: bool, chat_mode: Option<&Event>) -> bool {
+    match from {
+        "voice" => current_voice,
+        "mind" => current_mind && chat_mode.and_then(|ev| ev.str("reply")) == Some("text"),
+        _ => false,
     }
 }
 
@@ -1082,7 +1096,10 @@ fn main() {
                             "say.level" if ev.data.contains_key("face_cue")
                                 && !(from == "voice" && hub.active("voice") == Some(id)) => {}
                             // A playback receipt from a voice connection that has been replaced.
-                            "say.played" if hub.active("voice") != Some(id) => {}
+                            // (and one from the mind outside written replies, or from a replaced mind)
+                            "say.played" if !played_report_allowed(
+                                &from, hub.active("voice") == Some(id), hub.active("mind") == Some(id), chat_mode.as_ref(),
+                            ) => {}
                             "say.request" if ev.bool("private") == Some(true) && from != "mind" => {}
                             "say.request" if ev.data.contains_key("camera_seq")
                                 && !(from == "mind" && hub.active("mind") == Some(id)
@@ -1518,7 +1535,9 @@ fn only_the_voice_reports_which_clauses_played() {
     // What Pip remembers saying rests on these receipts (mind/played.py).
     for hardware in [true, false] {
         assert!(allowed_from("say.played", "voice", hardware));
-        for organ in ["mind", "face", "keyboard", "console", "hands", "eyes", "bodycare", "rogue"] {
+        // The mind may only for written replies; played_report_allowed decides.
+        assert!(allowed_from("say.played", "mind", hardware));
+        for organ in ["face", "keyboard", "console", "hands", "eyes", "bodycare", "chat", "rogue"] {
             assert!(!allowed_from("say.played", organ, hardware), "{organ} may not report playback");
         }
     }
@@ -1610,5 +1629,25 @@ fn written_chat_topics_have_one_sender_each() {
     }
     for topic in ["hear.sound", "hear.missed", "key.mute", "key.attend", "see.presence", "say.played"] {
         assert!(!allowed_from(topic, "chat", true), "{topic}");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn the_mind_reports_played_clauses_only_for_written_replies() {
+    let mode = |reply: &str| Event::new("chat.mode").with("mode", "x").with("input", "typed").with("reply", reply);
+    let text = mode("text");
+    let voice = mode("voice");
+    // The current voice always; a replaced voice never.
+    assert!(played_report_allowed("voice", true, false, None));
+    assert!(!played_report_allowed("voice", false, true, Some(&text)));
+    // The mind: only the current connection, only while replies are written.
+    assert!(played_report_allowed("mind", false, true, Some(&text)), "works with the voice organ down");
+    assert!(!played_report_allowed("mind", false, true, Some(&voice)), "not while Pip speaks aloud");
+    assert!(!played_report_allowed("mind", false, true, None), "not before any mode is known");
+    assert!(!played_report_allowed("mind", false, false, Some(&text)), "not from a replaced mind");
+    // Nobody else, in any mode.
+    for organ in ["face", "chat", "keyboard", "hands", "rogue"] {
+        assert!(!played_report_allowed(organ, true, true, Some(&text)), "{organ}");
     }
 }
