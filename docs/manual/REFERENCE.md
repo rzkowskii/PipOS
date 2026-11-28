@@ -1,7 +1,10 @@
 <!--
 doc: reference
-verified: 2026-11-24T22:17
-sources: mind/commands.py mind/reminder_language.py mind/turn.py mind/everyday.py mind/skills.py mind/profile.py mind/setup.py mind/care.py mind/local_menu.py mind/initiative_setup.py mind/retention.py mind/backup.py mind/dream_journal.py mind/network_enforce.py mind/network_policy.py mind/initiative.py mind/voice.py mind/voice_engines.py mind/mic_channel.py mind/mic_port.py mind/try_mode.py mind/tts.py mind/eyes.py mind/__main__.py crates/face/src/main.rs crates/face/src/keys.rs crates/brainstem/src/main.rs crates/brainstem/src/battery.rs crates/brainstem/src/kbd_light.rs mind/keys.py mind/local_screen.py os/board/beingos/slots.sh crates/bodycare/src/main.rs sim/body.py lab/vm.py lab/build.sh lab/cable.sh scripts/run-sim.sh os/package/being/being.env os/package/being/being-camera os/package/being/50-being.preset os/package/cortex/being-cortex.service os/package/cortex/being-dream-cortex.service os/board/beingos/try-grub.cfg os/board/beingos/try-image.sh config/being.json mind/wifi.py mind/reminders.py os/package/being/being-usb-logs os/package/being/being-hardware-report mind/diag.py mind/diag_report.py mind/diag_sound.py mind/diag_speech.py mind/diag_codec.py mind/diag_system.py os/package/being/pip-diag os/package/being/being-cable-link.service os/package/being/being-cable-ssh.service os/package/being/being-cable-workbench.service os/package/being/cable/sshd_config
+verified: 2026-11-28T13:22
+sources: mind/commands.py mind/reminder_language.py mind/turn.py mind/everyday.py mind/skills.py mind/profile.py mind/setup.py mind/care.py mind/local_menu.py mind/initiative_setup.py mind/retention.py mind/backup.py mind/dream_journal.py mind/network_enforce.py mind/network_policy.py mind/initiative.py mind/voice.py mind/voice_engines.py mind/mic_channel.py mind/mic_port.py mind/try_mode.py mind/tts.py mind/eyes.py mind/__main__.py crates/face/src/main.rs crates/face/src/keys.rs crates/brainstem/src/main.rs crates/brainstem/src/battery.rs crates/brainstem/src/kbd_light.rs mind/keys.py mind/local_screen.py os/board/beingos/slots.sh crates/bodycare/src/main.rs sim/body.py lab/vm.py lab/build.sh lab/cable.sh scripts/run-sim.sh os/package/being/being.env os/package/being/being-camera os/package/being/50-being.preset os/package/cortex/being-cortex.service os/package/cortex/being-dream-cortex.service os/board/beingos/try-grub.cfg os/board/beingos/try-image.sh config/being.json mind/wifi.py mind/reminders.py os/package/being/being-usb-logs os/package/being/being-hardware-report mind/diag.py mind/diag_report.py mind/diag_sound.py mind/diag_speech.py mind/diag_codec.py mind/diag_system.py os/package/being/pip-diag os/package/being/being-cable-link.service os/package/being/being-cable-ssh.service os/package/being/being-cable-workbench.service os/package/being/cable/sshd_config mind/look.py mind/actions.py mind/continuity.py mind/care_habits.py
+mind/dream_policy.py mind/mood.py mind/speaker_eq.py mind/vision_describer.py mind/context_storage.py
+crates/face/src/quick_menu.rs crates/face/src/options.rs os/package/being/being-ears.service
+os/package/being/being-context-storage.service os/package/cortex/being-model-check.service
 -->
 
 # PipOS reference
@@ -27,28 +30,37 @@ source file it comes from. When that file changes, check the table.
 ## Spoken commands
 
 Sources: `mind/commands.py`, `mind/reminder_language.py`, `mind/turn.py`,
-`mind/skills.py`, `mind/everyday.py`
+`mind/skills.py`, `mind/everyday.py`, `mind/look.py`, `mind/actions.py`,
+`mind/continuity.py`
 
 Matching works like this:
 
 - It is case-insensitive and needs the **whole utterance** to match.
 - A leading or trailing "please" is ignored. So is an address such as
   "Pip," or "hey Pip".
-- An utterance is routed in this order: guest mode on or off (which
-  goes ahead even while a question is open); an answer to something Pip
-  asked (a forget offer, a yes-or-no question, a ring); the workshop; the commands below; the everyday skills; greetings and the
-  morning brief; then the language model.
+- An utterance is routed in this order: guest mode on or off and the
+  camera and dream permission commands (which go ahead even while a
+  question is open); an answer to something Pip asked (a forget offer, a
+  yes-or-no question, a ring); the owner's saved habit and shortcut
+  controls; the workshop; the commands below; the everyday skills;
+  greetings and the morning brief; then the owner's saved habits and
+  shortcut phrases; then the language model. A turn answered by a saved
+  habit or shortcut logs the route `everyday.habits` or
+  `everyday.intent_shortcuts`.
 - Commands are always answered from code, never by the model.
 - In the 20 s follow-up window without Pip's name, commands that store or
   change something (remember, reminders and alarms, snooze, set the time,
-  forget, correct, guest mode, sleep, volume, time zone, weather city) are
-  ignored as room talk, unless the utterance is a question (it ends in a
-  question mark or starts with a word such as "can", "could" or "what").
-  Everyday skills and questions are still answered.
+  forget, correct, guest mode, camera and dream permissions, sleep,
+  volume, time zone, weather city, Quick Menu and Options, appearance,
+  saved threads) are ignored as room talk, unless the utterance is a
+  question (it ends in a question mark or starts with a word such as
+  "can", "could" or "what"). Everyday skills and questions are still
+  answered.
 
 The everyday skills (`mind/everyday.py`, in this order: read-back, sums,
-units, lists and notes, play, body talk, device, doctor, action log,
-diary, voice engines) have their phrases in the user guide's
+units, lists and notes, play, body talk, device, removable media, keep,
+doctor, action log, diary, ponder, voice engines, care routes, library,
+night speech) have their phrases in the user guide's
 [Things you can say](USER-GUIDE.md#things-you-can-say).
 
 ### Clock and calendar
@@ -88,6 +100,7 @@ permission for web lookups in setup."
 | "Wake me up at 7" / "Set an alarm for 6:30 tomorrow" / "Set an alarm for ten minutes" | Alarm. Rings in quiet hours |
 | "Set a timer for five minutes" / "Start a 10 minute timer" / "How long left on my timer?" | Countdown |
 | "What are my reminders?" / "List my timers" | Reads up to five pending items with their numbers |
+| "What reminders do I have today?" / "Read my reminders for tomorrow" / "Read today's reminders" / "Show me tomorrow's reminders" | Reads up to five pending reminders (not alarms or timers) due on that local day, each with its number and time, and says when more are pending. It changes nothing. "You have no pending reminders for today." when there are none. While the date is in doubt it says so and asks for the time first |
 | "Cancel reminder one" / "Cancel the timer" / "Delete the reminder to call Mum" | Removes an item by number or by task |
 | "Snooze" / "Snooze for 5 minutes" / "Five more minutes" | Puts off what is ringing (10 minutes by default, at most 120) |
 | "Okay" / "Thanks" / "Got it" / "Stop the alarm" / "I'm up" | Stops what is ringing. Bare "okay" and "thanks" count only while something rings |
@@ -117,15 +130,18 @@ when the clock is set.
 | "What do you remember about my orchid?" / "Do you remember what I said about …?" | Searches facts first ("You told me: …"). Then it searches the conversation archive and quotes the single best match with its date ("On November 20, 2026, you said: …") |
 | "What did I say about the café?" / "What have I told you about …?" | Searches only what you said |
 | "What did you say about …?" | Searches only what Pip said |
-| "What did we talk about last Friday?" / "… on 2026-11-20" | Searches a single day in your time zone |
+| "What did we talk about last Friday?" / "… on 2026-11-20" | Searches a single day in your time zone. A remembered sentence that states one day ("today", "yesterday", "tomorrow" or a date such as 2026-12-01) is also filed under that day, so it is found by a search for the day it is about |
 | "What did we talk about yesterday?" / "What did we do on Monday?" | Answered from the day record the night shift writes |
 | "What did we talk about?" / "What have we done today?" | Today's conversation |
 | "What do you remember about me?" / "Do you remember me?" | What it keeps about the owner |
 | "That's wrong, I called my orchid Silverleaf" | Replaces the last recalled or remembered item. Give the **full corrected wording** |
 | "Forget that" | Forgets the utterance just heard, or the item just recalled or remembered, and any reminder holding those words |
 | "Forget about my sister's birthday" / "Forget everything from yesterday" | Pip says how many items match, then waits up to 45 s for **"yes"**. Saying "no", "never mind" or "forget it" keeps everything. Reminders holding the forgotten words are cancelled too |
-| "Forget everything" | Owner only, not in guest mode. Waits 15 s for a plain yes. Erases every fact and archived sentence, the day records, lists and notes, the jokes record, the action log, reminders, alarms, timers and greeted days, and the model's cache |
+| "Forget everything" | Owner only, not in guest mode. Waits 15 s for a plain yes. Erases every fact and archived sentence, the day records, lists and notes, the jokes record, the action log, the overnight body readings, saved shortcut choices and habit suggestions, saved threads, reminders, alarms, timers and greeted days, and the model's cache. If you keep files, the question says whether they stay or go, following the keep's own forget setting |
 | "Never mind" / "Forget it" | Nothing is deleted |
+| "Pick this up later" / "Keep this thread open" | Owner only, persistent memory. Bookmarks the recent conversation as the open thread |
+| "What were we working on?" / "Pick up our thread" / "Resume our thread" | Says where the open thread was left, quoting your words. "There isn't an open thread." when there is none |
+| "Close this thread" | Closes the open thread |
 | "Start guest mode" / "Don't remember this" | Starts a private RAM conversation. Your archive, private core, reminders and network requests are unavailable |
 | "End guest mode" | Clears the guest conversation and returns to normal |
 
@@ -145,11 +161,41 @@ without Pip's name.
 | "How old are you?" / "When were you born?" | Its age and wake count from the life record |
 | "How is your battery?" / "How much charge do you have?" / "How long will your battery last?" | Its battery percentage, charging or plugged-in state, and time left when known |
 | "What can you do?" / "What else can you do?" / "What can you do with lists?" / "Help" | A short tour, or one group of skills |
+| "What can I say?" / "Show me the voice commands" | The voice-command help, by group: Appearance, Screen apps, Calculator, Keys, Daily commands, Maintenance, Memory commands, Guest mode, Night jobs, Phrase habits, Guide and Settings. "What can you do about *group*?" opens one group. The same list is under **V** in Setup |
+| "What are you allowed to do?" / "What permissions do you have?" | Says what Pip may use now, from the owner's permission settings (private) |
+| "You can use your camera" / "Turn the camera on" / "You can dream tonight" | Owner only, never in guest mode. Pip does not switch these on by voice: it opens a confirmation on the keyboard screen (**E** for the camera, **Y** for tonight's dream, which needs persistent memory and a trusted date), and says so |
+| "Stop watching" / "Turn the camera off" / "Stop dreaming" | Owner only. Switches the permission off at once and says so |
 | "Go to sleep" / "Good night" | "Okay. Good night." Between 5 a.m. and 6 p.m. it says "Okay. I'll rest my eyes for a while." instead. Pip then sleeps until you say the wake phrase (not while muted) or open the lid |
 | "Are you alive?" / "Are you sentient?" / "Do you have feelings?" / "What are you?" | A fixed, honest answer from code |
-| "Can you see me?" / "What do you see?" / "Look at this" | Pip can report a recent face detection while the camera is allowed. Face identification and object descriptions are pending. The reply is private. |
+| "Can you see me?" | Reports a recent face detection while the camera is allowed. The reply is private |
+| "What do you see?" / "Look at this" / "Can you see this?" | Owner only, camera allowed. Asks the eyes for one small frame and says a short local description of it, privately. If the camera is off it says it cannot use its camera; if no description comes back (for example the optional signed vision pack is missing) it says what the face detection can tell: "I can't make out objects yet." |
 | "What did you dream about?" | From its dream journal only |
 | "Speak up" / "Be quieter" / "Set your volume to 5" | Volume, through the voice organ |
+
+### Appearance and the Quick Menu
+
+Owner only, and not in guest mode. A change is saved in `look.json` and
+applies at once; Pip answers with what it saved. The same settings are in
+Options on the face and under **L** in Setup.
+
+| Say | Sets |
+|---|---|
+| "Make your eyes blue" / "Pick a random colour" | Eye colour: cyan, blue, teal, mint, violet, green, amber, red, rose, yellow or white (aqua, purple, orange, pink, gold and grey are accepted) |
+| "Make your eyes round" / "sharp" / "soft" | Eye shape |
+| "Set your glow to seventy percent" / "Make your eyes brighter" / "dimmer" | Glow strength, 40 to 160 percent; brighter and dimmer move it 20 points |
+| "Make your face smaller" / "Set your face size to full" | Face size: small, medium or full |
+| "Show your brows" / "Hide your mouth" / "Show your emotes" / "Show your eye details" / "Show your mood colour" | The optional face layers (all off at the factory) |
+| "Show the clock widget" / "Hide the system widget" / "Show the weather widget" | The corner widgets. The weather widget appears in Internet mode |
+| "Move the clock widget to the bottom right" | A widget's corner: top left, top right, bottom left or bottom right |
+| "Show the captions" / "Show the route badge" / "Show the heard line" / "Show the Quick Menu labels" / "Hide the idle glances" | Captions and their two extras, the Quick Menu's labels, and the idle glances |
+| "Set the Quick Menu to off" | Turns the Quick Menu shortcut off. "Open the Quick Menu" brings it back |
+| "What is your current look?" | Says the current look and which layers are on |
+
+| Say | Behaviour |
+|---|---|
+| "Open the Quick Menu" / "Show the Quick Menu" / "Close the Quick Menu" | Opens or dismisses it |
+| "Move the Quick Menu to the left" / "Put the menu on the right" / "Move the Quick Menu to the center" | Moves it. Right after that, "Actually put it on the left" moves it again |
+| "Open the options" / "Close the options" | Opens or closes the Options surface |
 
 ### Greetings (local replies, no model)
 
@@ -196,7 +242,8 @@ battery level in a private conversation." A guest cannot set the clock.
 
 ## Keys and touch
 
-Sources: `crates/face/src/main.rs`, `crates/face/src/keys.rs`, `mind/keys.py`,
+Sources: `crates/face/src/main.rs`, `crates/face/src/keys.rs`,
+`crates/face/src/quick_menu.rs`, `crates/face/src/options.rs`, `mind/keys.py`,
 `crates/brainstem/src/kbd_light.rs`, `os/package/being/being-console.c`,
 `mind/local_screen.py`, `mind/voice.py`
 
@@ -210,11 +257,12 @@ external keyboard without media keys sends them as before.
 | **Esc** | Stop the current reply, including audio already playing (`key.interrupt`). Pip remembers only the part that played | Leaves the typing chat |
 | **M** | Mute or unmute the microphone (`key.mute`). A letter while the terminal has the keyboard | Typed as text |
 | **fn+F10** | Mute or unmute the microphone | Mute (for the **P** speaker preview) |
-| **fn+F1** | Show or hide captions and the route badge. Off by default and never saved | — |
+| **fn+F1** | Show or hide captions and the route badge. Pip's words appear as the voice plays them (`say.played`). Off by default. The key changes it for now; the **Captions** setting (Options, or "Show the captions") is the saved choice, and the route badge and the heard line have settings of their own | — |
 | **Shift+fn+F1** | Show or hide the hardware and service health overlay | — |
 | **fn+F9** | Recover the face when the lid reading is unknown (`key.panel_recover`) | Same |
 | **fn+F2**, or **Mission Control** (F3) | Open setup on an installed Pip, or the start menu in Try | — |
 | **fn+F3** | While the workshop terminal has the keyboard: put it away (hands' control word `\0f3`) | — |
+| **fn+F6**, or **Command+Space** | Open or close the Quick Menu (see below). Not offered to a guest, while the eyes are asleep or the panel is dark, or when the Quick Menu setting is off | — |
 | **Brightness** (F1, F2) | The panel, about a sixteenth a press, never below 5 % (`key.brightness`, then `being.brightness` with `by: 6` and `req: "key"`, which `body.brightness` carries back so a spoken "brighter" never takes a key's answer). Held, it keeps stepping | Same, without the bar (see below) |
 | **Launchpad** (F4) | Open the workshop terminal; pressed again, put it away, then show it again (`key.apps`). Nothing is said; a refusal (a guest, no hands) is logged | — |
 | **Keyboard light** (F5, F6) | The keyboard's backlight (applesmc `smc::kbd_backlight`) in sixteenths (`key.kbd_light` with `dir` `down` or `up`, then `being.kbd_light`). A keyboard's own light toggle key sends `dir: "toggle"`: off, and back on at the level it had. It goes out while the panel is dark and comes back with it | Same, without the bar |
@@ -248,6 +296,21 @@ Mission Control. SDL has no code for Mission
 Control and Launchpad, so the face reads those two from the keyboard's
 event device itself.
 
+**Quick Menu and Options.** The Quick Menu lists the workshop's apps
+(Terminal, Monitor, Clock, Calculator, Lists, Memory, Journal, Mind, and
+Look it up when a lookup is possible) with Options, Help and Care. The arrow
+keys, **Home** and **End** move the selection, **Return** or **Space** opens
+it, **Tab** switches between a grid and a list, **/** searches, and **Esc**
+closes it (or ends a search first). Options is a keyboard surface under the
+docked eyes: **Up** and **Down** choose a setting, **Left**, **Right**,
+**Return** or **Space** change it, **Tab** and **Shift+Tab** move between its
+sections (Look, Layout, Voice and text, Behaviour and a help page that
+**Page Up** and **Page Down** scroll), and **Esc** closes it, back to the Quick
+Menu when it was opened from there. F1, F2, F9 and F10 keep their meaning
+while either is open. Each change is a request to the mind, which saves it
+and shows it. The same settings can be spoken ([Appearance and the Quick
+Menu](#appearance-and-the-quick-menu)).
+
 On the laptop Try stick, the GRUB menu (5 s timeout) offers these entries
 (the first stick, of 23 November, has only the first three):
 
@@ -268,7 +331,8 @@ include these seven entries. The cable entries also add `being.cable=1 being.voi
 ## On-screen menus
 
 Sources: `mind/local_menu.py`, `mind/setup.py`, `mind/care.py`,
-`mind/initiative_setup.py`
+`mind/care_habits.py`, `mind/initiative_setup.py`, `mind/look.py`,
+`mind/actions.py`
 
 ### USB start menu (Try image)
 
@@ -286,6 +350,13 @@ Sources: `mind/local_menu.py`, `mind/setup.py`, `mind/care.py`,
 
 Left for 240 s, the menu returns to the eyes.
 
+On a [cable development stick](#cable-development-build) or a diagnostic
+image (below), **Install** and **Restore** say so and refuse. **Restore**
+lists the files on the backup stick (FAT, exFAT or ext4, read-only; on an
+installed appliance in a private, short-lived mount) and has you pick the
+backup, then the identity file that unlocks it. When the Try session has a
+changed appearance, **Install** asks whether to keep it.
+
 ### Setup ("Make it yours"), from F2 or `being-setup`
 
 | Key | Setting |
@@ -299,38 +370,49 @@ Left for 240 s, the menu returns to the eyes.
 | 7 | Surprise me: a random name, voice and personality |
 | 8 | Network: Offline, Local network or Internet. Also covers web lookups and the time server (installed system only) |
 | 9 | Quiet hours and announcements: 1 automatic reminders and timers, 2 daily greetings, 3 quiet-hours window, 4 clear quiet hours, 5 morning brief, K save, Q discard |
+| L | Look: eye colour, shape, glow strength and face size, the optional layers, widgets, captions and the Quick Menu's place (the same settings as Options and the [spoken commands](#appearance-and-the-quick-menu)). `being-setup --look` opens it directly |
+| V | Voice commands: the phrases and keys, by group (the same list as "What can I say?") |
 | N | Natural or original voice: 1 automatic, 2 natural (Piper), 3 original (Flite); N and O play samples, M measures the natural voice |
 | C | Care: senses and memory (below). On the appliance only |
 | A | Volume and microphone: louder, quieter, set volume, test sound, microphone gain and a 4 s level meter. On the appliance only |
 | T | Time zone. On the appliance only |
 | B | Back up to a USB stick. Installed system only |
-| U | Update from a USB stick. Installed system only |
+| U | Update from a USB stick. Installed system only. The entry reads **System update** when an update source is configured (`/etc/being/update-source.json`, or `network/update-source.json` in `/mind`). For a USB update it shows the running and the new version, installs into the spare system copy, and, with a backup key, first saves an encrypted recovery checkpoint on the disk; without a key it says the update runs without one |
 | Y | Talk to Pip by typing. Installed system only |
 | P | Play a sample |
 | K | Keep (asks to confirm) |
 | Q | Cancel |
 
 On an installed system, profile changes (keys 1–7) apply after a reboot.
-Network and announcement changes apply at once. Care's memory mode and
+Network, announcement and look changes apply at once. Care's memory mode and
 time zone restart the mind. In Try, everything applies immediately.
+
+**B** asks once to enroll the stick as the backup stick, by its filesystem
+identity, and a later backup to a different stick asks before replacing it.
+Once a stick is enrolled, backups made by voice and by the night shift go only
+to that stick (`backup-media.json`).
 
 ### Care ("Senses and memory")
 
 | Key | Page |
 |---|---|
-| 1 | Camera on or off (runs `being-camera`) |
-| 2 | Dreams: 1 at night only (lid closed, on power, midnight to 5 a.m.), 2 whenever the lid is closed on power, 3 stop |
-| 3 | Memory: persistent, explicit-only, session-only, or 4 forget conversations after N days |
+| 1 | Camera on or off (runs `being-camera`). A spoken "You can use your camera" opens this page with **E** (Enable camera) |
+| 2 | Dreams: 1 at night only (lid closed, on power, midnight to 5 a.m.), 2 whenever the lid is closed on power, 3 stop. After a spoken "You can dream tonight" and a keyboard **Y** the row reads **Tonight**: one night's permission, which needs persistent memory and a trusted date |
+| 3 | Memory: persistent, explicit-only, session-only, or 4 forget conversations after N days. Leaving persistent mode also clears the habit observations |
 | 4 | What I remember: the newest 40 facts; forget one by number |
+| A | Habits: the saved phrase, time and event habits, with their triggers and steps |
+| C | Curiosity on or off. Off at the factory. When on, Pip may ask one gentle question after a conversation you start, at most once on a trusted local day, and keeps your answer only if you then say yes |
 | 5 | Dream journal: the newest 12 entries |
-| 6 | Date and time: set the clock (also the hardware clock), or choose the zone |
+| 6 | Date and time: set the clock. On an installed system a full date and time also sets the hardware clock; a time alone is refused while the date is uncertain. In Try only the system clock is set |
 | 7 | Time zone |
 | 8 | Workshop on or off |
 | 9 | Network: join Wi-Fi (scan or hidden), wired Ethernet on or off, forget Wi-Fi. Installed system only |
-| P | Permissions: view the owner settings for camera, network, workshop, announcements and dreams |
+| P | Permissions: what Pip may use now (camera, network, workshop, announcements and dreams), with the lid, guest mode and quiet hours that can limit it. View only |
 | D | Boot diagnostics on the Try stick on or off. Try only |
 | H | Health: the doctor's check-up |
 | L | Offline library. View sources, licences and credits, or change consent for an installed pack |
+| R | Previous system: restart once into the last confirmed system. If that system cannot confirm its health, Pip returns to the current one. Installed system only |
+| E | Endurance: start a 24-hour, 48-hour or 1-week native run and read the last one. It never cuts power itself. Installed system only, in persistent memory and not in guest mode |
 
 ## Maintenance commands
 
@@ -344,13 +426,13 @@ controls are also in Setup and Care.
 
 | Command | Purpose |
 |---|---|
-| `being-setup [--show\|--dry-run\|--network\|--initiative\|--care\|--audio\|--time-zone\|--backup\|--update\|--voice]` | Personalization, or one of its pages directly. `--care`, `--audio`, `--time-zone`, `--backup` and `--update` work on the appliance only |
+| `being-setup [--show\|--dry-run\|--network\|--initiative\|--care\|--audio\|--time-zone\|--backup\|--update\|--voice\|--look]` | Personalization, or one of its pages directly. `--care`, `--audio`, `--time-zone`, `--backup` and `--update` work on the appliance only |
 | `being-memory status` / `being-memory set persistent\|explicit-only\|session-only [--expiry-days N]` | Retention policy. `--expiry-days` (1–36500) works only with `persistent`. Nothing is expired while the clock is not trusted. Refused while a restore is unfinished. Takes effect when the mind next starts: `systemctl restart being-mind.service` |
-| `being-camera enable\|disable\|status` | Camera permission (the root-owned 0600 marker `/mind/camera.enabled`). Must run as root. Starts or stops `being-eyes.service`. `status` shows both the permission and the service state |
+| `being-camera enable\|disable [--no-block]\|status` | Camera permission (the root-owned 0600 marker `/mind/camera.enabled`). Must run as root. Starts or stops `being-eyes.service`. `disable --no-block` removes the permission and only queues the stop of Eyes. `status` shows both the permission and the service state |
 | `being-dream-journal [--limit N]` | Read the overnight journal |
 | `being-network status [--json]` / `being-network set MODE [--web-lookups] [--time-server IP]` | Network policy |
 | `being-wifi configure IFACE SSID [--security wpa2\|wpa3] [--password-stdin] [--offline-mind PATH]` / `status` / `forget` / `scan [IFACE]` / `ethernet on\|off\|status` | Manage networking:<ul><li>save, show or remove the single Wi-Fi profile;</li><li>list nearby networks as JSON;</li><li>switch wired Ethernet (used in Internet mode).</li></ul>Without `--password-stdin` it asks for the password. `--offline-mind` saves to an installed mind partition mounted from a Linux live system. WPA2 or WPA3 personal only; no open or enterprise networks. Wi-Fi is used only outside Offline mode. Example: `printf '%s' "$PASS" \| being-wifi configure wlan0 "Home WiFi" --security wpa2 --password-stdin` |
-| `being-backup keygen --identity F` / `create\|export-deletions --mind-dir D --output F --recipient R` / `checkpoint --mind-dir D` / `restore --mind-dir D --input F --identity F [--deletions F --current-checkpoint HEX]` | Encrypted backup and restore (see the [user guide](USER-GUIDE.md#backing-up-pip)) |
+| `being-backup keygen --identity F` / `create\|export-deletions --mind-dir D --output F --recipient R` / `checkpoint --mind-dir D` / `restore --mind-dir D --input F --identity F [--deletions F --current-checkpoint HEX]` | Encrypted backup and restore (see the [user guide](USER-GUIDE.md#backing-up-pip)). Its other subcommands are internal helpers that handle the stick without the mind touching it |
 | `being-installer [--check\|--list\|--plan DEV\|--install DEV] [--json]` | Hardware check, disk listing, layout preview, install |
 | `being-hardware-report [--save]` | Print the hardware report. With `--save` it instead saves the summary and report (MAC addresses masked) to this boot's folder on the `PIPLOGS` partition of a laptop Try stick, and prints only where it saved. It exits 1 when no stick is in use |
 | `being-usb-logs run\|report\|summary\|check\|mic-test` | Manage Try boot diagnostics on the `PIPLOGS` partition; `mic-test` measures the microphone level once (numbers only). Each boot folder also gets the full codec dumps (`card0-codec0.txt` and so on, read with the processing coefficients shown), and `summary.txt` gains the lines **Codec IDs**, **HDA model**, **Cable link** and **Voice debug** |
@@ -382,8 +464,10 @@ the Try menu's item **8** (Quick, Full or Voice).
 | `continuity` | Archive read access | Validates the current life record and reads the archive's SQLite integrity and format. It checks the conversation and workshop slots against the configured context size through the local cortex API. The report contains health results and format numbers. |
 | `mic` | Yes | The mixer, the room floor per channel (a dead channel is named) and the Mic Boost × Capture sweep |
 | `speaker` | Yes | The test-signal battery through `plughw:0,0` and `hw:0,0` (rate, underruns, the `aplay -v` chain), small, default and large periods, the acoustic loopback (level, latency, distortion, octave bands, dropouts) and speaker isolation |
+| `echo-trace` | Yes | One bounded trace of the speaker's test signal and the microphone, kept in RAM. Needs `--consent-room-audio` and `--out` naming a new folder directly under `/run/being-diag`. Refused without a confirmed open lid and a live brainstem heartbeat, and it ends if either goes. The playback and the recording are separate processes, so their timing is estimated afterwards |
+| `native-echo-trace` | Yes | The same, from one linked ALSA capture and playback group; the helper refuses settings it cannot link exactly. Same consent, folder and lid rules |
 | `tts` | Yes | Every voice: its speed, and the words PocketSphinx decodes from it before and after the speaker |
-| `codec` | Yes | The codec dump, its subsystem id, the fixup the driver picked and the codec settings. `--model NAME` (`apple`, `mbp81`, `mbp101`, `mbp53`, `mbp55`, `imac27`, `imac27_122`, `mba42`, `mba6`) switches the fixup live, then sets the mixer again with `being-audio-init --defaults`; `--coef HEX` (16 bits, such as `0x102a` or `0x000a`) writes coefficient 0x02 of node 0x11. Either one then re-reads the ADC setting and records the room floor. Live changes need the cable build's kernel (hwdep and reconfiguration); elsewhere they report skip |
+| `codec` | Yes | The codec dump, its subsystem id, the fixup the driver picked and the codec settings. `--model NAME` (`apple`, `mbp81`, `mbp101`, `mbp53`, `mbp55`, `imac27`, `imac27_122`, `mba42`, `mba6`) asks the driver for another fixup, then sets the mixer again with `being-audio-init --defaults`; `--coef HEX` (16 bits, such as `0x102a` or `0x000a`) writes coefficient 0x02 of node 0x11. Either one then re-reads the ADC setting and records the room floor. Live changes need the cable build's kernel (hwdep and reconfiguration); elsewhere they report skip. On kernel 6.18 the driver picks a fixup only when the codec is created, so `--model` is judged by its effect and reports skip when nothing changed; the boot-time `snd_hda_intel.model=` applies a fixup, and `--coef` is the live stand-in |
 | `hear FILE` or `hear --phrase TEXT` | Yes | Plays a WAV (any rate; the louder channel is used), or renders TEXT on Pip (`--voice slt\|kal16\|piper`, default `slt`), to the running voice through the diagnostic microphone, then reads from the journal the wake, the `heard:` line and its delay, the mind's route and whether the terminal opened. `--asr pocketsphinx\|moonshine\|auto` forces the recognizer for the run; `--expect-route ROUTE` (such as `workshop.open`) names the route to expect, which is otherwise predicted from the phrase; `--patience N` (1 to 20) multiplies every wait, for an emulated CPU. The terminal counts as opened only if it is still up a few seconds later and hands did not log that it failed to start |
 | `engines` | No | Whether Moonshine and the natural voice are installed and verified, the CPU's AVX and AVX2 flags, and `mind.voice_bench` |
 | `restore` | Yes | Put the voice and the mixer back after an interrupted run (below) |
@@ -398,7 +482,13 @@ Options every command takes:
 | `--out DIR` | Write the report to DIR |
 | `--yes-keep-recordings` | Keep recordings of the room and of you, and their transcripts (default: RAM only, removed) |
 | `--stimulus-level DBFS` | Test signal level, −40 to −3 dBFS (default −20) |
+| `--level clean\|realistic\|both` | For `hear` (default `clean`) and `commands` (default `both`): `clean` plays the phrase as rendered over a −64 dBFS room floor; `realistic` plays it at a −30 dBFS peak, as this laptop's microphone hears a person |
+| `--consent-room-audio` | For `echo-trace` and `native-echo-trace`: confirm that a short room recording may be kept in RAM |
 | `--no-unit` | Run audio work in this process, not under `systemd-run` |
+
+Every command that opens the sound card is refused (exit 2) once the
+brainstem has set the microphone safety latch, `/run/being/mic-policy-breach`,
+which stays until reboot. Read-only commands still run.
 
 `restore` also takes `--quiet` (say nothing on stdout; what it did goes to
 stderr, and nothing at all when there was nothing to put back) and
@@ -487,7 +577,7 @@ it on. Every entry of a cable development stick turns it on.
 | `dictation ended after S s: final transcript of N characters, confidence C, log-posterior L, …; voiced V s, …` | voice | Each final transcript, always; never the words |
 | `command grammar second pass: matched a command of N words (margin M per frame), …` or `… no match (why); keeping the open-vocabulary transcript` | voice | When a short dictation was not a workshop command and was read again with the command grammar |
 | `playback {"wav_s": …, "rate": …, "wall_s": …}` | voice | Each spoken clause, always; a warning when it played far shorter or longer than its length |
-| `route {"route": "workshop.open", "chars": 15}` | mind | Each turn, always. With voice debugging on, a `"text"` field holds the words |
+| `route {"route": "workshop.open", "chars": 15}` | mind | Each turn, always. With voice debugging on, a `"text"` field holds the words. A turn that used the offline library adds a `"library"` field with the source and the outcome |
 | `route {"route": "private"}` | mind | Each turn while a guest is here, or while memory is `session-only` or `explicit-only` (any mode but `persistent`), whatever the debug setting |
 
 In guest mode (`app.privacy` with `guest: true`, from the mind) the voice
@@ -503,6 +593,13 @@ and **Voice debug** lines, and where voice debugging came from (the kernel
 command line, `/etc/being/env`, a unit drop-in, or transcripts seen in the
 journal). On a cable boot its first line also ends "(CABLE DEVELOPMENT
 BOOT)".
+
+**Microphone capture.** On the appliance the voice does not open the sound
+card for capture itself: `being-ears` does, under the brainstem's microphone
+grant, and passes the audio over `/run/being/ears.sock` (`BEING_EARS_SOCKET`).
+The microphone is read as it arrives into a queue of up to 10 s, so a long
+decode does not make the capture overrun. The QEMU port and the diagnostic
+microphone below bypass `being-ears`.
 
 **The diagnostic microphone.** When the voice starts with
 `BEING_DIAG_MIC=PATH`, it does not open ALSA capture. It connects to the
@@ -536,14 +633,21 @@ Sources: `mind/*.py`, `crates/brainstem/src/life.rs`
 | `voice-volume.json`, `audio/voice.json`, `audio/engines.json`, `audio/asound.state` | mind, voice, Care | Volume, chirps and voice choice, voice-engine speed measurements, mixer levels. A key mute is never saved here | No |
 | `audio/sherpa-avx-smoke.json` | `pip-diag engines --record-smoke` | A native speech compatibility result pinned to the build and the installed sherpa-onnx and ONNX Runtime libraries. A matching native result takes precedence over the packaged Ivy Bridge verdict in `/usr/share/being/voice/`. Auto also requires Moonshine to meet the speed limit. On Try, the recorded result lives in RAM until shutdown | No |
 | `speaker-muted` | mind (`mind/keys.py`) | Present while the mute key (or the volume keys stepped to nothing) holds the speaker at 0, so the next start of the mind puts the sound back | No |
+| `look.json` | Setup, mind | The look: eye colour, shape, glow, face size, optional layers, widgets, captions and the Quick Menu's place. The face reads it at start, and the mind mirrors it to `/run/being/look.json`. A Try session's look can be kept when installing | No |
 | `play.json` | mind | Which jokes and facts were told | No |
+| `body.db` | mind | Passive overnight hardware readings (no conversation) | No |
+| `keep/` | mind | The owner's opt-in file keep: the files and their index. "Forget everything" follows its own preserve-or-erase setting | A catalog and its erasure record only, not the files |
 | `night-shift.json` | mind | How far the night's chores got | No |
 | `last-backup.json`, `backup-recipient.txt` | backup, Care | When the last backup was made and how; the public half of the backup key | No |
+| `backup-media.json` | backup, Setup **B** | The filesystem identity of the enrolled backup stick | No |
+| `update-checkpoint/before-update.age` | backup | The one encrypted recovery checkpoint saved before a system update, when a backup key is configured | No |
 | `core.md` | owner (by hand) | Optional "things it always knows". Persistent mode only | No |
 | `core-profile.md` | night shift | Up to four confirmed owner fact references. The archive supplies their current text in persistent owner mode. A manual `core.md` takes precedence. | No |
 | `network/policy.json`, `network/wifi.json` | `being-network`, `being-wifi` | Network mode, permissions, Wi-Fi credentials | No |
 | `camera.enabled` | `being-camera` | Camera consent marker (root, 0600) | No |
 | `dreams-enabled` | Care | Dream consent and window (`night` or `closed`). Legacy empty markers mean `night`. | No |
+| `dreams-once.json` | Care | Permission for a single night's dreaming, with its date | No |
+| `curiosity.enabled` | Care | Marker: the daily question is on | No |
 | `apps.enabled`, `apps.disabled` | Care | Workshop switch (on unless `apps.disabled` exists) | No |
 | `lab-access/` | `being-lab-access` | Paired-Mac maintenance keys (maintenance builds only) | No |
 | `.being-restore-in-progress` | `being-backup restore` | Blocks the mind, voice and cortex until a restore completes | — |
@@ -567,7 +671,10 @@ Source: `config/`, installed to `/etc/being/`
 | `temperature` | 0.7 | Retries after a parrot or boilerplate reply raise it |
 | `top_k`, `top_p`, `presence_penalty` | 20, 0.8, 1.0 | Sampler settings sent to llama-server |
 | `reply_shape` | `strict` | The reply grammar. `strict` (shipped since the model audition of 24 November) ends long answers at a sentence (stories keep the open shape); `open` is the built-in default |
+| `mood` | false | Off. When on, current body readings may shape the reply grammar and length (`mind/mood.py`) |
+| `defer_idle_slot_writes` | false | Off. An experiment to write less to the disk: keeps a warm conversation slot only in the model server's memory until sleep, lid close or shutdown |
 | `prefill` | false | Read-ahead while listening (experimental) |
+| `listening_scaffold` | false | Off. While you speak, primes only the stable start of the prompt. Needs the model on this machine and `prefill` off |
 | `morning_brief` | (not set: on) | |
 | `battery_plea_percent` / `_minutes` | 15 / 30 | The mind's own plea thresholds, used only when the brainstem sends no battery level |
 | `battery_second_plea_percent` / `_minutes` | 10 / 10 | As above |
@@ -589,13 +696,16 @@ Source: `os/package/being/*.service`, `os/package/cortex/*.service`
 | `being-brainstem` | `being-brainstem --appliance-body …` | Early boot, `WatchdogSec=10s`, reboot after repeated failure. `CPUWeight=1000` |
 | `being-face` | `being-face --fullscreen` (KMS) | Skipped while the USB menu is showing. `WatchdogSec=5s`, pinged every frame; shader cache in `/run/being/mesa`. `CPUWeight=1000` |
 | `being-mind` | `python3 -m mind` | Waits for the brainstem only, never the cortex, so code answers work while the model loads. Blocked during a restore. `WatchdogSec=30s`, pinged from its event loop. `CPUWeight=1000` |
-| `being-voice` | `python3 -m mind.voice` | Blocked during a restore and in the serial lab. `WatchdogSec=30s`, `CPUWeight=1000` |
+| `being-ears` | `being-ears` | The microphone capture, isolated from the voice: no network, only the sound card's capture devices, `/run/being/ears.sock`. Starts after the brainstem and before the voice, and not at all after the microphone safety latch (`/run/being/mic-policy-breach`) is set |
+| `being-voice` | `python3 -m mind.voice` | Reads the microphone from `being-ears`. Blocked during a restore and in the serial lab. `WatchdogSec=30s`, `CPUWeight=1000` |
+| `being-context-storage` | `python3 -m mind.context_storage` | A one-shot at boot that chooses where this boot's working conversation and the model's slot files live (an encrypted directory or RAM, `/run/being-context/paths.env`). The cortex requires it |
 | `being-audio-init` | `being-audio-init` | Sets the sound card's levels at boot (`being.audio=keep` leaves them) |
-| `being-cortex` | `llama-server` on 127.0.0.1:8080 | Gated by signed model-pack verification. `--parallel 2 --ctx-size 8192`, 2 threads, `Nice=5`, `CPUWeight=100`, sandboxed, loopback only |
-| `being-dream-cortex` | `llama-server` on 127.0.0.1:8081 with `/models/dream/dream.gguf` | Disabled at boot; the night shift starts and stops it. Needs its own verified pack; never on a bench boot. `Nice=10`, `CPUWeight=20`, no access to `/mind` |
+| `being-cortex` | `llama-server` on 127.0.0.1:8080 | Gated by signed model-pack verification. `--parallel 2 --ctx-size 8192`, 2 threads, 64-token batches with 7-token physical batches, flash attention off, the weights mapped and not locked, `Nice=5`, `CPUWeight=100`, sandboxed, loopback only, browser requests from other origins refused. It sees only its own folder of `/mind`. Short of memory, the kernel ends it before the organs and `Restart=always` loads it again |
+| `being-model-check` | `python3 mind/model_pack.py check-media` | Try boots only: the organs trust a model pack once its signature, descriptor and sizes check out, and this unit then hashes every pack in full at idle priority. A pack that fails is refused for the rest of the boot. Not run on a bench boot or with `being.model_check=full`, which hashes before use. The cortex pulls it in |
+| `being-dream-cortex` | `llama-server` on 127.0.0.1:8081 with `/models/dream/dream.gguf` | Disabled at boot; the night shift starts and stops it, and it stops with the mind. Needs its own verified pack; never on a bench boot. `Nice=10`, `CPUWeight=20`, idle I/O class, no access to `/mind`. Preferred over the cortex by the kernel's memory killer |
 | `being-hands` | `python3 -m mind.hands` | The workshop terminal, `CPUWeight=20`. Its shell runs caged in `workshop.slice` with a RAM `/workshop` |
 | `being-bodycare` | `being-bodycare` | Charge limit, fan floor and CPU caps. Observe mode unless `BEING_BODYCARE_MODE=act`; restores what it changed on stop. `WatchdogSec=30s` |
-| `being-eyes` | `python3 -m mind.eyes` | Only when `/mind/camera.enabled` exists. Sandboxed |
+| `being-eyes` | `python3 -m mind.eyes` | Only when `/mind/camera.enabled` exists. Sandboxed. Detects presence, and takes one small bounded frame for "Look at this"; on the MacBookPro9,2 it opens only the internal camera named in the body map |
 | `being-bench` | `python3 -m mind.bench` | Only on a `being.bench=1` boot. Stops the model servers, measures, saves to `PIPLOGS` |
 | `being-boot-health` | `python3 -m mind.boot_health` | Confirms the A/B slot |
 | `being-local-screen` | `being-console python3 -m mind.local_screen` | The on-panel menus. Conflicts with the face |
@@ -620,7 +730,7 @@ BEING_REQUIRE=face,mind,voice
 | Variable | Default | Used by |
 |---|---|---|
 | `BEING_BUS` | `$XDG_RUNTIME_DIR/being/bus.sock`, then `/tmp/being-$USER/bus.sock`. `being-setup` and the local screen default to `/run/being/bus.sock` | All organs, `being-setup`, local screen |
-| `BEING_MIND` | The default depends on the organ:<ul><li>mind: `/mind` if writable, else `~/.local/share/being/mind`</li><li>eyes: `/mind`</li><li>brainstem: none. Without this or `--mind-dir`, it keeps no life record</li></ul> | brainstem, mind, eyes, voice, and tools that default to the mind directory (`being-memory`, `being-setup`, `being-dream-journal`) |
+| `BEING_MIND` | The default depends on the organ:<ul><li>mind: `/mind` if writable, else `~/.local/share/being/mind`</li><li>eyes: `/mind`</li><li>face: `/mind` (it reads `look.json`)</li><li>brainstem: none. Without this or `--mind-dir`, it keeps no life record</li></ul> | brainstem, face, mind, eyes, voice, and tools that default to the mind directory (`being-memory`, `being-setup`, `being-dream-journal`) |
 | `BEING_REQUIRE` | `face,mind,voice` (the `--require` default) | The brainstem unit, which passes it as `--require` |
 | `BEING_CORTEX` | `cortex_url`, then `http://127.0.0.1:8080` | mind |
 | `BEING_CORTEX_URL` | `http://127.0.0.1:8080` | hands |
@@ -641,6 +751,11 @@ BEING_REQUIRE=face,mind,voice
 | `BEING_COMMAND_GRAMMAR`, `BEING_COMMAND_GRAMMAR_MARGIN` | on (`0` turns it off), 6.0 | voice: the command grammar's second pass, and how far (per 10 ms frame) a command must beat a free phone loop |
 | `BEING_CHIRPS`, `BEING_CHIRP_DIR`, `BEING_HEAR_SOUND` | on (off in the lab), `/run/being/chirps` | voice |
 | `BEING_SHERPA_LIBRARY`, `BEING_EMBED_DIR` | the packaged library and model | voice, memory |
+| `BEING_PIPER_THREADS` | 2 (at most the CPUs available), 1 to 8 | voice: threads for the natural voice |
+| `BEING_MIC_HIGHPASS` | off (`1` or `on`, or a cutoff in Hz) | voice: a high-pass filter on what the recognizer hears. It wins over `being.mic_highpass=` |
+| `BEING_SPEAKER_EQ` | on for the MacBookPro9,2, off elsewhere (`0` or `1`) | voice: an equalizer on Pip's speech, measured on that laptop. It wins over `being.speaker_eq=` |
+| `BEING_EARS_SOCKET` | `/run/being/ears.sock` in the voice and ears units | voice, `being-ears`: where the microphone audio passes. Unset, the voice opens the sound card itself, as the lab, the QEMU port and `pip-diag` do |
+| `BEING_ENDPOINT_EVIDENCE`, `BEING_HYBRID_ENDPOINT` | off (`1` turns on) | voice, Try boots only: research switches for end-of-speech timing: the first records content-free evidence (never words or samples), the second tries an experimental endpoint tail |
 | `BEING_VOICE_SHORTEN_FIRST_PAUSE` | off | voice |
 | `BEING_VOICE_DEBUG` | off (`1` turns it on) | voice and mind: [voice debug](#voice-debug-and-route-lines), on any boot |
 | `BEING_DIAG_MIC` | unset | voice: read the [diagnostic microphone](#voice-debug-and-route-lines) socket instead of ALSA. Set by `pip-diag` in a runtime drop-in |
@@ -649,6 +764,7 @@ BEING_REQUIRE=face,mind,voice
 | `BEING_SLOT_DEADLINE` | 180 | boot health |
 | `BEING_LOCAL_SETUP` | set by the face unit | face (enables F2 and Mission Control) |
 | `BEING_FACE_DPMS` | on (`0` disables) | face: switch the panel off while dark |
+| `BEING_FACE_EFFECTS` | off (`1` turns the optional emote layer on at start) | face |
 | `BEING_PANEL_DIR`, `BEING_HANDS_KEYS` | the hands organ's paths | face |
 
 ## Kernel command line
@@ -668,6 +784,10 @@ BEING_REQUIRE=face,mind,voice
 | `being.audio=keep` | `being-audio-init` leaves the mixer as it is |
 | `being.bench=1`, `being.bench.soak=MINUTES`, `being.bench.quick=1` | Bench mode: measure models and voices, with an optional soak or a quick run |
 | `being.bench=2`, `being.bench.idle=600` | Measure boot and idle while the production organs run. The optional interval collects repeated samples for up to ten minutes. |
+| `being.model_check=full` | Hash every model pack in full before it is used, as an installed system does, instead of the Try stick's background check (`being-model-check`) |
+| `being.mic_highpass=`, `being.speaker_eq=0\|1` | The microphone high-pass (`0`, `1`, or a cutoff in Hz) and the speaker equalizer, for this boot. The environment variables win |
+| `being.mind_crypt=1` | Set by the installer in an installed entry whose `/mind` is on a PIN-protected partition, which is unlocked at the local console (`mind/mind_encryption.py`) |
+| `being.face_present_on_change=1`, `being.face_reply_ladder=1`, `being.body_breath=1`, `being.endpoint_evidence=1`, `being.hybrid_endpoint=1` | Per-boot experiments on a Try stick (the last two are the [voice's](#environment-variables) research switches). They are off unless named, and the face logs which of its own it started |
 | `being.mic_test=1` or `0` | Enable or disable the Try boot microphone level measurement. It requires a confirmed open lid. Alternate microphone entries enable it. |
 | `being.face_idle_hz=5`, `15` or `30` | One-boot pacing comparison for the calm, empty desktop. Active animation, apps and captions use their usual timing. The face logs median and p95 drawing time. |
 | `hid_apple.fnmode=1` | Set on laptop images: the top row does what is printed on it (brightness, volume and the rest); fn+key sends F1 to F12 |
@@ -685,7 +805,9 @@ Sources: `lab/vm.py`, `lab/build.sh`, `scripts/run-sim.sh`, `sim/body.py`
 | `lab/build.sh cable-key PUBKEY HOSTKEY` | Import the cable link's login public key and its SSH host key into the builder |
 | `lab/cable.sh ssh-config\|ping\|ssh [CMD…]\|push [--no-restart]\|pull-logs` | The Mac's side of the cable link (below) |
 | `lab/build.sh bundle` / `installed-bundle` / `test-media` / `installed-test-media` | Signed updates and fixtures |
+| `BEING_LAPTOP_DIAGNOSTIC=1 lab/build.sh laptop-try` | A separate maintenance stick, `out/images/beingos-laptop-diagnostic-try.img`: a root console on tty2 and measurement tools, for the owner's bench. It cannot install, be signed or be exported, and it is refused together with the cable and LAN-maintenance builds. Only `laptop-config`, `laptop-make` and `laptop-try` accept it |
 | `lab/build.sh release-key DIR` / `release-cert FILE` / `laptop-bundle KEY` | The owner's release key, its certificate, and signed laptop updates |
+| `lab/build.sh laptop-rotation-bundle OLD_KEY OLD_CERT VERSION` | A signed laptop update whose rootfs trusts a replacement certificate, signed with the current installed certificate and key |
 | `lab/build.sh candidate NAME [--laptop] [--cache-overlay]` | Frozen, sealed release candidate under `out/candidates/NAME/` |
 | `lab/build.sh up` / `down` / `destroy` / `shell` | Colima builder lifecycle |
 | `lab/make-iso.sh` | The PipOS ISO from the laptop Try build ([ISO.md](../ISO.md)) |
@@ -695,6 +817,10 @@ Sources: `lab/vm.py`, `lab/build.sh`, `scripts/run-sim.sh`, `sim/body.py`
 | `scripts/check fast\|boot-gate\|full` | The three test tiers |
 | `scripts/status [--write]` | The generated block of [STATUS.md](../../STATUS.md) |
 | `target/debug/face --demo` | Show every expression |
+
+A full rebuild ("all", after the being package is rebuilt) records the tree's
+source id in the image (`IMAGE.source-id`); `BEING_FAST_REBUILD=1` skips the
+clean and records none.
 
 In the serial lab and the simulator, you can type these slash commands:
 `/lid open|close`, `/battery N`, `/plug`, `/lux N`, `/temp N`, `/hour N`,
@@ -713,14 +839,26 @@ an ISO and is never signed as an update. The procedure is in
 | What | Value |
 |---|---|
 | Build | `BEING_LAPTOP_CABLE=1 lab/build.sh laptop-try`, in its own tree `/work/output/laptop-cable`, giving `out/images/beingos-laptop-cable-try.img` and its `.source-id` |
-| Refused together with | `BEING_LAPTOP_MAINTENANCE=1`, `BEINGOS_REQUIRE_RELEASE_KEY=1`, `lab/build.sh candidate` and `laptop-bundle`. `lab/make-iso.sh` and the installer (`mind/install_apply.py`) refuse a cable rootfs, and post-build refuses the cable files in every other image |
+| Refused together with | `BEING_LAPTOP_MAINTENANCE=1`, `BEING_LAPTOP_DIAGNOSTIC=1`, `BEINGOS_REQUIRE_RELEASE_KEY=1`, `lab/build.sh candidate` and `laptop-bundle`. `lab/make-iso.sh` and the installer (`mind/install_apply.py`) refuse a cable rootfs, and post-build refuses the cable files in every other image |
 | Added to the release laptop image | OpenSSH's server (LAN maintenance stays out), `BR2_PACKAGE_BEING_CABLE_DEV` (the three units and `/usr/share/being/cable/`: `authorized_keys`, `ssh_host_ed25519_key`, its `.pub` and `sshd_config`), and the kernel fragment `os/board/beingos/linux-cable.config` (`CONFIG_SND_HDA_HWDEP`, `CONFIG_SND_HDA_RECONFIG`, `CONFIG_SND_HDA_PATCH_LOADER`, `CONFIG_SND_DEBUG`, `CONFIG_SND_DEBUG_VERBOSE`) |
-| Boot entries | The same six; each adds `being.cable=1 being.voice_debug=1` |
+| Boot entries | The same seven; each adds `being.cable=1 being.voice_debug=1` |
 | Keys | `lab/build.sh cable-key PUBKEY HOSTKEY`, both kept outside the repository. PUBKEY is the login key's Ed25519 public half; HOSTKEY is an unencrypted OpenSSH Ed25519 private key, which every cable stick presents. It refuses a path inside the repository, a private key as PUBKEY, an encrypted or non-Ed25519 host key, and the same key twice. They are stored in the builder volume under `/work/beingos-cable` (mode 0600) |
 | Addresses | On the first wired port, chosen by type, never by name: `169.254.77.1/16` and `fe80::77:1/64`. If another device on the cable already has 169.254.77.1, Pip does not take it. The Mac keeps its own self-assigned 169.254.x address |
 | SSH | Port 22, root only, the one Ed25519 key only, from `169.254.0.0/16` and `fe80::/10` only (the firewall, `AllowUsers` and the key's `from=` option each check), no forwarding, SFTP allowed |
 | Writable code | `being-cable-workbench` copies `/usr/lib/being` and `/etc/being` to `/run/being-dev` and bind-mounts them back, with timestamp-checked `.pyc` files, so an edited module takes effect when its organ restarts. All of it is gone at power-off |
 | Kill switch | `being.cable=0` on the GRUB command line (press `e`, edit, Ctrl-X): no link, no SSH, code read-only |
+
+Patching a module on a running image: a working-tree `mind/turn.py` cannot
+be copied onto an older image by itself. It imports modules that may not be
+on that image (`keys.py`, `played.py`, `try_mode.py` and others), and it
+differs from an older one by thousands of lines. Copy it only together with
+every module it imports, or patch in just the self-contained hunks (for the
+inherited-turn fix: `INHERITED_TURN_GRACE`, `_first_state_seen`,
+`_inherited_turn_task`, `_turn_open`, `_note_inherited_turn`,
+`_end_inherited_turn`, the `_connection_lost` reset and the `state.changed`
+hook). Before restarting `being-mind`, run `python3 -c 'import mind.turn'` on
+the target from `/usr/lib/being`: an `ImportError` there means a crash loop
+and a brainstem stuck in waking, and any probe then measures a broken mind.
 
 On the Mac (`PIPOS_CABLE_IF` names the cable port, default `en0`;
 `PIPOS_CABLE_HOST` is `pip`, over IPv6, the default, or `pip4`;

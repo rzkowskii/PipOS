@@ -1,7 +1,7 @@
 <!--
 doc: developer-guide
-verified: 2026-11-24T22:17
-sources: lab/build.sh lab/vm.py lab/cortex-dev.sh lab/make-iso.sh lab/cable.sh scripts/run-sim.sh scripts/check lab/candidate-build.sh lab/candidate_tests.py lab/soak.py lab/builder/Dockerfile os/configs/beingos_x86_64_defconfig os/configs/beingos_laptop_defconfig os/board/beingos/try-image.sh os/board/beingos/post-build.sh os/board/beingos/linux-cable.config os/package/being/Config.in Cargo.toml sim/fake_cortex.py sim/body.py mind/mic_port.py lab/mic_bridge.py mind/lab_access.py lab/model_audition.py lab/decision_eval.py lab/dream_recall_eval.py lab/recall_second_opinion.py lab/try_timings.py lab/tests/test_cable_dev.py lab/tests/test_voice_terminal.py mind/bus.py mind/everyday.py mind/diag.py mind/diag_report.py mind/keys.py crates/face/src/keys.rs crates/brainstem/src/main.rs mind/voice.py os/package/being/being-cable-link.service os/package/being/being-cable-ssh.service os/package/being/being-cable-workbench.service
+verified: 2026-11-28T13:16
+sources: lab/build.sh lab/candidate_manifest.py lab/persona_eval.py crates/ears/src/main.rs lab/vm.py lab/cortex-dev.sh lab/make-iso.sh lab/cable.sh scripts/run-sim.sh scripts/check lab/candidate-build.sh lab/candidate_tests.py lab/soak.py lab/builder/Dockerfile os/configs/beingos_x86_64_defconfig os/configs/beingos_laptop_defconfig os/board/beingos/try-image.sh os/board/beingos/post-build.sh os/board/beingos/linux-cable.config os/package/being/Config.in Cargo.toml sim/fake_cortex.py sim/body.py mind/mic_port.py lab/mic_bridge.py mind/lab_access.py lab/model_audition.py lab/decision_eval.py lab/dream_recall_eval.py lab/recall_second_opinion.py lab/try_timings.py lab/tests/test_cable_dev.py lab/tests/test_voice_terminal.py mind/bus.py mind/everyday.py mind/diag.py mind/diag_report.py mind/keys.py crates/face/src/keys.rs crates/brainstem/src/main.rs mind/voice.py os/package/being/being-cable-link.service os/package/being/being-cable-ssh.service os/package/being/being-cable-workbench.service
 -->
 
 # PipOS developer guide
@@ -19,7 +19,7 @@ project stands is in [STATUS.md](../../STATUS.md).
 | Colima + Docker | The Buildroot builder container (profile `beingos`: an arm64 `vz` VM with 14 CPUs, 48 GB and a 100 GB disk by default; `BEING_BUILDER_CPUS` and `BEING_BUILDER_MEMORY` change the first two when the VM is created) |
 | QEMU (with EDK2 firmware) | The virtual Ivy Bridge laptop |
 | Python 3 | The lab harness, the tests, and the mind when simulated |
-| Rust / cargo | Host builds of the face, brainstem and bodycare, and the Rust tests |
+| Rust / cargo | Host builds of the face, brainstem and bodycare, and the Rust tests. The workspace also holds the `ears` capture organ, which only does anything on Linux |
 | SDL2 + pkg-config | The face crate links SDL2 and finds it through pkg-config (`brew install sdl2 pkg-config`) |
 | ffmpeg | `--sound` microphone bridge and the L4 tests |
 | macOS `say` | Generated speech for voice tests, and the simulator's voice |
@@ -57,7 +57,9 @@ The simulator is made of these pieces:
 - **`--fake` replies** come from `sim/fake_cortex.py`. It serves the
   llama-server HTTP API with scripted text, and can run alone:
   `python3 sim/fake_cortex.py --port 8080`.
-- **The slash commands** are implemented in `sim/body.py`.
+- **The slash commands** are implemented in `sim/body.py`, which also
+  reports `say.played` for each reply clause and ends each reply with a
+  final one, as the real voice does.
 - **With `lab/vm.py --sound`**, the Mac microphone reaches the guest
   through `lab/mic_bridge.py` and a virtio-serial port named
   `org.beingos.microphone` (`mind/mic_port.py`). Speaker output goes
@@ -96,7 +98,8 @@ lab/build.sh                            # build out/images/beingos.img (first bu
 | `lab/build.sh bundle` / `installed-bundle` | Signed RAUC updates for the factory or installed channel |
 | `lab/build.sh release-key DIR` / `release-cert FILE` / `laptop-bundle KEY` | The owner's passphrase-protected release key (made on the Mac, outside the repository), its certificate in the builder, and laptop updates signed with it |
 | `lab/build.sh laptop-rotation-bundle OLD_KEY OLD_CERT VERSION` | Signed bridge to the replacement release certificate. [Rotation procedure](../HARDWARE.md#rotate-the-laptop-release-key) |
-| `lab/build.sh candidate NAME [--laptop]` | Frozen, sealed release candidate in `out/candidates/NAME/`; `--laptop` adds the laptop disk and Try stick from the same snapshot, with a rootfs parity report |
+| `BEING_LAPTOP_DIAGNOSTIC=1 lab/build.sh laptop-try` | `beingos-laptop-diagnostic-try.img`, in its own tree: an owner-local, Try-only measurement image with a root console on tty2 and diagnostic tools. It cannot install and is never signed. It supports only `laptop-config`, `laptop-make` and `laptop-try`, and cannot be combined with the cable or maintenance builds ([LAB.md](../LAB.md#try-only-maintenance-image)) |
+| `lab/build.sh candidate NAME [--cache-overlay] [--laptop]` | Frozen, sealed release candidate in `out/candidates/NAME/`; `--cache-overlay` rebuilds local source over the build cache; `--laptop` adds the laptop disk and Try stick from the same snapshot, with a rootfs parity report. Each rootfs must carry the source ID of the frozen tree. Refused when `BEING_LAPTOP_CABLE` or `BEING_LAPTOP_DIAGNOSTIC` is set |
 
 The build details:
 
@@ -122,7 +125,7 @@ The build details:
 
 ```bash
 scripts/check fast                                      # everything below that runs on the Mac, a few minutes
-cargo test --workspace                                  # Rust: bus, brainstem, face, bodycare
+cargo test --workspace                                  # Rust: bus, brainstem, face, bodycare, ears
 python3 -m unittest discover -s tests -t .              # host Python (about 2,000 tests, about 4 min)
 python3 -m unittest discover -s lab/tests/host -t .     # host checks of the lab tools
 python3 -m unittest discover -s lab/tests -t . -v       # QEMU guest suites (slow)
@@ -142,6 +145,7 @@ python3 -m unittest discover -s lab/tests -t . -v       # QEMU guest suites (slo
 | `test_l0` | Ivy Bridge CPU flags, kernel 6.18, UEFI SATA boot, all services up |
 | `test_l1` | Eyes and nothing else on screen. Face crash recovery and brainstem-loss look |
 | `test_l2` | Real model reply, commands without the model, continuity across reboot, power cut and new body, raw-disk forgetting |
+| `test_privacy` | Forgotten data and guest isolation in the packaged VM |
 | `test_l3` | Signed update, rollback after three failed trials, watchdogs, 20 seeded power cuts |
 | `test_l4` | Wake phrase, transcription, speech, mute and interrupt over ALSA loopback |
 | `test_l5` | Lid close stops audio. Lid open wakes without the model |
@@ -157,8 +161,15 @@ python3 -m unittest discover -s lab/tests -t . -v       # QEMU guest suites (slo
 `scripts/check boot-gate` runs the must-pass suites (laptop smoke, L0, L1,
 L5, Try, local screen, install/apply, setup and one real-model L2 turn) in
 parallel QEMU lanes with `BEING_GATE=1`, so a skip or a stale image fails.
+With `--manifest`, it first verifies the candidate's source and artifacts
+(`lab.candidate_manifest verify`) and takes the images from the manifest,
+refusing a suite that needs unsealed media. Ctrl-C stops the lanes.
 `scripts/check full --manifest out/candidates/NAME/release.json` runs the
-whole candidate controller.
+whole candidate controller, including the persona evidence. When the
+candidate's source holds `lab/persona_eval.py`, the controller needs
+`--persona-baseline` (the accepted judge report for the previous persona);
+`--persona-result` names the report for this candidate. Both flags are
+passed through by `scripts/check full`, and both need `--manifest`.
 
 For a release candidate by hand:
 
@@ -177,7 +188,7 @@ The model is chosen by benchmark, not by taste:
 |---|---|
 | `lab/model_audition.py`, `lab/turn_latency.py`, `lab/voice_latency_qemu.py` | Replies and latency |
 | `lab/quant_candidates.py` | Quantisation candidates for a model |
-| `lab/bench_guest.py`, `lab/bench_report.py`, `lab/try_timings.py` | Measure models and speech with `being.bench=1`. Collect boot, service and hardware evidence with `being.bench=2`. Reports go to `PIPLOGS` when available. |
+| `lab/bench_guest.py`, `lab/bench_report.py`, `lab/try_timings.py` | Measure models and speech with `being.bench=1`. Collect boot, service and hardware evidence with `being.bench=2`. Reports go to `PIPLOGS` when available. `try_timings.py` also summarises the voice's startup phases, its endpoint evidence and which step answered each turn (counted by route; the words are never read) |
 | `lab/sherpa_avx_smoke.py` | That the speech engine runs without AVX2 |
 | `lab/decision_eval.py` (fixtures in `decision_fixtures.py`) | Recall routing decisions |
 | `lab/dream_recall_eval.py` (scored on `dream_recall_holdout.py`) | Recall across an overnight pass |
@@ -269,7 +280,7 @@ and the F1 captions overlay are the ways to see what the laptop did.
 | Change a state or timer | `crates/brainstem/src/machine.rs`. Update [ARCHITECTURE.md §4](ARCHITECTURE.md#4-states) |
 | Change battery care | `crates/brainstem/src/battery.rs` (the brainstem's judgement and power-off) and the plea lines in `mind/turn.py` |
 | Change the face | `crates/face/src/{anim,eye,render}.rs`, `eye.frag` |
-| Change what a key does | `crates/face/src/keys.rs` (the top row, by SDL scancode, and the evdev-only Mission Control and Launchpad), `crates/face/src/main.rs` (Esc, M, F-keys), and `mind/keys.py` for the keys the mind answers (a new one goes in its `TOPICS`, which the mind subscribes to). `allowed_from` in `crates/brainstem/src/main.rs` already admits every `key.*` topic from the face alone on the laptop, so a new key topic needs no entry there; add it to the brainstem test `the_top_row_keys_come_from_the_face_and_reach_the_mind`. Only a new topic that is not a key, such as `being.kbd_light`, needs its own arm in `allowed_from`. Update [REFERENCE.md](REFERENCE.md#keys-and-touch) |
+| Change what a key does | `crates/face/src/keys.rs` (the top row, by SDL scancode, and the evdev-only Mission Control and Launchpad), `crates/face/src/main.rs` (Esc, M, F-keys), and `mind/keys.py` for the keys the mind answers (a new one goes in its `TOPICS`, which the mind subscribes to). `allowed_from` in `crates/brainstem/src/main.rs` already admits every `key.*` topic from the face alone on the laptop (the exceptions are `key.mute` from the mind and `key.interrupt` from the Try menu's typing chat), so a new key topic needs no entry there; add it to the brainstem test `the_top_row_keys_come_from_the_face_and_reach_the_mind`. Only a new topic that is not a key, such as `being.kbd_light`, needs its own arm in `allowed_from`. Update [REFERENCE.md](REFERENCE.md#keys-and-touch) |
 | Add a diagnostics check | A function in `mind/diag_*.py` that returns `check(id, section, status, value, evidence, hint)` items, run through `guarded()` in a section of `mind/diag.py`. Anything that opens the sound card goes inside `diag_sound.AudioSession`. For it to count in a verdict area, start its id with one of the prefixes that `diag_report.AREAS` lists for that area (such as `mic.`, `speaker.`, `loopback.`, `tts.`, `voice.wake`, `commands.`, `hear.terminal` or `workshop.`); the area names themselves are not matched. Add a test with fakes in `tests/test_diag*.py` |
 | Add a service or package | `os/package/being/` (`being.mk`, the unit file, `50-being.preset`) |
 | Change the kernel | `os/board/beingos/linux.config`; laptop-only changes go in `linux-laptop.config` |

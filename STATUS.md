@@ -515,11 +515,13 @@ REFERENCE.md, FIRST-BOOT.md and LAB.md were corrected to match.
   consent; "brighter" at full brightness answering "That's as bright as I
   go." Brightness set by voice is still restored only on a clean
   brainstem stop.
-- Care's dream window "whenever the lid is closed" is saved but not used:
-  the mind builds its `DreamPolicy` without the settings directory, so the
-  night window (before 5 a.m.) always applies.
-- Care's Dreams page still says "I use no model for this yet", which is no
-  longer true once the dream pack is on the image.
+- Fixed after this list was written: Care's dream window "whenever the lid
+  is closed" now reaches the night shift. The mind builds its `DreamPolicy`
+  with the settings directory and reads the choice live (see the current
+  handover).
+- Fixed after this list was written: Care's Dreams page no longer says "I use
+  no model for this yet". It now says the dream model, when available,
+  proposes memories that Pip checks against the source (`mind/care.py`).
 - The manual pages were re-checked and restamped on 24 November; see
   `scripts/check-docs.py` for anything changed since.
 - Not confirmed: that the image ships `hwclock` (clock setting relies on

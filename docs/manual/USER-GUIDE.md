@@ -1,7 +1,7 @@
 <!--
 doc: user-guide
-verified: 2026-11-24T22:17
-sources: mind/commands.py mind/reminder_language.py mind/reminders.py mind/habits.py mind/care_habits.py mind/turn.py mind/skills.py mind/local_screen.py mind/setup.py mind/care.py mind/local_menu.py mind/retention.py mind/backup.py mind/device.py mind/initiative.py mind/initiative_setup.py mind/voice.py mind/voice_engines.py mind/installer.py mind/recognition.py mind/app_commands.py mind/hands.py mind/usb_logs.py mind/diag.py mind/diag_report.py crates/face/src/main.rs crates/face/src/keys.rs mind/keys.py crates/brainstem/src/machine.rs crates/brainstem/src/body.rs crates/brainstem/src/battery.rs os/board/beingos/try-grub.cfg os/package/being/being-camera README.md docs/LAB.md docs/HARDWARE.md os/board/beingos/try-image.sh mind/diag_sound.py mind/diag_speech.py
+verified: 2026-11-28T13:17
+sources: mind/commands.py mind/reminder_language.py mind/reminders.py mind/habits.py mind/care_habits.py mind/turn.py mind/type_chat.py mind/skills.py mind/local_screen.py mind/setup.py mind/care.py mind/local_menu.py mind/retention.py mind/backup.py mind/device.py mind/initiative.py mind/initiative_setup.py mind/voice.py mind/voice_engines.py mind/installer.py mind/recognition.py mind/app_commands.py mind/hands.py mind/usb_logs.py mind/diag.py mind/diag_report.py crates/face/src/main.rs crates/face/src/keys.rs mind/keys.py crates/brainstem/src/machine.rs crates/brainstem/src/body.rs crates/brainstem/src/battery.rs os/board/beingos/try-grub.cfg os/package/being/being-camera README.md docs/LAB.md docs/HARDWARE.md os/board/beingos/try-image.sh mind/diag_sound.py mind/diag_speech.py mind/keep.py mind/keep_export.py mind/keep_transfer.py mind/keep_documents.py mind/usb_arrival.py
 -->
 
 # Living with Pip: the PipOS user guide
@@ -18,19 +18,18 @@ This guide is for the person who looks after Pip. It explains what Pip
 does today. Features still in progress are marked *not yet*. The
 [reference](REFERENCE.md) lists every phrase, key and setting.
 
-> **Where PipOS is today (24 November 2026).** PipOS has passed its
+> **Where PipOS is today (28 November 2026).** PipOS has passed its
 > automated tests in a virtual laptop, and it has **booted on a real
-> MacBook Pro** from USB sticks in *Try* mode, which changes nothing on
-> the laptop. On the first boot Pip heard "Hey Pip" but could not make out
-> the words after it, so it never answered. Boots on 24 November found
-> that the microphone still comes up too quiet and that Pip's voice is
-> garbled on the laptop's own speakers. Until those are fixed, you can
-> type to Pip instead, and it answers on screen as well.
-> Much of what is marked *new* below has not yet been tried on the
-> laptop. Pip is not installed on the laptop's own disk yet.
-> Treat details about real hardware as the intended behaviour until they
-> have been checked there. [STATUS.md](../../STATUS.md) has the current
-> state.
+> MacBook Pro** from a USB stick in *Try* mode, which changes nothing on
+> the laptop. On the first boot, on 23 November, Pip heard "Hey Pip" but
+> could not make out the words after it, so it never answered. Cable
+> diagnostics since then have measured speech recognition and the natural
+> voice on the same laptop. Speaking to Pip across the room, false wakes in
+> a quiet room, battery and heat, and installing Pip on the laptop's own
+> disk are still open. Treat details about real hardware as the intended
+> behaviour until they have been checked there.
+> [STATUS.md](../../STATUS.md) has the current state and says which results
+> came from the laptop and which from the virtual one.
 
 ---
 
@@ -195,7 +194,7 @@ Panel**, **fn F3 Hide**.
 | **Esc** | Stop Pip mid-sentence. Pip remembers saying only what you heard |
 | **M** or **fn+F10** | Mute or unmute the microphone. The face shows when it is muted |
 | **fn+F2**, or **Mission Control** (F3) | Open settings. In Try mode it opens the start menu; choose **4 – Setup** |
-| **fn+F1** | Show or hide captions for what Pip hears and says, with a badge for how it answered. Off by default and never saved |
+| **fn+F1** | Show or hide captions for what Pip hears and says, with a badge for how it answered. Pip's answer appears as it is spoken, so a stopped answer shows only what you heard. Off by default and never saved |
 | **Shift+fn+F1** | Show or hide the hardware and service health overlay |
 | **fn+F9** | Bring the face back if the screen stays blank because Pip has no lid reading |
 | **Brightness** (F1, F2) | *New.* The screen dimmer or brighter, never so dim that the eyes vanish. A bar shows the new level |
@@ -205,7 +204,7 @@ Panel**, **fn F3 Hide**.
 | **Mute** (F10) | *New.* Pip's speaker off, and back on at the same level. This is the speaker, not the microphone: Pip still hears you. "speaker muted" stays on the face while it is off. A timer, alarm or reminder, or a low-battery warning, turns the speaker back on before it rings, and so does restarting Pip |
 | **Volume** (F11, F12) | *New.* Pip's speaker quieter or louder. A bar shows it, and a short click at the new loudness, as on a Mac (not while Pip is listening to you or talking, or with its sounds switched off). The lowest step is silence, the same as the mute key |
 | **Space**, **Return** or a click | While the eyes rest: listen, as if you had said "Hey Pip". Not while the terminal has the keyboard, and not while muted |
-| **Mission Control** or **fn+F2**, then **6** (Try stick) or **Y** (installed) | Type to Pip instead of talking. It answers on screen and out loud. **Esc** leaves |
+| **Mission Control** or **fn+F2**, then **6** (Try stick) or **Y** (installed) | Type to Pip instead of talking. It answers out loud, and each part shows on screen as it is spoken. **Esc** leaves |
 
 The previous, next and eject keys do nothing. None of the top row's printed
 keys is ever typed into the terminal. On the start menu and setup screens
@@ -277,7 +276,7 @@ they have been tested only on the development Mac, and
 | "What did you hear?" / "What did I just say?" | *New.* Reads back exactly what it heard, for example "I heard: 'set a timer for five minutes'." It keeps that only until it next sleeps |
 | "Say that again" / "Pardon?" / "What did you say?" | *New.* Repeats its last line |
 | "How well can you hear me?" / "Check your hearing" | *New.* Says how quiet the room is and how clearly your voice reaches it, from measured levels |
-| "Speak up" / "Be quieter" / "Set your volume to 5" | Changes its volume |
+| "Speak up" / "Be quieter" / "Set your volume to 60" | Changes its volume. By voice it never goes below 10 percent, so you can still ask it back up ("Set your volume to 5" gives 10 and says so). The volume keys can go down to silence |
 | "Use your natural voice" / "Use your original voice" / "Which voice are you using?" | *New.* Switches between the natural voice (Alba) and the original robot voice. Left on automatic, Pip speaks with the natural voice from its first reply, whenever that voice is installed and checks out. It measures the voice's speed later, while resting, and goes back to the original voice only if Alba takes more than 0.7 s to make each second of speech. "Which voice" says whether that has been checked yet |
 
 ### Time and routines
@@ -403,6 +402,7 @@ Anything else is ordinary conversation.
 | "Remind me in ten minutes to check the oven." | A relative reminder |
 | "Set a timer for five minutes." | A countdown |
 | "What are my reminders?" / "List my timers." | Up to five items, with numbers |
+| "Read today's reminders." / "What reminders do I have tomorrow?" | The pending reminders for that day (up to five). If Pip doubts its clock it asks for the time first |
 | "Cancel reminder one." / "Cancel the timer." | Removes an item |
 
 - Times can be "at 7:30 pm", "noon" or "in an hour and a half".
@@ -552,6 +552,40 @@ change restarts the mind.
 | **persistent** (default) | Everything. Care **3**, then **4**, can limit conversations to the last *N* days |
 | **explicit-only** | Only facts you asked it to remember. New conversation is not archived and is gone when the mind restarts. What was already archived stays until you forget it |
 | **session-only** | Nothing survives a restart. Reminders, lists, weather and announcements are off |
+
+## Keeping files
+
+Pip can keep files for you in a private store of its own, called the keep.
+Only the owner can use it, and only on an installed Pip with persistent
+memory and the lid open. It is not available in guest mode. While Pip has
+not yet been told how "Forget everything" should treat the keep, it asks first. Say
+"Preserve my keep when I forget everything" or "Erase my keep when I forget
+everything". Pip asks you to confirm the choice with a plain yes.
+
+| Say | Pip |
+|---|---|
+| "What's in my keep?" | Counts the file records, says if any are missing on this laptop, and names the latest |
+| "Keep the photos" / "Resume copying photos" / "How far did you get keeping the photos?" | Copies the photos from the USB stick you have plugged in, and reports progress |
+| "Keep the file called report" | Copies that one file from the USB stick |
+| "Call kept file report by the name taxes" | Gives a kept file a spoken name |
+| "Read me taxes from my keep" | Reads a short text file aloud |
+| "What does taxes say about rent?" | Quotes matching passages from a kept document |
+| "Give me taxes from my keep" | Copies the file to the USB stick without replacing anything on it, after you confirm |
+| "Forget kept file taxes" | Removes that file from the keep |
+| "Empty my keep" / "Back up my keep" | Empties the keep, or backs up its file contents |
+
+Pip refuses a name that matches more than one file. Files are limited to 64
+MB each. Writing to a stick works only on FAT and exFAT. Whether
+the keep survives "Forget everything" is your choice above. The normal
+encrypted backup holds the keep's catalogue, not the file contents, which
+"Back up my keep" saves separately. The built-in SD card reader is
+off by default, and Pip's file commands use the USB stick.
+
+When a USB drive is plugged in while Pip is resting and not in guest mode
+or quiet hours, Pip may say so, at most once every five minutes. It says what
+kind of drive it is (a backup drive, another PipOS drive, a Mac-formatted
+drive or a USB drive), its rough size and its label when that is a plain one. It
+reads only the drive's description, never its files.
 
 ## Calculator
 
@@ -716,11 +750,15 @@ face before opening a screen app.
 | **2** | Dreams on or off. Choose nights or whenever the lid is closed on power |
 | **3** | Memory mode, and forgetting conversations after a number of days |
 | **4** | What I remember: read the facts and forget one |
+| **A** | Habits: your phrase habits, with their triggers and steps |
+| **C** | Curiosity on or off. When on, Pip may ask one gentle question after a conversation you start, at most once on a trusted local day. Your answer is saved only if you then say yes to "Shall I remember that?" |
 | **5** | Dream journal |
 | **6** | Date and time (for a clock that went wrong) |
 | **7** | Time zone |
 | **8** | Workshop on or off |
 | **9** | Network: join Wi-Fi, wired Ethernet on or off, forget Wi-Fi (installed Pip only) |
+| **R** | Previous system: try the last confirmed system copy once (installed Pip only). See [Updates](#updates) |
+| **E** | Endurance: native soak and power-cut evidence (installed Pip only) |
 | **P** | Permissions for camera, network, workshop, announcements and dreams |
 | **D** | Boot diagnostics on the stick on or off (Try only) |
 | **H** | Health: the same check-up as "Are you okay?" |
@@ -1091,6 +1129,9 @@ The **laptop** build of PipOS deliberately has no login console, so these
 commands need one of these:
 
 - a *maintenance* build, which adds paired-Mac SSH access;
+- the Try-only *maintenance image*, which has a root login on the second
+  console and measurement tools. It cannot install or restore
+  ([LAB.md](../LAB.md#try-only-maintenance-image));
 - a lab or virtual-laptop image;
 - for development only, a *cable development* Try stick, which a Mac
   reaches over a plain Ethernet cable ([LAB.md](../LAB.md#cable-development-build)).

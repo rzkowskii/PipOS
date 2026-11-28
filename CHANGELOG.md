@@ -15,9 +15,14 @@ passing, 64 skipped for tools, models and downloads a fresh checkout
 does not have; lab host checks 64 passed). It has not been reviewed as a whole yet, and none of it has
 been built into a published image or tried on the MacBook as a set.
 [STATUS.md](STATUS.md) has the hardware and QEMU evidence for the parts
-that were tried on their own. A review of the face code after this
-checkpoint found 20 faults, among them a brief link loss that silences
-the mouth for the rest of a reply; their fixes follow in a later update.
+that were tried on their own. Later the same day, reviews of the
+face code and of the last three implementation rounds found 30 faults.
+All are fixed in the commits after the checkpoint: among them a brief
+link loss that silenced the mouth for the rest of a reply, missed speech
+counted as thinking, and a reboot-loop breaker for the health watch.
+The owner confirmed the new heat limits (cool under 70 C, hot over
+92 C) and the fan rising while you speak on 28 November. None of these
+fixes has run on the laptop yet.
 
 - **Hearing and voice.** A separate Ears service owns the microphone and
   hands the stream to Voice. If capture outlives a refusal, a privacy
