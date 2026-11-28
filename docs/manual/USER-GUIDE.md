@@ -657,7 +657,7 @@ only, Spoken. Or say "Let's type" (Written + voice), "Silent mode" (Written
 only) or "Back to talking" (Spoken; heard only while the microphone is on).
 Press **Enter** to send a line and **Esc** to leave the box.
 
-The aim in both written modes is that the microphone is off, so Pip does not
+In both written modes the microphone is off, so Pip does not
 listen for “Hey Pip” while you type (the mute key is a different thing and is
 not used). A guest always gets Spoken, no dock and no captions of your words.
 Written chat is meant to work with the voice off or broken too; a reply then
@@ -666,12 +666,14 @@ shows when it is over.
 An image can ship with the two written modes switched off (`"written_chat": false` in `/etc/being/being.json`); the chip and **F7** then say "Written chat is switched off in this image" and Pip stays Spoken.
 
 **Status, 28 November (host tests only, never run on the laptop):** the dock,
-the chip, F7, the typing box, the text shown as Pip speaks, and a guest
-forcing Spoken are built. Silent replies, the microphone going off, spoken
-confirmations turning into text, and timers as text with a chime need the
-conversation code that is not in yet. Until it is, **Written only still
-speaks and the microphone stays on**, so this page describes the intended
-behaviour of the two written modes, not what Pip does today.
+the chip, F7, the typing box and the three modes are built. In both written
+modes Pip stops listening as soon as you switch: the microphone is closed at
+once and stays closed until you go back to Spoken or a guest arrives (a guest
+always gets Spoken, and the microphone opens again for them). In Written only
+the replies are shown, not spoken; timers and reminders show as text with one
+chime, and alarms still ring aloud. Known gaps: saying goodbye in Written only
+waits a few seconds before Pip settles, and none of this has been tried on the
+MacBook yet.
 
 Not there yet: an entry for the mode in the Quick Menu or Options, touch on the
 dock, and Yes and No buttons: a question that needs “yes” is plain text, so
