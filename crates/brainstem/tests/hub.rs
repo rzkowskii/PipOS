@@ -822,3 +822,28 @@ fn a_mind_restart_while_thinking_opens_the_ears_at_once() {
     let heard = wait_for(&mind, "the new mind hears it", |e| e.topic == "hear.final");
     assert_eq!(heard.str("text"), Some("what time is it"));
 }
+
+/// A finished job moves the face only for the owner: before Mind has reported
+/// on privacy the guest question is unanswered, and unknown counts as a guest.
+#[test]
+fn the_face_reacts_to_a_job_only_once_the_owner_is_known() {
+    let stem = Stem::start("guestjob", "mind");
+    let watcher = stem.join("watcher", &["state.changed", "face.*"]);
+    let mut mind = stem.join("mind", &[]);
+    let mut shell = stem.join("shell", &[]);
+    mind.send(&Event::new("mind.ready").with("cortex", true)).unwrap();
+    wait_for(&watcher, "idle", state_is("idle"));
+    let failed = |id: &str| Event::new("term.status").with("id", id).with("phase", "failed").with("exit", 2i64);
+
+    shell.send(&failed("before-any-report")).unwrap();
+    assert!(quiet(&watcher, |e| e.topic == "face.express"), "reacted before Mind said who is here");
+
+    mind.send(&Event::new("app.privacy").with("guest", false)).unwrap();
+    shell.send(&failed("owner")).unwrap();
+    let face = wait_for(&watcher, "face.express for the owner", |e| e.topic == "face.express");
+    assert_eq!(face.str("name"), Some("sad"));
+
+    mind.send(&Event::new("app.privacy").with("guest", true)).unwrap();
+    shell.send(&failed("guest")).unwrap();
+    assert!(quiet(&watcher, |e| e.topic == "face.express"), "reacted to a guest's job");
+}

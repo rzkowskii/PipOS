@@ -84,6 +84,14 @@ fn guest_latched(appliance_body: bool) -> bool {
     }
 }
 
+/// Whether the person at the screen may be someone other than the owner.
+/// Owner-only reactions wait for an explicit report from Mind that no guest
+/// is present, so "not reported yet" counts as a guest, as does the
+/// boot-local latch.
+fn guest_now(privacy: &Option<Event>, appliance_body: bool) -> bool {
+    privacy.as_ref().and_then(|event| event.bool("guest")) != Some(false) || guest_latched(appliance_body)
+}
+
 /// Topics only the brainstem may send. Orders to the voice and the mind are
 /// the brainstem's alone, so no organ can mute, stop or cancel another.
 const RESERVED: &[&str] = &[
@@ -740,6 +748,8 @@ fn main() {
         }
         None => machine::Machine::new(cfg, 0.0),
     };
+    // Until Mind reports who is here, the person may be a guest.
+    machine.set_guest(guest_now(&caption_privacy, appliance_body));
     let hardware_body = cfg!(target_os = "linux") && appliance_body && !lab_body;
     let mut ears = ears::Ears::for_body(hardware_body, Path::new("/"));
     let mut audio_stop: Option<(std::process::Child, f64)> = None;
@@ -1026,6 +1036,7 @@ fn main() {
                                     let privacy = Event::new("app.privacy")
                                         .with("guest", guest || guest_latched(appliance_body));
                                     caption_privacy = Some(privacy.clone());
+                                    machine.set_guest(guest_now(&caption_privacy, appliance_body));
                                     pending.push((privacy, Some(id)));
                                 }
                             }
@@ -1062,9 +1073,8 @@ fn main() {
                                     || ev.data.get("lid_seq").is_some_and(|value| value.as_u64() != Some(seq))) => {}
                             _ => {
                                 if ev.topic == "term.status" {
-                                    // Same guest test as the routing below.
-                                    machine.set_guest(caption_privacy.as_ref().and_then(|event| event.bool("guest")) == Some(true)
-                                        || guest_latched(appliance_body));
+                                    // The latch can appear after boot, and a job is rare.
+                                    machine.set_guest(guest_now(&caption_privacy, appliance_body));
                                 }
                                 body.on_event(&ev, now);
                                 let outs = machine.on_event(&ev, now);
@@ -1511,4 +1521,15 @@ fn a_turn_ended_by_an_organ_restart_is_written_down() {
     assert_eq!(turn_ended_note("voice", &cancel("mind_restarted")), None);
     assert_eq!(turn_ended_note("voice", &[Event::new("mind.cancel")]), None);
     assert_eq!(turn_ended_note("voice", &[]), None);
+}
+
+#[cfg(test)]
+#[test]
+fn nobody_is_the_owner_until_mind_says_so() {
+    let report = |guest: bool| Some(Event::new("app.privacy").with("guest", guest));
+    assert!(guest_now(&None, false), "no report yet must count as a guest");
+    assert!(guest_now(&report(true), false));
+    assert!(!guest_now(&report(false), false));
+    // A report without the field is no answer either.
+    assert!(guest_now(&Some(Event::new("app.privacy")), false));
 }
