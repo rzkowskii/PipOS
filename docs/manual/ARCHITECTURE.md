@@ -296,11 +296,11 @@ Only a hardware body (or a test naming `--poweroff-cmd`) powers off.
   DRM DPMS (`BEING_FACE_DPMS=0` stops that), because `bl_power` does not
   switch off the MacBook's LVDS backlight.
 - **Expressions.** The expression table (`crates/face/expressions.json`)
-  has 75 poses: the 17 original ones (`neutral`, `attentive`,
+  has 87 poses: the 17 original ones (`neutral`, `attentive`,
   `listening`, `thinking`, `speaking`, `joy`, `curiosity`, `surprise`,
   `skepticism`, `concern`, `sleepy`, `asleep`, `dreaming`, `tired`,
   `muted`, `loading` before the brainstem first answers, and `dazed`) and
-  fifty-eight more (`sad`, `laugh`, `love`, `embarrassed`, `scared`,
+  seventy more (`sad`, `laugh`, `love`, `embarrassed`, `scared`,
   `annoyed`, `smug`, `confused`, `wink`, `bored`, `relieved`, and the
   shock family `shocked`, `startled`, `gasp`, `amazed`, `bewildered`,
   `speechless`, `horror`, `stunned`, and the warm ladder `pleased`, `excited`, `victorious`, `angry`,
@@ -309,7 +309,9 @@ Only a hardware body (or a test naming `--poweroff-cmd`) powers off.
   `nervous`, `mischief`, `determined`, `cheeky`, `sing`, `dizzy`, `ko`,
   `cozy`, `flirty`, `dreamy`, `adoring`, and the tense and unhappy family
   `heartbroken`, `guilty`, `jealous`, `raging`, `disgusted`, `panicked`,
-  `freezing`, `lonely`, `pouting`, `grumpy`, `resigned`, `awkward`). The brainstem and the face can ask
+  `freezing`, `lonely`, `pouting`, `grumpy`, `resigned`, `awkward`, and the Pip states `p_processing`, `p_searching`,
+  `p_glitch`, `p_success`, `p_music`, `p_scan`, `p_deadpan`, `p_yawn`, `p_lowbat`,
+  `p_wake`, `p_smug`, `p_sound`). The brainstem and the face can ask
   for any of them except `dreaming` and `loading`; the tuned ones keep
   the pose clamp and the 60 Hz kick window the audition poses had. The model can still choose only one of seven
   emotions for its reply: neutral, joy, curiosity, surprise, skepticism,

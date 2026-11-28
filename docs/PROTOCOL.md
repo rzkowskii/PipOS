@@ -206,7 +206,10 @@ and the tuned expressions `sad`, `laugh`, `love`, `embarrassed`, `scared`,
 set `starstruck`, `proud`, `idea`, `crying`, `nervous`, `mischief`, `determined`,
 `cheeky`, `sing`, `dizzy`, `ko`, `cozy`, `flirty`, `dreamy`, `adoring`, and the tense and
 unhappy family `heartbroken`, `guilty`, `jealous`, `raging`, `disgusted`, `panicked`,
-`freezing`, `lonely`, `pouting`, `grumpy`, `resigned`, `awkward`. `face.express` accepts
+`freezing`, `lonely`, `pouting`, `grumpy`, `resigned`, `awkward`, and the Pip states
+`p_processing`, `p_searching`, `p_glitch`, `p_success`, `p_music`, `p_scan`, `p_deadpan`,
+`p_yawn`, `p_lowbat`, `p_wake`, `p_smug`, `p_sound` (names only: the face's own state poses
+stay the real ones, and the director decides when each shows). `face.express` accepts
 exactly these names; any other name is ignored. (`dreaming` is a demo-only pose
 and `loading` is the face's own state before the brainstem first answers; neither
 can be requested.) The model still chooses only from its seven tags
