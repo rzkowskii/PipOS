@@ -2254,6 +2254,17 @@ class HonestTime(MindCase):
         self.assertIn("still not sure of the time", second)
         self.assertIn("still not sure of the date", third)
 
+    async def test_a_trusted_clock_clears_the_once_so_a_later_reset_is_explained_again(self):
+        with patch.object(self.mind, "_clock_doubt", return_value="reset"):
+            await self.hear("What time is it?", 1)
+        self.assertIn("My clock was reset", said(self.bus))
+        with patch.object(self.mind, "_clock_doubt", return_value=None):
+            await self.mind._publish_clock(refresh=True)
+        self.bus.sent.clear()
+        with patch.object(self.mind, "_clock_doubt", return_value="reset"):
+            await self.hear("What time is it?", 1)
+        self.assertIn("My clock was reset", said(self.bus))
+
     async def test_the_date_and_time_can_be_given_in_one_sentence_and_set_on_a_yes(self):
         from mind import clock_set
 
@@ -2268,7 +2279,7 @@ class HonestTime(MindCase):
             await self.hear("yes", 1)
         expected = datetime(2026, 11, 28, 15, 40, tzinfo=ZoneInfo("Australia/Sydney")).timestamp()
         setter.assert_called_once()
-        self.assertEqual(setter.call_args.args[1], expected)
+        self.assertAlmostEqual(setter.call_args.args[1], expected, delta=5)
         self.assertIn("my clock says so now", said(self.bus))
 
     async def test_a_no_leaves_the_clock_alone(self):

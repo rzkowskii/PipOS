@@ -31,7 +31,7 @@ _DIARY_DAYS = r"(?:yesterday|last week|(?:on |last )?(?:monday|tuesday|wednesday
 
 # Tried in order. Recall comes before remember, so "do you remember X" is a
 # question, not a new memory.
-_MONTH_WORDS = ("january|february|march|april|june|july|august|september|october|november|december|"
+_MONTH_WORDS = ("january|february|march|april|may|june|july|august|september|october|november|december|"
                 "jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec")
 _PATTERNS = [
     ("guest_start", r"start guest mode|don['’]?t remember this(?:[\s,.:;!?][\s\S]*)?"),

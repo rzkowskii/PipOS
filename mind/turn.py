@@ -1166,6 +1166,9 @@ class Mind:
         if refresh or now - sampled >= 3 or self._clock_sent is None:
             trusted = self._clock_doubt() is None
             self._clock_trust_sample = (now, trusted)
+            if trusted:
+                # A later reset is explained again.
+                self._clock_asked = False
         zone = self.skills.zone
         offset = None
         if zone is not None and trusted:
@@ -5591,7 +5594,7 @@ class Mind:
         elif kind == "time":
             self._record("command", text, speaker)
             if doubt := self._clock_doubt():
-                await self._say(self._doubtful_clock_line(doubt))
+                await self._say(self._doubtful_clock_line(doubt, owner=self._clock_owner(speaker)))
             else:
                 await self._say(f"[neutral] {await self.skills.reply(command, self.clock)}")
             await self._publish_clock()
@@ -5603,7 +5606,7 @@ class Mind:
             await self._say(_tagged(reply), keep=False, private=True)
         elif kind in ("date", "date_tomorrow", "day") and (doubt := self._clock_doubt()):
             self._record("command", text, speaker)
-            await self._say(self._doubtful_clock_line(doubt, what="date"))
+            await self._say(self._doubtful_clock_line(doubt, what="date", owner=self._clock_owner(speaker)))
         elif kind == "set_time" and self._guest_memory is not None:
             # The clock is the owner's: it moves their reminders and the
             # memory's record of a clock set by hand.
@@ -6345,7 +6348,10 @@ class Mind:
             self._plea_thanks_until = None
         return self._plea_due is not None or thanks
 
-    def _doubtful_clock_line(self, doubt, what="time"):
+    def _clock_owner(self, speaker):
+        return speaker == self.cfg.owner and self._guest_memory is None
+
+    def _doubtful_clock_line(self, doubt, what="time", *, owner=True):
         """What Pip says when asked the time or date it cannot be sure of.
 
         The first ask in a boot gets the whole story and how to put it right
@@ -6353,6 +6359,10 @@ class Mind:
         typed); asked again, Pip only says it is still not sure, so a clock that
         stays wrong does not become a nag.
         """
+        if not owner:
+            # A guest cannot set the clock, and must not use up the owner's explanation.
+            return (f"[concern] I'm not sure of the {what}. My clock was reset, or I lost track of it. "
+                    "My owner can set it.")
         if getattr(self, "_clock_asked", False):
             return (f"[concern] I'm still not sure of the {what}. "
                     "Tell me the date and time whenever you like, and I'll set my clock.")

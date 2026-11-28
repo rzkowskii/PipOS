@@ -32,11 +32,20 @@ from pathlib import Path
 from . import care, clock_epoch
 from .body_talk import Confirm, Reply, is_guest, said as tidy_said
 from .skills import speakable_time
+from .try_mode import is_try_boot
 
 # How long a date said on its own waits for the time to follow.
 PENDING_SECONDS = 90.0
 # The question stays open this long for the owner's yes.
 CONFIRM_SECONDS = 30.0
+# No date further ahead of what Pip remembers than this: a slip of a year (2036
+# for 2026) is a mistake, and the Setup screen can still set any date.
+MAX_AHEAD = timedelta(days=730)
+SETUP = "The setup screen can set it."
+
+
+def _clock():
+    return time.monotonic()
 
 _MONTHS = {
     name: number for number, names in enumerate(
@@ -58,13 +67,13 @@ _ORDINALS = {
 }
 _ORDINAL_WORDS = "|".join(sorted(_ORDINALS, key=len, reverse=True))
 _DAY_NAMES = r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+_SETTING = r"(?:set|change) (?:the |your )?(?:date|time|clock)(?: and (?:the )?(?:time|date))? to"
 _INTENT = re.compile(
-    r"^(?:actually |now )?(?:it'?s|it is|today is|today'?s|the date is|the date and time (?:is|are)|"
-    r"the time and date (?:is|are)|set the date(?: and time)? to|change the date(?: and time)? to)\b")
+    rf"^(?:actually |now )?(?:it'?s|it is|today is|today'?s|the date is|the time is|the date and time (?:is|are)|"
+    rf"the time and date (?:is|are)|{_SETTING})\b")
 _LEAD = re.compile(
-    r"^(?:(?:and |actually |now )?(?:it'?s|it is|today is|today'?s|the date is|the date and time (?:is|are)|"
-    r"the time and date (?:is|are)|set the date(?: and time)? to|change the date(?: and time)? to|the time is|"
-    r"time is|at|and) ?)+")
+    rf"^(?:(?:and |actually |now )?(?:it'?s|it is|today is|today'?s|the date is|the date and time (?:is|are)|"
+    rf"the time and date (?:is|are)|{_SETTING}|the time is|time is|at|and) ?)+")
 
 # The date said on its own, waiting for a time: per state directory.
 _pending = {}
@@ -164,20 +173,31 @@ def _find_date(text):
     return None
 
 
-_PM = re.compile(r"\b(?:in the (?:afternoon|evening)|at night|tonight|pm)\b")
+_NIGHT = re.compile(r"\b(?:at night|tonight)\b")
+_AFTERNOON = re.compile(r"\bin the afternoon\b")
+_EVENING = re.compile(r"\b(?:in the evening|pm)\b")
 _AM = re.compile(r"\b(?:in the morning|am)\b")
+_DAYPARTS = (_NIGHT, _AFTERNOON, _EVENING, _AM)
 _AMBIGUOUS = "Say morning or afternoon with the time, or use the 24-hour clock."
 
 
 def _find_time(text):
     """(hour, minute) for the clock time in `text`, None when there is none, or a
-    ValueError when there is one that cannot be taken (no morning or afternoon)."""
+    ValueError when there is one that cannot be taken (no morning or afternoon).
+
+    The morning or afternoon belongs to the minute that is named: "quarter to
+    twelve at night" is 23:45 and "quarter to twelve in the morning" 11:45."""
     text = _numbers(_tidy(text))
     text = _LEAD.sub("", text).strip()
+    text = re.sub(r"(?: (?:on|at|the))+$", "", text).strip()
     if not text:
         return None
-    pm, am = bool(_PM.search(text)), bool(_AM.search(text))
-    body = " ".join(_PM.sub(" ", _AM.sub(" ", text)).replace("a m", " ").replace("p m", " ").split())
+    night, afternoon = bool(_NIGHT.search(text)), bool(_AFTERNOON.search(text))
+    evening, am = bool(_EVENING.search(text)), bool(_AM.search(text))
+    body = text
+    for pattern in _DAYPARTS:
+        body = pattern.sub(" ", body)
+    body = " ".join(body.replace("a m", " ").replace("p m", " ").split())
     if body in ("noon", "midday"):
         return 12, 0
     if body == "midnight":
@@ -199,16 +219,31 @@ def _find_time(text):
         hour, minute = int(match[1]), 0
     else:
         return None
-    if am or pm:
+    if not (0 <= minute <= 59 or shift):
+        return None
+    if night or afternoon or evening or am:
         if not 1 <= hour <= 12:
             return None
-        hour = hour % 12 + (12 if pm else 0)
-    elif 1 <= hour <= 12:
+        # The named minute, on the 12-hour clock: past or to the hour, wrapping round.
+        total = ((hour % 12) * 60 + minute + shift) % 720
+        clock12, minute = (total // 60) or 12, total % 60
+        if am:
+            hour = clock12 % 12
+        elif night:
+            hour = clock12 + 12 if 6 <= clock12 <= 11 else clock12 % 12
+        elif afternoon:
+            if clock12 == 11:
+                raise ValueError("Eleven o'clock is not in the afternoon. Say it as morning, evening or night.")
+            hour = clock12 % 12 + 12
+        else:
+            hour = clock12 % 12 + 12
+        return hour, minute
+    if 1 <= hour <= 12:
         raise ValueError(_AMBIGUOUS)
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+    if not (0 <= hour <= 23):
         return None
-    moment = datetime(2000, 1, 1, hour, minute) + timedelta(minutes=shift)
-    return moment.hour, moment.minute
+    total = (hour * 60 + minute + shift) % 1440
+    return total // 60, total % 60
 
 
 class Said:
@@ -251,7 +286,7 @@ def may_match(text):
 
 
 def _pending_open():
-    now = time.monotonic()
+    now = _clock()
     for key in [key for key, (_, until) in _pending.items() if until < now]:
         del _pending[key]
     return bool(_pending)
@@ -259,27 +294,38 @@ def _pending_open():
 
 # -- turning it into a moment, or a reason it cannot be --------------------
 
-def moment(said, zone, today, state_dir=None):
+def moment(said, zone, today, state_dir=None, *, floor=None):
     """The aware datetime named by `said` (date and clock both present), or a
-    ValueError saying why it cannot be right. `today` is the owner's date as
-    Pip's own clock has it: the year is borrowed from it when none was said."""
+    ValueError saying why it cannot be right. The year is never borrowed from
+    Pip's own clock (it is the one in doubt, and over New Year it could be a
+    year out). `today` is kept for callers and not used. `floor` overrides the
+    trusted clock floor (a correction in the same boot as a wrong set)."""
     year = said.year
     if year is None:
-        if today.year < 2026:
-            raise ValueError("Say the year too.")
-        year = today.year
+        raise ValueError("Say the year too.")
     try:
         when = datetime(year, said.month, said.day, said.clock[0], said.clock[1], tzinfo=zone)
     except ValueError:
         raise ValueError(f"There is no {said.day} {_month_name(said.month)} {year}.") from None
     stamp = when.timestamp()
     if stamp < clock_epoch.CLOCK_FLOOR or stamp > clock_epoch.MAX_CLOCK:
-        raise ValueError("I can't be set to a date before 2026 or after 2100.")
-    floor = clock_epoch.floor(state_dir) if state_dir is not None else clock_epoch.CLOCK_FLOOR
+        raise ValueError(f"I can't be set to a date before 2026 or after 2100. {SETUP}")
+    # A time the clocks skip, or play twice, that day: ask for the setup screen.
+    shown = datetime.fromtimestamp(stamp, zone)
+    if (shown.hour, shown.minute) != (when.hour, when.minute):
+        raise ValueError(f"{speakable_time(when.hour, when.minute)} doesn't exist that day, because the clocks "
+                         f"change. {SETUP}")
+    if when.replace(fold=1).utcoffset() != when.utcoffset():
+        raise ValueError(f"{speakable_time(when.hour, when.minute)} happens twice that day, because the clocks "
+                         f"change. {SETUP}")
+    if floor is None:
+        floor = clock_epoch.floor(state_dir) if state_dir is not None else clock_epoch.CLOCK_FLOOR
     if stamp < floor:
-        shown = datetime.fromtimestamp(floor, zone)
-        raise ValueError(f"That is earlier than things I already remember, from {shown.day} "
-                         f"{_month_name(shown.month)} {shown.year}.")
+        before = datetime.fromtimestamp(floor, zone)
+        raise ValueError(f"That is earlier than things I already remember, from {before.day} "
+                         f"{_month_name(before.month)} {before.year}. {SETUP}")
+    if stamp > floor + MAX_AHEAD.total_seconds():
+        raise ValueError(f"That is a long way after anything I remember. {SETUP}")
     return when
 
 
@@ -301,11 +347,19 @@ def appliance():
     return Path("/etc/being").is_dir()
 
 
+_set_this_boot = {}  # state dir -> the clock floor from before this skill's own first set
+
+
 async def handle(text, ctx):
-    heard = tidy_said(text, ctx)
     key = str(ctx.state_dir)
+    # Only while the clock is in doubt, or to correct what this skill set in this boot: a
+    # trusted clock is never moved by a sentence that happens to hold a date.
+    if getattr(ctx, "clock_trusted", True) and key not in _set_this_boot:
+        _pending.pop(key, None)
+        return None
+    heard = tidy_said(text, ctx)
     waiting = _pending.pop(key, None)
-    if waiting is not None and waiting[1] < time.monotonic():
+    if waiting is not None and waiting[1] < _clock():
         waiting = None
     try:
         got = read(heard)
@@ -322,37 +376,46 @@ async def handle(text, ctx):
         return Reply("[neutral] Only the person I live with can set my clock.")
     now = getattr(ctx, "now", None)
     if now is None:
-        return Reply("[concern] I need to know your time zone before I can set my clock. "
-                     "The setup screen can set it.")
+        return Reply(f"[concern] I need to know your time zone before I can set my clock. {SETUP}")
     if got.clock is None:
-        _pending[key] = (got.date, time.monotonic() + PENDING_SECONDS)
+        _pending[key] = (got.date, _clock() + PENDING_SECONDS)
         return Reply(ASK_FOR_TIME)
     try:
-        when = moment(got, now.tzinfo, now.date(), ctx.state_dir)
+        when = moment(got, now.tzinfo, now.date(), ctx.state_dir, floor=_set_this_boot.get(key))
     except ValueError as reason:
         return Reply(f"[concern] {reason}")
+    heard_at = _clock()
 
     async def on_yes():
-        return await apply(ctx, when)
+        return await apply(ctx, when, waited=max(0.0, _clock() - heard_at))
 
     return Reply(f"[neutral] I heard {spoken_moment(when)}. Shall I set my clock to that? Say yes.",
                  confirm=Confirm(on_yes=on_yes, seconds=CONFIRM_SECONDS, strict=True))
 
 
-async def apply(ctx, when):
-    """Set the clock to `when`, after the owner's yes: the Setup screen's own path."""
+async def apply(ctx, when, *, waited=0.0):
+    """Set the clock to `when` (plus the seconds that went by since it was heard), after the
+    owner's yes: the Setup screen's own path. Try sessions set the system clock only."""
     if not appliance():
         return Reply("[concern] I can only set my own clock on my laptop.")
+    when = when + timedelta(seconds=waited)
+    key = str(ctx.state_dir)
+    before = clock_epoch.floor(ctx.state_dir)
+    write_rtc = not is_try_boot()
     try:
         battery = await asyncio.to_thread(care.set_clock, ctx.state_dir, when.timestamp(),
-                                          date_confirmed=True, write_rtc=True)
+                                          date_confirmed=True, write_rtc=write_rtc)
     except sqlite3.OperationalError as error:
         if getattr(error, "sqlite_errorcode", None) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
             return Reply("[concern] My timers are busy. Say it again in a moment.")
-        return Reply("[concern] I couldn't set my clock. The setup screen can.")
+        return Reply(f"[concern] I couldn't set my clock. {SETUP}")
     except (OSError, ValueError, sqlite3.Error):
-        return Reply("[concern] I couldn't change my clock myself. The setup screen can set it.")
+        return Reply(f"[concern] I couldn't change my clock myself. {SETUP}")
+    _set_this_boot.setdefault(key, before)
     line = f"[joy] Thanks. It is {spoken_moment(when)}, and my clock says so now."
-    if battery is False:
-        line += " I couldn't write it to my battery clock, so it may be lost if my power runs out."
+    if not write_rtc:
+        line += " I will forget it when I restart."
+    elif battery is False:
+        line += (" I couldn't write it to my battery clock, so my clock will be wrong again after a restart. "
+                 "The setup screen can save it to the battery clock.")
     return Reply(line)
