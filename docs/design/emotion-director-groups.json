@@ -1,0 +1,889 @@
+[
+ {
+  "name": "neutral",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {},
+  "why": "Source reading: effects breath only (concepts.json digest); production baseline pose (PROTOCOL.md:198). Asserts nothing about the body."
+ },
+ {
+  "name": "listening",
+  "group": "b",
+  "live_condition": "state.changed state=listening with ears.policy allowed=true (PROTOCOL.md:56; link.rs:600-606 sets it from the bus)",
+  "drawn_marks": {},
+  "why": "Source reading: breath only; D6 names listening as a state-true emote (research plan:122). Showing it with the mic closed would be a false privacy claim."
+ },
+ {
+  "name": "thinking",
+  "group": "b",
+  "live_condition": "state.changed state=thinking (accepted utterance, cortex working); link.rs:600, anim.rs:1000",
+  "drawn_marks": {
+   "dots": 1
+  },
+  "why": "Source reading: dots+breath; D6 names thinking as state-true (research plan:122). Only honest while a turn is really in flight."
+ },
+ {
+  "name": "surprise",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {},
+  "why": "Source reading: breath, pup 0.2, shine 0.35 only; no body imagery. One of the 7 model tags (mind/speech.py:6) and a production pose (PROTOCOL.md:198)."
+ },
+ {
+  "name": "curiosity",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "question": 0.9
+  },
+  "why": "Source reading: question mark 0.9 is a symbol, not a body claim; model tag (mind/speech.py:6)."
+ },
+ {
+  "name": "skepticism",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {},
+  "why": "Source reading: breath only; model tag and used for hear.missed squint (PROTOCOL.md:198-201)."
+ },
+ {
+  "name": "joy",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "blush": 0.25,
+   "sparkle": 0.4
+  },
+  "why": "Source reading: sparkle 0.4 plus faint blush 0.25 (cartoon cheek marks, emote.rs:263). Model tag; the blush is the only soft point and can be dropped without losing the pose."
+ },
+ {
+  "name": "laugh",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "cry": 0.2,
+   "blush": 0.3,
+   "sparkle": 0.3,
+   "bounce": 1
+  },
+  "why": "Source reading: draws cry 0.2 (tear trail, emote.rs:234) and wet 0.5 (lower-edge tear line, eye.frag:322): bodily-fluid imagery, D6 lab-only (research plan:122)."
+ },
+ {
+  "name": "excited",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "sparkle": 1,
+   "bounce": 0.7
+  },
+  "why": "Source reading: sparkle 1, bounce 0.7, shine 1; symbolic only."
+ },
+ {
+  "name": "love",
+  "group": "c1",
+  "live_condition": "",
+  "drawn_marks": {
+   "blush": 0.8,
+   "hearts": 1
+  },
+  "why": "Source reading: hearts 1 (emote.rs:320), sp_heart 1 (heart pupils), blush 0.8: romantic hearts, named lab-only by D6 (research plan:122).",
+  "effects_off": "pleased"
+ },
+ {
+  "name": "starstruck",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "sparkle": 1
+  },
+  "why": "Source reading: sparkle 1 and star pupils (sp_star); decorative, no fluid, pain or romance."
+ },
+ {
+  "name": "proud",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "sparkle": 0.7
+  },
+  "why": "Source reading: sparkle 0.7, shine 0.6 only."
+ },
+ {
+  "name": "idea",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "sparkle": 0.4,
+   "bulb": 1
+  },
+  "why": "Source reading: bulb 1, sparkle 0.4 are symbols; no body claim."
+ },
+ {
+  "name": "sad",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "cry": 0.25,
+   "gloom": 0.4
+  },
+  "why": "Source reading: cry 0.25 (tear trail), wet 0.65, gloom 0.4: tears are a D6 lab-only item (research plan:122). Production 'sad' (expressions.json poses) has none of this."
+ },
+ {
+  "name": "crying",
+  "group": "c1",
+  "live_condition": "",
+  "drawn_marks": {
+   "cry": 1,
+   "blush": 0.25,
+   "gloom": 0.5,
+   "shiver": 0.4
+  },
+  "why": "Source reading: cry 1, wet 1, shiver 0.4, blush 0.25: full tear imagery; D6 lab-only (research plan:122).",
+  "effects_off": "sad"
+ },
+ {
+  "name": "nervous",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 1,
+   "shiver": 0.5
+  },
+  "why": "Source reading: sweat 1, shiver 0.5: sweat drops plus trembling, D6 lab-only."
+ },
+ {
+  "name": "scared",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 1,
+   "shiver": 1
+  },
+  "why": "Source reading: sweat 1, shiver 1: fear sweat and trembling, D6 lab-only. Production 'scared' is eyes-only."
+ },
+ {
+  "name": "sick",
+  "group": "c0",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 0.5,
+   "gloom": 0.3,
+   "shiver": 0.3
+  },
+  "why": "Source reading: sweat 0.5, gloom, shiver: claims illness. Pip's only honest unwell signal is the unwell overlay (PROTOCOL.md:56) shown as dazed; this pose asserts sickness it cannot have."
+ },
+ {
+  "name": "annoyed",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {},
+  "why": "Source reading: breath only; production pose (PROTOCOL.md:198 family)."
+ },
+ {
+  "name": "smug",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "sparkle": 0.35
+  },
+  "why": "Source reading: sparkle 0.35 only."
+ },
+ {
+  "name": "mischief",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "sparkle": 0.3
+  },
+  "why": "Source reading: sparkle 0.3 only."
+ },
+ {
+  "name": "determined",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "sparkle": 0.35
+  },
+  "why": "Source reading: sparkle 0.35 only."
+ },
+ {
+  "name": "wink",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "sparkle": 0.7
+  },
+  "why": "Source reading: sparkle 0.7 only; a gesture, not a body claim."
+ },
+ {
+  "name": "cheeky",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "notes": 0.6
+  },
+  "why": "Source reading: notes 0.6 (music-note symbols) only."
+ },
+ {
+  "name": "ko",
+  "group": "c1",
+  "live_condition": "",
+  "drawn_marks": {
+   "gloom": 1
+  },
+  "why": "Source reading: sp_x pupils, gloom 1, breath 0.3: claims being knocked out or injured; pain/injury Pip cannot have. A crash is not honestly shown as a punch-out.",
+  "effects_off": "not used"
+ },
+ {
+  "name": "sleepy",
+  "group": "b",
+  "live_condition": "state.changed state=drowsy, or body.drives tiredness high (PROTOCOL.md:56, :65)",
+  "drawn_marks": {
+   "zzz": 0.5
+  },
+  "why": "Source reading: zzz 0.5, breath 1.8. Sleepy is state-true only when the body is drowsy (D6 names sleep as state-true; research plan:122). Also a model tag (mind/speech.py:6), so the model may voice it; the face should gate it."
+ },
+ {
+  "name": "asleep",
+  "group": "b",
+  "live_condition": "state.changed state=asleep (PROTOCOL.md:56; anim.rs:954, :1290)",
+  "drawn_marks": {
+   "zzz": 1,
+   "bubble": 0.8
+  },
+  "why": "Source reading: zzz 1, breath 2.5, bubble 0.8. Sleep is a D6 state-true emote. The bubble (emote.rs:501, drawn at the nose position) is nasal-bubble imagery and should be reviewed or dropped."
+ },
+ {
+  "name": "tired",
+  "group": "b",
+  "live_condition": "body.state battery_low true on battery, or body.drives tiredness raised, during visible idle (PROTOCOL.md:57, :65, :203)",
+  "drawn_marks": {
+   "sweat": 0.3,
+   "gloom": 0.2
+  },
+  "why": "Source reading: gloom 0.2 plus sweat 0.3 (strip the sweat). The tired pose is the low-battery cue (PROTOCOL.md:203)."
+ },
+ {
+  "name": "bored",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "dots": 1
+  },
+  "why": "Source reading: dots 1 (ellipsis) and breath only; shows a conversational stance, no body claim."
+ },
+ {
+  "name": "dazed",
+  "group": "b",
+  "live_condition": "unwell overlay true or link_lost (anim.rs:1383-1385; body.mic_policy breach marks unwell, PROTOCOL.md:62)",
+  "drawn_marks": {
+   "sway": 0.5
+  },
+  "why": "Source reading: sway 0.5, no drawn extras; production pose tied to a body state (PROTOCOL.md:198, anim.rs:1383)."
+ },
+ {
+  "name": "muted",
+  "group": "b",
+  "live_condition": "state.changed muted=true (PROTOCOL.md:56)",
+  "drawn_marks": {},
+  "why": "Source reading: breath only; production pose that states mic is off (PROTOCOL.md:198). False if the mic is actually open."
+ },
+ {
+  "name": "loading",
+  "group": "b",
+  "live_condition": "state waking (lid opening or boot) or a model/app load actually running; state.changed state=waking (PROTOCOL.md:56, :203)",
+  "drawn_marks": {},
+  "why": "Source reading: breath only; a loading look claims a real start-up or load is under way."
+ },
+ {
+  "name": "hopeful",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "sparkle": 0.6
+  },
+  "why": "Source reading: sparkle 0.6, shine 0.9, wet 0.25 (below the 0.5 tear-line threshold; gloss only). Soft point: wet."
+ },
+ {
+  "name": "giggle",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "blush": 0.5,
+   "sparkle": 0.2,
+   "bounce": 0.9
+  },
+  "why": "Source reading: blush 0.5, sparkle 0.2, bounce 0.9; cartoon cheek marks (emote.rs:263), no fluid or romance."
+ },
+ {
+  "name": "flirty",
+  "group": "c1",
+  "live_condition": "",
+  "drawn_marks": {
+   "blush": 0.3,
+   "hearts": 0.4,
+   "sparkle": 0.5
+  },
+  "why": "Source reading: hearts 0.4, blush 0.3, sparkle 0.5: romantic hearts, D6 lab-only.",
+  "effects_off": "smug"
+ },
+ {
+  "name": "victorious",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "sparkle": 1,
+   "bounce": 1
+  },
+  "why": "Source reading: sparkle 1, bounce 1, shine 1 only."
+ },
+ {
+  "name": "pleased",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "blush": 0.2,
+   "sparkle": 0.2
+  },
+  "why": "Source reading: blush 0.2, sparkle 0.2, shine 0.3; mild."
+ },
+ {
+  "name": "adoring",
+  "group": "c1",
+  "live_condition": "",
+  "drawn_marks": {
+   "blush": 0.7,
+   "hearts": 0.5,
+   "sparkle": 0.5
+  },
+  "why": "Source reading: hearts 0.5, blush 0.7, wet 0.6: romantic hearts and tear-line, D6 lab-only.",
+  "effects_off": "pleased"
+ },
+ {
+  "name": "dreamy",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "sparkle": 0.6,
+   "notes": 0.6,
+   "sway": 1
+  },
+  "why": "Source reading: sparkle 0.6, notes 0.6, sway 1, wet 0.25 (gloss only). A wistful look; not an assertion that Pip is dreaming (the real dream stage is separate, PROTOCOL.md:203)."
+ },
+ {
+  "name": "reassuring",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {},
+  "why": "Source reading: breath 1.3 and shine 0.3 only."
+ },
+ {
+  "name": "amused",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "sparkle": 0.2,
+   "bounce": 0.3
+  },
+  "why": "Source reading: sparkle 0.2, bounce 0.3, shine 0.4 only."
+ },
+ {
+  "name": "encouraging",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "sparkle": 0.6,
+   "bounce": 0.6
+  },
+  "why": "Source reading: sparkle 0.6, bounce 0.6, shine 0.9 only."
+ },
+ {
+  "name": "heartbroken",
+  "group": "c1",
+  "live_condition": "",
+  "drawn_marks": {
+   "cry": 0.8,
+   "gloom": 0.7,
+   "shiver": 0.3
+  },
+  "why": "Source reading: cry 0.8, wet 1, sp_heart 0.3, gloom 0.7: tears plus a broken-heart pupil; grief and bodily fluid, D6 lab-only.",
+  "effects_off": "sad"
+ },
+ {
+  "name": "jealous",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "steam": 0.2,
+   "gloom": 0.35
+  },
+  "why": "Source reading: steam 0.2 (below the 0.5 threshold), gloom 0.35; mood display, no fluid or illness."
+ },
+ {
+  "name": "raging",
+  "group": "c1",
+  "live_condition": "",
+  "drawn_marks": {
+   "anger": 1,
+   "steam": 1,
+   "shiver": 0.7,
+   "bounce": 0.3,
+   "flame": 1
+  },
+  "why": "Source reading: flame 1 (emote.rs:283), steam 1, anger 1, shiver 0.7: fire and heavy steam imply overheating or combustion on a laptop, a body claim Pip cannot honestly make (also an alarming one).",
+  "effects_off": "angry"
+ },
+ {
+  "name": "panicked",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 1,
+   "exclaim": 1,
+   "shiver": 1,
+   "bounce": 0.8
+  },
+  "why": "Source reading: sweat 1, exclaim 1, shiver 1, bounce 0.8: panic sweat, D6 lab-only."
+ },
+ {
+  "name": "freezing",
+  "group": "c1",
+  "live_condition": "",
+  "drawn_marks": {
+   "gloom": 0.2,
+   "shiver": 1,
+   "snow": 1
+  },
+  "why": "Source reading: snow 1 (emote.rs:470), shiver 1, wet 0.3: claims a felt chill. body.state has a temp reading (PROTOCOL.md:57) but a laptop does not freeze; falling snow is imaginary weather. Not found: any rule tying this to a low-temp read",
+  "effects_off": "not used"
+ },
+ {
+  "name": "grumpy",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "steam": 0.4,
+   "gloom": 0.3
+  },
+  "why": "Source reading: steam 0.4 (below 0.5 threshold), gloom 0.3; mood display only."
+ },
+ {
+  "name": "queasy",
+  "group": "c0",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 0.7,
+   "gloom": 0.4,
+   "shiver": 0.35,
+   "sway": 0.8
+  },
+  "why": "Source reading: sweat 0.7, gloom 0.4, shiver 0.35, sway 0.8: claims nausea, an illness Pip cannot have."
+ },
+ {
+  "name": "awkward",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 0.85,
+   "blush": 0.45,
+   "dots": 0.7
+  },
+  "why": "Source reading: sweat 0.85, blush 0.45, dots 0.7: heavy sweat, D6 lab-only."
+ },
+ {
+  "name": "p_processing",
+  "group": "b",
+  "live_condition": "state thinking with cortex busy, body.state effort/reflex_strain_pct raised; steam only if temp or thermal_throttles shows heat (PROTOCOL.md:57)",
+  "drawn_marks": {
+   "steam": 0.35,
+   "dots": 1
+  },
+  "why": "Source reading: dots 1, sp_spiral 0.85, steam 0.35. Claims work in progress; steam implies heat, so it should only follow real load."
+ },
+ {
+  "name": "p_searching",
+  "group": "b",
+  "live_condition": "a skill/memory lookup or camera.look request actually running (PROTOCOL.md:126); not found: a dedicated 'searching' bus signal",
+  "drawn_marks": {
+   "question": 0.5,
+   "dots": 0.4
+  },
+  "why": "Source reading: question 0.5, dots 0.4, pup 0.1. Claims a search is under way; Pip is offline by default (docs/DESIGN.md principle 7)."
+ },
+ {
+  "name": "p_glitch",
+  "group": "b",
+  "live_condition": "real fault: body.state thermal_throttles or oom_organs non-zero, app.refused, or link_lost (PROTOCOL.md:57, :117; anim.rs:1385)",
+  "drawn_marks": {
+   "question": 0.4,
+   "shiver": 1,
+   "glitch": 1,
+   "warn": 0.8
+  },
+  "why": "Source reading: glitch 1, warn 0.8, sp_x 0.45, shiver 1. Claims a fault; also photosensitivity risk, decision D9 keeps glitch out of scope unless approved (research plan:123)."
+ },
+ {
+  "name": "p_success",
+  "group": "b",
+  "live_condition": "a real completion event (job or timer done, say.done final=true for an announcement; PROTOCOL.md:89)",
+  "drawn_marks": {
+   "sparkle": 1,
+   "bounce": 0.5,
+   "check": 1
+  },
+  "why": "Source reading: check 1, sparkle 1, bounce 0.5. A check mark claims a task completed."
+ },
+ {
+  "name": "p_scan",
+  "group": "b",
+  "live_condition": "camera grant active and camera.look serviced for the current turn (PROTOCOL.md:126, body.presence :60)",
+  "drawn_marks": {
+   "dots": 0.3,
+   "scan": 1
+  },
+  "why": "Source reading: scan 1, dots 0.3. A scan line claims the camera is looking; the camera LED lights whenever it looks (docs/DESIGN.md organ table)."
+ },
+ {
+  "name": "p_deadpan",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {},
+  "why": "Source reading: breath only; no effects."
+ },
+ {
+  "name": "p_yawn",
+  "group": "b",
+  "live_condition": "state drowsy or asleep to waking, or body.drives tiredness high (PROTOCOL.md:56, :65)",
+  "drawn_marks": {
+   "cry": 0.1,
+   "zzz": 0.4
+  },
+  "why": "Source reading: zzz 0.4, breath 1.6, plus cry 0.1 and wet 0.5 (yawn-tear; strip these). Production anim already yawns when drowsy (anim.rs:928)."
+ },
+ {
+  "name": "p_sneeze",
+  "group": "c0",
+  "live_condition": "",
+  "drawn_marks": {
+   "exclaim": 0.5,
+   "steam": 1,
+   "shiver": 0.5,
+   "bounce": 1
+  },
+  "why": "Source reading: steam 1, exclaim 0.5, shiver 0.5, bounce 1: a respiratory reflex with a spray of vapour; Pip has no nose. Closest honest event (a fan puff) is not found in the bus."
+ },
+ {
+  "name": "p_hiccup",
+  "group": "c0",
+  "live_condition": "",
+  "drawn_marks": {
+   "blush": 0.3,
+   "exclaim": 0.3,
+   "bounce": 1
+  },
+  "why": "Source reading: exclaim 0.3, bounce 1, blush 0.3: an involuntary bodily spasm Pip cannot have."
+ },
+ {
+  "name": "p_lowbat",
+  "group": "b",
+  "live_condition": "body.state battery_low true (or stem.shutdown reason battery_critical); PROTOCOL.md:57, :102",
+  "drawn_marks": {
+   "sweat": 0.2,
+   "gloom": 0.9,
+   "battery": 1
+  },
+  "why": "Source reading: battery 1 icon (emote.rs:522), gloom 0.9, breath 0.6, plus a faint sweat 0.2 (strip it). D6 names battery as state-true (research plan:122)."
+ },
+ {
+  "name": "p_wake",
+  "group": "b",
+  "live_condition": "state.changed state=waking, or body.lid confirmed open after closed (PROTOCOL.md:56, :59, :203)",
+  "drawn_marks": {
+   "zzz": 0.3
+  },
+  "why": "Source reading: zzz 0.3, breath 1.4, wet 0.3 (gloss). A waking look is true only while waking."
+ },
+ {
+  "name": "p_smug",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "sparkle": 0.5
+  },
+  "why": "Source reading: sparkle 0.5, shine 1 only."
+ },
+ {
+  "name": "p_sound",
+  "group": "b",
+  "live_condition": "hear.speech_start or hear.missed reason=unclear with ears.policy allowed=true (PROTOCOL.md:56, hear.* rows, :201)",
+  "drawn_marks": {
+   "question": 0.45,
+   "exclaim": 0.2,
+   "notes": 0.3
+  },
+  "why": "Source reading: question 0.45, exclaim 0.2, notes 0.3. Claims a sound was just heard."
+ },
+ {
+  "name": "startled",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 0.7,
+   "exclaim": 1,
+   "shiver": 0.6,
+   "bounce": 1
+  },
+  "why": "Source reading: sweat 0.7, exclaim 1, shiver 0.6, bounce 1: sweat drawn, D6 lab-only."
+ },
+ {
+  "name": "gasp",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "blush": 0.25,
+   "exclaim": 0.3
+  },
+  "why": "Source reading: blush 0.25, exclaim 0.3, breath 2, shine 0.5; surprise variant. Soft point: the breath-rate 2 mimics an inhale (a minor lung claim) and a faint blush."
+ },
+ {
+  "name": "speechless",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "dots": 1
+  },
+  "why": "Source reading: dots 1, breath 0.4, pup 0.08; ellipsis symbol only."
+ },
+ {
+  "name": "horror",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 1,
+   "exclaim": 0.5,
+   "gloom": 1,
+   "shiver": 1
+  },
+  "why": "Source reading: sweat 1, exclaim 0.5, gloom 1, shiver 1: heavy fear sweat, D6 lab-only."
+ },
+ {
+  "name": "attentive",
+  "group": "b",
+  "live_condition": "state.changed state=attending (brainstem), unmuted, lid confirmed open",
+  "drawn_marks": {},
+  "why": "No drawn effect, but it is the face's mapping for brainstem state attending (anim.rs:1428-1436; PROTOCOL.md:56). It mirrors listening (b), which has the same bare eyes, so showing it as a free reaction would claim the ears are open. The Mut"
+ },
+ {
+  "name": "concern",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 0.3
+  },
+  "why": "Draws sweat 0.3 (emote.rs:215-231 drops, alpha = sweat value) and concern is not a decor-protected pose (decor.rs:39-50), so the drop shows live. Sweat is a D6 item and the drawn effect is the claim. Strict reading: the eyes-only production"
+ },
+ {
+  "name": "embarrassed",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 0.5,
+   "blush": 1
+  },
+  "why": "Sweat 0.5 (drawn drop) plus blush 1.0: sweat is D6. The blush alone would be a; the sweat decides. Eyes-only embarrassed is a launch pose. Source reading."
+ },
+ {
+  "name": "angry",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "anger": 1,
+   "steam": 0.8,
+   "shiver": 0.35
+  },
+  "why": "Anger vein (anger 1), steam 0.8 and shiver 0.35 are cartoon anger idiom, not fluid, illness or a D6 item (steam puffs, emote.rs:399-415). Judged as a mood mark; steam is the closest call because it could read as venting heat, so keep it off"
+ },
+ {
+  "name": "sing",
+  "group": "b",
+  "live_condition": "voice organ producing audio: state=speaking with say.started / say.level / say.played (PROTOCOL.md:87-90), audio output unmuted",
+  "drawn_marks": {
+   "notes": 1,
+   "bounce": 0.35,
+   "sway": 0.6
+  },
+  "why": "Notes 1.0 with bounce and sway assert that Pip is singing, i.e. producing sound. Nothing found on the bus for singing or music (grep of PROTOCOL.md and DESIGN.md); the only honest backing is the voice organ actually playing audio. Conservat"
+ },
+ {
+  "name": "confused",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 0.2,
+   "question": 1
+  },
+  "why": "Question mark 1.0 plus sweat 0.2: any drawn sweat is D6 (emote.rs:215 draws it above 0.012). Faint, but the drawn effect is a bodily-fluid claim, so the conservative group applies; the eyes-only confused is the usable form. Source reading."
+ },
+ {
+  "name": "dizzy",
+  "group": "b",
+  "live_condition": "state.changed unwell=true or brainstem link lost (same truth as the dazed pose); accelerometer shake/tilt would also qualify but is not built (DESIGN.md:46)",
+  "drawn_marks": {
+   "sway": 1
+  },
+  "why": "Spiral pupils (sp_spiral 1) and sway 1 claim vertigo. The only honest equivalents are the unwell or link-lost faults, which the face already shows as dazed (anim.rs:1383-1385). Accelerometer is not built (DESIGN.md:46), so no tilt signal ex"
+ },
+ {
+  "name": "grateful",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "blush": 0.5,
+   "hearts": 0.3,
+   "sparkle": 0.3
+  },
+  "why": "Draws hearts 0.3 (emote.rs:320) with blush 0.5 and wet 0.55: hearts are D6 lab-only, whatever the intensity. Without the hearts it would be a; the eyes-only warm pose remains usable. Source reading."
+ },
+ {
+  "name": "bashful",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "blush": 1,
+   "sway": 0.4
+  },
+  "why": "Blush 1.0, sway 0.4, wet 0.2. Blush is a hatch-mark mood symbol like the anger vein, not a fluid, and is not named in D6 (plan line 122); wet 0.2 is only a faint rim gloss (eye.frag:322-323). Borderline: if the owner counts a full flush as "
+ },
+ {
+  "name": "relieved",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 0.3
+  },
+  "why": "Draws sweat 0.3 (the brow-wipe drop, emote.rs:215) plus wet 0.3: sweat is D6. Eyes-only relieved is usable. Source reading."
+ },
+ {
+  "name": "cozy",
+  "group": "b",
+  "live_condition": "state.changed state=drowsy, or idle on AC with body.drives comfort high / tiredness raised (PROTOCOL.md:57, :65)",
+  "drawn_marks": {
+   "blush": 0.6,
+   "zzz": 0.2,
+   "sway": 0.7
+  },
+  "why": "Zzz 0.2 with slow sway and breath 1.4 shows contented dozing, which is false when the body is not drowsy; the other zzz poses (sleepy, p_yawn, p_wake) are b for the same reason. Blush 0.6 is harmless. Source reading."
+ },
+ {
+  "name": "disappointed",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 0.1,
+   "gloom": 0.6
+  },
+  "why": "Gloom 0.6 mood lines plus sweat 0.1. The sweat is nearly invisible but is drawn (emote.rs:215, threshold 0.012), and the rule is about what is drawn, so the conservative group applies; the eyes-only pose is usable as a. Closest call of the "
+ },
+ {
+  "name": "guilty",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 0.5,
+   "blush": 0.35,
+   "gloom": 0.3
+  },
+  "why": "Sweat 0.5, blush 0.35, wet 0.3: drawn sweat, D6; no signal for guilt. Source reading."
+ },
+ {
+  "name": "disgusted",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 0.2
+  },
+  "why": "Sweat 0.2 is drawn (emote.rs:215), a D6 bodily-fluid item, and the pose can read as nausea. Eyes-only disgust is usable. Source reading."
+ },
+ {
+  "name": "lonely",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "dots": 0.6,
+   "gloom": 1,
+   "sway": 0.25
+  },
+  "why": "Dots 0.6, gloom 1.0 lines, sway, wet 0.45 (gloss, no cry channel). A feeling mark, not a body claim or fluid; it can be tied to the social drive later but needs no signal to be honest. Source reading."
+ },
+ {
+  "name": "pouting",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "blush": 0.9,
+   "steam": 0.15
+  },
+  "why": "Blush 0.9, steam 0.15 as a huff, wet 0.55 as a glossy rim (eye.frag:322-323; cry is 0, so no drop is drawn). Same blush call as bashful; moves to c if blush is ruled a bodily claim. Source reading."
+ },
+ {
+  "name": "resigned",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 0.25,
+   "gloom": 0.3,
+   "sway": 0.2
+  },
+  "why": "Sweat 0.25 drawn with gloom 0.3 and sway: sweat is D6. Eyes-only resigned is usable. Source reading."
+ },
+ {
+  "name": "p_music",
+  "group": "b",
+  "live_condition": "voice organ actually playing audio (say.started / say.level, PROTOCOL.md:87-88); no music source found",
+  "drawn_marks": {
+   "blush": 0.2,
+   "notes": 1,
+   "sway": 1
+  },
+  "why": "Notes 1.0 and sway 1.0 assert music is playing or heard. No music source found on the bus (grep of PROTOCOL.md and DESIGN.md), so the only backing is audio actually playing. Conservative choice; a is defensible as a groove pose. Source read"
+ },
+ {
+  "name": "shocked",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 0.5,
+   "exclaim": 1,
+   "shiver": 0.2
+  },
+  "why": "Sweat 0.5 drawn with exclaim and shiver 0.2: D6 sweat at a clearly visible level. Eyes-only shock is the surprise family and usable. Source reading."
+ },
+ {
+  "name": "amazed",
+  "group": "a",
+  "live_condition": "",
+  "drawn_marks": {
+   "sparkle": 1
+  },
+  "why": "Sparkle 1.0, shine 1.0, wet 0.55. Wet is a gloss mix on the lower eye edge (eye.frag:322-323), there is no cry channel and no drop; hopeful and dreamy use the same detail as a. Source reading."
+ },
+ {
+  "name": "bewildered",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 0.3,
+   "question": 1,
+   "sway": 0.6
+  },
+  "why": "Question 1.0, faint spiral 0.25, sway, sweat 0.3: drawn sweat is D6. Source reading."
+ },
+ {
+  "name": "stunned",
+  "group": "a*",
+  "live_condition": "",
+  "drawn_marks": {
+   "sweat": 0.6,
+   "gloom": 0.35
+  },
+  "why": "Sweat 0.6 drawn with gloom 0.35: D6 sweat. Source reading."
+ }
+]
