@@ -58,7 +58,7 @@ SUBSCRIPTIONS = (
     "body.lid", "body.state", "state.changed", "ears.policy", "voice.mute", "voice.volume", "voice.chirps",
     "voice.level_request", "voice.engine", "say.request", "say.stop", "stem.chirp", "mind.ready",
     "app.privacy", "organ.down", "voice.prepare", "voice.clear_prepared", install_status.TOPIC,
-    "body.mic_policy",
+    "body.mic_policy", "chat.mode",
 )
 FRAME_SECONDS = FRAME_SAMPLES / RATE
 RUN_DIR = "/run"
@@ -1112,6 +1112,7 @@ class Voice:
         self.tasks = None
         self.state = "waking"
         self.muted = True
+        self.typed_input = False  # chat.mode input=typed; never kept across a restart
         self.lid_open = False
         self.lid_closed_seen = False
         self.lid_seq = None
@@ -1353,6 +1354,16 @@ class Voice:
         elif topic == "ears.policy":
             self.ears_allowed = event.get("allowed") is True
             await self.sync_capture()
+        elif topic == "chat.mode":
+            typed = event.get("input") == "typed"
+            if typed != self.typed_input:
+                self.typed_input = typed
+                LOG.info("microphone %s: the owner %s", "off" if typed else "on again",
+                         "types to Pip" if typed else "talks to Pip")
+                if typed:
+                    self.expecting = False
+                    self.apology_owed = False
+                await self.sync_capture()
         elif topic == "voice.mute":
             self.muted = event["on"]
             if self.muted:
@@ -1523,7 +1534,14 @@ class Voice:
 
     def capture_wanted(self):
         return (self.privacy_known and self.ears_allowed and self.lid_open and self.bus.connected.is_set()
-                and not self.muted and self.state in HEARING and not self.install_playing)
+                and not self.muted and not self.typing and self.state in HEARING and not self.install_playing)
+
+    @property
+    def typing(self):
+        """The owner types to Pip (chat.mode input=typed): the microphone stays shut, so no
+        wake phrase and no speech is heard. Its own gate, never the saved microphone mute,
+        and never kept across a restart (the mode starts spoken). A guest hears the voice."""
+        return self.typed_input and not self.private_audio
 
     async def sync_capture(self):
         if not self.capture_wanted():
@@ -3464,6 +3482,10 @@ class Voice:
                             finally:
                                 self._now_playing = None
                         if last:
+                            if not started and not ready and not self.reply_failures and self._bell_first:
+                                # A ring with no words (written chat): the bell alone.
+                                self._bell_first = False
+                                started = await self.ring_bell()
                             if not started and self.reply_failures:
                                 # Nothing could be said. A short troubled sound is honest audio,
                                 # and lets the brainstem leave thinking at once.

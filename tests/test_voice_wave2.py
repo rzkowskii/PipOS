@@ -540,6 +540,36 @@ class RingBell(unittest.IsolatedAsyncioTestCase):
         order = await self.speak({"text": "Your alarm.", "last": True, "chirp": "bell"}, quiet_hours=lambda clock: True)
         self.assertEqual(order[0], ("bell", "/unused/bell.wav"))
 
+    async def test_a_ring_with_no_words_is_the_bell_alone_and_the_ring_is_reported(self):
+        # Written chat: the words are shown on screen, the voice only chimes.
+        voice = Voice(Mock(), "Richard", [], "")
+        voice.chirps_on, voice.lid_open, voice.muted = True, True, False
+        voice.chirp_bank = Mock(path=Mock(return_value="/unused/bell.wav"))
+        order = []
+        voice.play_chirp = AsyncMock(side_effect=lambda path: order.append("bell") or True)
+        voice.play = AsyncMock(side_effect=lambda audio, first: order.append("words"))
+        voice.send_audio = AsyncMock()
+        voice.clauses.put_nowait(voice_module.clause_request(
+            {"text": "", "seq": 1, "last": True, "chirp": "bell", "announcement": "tok"}))
+        from contextlib import nullcontext
+        with patch("mind.voice.tempfile.TemporaryDirectory", return_value=nullcontext("/unused")):
+            await asyncio.wait_for(voice.speak(), 2)
+        self.assertEqual(order, ["bell"])
+        done = [c for c in voice.send_audio.await_args_list if c.args[0] == "say.done"]
+        self.assertEqual(done[-1].kwargs, {"final": True, "announcement": "tok"})
+
+    async def test_no_bell_when_muted_for_a_wordless_ring(self):
+        voice = Voice(Mock(), "Richard", [], "")
+        voice.chirps_on, voice.lid_open, voice.muted = True, True, True
+        voice.chirp_bank = Mock(path=Mock(return_value="/unused/bell.wav"))
+        voice.play_chirp = AsyncMock(return_value=True)
+        voice.send_audio = AsyncMock()
+        voice.clauses.put_nowait(voice_module.clause_request({"text": "", "seq": 1, "last": True, "chirp": "bell"}))
+        from contextlib import nullcontext
+        with patch("mind.voice.tempfile.TemporaryDirectory", return_value=nullcontext("/unused")):
+            await asyncio.wait_for(voice.speak(), 2)
+        voice.play_chirp.assert_not_awaited()
+
     async def test_a_chirp_still_playing_stops_before_the_bell(self):
         voice = Voice(Mock(), "Richard", [], "")
         voice.chirps_on, voice.lid_open, voice.muted = True, True, False

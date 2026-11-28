@@ -82,6 +82,9 @@ SUBS = [
     "say.done",
     # Which clauses of a model reply Voice really played (mind/played.py).
     "say.played",
+    # How the owner talks with Pip now: spoken, or typed with written
+    # replies (mind/chat_bridge.py). Retained and replayed by the brainstem.
+    "chat.mode",
     "state.changed",
     "body.lid",
     "body.presence",
@@ -293,11 +296,12 @@ _PLAIN_YES = re.compile(r"^yes$", re.I)
 # Commands that store, change or switch something. Heard in the follow-up
 # window they are only taken with a sign they were meant for the being:
 # "don't forget your keys" and "the time is 6:15" are room talk too.
+CHAT_MODES = frozenset(("spoken", "typed_voice", "typed_text"))
 ADDRESS_ONLY_COMMANDS = {
     "remember", "set_time", "forget", "forget_last", "correct", "guest_start", "guest_end", "sleep",
     "volume_up", "volume_down", "volume_set", "reminder", "snooze", "ack", "weather_location",
     "clear_weather_location", "clock_zone", "device_zone",
-    "quick_menu", "screen_options", "look_set", "look", "permissions",
+    "quick_menu", "screen_options", "look_set", "look", "permissions", "chat_mode",
     "thread_save", "thread_resume", "thread_close",
 } | CONSENT_COMMANDS
 _NO = re.compile(
@@ -768,6 +772,10 @@ class Mind:
         # replies as written.
         self._plays = {}
         self._voice_reports = None
+        # chat.mode reply=text: replies are shown, not spoken. A ring that must
+        # sound (an alarm) speaks whatever the mode (`_voiced`).
+        self._chat_text = False
+        self._voiced = False
         self._utterance_senses = None
         self._last_partial = None
         self._prefill_task = None
@@ -1810,6 +1818,8 @@ class Mind:
         elif topic == "say.played":
             # Taken in arrival order with cancels and lid closures.
             self._observe_played(event)
+        elif topic == "chat.mode":
+            self._chat_text = event.get("reply") == "text"
         elif topic == "camera.look_result":
             self._camera_look_result(event)
         elif event["t"] == "say.done" and event.get("final") and event.get("announcement"):
@@ -2119,11 +2129,43 @@ class Mind:
             if not played.closed:
                 self._forget_played(played)
 
+    def _text_reply(self):
+        """Replies are shown and not spoken: written chat with written replies.
+        A guest always hears the spoken voice, and an alarm still rings."""
+        return self._chat_text and self._guest_memory is None and not self._voiced
+
     async def _send_reply(self, topic, **fields):
         if self.lid_open and not self._cancelled:
+            if self._text_reply():
+                if topic == "say.request" and not fields.get("chirp"):
+                    # Nothing is spoken: the mind itself reports each clause as
+                    # shown, with its words, so the captions, the typed chat and
+                    # the history work with the voice organ down too.
+                    await self._show_clause(fields)
+                    return
+                if topic == "mind.reply_done":
+                    fields["spoke"] = False
             if self.lid_seq is not None:
                 fields["lid_seq"] = self.lid_seq
             await self.bus.send(topic, **fields)
+
+    async def _show_clause(self, fields):
+        """A say.request in text mode becomes the `say.played` Voice would have
+        sent: per clause with its text, then the reply's final receipt."""
+        reply = fields.get("reply")
+        if not (isinstance(reply, str) and PLAYED_TOKEN.fullmatch(reply)):
+            reply = uuid.uuid4().hex[:16]
+        text = fields.get("text")
+        if isinstance(text, str) and text.strip():
+            receipt = {"reply": reply, "seq": fields.get("seq"), "text": text}
+        elif fields.get("last") is True:
+            receipt = {"reply": reply, "final": True, "stopped": False}
+        else:
+            return
+        if self.lid_seq is not None:
+            receipt["lid_seq"] = self.lid_seq
+        await self.bus.send("say.played", **receipt)
+        self._observe_played({"t": "say.played", **receipt})
 
     async def _on_event(self, event):
         topic = event.get("t")
@@ -3062,7 +3104,12 @@ class Mind:
             line = self._greeting_line()
         pending.speaking = True
         self._cancelled = False
-        await self._say(line, keep=False, announcement=token, chirp=chirp)
+        # An alarm still rings aloud in written chat: a silent one that fails to wake someone is worse.
+        self._voiced = isinstance(entry, Reminder) and entry.kind == "alarm"
+        try:
+            await self._say(line, keep=False, announcement=token, chirp=chirp)
+        finally:
+            self._voiced = False
 
     def _local_now(self):
         """The owner's local time, or None while their time zone is unknown."""
@@ -4441,7 +4488,9 @@ class Mind:
         line = _tagged(getattr(reply, "line", "") or "")
         logged = getattr(reply, "logged", None)
         confirm = getattr(reply, "confirm", None)
-        wait_for_speech = getattr(confirm, "after_speech", False)
+        # In text mode nothing is spoken, so there is no end of speech to wait
+        # for: the question is armed at once and a typed yes or no answers it.
+        wait_for_speech = getattr(confirm, "after_speech", False) and not self._text_reply()
         if wait_for_speech:
             voice_scope = self.bus.generation, self.lid_seq
             voice_ack = uuid.uuid4().hex
@@ -4865,8 +4914,10 @@ class Mind:
             self._register_played(played)
         self._said_all_ok = False
         self._said_all.clear()
+        text_mode = self._text_reply()
         for i, clause in enumerate(clauses, 1):
-            extra = {"chirp": chirp} if chirp and i == 1 else {}
+            # In text mode the chime is its own request, after the words are shown.
+            extra = {"chirp": chirp} if chirp and i == 1 and not text_mode else {}
             if private:
                 extra["private"] = True
             if played is not None:
@@ -4881,7 +4932,15 @@ class Mind:
                 marker["confirm_ack"] = confirm_ack
             await self._send_reply("say.request", text="", seq=len(clauses) + 1, last=True,
                                    reply=played.token, **marker)
+        if text_mode and clauses and chirp and not self._cancelled:
+            # One chime, and nothing spoken (the voice rings the bell for an empty reply).
+            await self._send_reply("say.request", text="", seq=1, last=True, chirp=chirp,
+                                   **({"announcement": announcement} if announcement is not None else {}))
         await self._send_reply("mind.reply_done", spoke=bool(clauses))
+        if text_mode and announcement is not None and clauses and not self._cancelled and self.lid_open:
+            # Shown is as good as said: nothing will report speech for it, and the
+            # voice organ may be down.
+            self._complete_announcement(announcement)
         said = reply_id = None
         if keep and not private and not self._cancelled:
             sources.setdefault("canned", True)
@@ -5612,6 +5671,13 @@ class Mind:
             await self._send_reply("screen.quick_menu", **self._options_fields(opening))
             await self._say("[neutral] Use Tab for sections and the arrow keys for settings."
                             if opening else "[neutral] Okay.", keep=False)
+        elif kind == "chat_mode":
+            # "Let's type", "Silent mode", "Back to talking" (mind/chat_bridge.py owns the mode).
+            if self._guest_memory is not None or speaker != self.cfg.owner or arg not in CHAT_MODES:
+                await self._say("[neutral] Written chat is for my owner.", keep=False)
+                return
+            await self._say("[neutral] Okay." if arg == "spoken" else "[neutral] Okay, type to me.", keep=False)
+            await self._send_reply("chat.mode.request", mode=arg)
         elif kind == "quick_menu":
             if menu_followup and not self._quick_menu_active():
                 # The lid, the face or a question can change while routing.

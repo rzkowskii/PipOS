@@ -571,6 +571,18 @@ The voice organ picks its engines at start (`mind/voice_engines.py`):
   win), force an engine. A forced engine skips the speed rule (and, for
   Moonshine, the smoke test) but is still loaded only if its pack
   verifies.
+- **Written chat (`chat.mode`).** The mind and the voice both read the
+  retained `chat.mode` topic; none heard yet means spoken, and a guest is always
+  spoken to. With `input` typed, the voice keeps the microphone shut (no wake
+  phrase, no speech) under a gate of its own, never the saved microphone mute,
+  and a restarted voice starts spoken. With `reply` text, the mind sends no
+  `say.request`: it reports each clause itself as a `say.played` carrying its
+  `text`, then the reply's final receipt, and `mind.reply_done` says
+  `spoke: false`, so captions, the typed chat and the history work with the
+  voice organ down. A confirmation question is armed at once (the 15 s window
+  starts when it is shown) and a typed yes answers it. A timer or reminder is
+  its text plus one bell (an empty `say.request` with `chirp: "bell"`) and is
+  counted as rung when shown; an alarm still rings aloud.
 - **Capture and decoding.** The voice drains the microphone into a
   bounded queue (10 s of audio) on a thread of its own, and the decoder
   reads from it at its own pace. A decoder that falls the whole queue

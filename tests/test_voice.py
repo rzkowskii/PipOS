@@ -74,6 +74,49 @@ class LidPrivacy(unittest.IsolatedAsyncioTestCase):
             await voice.event("state.changed", state="idle", muted=False)
             self.assertIsNone(voice.capture)
 
+    async def test_typed_input_keeps_the_microphone_shut_without_touching_the_mute(self):
+        voice = TestVoice()
+        async with asyncio.TaskGroup() as voice.tasks:
+            await voice.event("state.changed", state="idle", muted=False)
+            await voice.event("body.lid", closed=False)
+            await asyncio.wait_for(voice.recording_started.wait(), 1)
+            await voice.event("chat.mode", mode="typed_voice", input="typed", reply="voice")
+            self.assertTrue(voice.recording_stopped.is_set())
+            self.assertIsNone(voice.capture)
+            self.assertFalse(voice.muted, "its own gate, not the saved microphone mute")
+            # Still shut after another state change, and while the mode stays typed.
+            await voice.event("state.changed", state="idle", muted=False)
+            self.assertIsNone(voice.capture)
+            voice.recording_started.clear()
+            await voice.event("chat.mode", mode="spoken", input="voice", reply="voice")
+            await asyncio.wait_for(voice.recording_started.wait(), 1)
+            voice.connection_lost()
+            await voice.stop_capture()
+
+    async def test_the_mic_mute_stays_on_when_typing_ends(self):
+        voice = TestVoice()
+        async with asyncio.TaskGroup() as voice.tasks:
+            await voice.event("state.changed", state="idle", muted=True)
+            await voice.event("body.lid", closed=False)
+            await voice.event("chat.mode", mode="typed_text", input="typed", reply="text")
+            await voice.event("chat.mode", mode="spoken", input="voice", reply="voice")
+            self.assertIsNone(voice.capture, "the owner's own mute still holds")
+
+    async def test_a_guest_is_never_left_deaf_by_the_owners_typed_mode(self):
+        voice = TestVoice()
+        async with asyncio.TaskGroup() as voice.tasks:
+            await voice.event("state.changed", state="idle", muted=False)
+            await voice.event("body.lid", closed=False)
+            await asyncio.wait_for(voice.recording_started.wait(), 1)
+            voice.guest = True
+            await voice.event("chat.mode", mode="typed_voice", input="typed", reply="voice")
+            self.assertFalse(voice.typing)
+            voice.connection_lost()
+            await voice.stop_capture()
+
+    async def test_a_restarted_voice_starts_spoken(self):
+        self.assertFalse(TestVoice().typed_input)
+
     async def test_close_stops_playback_and_drops_pending_clauses(self):
         voice = TestVoice()
         async with asyncio.TaskGroup() as voice.tasks:
