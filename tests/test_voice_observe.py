@@ -437,14 +437,33 @@ class TryMeasurement(unittest.IsolatedAsyncioTestCase):
         engines = FakeEngines([])
         voice = self.voice(engines, try_boot=False)
         voice.mind_ready.set()
-        with patch.object(voice_module, "TRY_MEASURE_AFTER", 0):
+        with patch.object(voice_module, "ASR_EARLY_AFTER", 0), self.assertLogs("being.voice", "INFO") as logs:
             task = asyncio.create_task(voice.choose_engines())
             await real_sleep(0.05)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-            voice.try_task.cancel()
-            await asyncio.gather(voice.try_task, return_exceptions=True)
+            voice.asr_task.cancel()
+            await asyncio.gather(voice.asr_task, return_exceptions=True)
         self.assertEqual([entry[0] for entry in engines.asked], ["asr"], "no voice measurement on an installed boot")
+        self.assertTrue(any("Pip hears better after its first minute" in line for line in logs.output))
+
+    async def test_the_early_wait_is_short_and_a_try_boot_measures_moonshine_before_the_voice(self):
+        self.assertLessEqual(voice_module.ASR_EARLY_AFTER, 15.0)
+        self.assertLess(voice_module.ASR_EARLY_AFTER, voice_module.TRY_MEASURE_AFTER)
+        engines = FakeEngines([])
+        voice = self.voice(engines, try_boot=True)
+        voice.mind_ready.set()
+        with patch.object(voice_module, "ASR_EARLY_AFTER", 0), patch.object(voice_module, "TRY_MEASURE_AFTER", 0.2), \
+                self.assertLogs("being.voice", "INFO"):
+            task = asyncio.create_task(voice.choose_engines())
+            await real_sleep(0.5)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            for spawned in (voice.asr_task, voice.try_task):
+                spawned.cancel()
+                await asyncio.gather(spawned, return_exceptions=True)
+        self.assertEqual(engines.asked[0][0], "asr", "Moonshine comes first")
+        self.assertIn("tts", [entry[0] for entry in engines.asked])
 
     async def test_an_installed_boot_already_on_moonshine_measures_nothing_early(self):
         engines = FakeEngines([])
@@ -463,7 +482,7 @@ class TryMeasurement(unittest.IsolatedAsyncioTestCase):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         self.assertEqual(engines.asked, [])
-        self.assertIsNone(getattr(voice, "try_task", None))
+        self.assertIsNone(getattr(voice, "asr_task", None))
 
     async def test_a_forced_voice_is_chosen_without_the_speed_rule_and_never_refreshed(self):
         for saved in ("flite", "auto"):

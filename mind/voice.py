@@ -161,6 +161,12 @@ ENGINE_REFRESH_SECONDS = 900.0
 # is then answering and warming), once the CPU is quiet; it gives up waiting
 # for quiet after TRY_MEASURE_PATIENCE seconds.
 TRY_MEASURE_AFTER = 60.0
+# Moonshine alone is measured much sooner (every boot that is still on
+# PocketSphinx): this long after the mind is ready, still only at rest and
+# once the CPU is quiet. The cortex's start-up warming is what keeps the
+# CPU busy just after mind.ready, and the quiet check waits for it, so the
+# short delay costs nothing but the poll.
+ASR_EARLY_AFTER = 15.0
 # mind.ready comes once per mind connection and is not replayed, so a voice
 # that starts after it (on a cold boot, a restart for pip-diag, or after a
 # crash) learns it from the brainstem having left waking (Voice.learn_ready),
@@ -1045,6 +1051,7 @@ class Voice:
         # One measurement at a time: the Try measurement and the refresh may fall due together.
         self.measuring = asyncio.Lock()
         self.try_task = None
+        self.asr_task = None
         self.settings_dir = settings_dir
         settings = settings or {"volume": None, "chirps": True}
         self.volume = settings["volume"]
@@ -2323,13 +2330,14 @@ class Voice:
         except Exception as error:
             LOG.warning("could not choose the speech recognizer: %r", error)
         startup_log("asr_ready", self.startup_started, phase_s=time.monotonic() - began)
-        if self.settings_dir is not None and (self.try_boot or self.recognizer is wake):
-            # Its own task: waiting for it must never hold up the refresh below.
-            # A Try boot measures everything due. Any other boot still on
-            # PocketSphinx (a fresh install has no speed record yet) measures
-            # Moonshine alone, so it does not wait 900 s; the first listening
-            # never waits for it either way.
-            self.try_task = self.spawn(self.try_measurement_logged(wake, only_asr=not self.try_boot))
+        if self.settings_dir is not None and self.recognizer is wake:
+            # Moonshine first, soon: until it is on, Pip hears with PocketSphinx, which
+            # understands far less. Its own task: waiting for it never holds up listening.
+            self.asr_task = self.spawn(self.try_measurement_logged(wake, only_asr=True, after=ASR_EARLY_AFTER))
+        if self.try_boot and self.settings_dir is not None:
+            # A Try boot also measures the rest (the voice) a little later; the
+            # measurements never overlap (refresh_engines).
+            self.try_task = self.spawn(self.try_measurement_logged(wake))
         while True:
             await asyncio.sleep(ENGINE_REFRESH_SECONDS)
             if self.state not in AT_REST or self.settings_dir is None:
@@ -2342,15 +2350,15 @@ class Voice:
             except Exception as error:
                 LOG.warning("could not re-measure the speech engines: %r", error)
 
-    async def try_measurement_logged(self, wake, only_asr=False):
+    async def try_measurement_logged(self, wake, only_asr=False, after=None):
         try:
-            await self.try_measurement(wake, only_asr=only_asr)
+            await self.try_measurement(wake, only_asr=only_asr, after=after)
         except asyncio.CancelledError:
             raise
         except Exception as error:
             LOG.warning("could not measure the speech engines in this Try session: %r", error)
 
-    async def try_measurement(self, wake, only_asr=False):
+    async def try_measurement(self, wake, only_asr=False, after=None):
         """One measurement early in a Try session, which is too short for the 900 s refresh.
         With `only_asr`, a boot that is not a Try session measures Moonshine alone.
 
@@ -2365,16 +2373,19 @@ class Voice:
         except TimeoutError:
             LOG.info("Try session: no mind.ready in %g s (it may have gone out before this voice started); "
                      "taking the mind as ready", TRY_READY_PATIENCE)
-        await asyncio.sleep(TRY_MEASURE_AFTER)
+        await asyncio.sleep(TRY_MEASURE_AFTER if after is None else after)
         quiet = getattr(self.engines, "cpu_quiet", None)
         waited = 0.0
         while self.state not in AT_REST or (quiet is not None and not await asyncio.to_thread(quiet)):
             if waited >= TRY_MEASURE_PATIENCE:
-                LOG.info("Try session: the CPU never went quiet, so the speech engines are not measured")
+                LOG.info("the CPU never went quiet, so the speech engines are not measured")
                 return
             await asyncio.sleep(TRY_MEASURE_POLL)
             waited += TRY_MEASURE_POLL
-        LOG.info("Try session: measuring the speech engines that are due")
+        if only_asr:
+            LOG.info("measuring the speech recognizer: Pip hears better after its first minute")
+        else:
+            LOG.info("Try session: measuring the speech engines that are due")
         await self.refresh_engines(wake, idle=quiet, only_asr=only_asr)
 
     async def refresh_engines(self, wake, idle=None, only_asr=False):

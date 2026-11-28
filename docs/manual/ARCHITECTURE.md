@@ -1,6 +1,6 @@
 <!--
 doc: architecture
-verified: 2026-11-28T14:45
+verified: 2026-11-28T15:15
 sources: crates/bus/src/lib.rs crates/brainstem/src/main.rs crates/brainstem/src/machine.rs crates/brainstem/src/body.rs crates/brainstem/src/battery.rs crates/brainstem/src/brightness.rs crates/brainstem/src/kbd_light.rs crates/face/src/keys.rs mind/keys.py mind/app_commands.py mind/mic_port.py mind/mic_channel.py mind/try_mode.py mind/diag.py mind/diag_sound.py mind/install_apply.py os/package/being/being-cable-link.service os/package/being/being-cable-ssh.service os/package/being/being-cable-workbench.service os/board/beingos/linux-cable.config crates/brainstem/src/peer.rs crates/brainstem/src/life.rs crates/brainstem/src/camera.rs crates/brainstem/src/linux_body.rs crates/bodycare/src/main.rs crates/bodycare/src/policy.rs crates/face/src/main.rs crates/face/src/anim.rs crates/face/src/link.rs crates/face/src/render.rs crates/face/src/eye.rs crates/face/src/pace.rs crates/face/src/dpms.rs crates/face/src/overlay.rs mind/turn.py mind/played.py mind/everyday.py mind/memory.py mind/embed.py mind/cortex.py mind/speech.py mind/voice.py mind/voice_engines.py mind/hands.py mind/night_shift.py mind/dream_model.py mind/dream_verify.py mind/eyes.py mind/retention.py mind/dream_policy.py mind/dream_store.py mind/boot_health.py mind/installer.py mind/network_policy.py mind/network_enforce.py os/package/being/being.mk os/package/cortex/being-cortex.service os/package/cortex/being-dream-cortex.service os/board/beingos/grub.cfg os/board/beingos/genimage.cfg os/board/beingos/post-build.sh os/board/beingos/rauc.conf mind/storage.py mind/backup.py mind/backup_crypto.py mind/wifi.py mind/initiative.py mind/consolidation.py mind/install_binding.py mind/usb_logs.py mind/model_pack.py mind/bus.py mind/local_screen.py mind/local_menu.py os/package/being/being-try-generator os/package/being/being-installed-generator os/package/being/being-screen-mode os/package/being/50-being.preset os/package/being/30-model-pack.conf os/board/beingos/being-update-ready os/board/beingos/slots.sh mind/diag_speech.py os/package/being/cable/sshd_config lab/build.sh os/package/being/being-health-watch os/package/being/being-health-watch.service crates/ears/src/main.rs crates/ears/src/linux.rs crates/brainstem/src/ears.rs crates/brainstem/src/camera_look.rs crates/brainstem/src/camera_usb.rs crates/bus/src/body_drives.rs crates/bus/src/body_map.rs config/body-maps.json os/package/being/being-ears.service mind/vision_describer.py mind/vitals.py mind/ponder.py mind/habits.py mind/intents.py mind/update_checkpoint.py mind/update_slots.py crates/face/src/quick_menu.rs crates/face/src/options.rs
 -->
 
@@ -526,11 +526,15 @@ The voice organ picks its engines at start (`mind/voice_engines.py`):
   whose `/mind` is empty, the voice takes one measurement of its own
   60 s after `mind.ready`, once Pip is at rest and the CPU is quiet
   (CPU pressure under 5 %, or a load average under 0.7 without PSI),
-  giving up after 10 minutes. An installed boot that is still on PocketSphinx
-  (a fresh install has no speed record yet) takes the same early measurement
-  for Moonshine alone, instead of waiting for the 900 s refresh. Listening
-  never waits for either: Pip starts on PocketSphinx and switches at rest. A
-  measurement that is too slow is logged once with its reason.
+  giving up after 10 minutes.
+  Moonshine alone is measured much sooner, on every boot that is
+  still on PocketSphinx (a fresh install, or any Try boot, has no speed record
+  yet): 15 s after `mind.ready`, still only at rest and once the CPU is quiet
+  (the cortex's start-up warming keeps it busy, and the check waits for that,
+  for up to 10 minutes). So Pip hears better after its first minute; until then
+  PocketSphinx writes the words, and listening never waits for the measurement.
+  A measurement that is too slow is logged once with its reason, kept, and not
+  repeated.
 - **Hearing after the wake.** On "auto", Moonshine is used only when its
   files are present, a passed Ivy Bridge speech smoke test is recorded
   for the exact sherpa-onnx and ONNX Runtime bytes installed (no image
