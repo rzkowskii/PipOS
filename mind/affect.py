@@ -32,21 +32,49 @@ Design (docs/design/emotion-director.md, section 4):
       - nothing but filler may come before the cue in a sentence;
       - what the cue does not cover opens with a preposition, a time word or a
         question opener (lexicon GAP_START_OK: "at work", "about it", "how did you
-        sleep"), or, as a whole clause, with SAFE_START ("how", "see", "who's");
-        it never opens with a negation, a contrast, a condition, "and", "that",
-        "it", "you", "now", "the", a third person or an imperative (TURN_WORDS),
-        and never holds a negation, a contrast word or GAP_STOP ("now", "stop",
-        "fix" ...): "thanks, that was not what I asked", "nice job, now the
+        sleep"), or, as a whole clause, is exactly one phrase of the CLOSED list
+        SAFE_CLAUSES ("how are you", "what's up", "how about you"); it never opens
+        with a negation, a contrast, a condition, "and", "that", "it", "you", "now",
+        "the", a third person or an imperative (TURN_WORDS), and never holds a negation,
+        a contrast word or GAP_STOP ("now", "stop", "fix" ...): "thanks, that was not
+        what I asked", "nice job, now the
         lights are off", "good job. you deleted my alarm", "if good morning",
         "dinner is late, thanks" and "I'm sad, I'm cutting onions" are all None.
     This is a recall cost on purpose: a long line, or one that says something else
     next to the cue, gets no reaction. A wrong reaction is worse than none.
-    A joke marker never overrides worry or support: "my dog died, just kidding"
-    is None, not a laugh. "thanks for ..." needs a whitelisted noun or gerund.
+    "thanks for ..." needs a whitelisted noun or gerund.
   * A positive reaction (warm, thanks, humour, surprise) is dropped when the
     same sentence turns on it with a contrast, a negation or an insult outside
     the matched words ("thanks, but that was wrong", "wow, you broke it").
-    Sorrow or worry followed by thanks in the same sentence is irony: nothing.
+  * CLOSED TAILS (fourth review round). Loose continuations were replaced by closed
+    lists, because each open list grew by one word per review:
+      - after a greeting only vocatives or one phrase of GREET_FOLLOW ("how are you",
+        "how's it going", "how did you sleep", "how was your day", "how are you
+        doing", "what's up", "what's new", "how's everything", ...): "hello, what's
+        your problem" and "hello pip can you set a timer" give nothing;
+      - "crying" and "loss" (died, passed away, I lost my dog) take only a vocative or
+        a time word after them (VTIME: "yesterday", "last week", "this morning"), so
+        "crying at this video" and "died in minecraft" have nothing to stand on;
+      - "sad", "unhappy" and "upset" followed by a preposition ("with the couch",
+        "about the bill") are about a thing and give nothing (only "lonely" and the
+        strong words may take one);
+      - "oh my god" and "omg" react only with nothing after them, or "really"
+        ("oh my god pip" gives NO reaction; the lower "wow" strength was the other
+        option, and None was chosen: a wrong gasp is worse than none);
+      - a hesitation (well, uh, um, hmm, meh) anywhere before thanks, in its sentence
+        or an earlier one, drops the thanks ("well, thanks"). The whitelisted nouns
+        and gerunds after "thanks for" stay ("thanks for coming", "thanks for trying");
+      - after a thanks, a short closing from CLOSINGS ("that helped", "that worked",
+        "that was helpful", optionally "a lot") is allowed, as a clause or at the end.
+  * CONFLICT CHECKS run over the WHOLE read (every sentence), not one sentence at a time,
+    because speech-to-text puts full stops everywhere (_conflict):
+      - sorrow or worry (worry, support) with laughter or a joke anywhere: nothing;
+      - a retraction ("just kidding", "jk") with any other cue, in either order: nothing
+        (it never turns into a laugh; on its own it is still humour);
+      - sorrow or worry with "thanks a lot" anywhere, or any thanks after it: a dig;
+      - a positive cue (warm, thanks, surprise) followed by a LATER sentence that is
+        laughter or a joke ("thank you pip. lol"): it may be mocking. A laugh BEFORE
+        a positive ("haha. thank you pip") is fine.
 
 Scan limits: this reader and the brainstem's clause reader are SEPARATE scans
 of different text and do not share a limit. This one reads the person's whole
@@ -309,7 +337,27 @@ def _thanks_for_ok(after):
     return len(tail) <= 3 and all(t in lex.THANKS_FOR_TAIL for t in tail)
 
 
-def _tail_ok(mode, rest, nxt, is_last, addressed):
+def _phrase_then_tail(tokens, phrases):
+    """True when tokens are exactly one phrase of the CLOSED set, then only vocatives or
+    time words (lexicon PHRASE_TAIL). Bounded: a phrase is at most five tokens."""
+    for ln in range(1, min(len(tokens), 5) + 1):
+        if tuple(tokens[:ln]) in phrases and all(t in lex.PHRASE_TAIL for t in tokens[ln:]):
+            return True
+    return False
+
+
+def _safe_clause(cl, closings):
+    """A whole clause with no cue in it: only filler, or one phrase of the closed list."""
+    k = 0
+    while k < len(cl) and cl[k] in lex.STRIP:
+        k += 1
+    if k == len(cl):
+        return True
+    phrases = lex.SAFE_CLAUSES | lex.CLOSINGS if closings else lex.SAFE_CLAUSES
+    return _phrase_then_tail(cl[k:], phrases)
+
+
+def _tail_ok(mode, rest, nxt, is_last):
     if mode == "any":
         return True
     if mode == "thanks":
@@ -318,7 +366,13 @@ def _tail_ok(mode, rest, nxt, is_last, addressed):
             k += 1
         if k == len(rest):
             return True
+        if _phrase_then_tail(rest[k:], lex.CLOSINGS):
+            return True         # "thanks that helped"
         return rest[k] == "for" and _thanks_for_ok(rest[k + 1:])
+    if mode == "vtime":
+        return len(rest) <= 3 and all(t in lex.VTIME for t in rest)
+    if mode == "gasp":
+        return not rest or rest == ["really"]
     if mode == "tightlast":
         return is_last and len(rest) <= 3 and all(t in lex.TIGHT for t in rest)
     if mode == "tight":
@@ -327,13 +381,12 @@ def _tail_ok(mode, rest, nxt, is_last, addressed):
         k = 0
         while k < len(rest) and k < 3 and rest[k] in lex.VOCATIVES:
             k += 1
-        # once Pip is named, anything may follow ("hello Pip can you ...")
-        # except an accusation or a command ("hello pip you are late")
+        # nothing may follow but vocatives, or one phrase of the CLOSED list
+        # ("how are you", "what's up"): "hello pip can you ...", "hello, what's your
+        # problem" and "hi pip you are late" all give nothing
         if k == len(rest):
             return True
-        if addressed:
-            return rest[k] not in lex.ACCUSE_START
-        return rest[k] in lex.FOLLOW
+        return _phrase_then_tail(rest[k:], lex.GREET_FOLLOW)
     if mode == "noway":
         # "no way, really?" / "no way that's true": astonishment. A bare "no way!"
         # (a refusal as often as a gasp) and "no way, put that down!" are not.
@@ -373,7 +426,7 @@ def _clause_hits(cl, is_last, term, nxt=""):
             reject = lex.REJECT_ANY.get(rule.name)
             if reject and any(t in reject for t in cl):
                 continue
-            if not _tail_ok(rule.tail, rest, nxt, is_last, "pip" in cl[:end + 1]):
+            if not _tail_ok(rule.tail, rest, nxt, is_last):
                 continue
             if q_start and rule.qok is not True:
                 continue
@@ -431,22 +484,18 @@ def _accused(clauses, ci, rule):
     return False
 
 
-def _ironic_thanks_after(clauses, raw):
-    """Worry or fear followed, in the same sentence, by thanks: irony, say nothing.
-
-    "I'm anxious, thanks a lot" and "I'm anxious, thank you so much" are digs, not
-    gratitude. Thanks BEFORE the worry ("thanks, I had a rough day") is fine.
-    """
-    first_worry = None
-    for cue, ci, start, _ in raw:
-        if cue.family in ("worry", "support") and (first_worry is None or (ci, start) < first_worry):
-            first_worry = (ci, start)
-    if first_worry is None:
-        return False
-    if any(cue.family == "thanks" and (ci, start) > first_worry for cue, ci, start, _ in raw):
+def _grudging_thanks(clauses, ci, start, shrugged):
+    """A hesitation or a shrug before thanks ("well, thanks", "uh, thank you", "hmm thanks"),
+    in this sentence or an earlier one ("hmm. thanks."). shrugged: an earlier sentence had one."""
+    if shrugged:
         return True
-    flat = [t for cl in clauses for t in cl]
-    return any(tuple(flat[i:i + 3]) in lex.IRONIC_THANKS for i in range(len(flat) - 2))
+    for k in range(ci + 1):
+        for j, tok in enumerate(clauses[k]):
+            if k == ci and j >= start:
+                break
+            if tok in lex.HESITATION:
+                return True
+    return False
 
 
 def _sentence_is_cue_plus_filler(clauses, raw):
@@ -457,7 +506,9 @@ def _sentence_is_cue_plus_filler(clauses, raw):
     nothing outside them turns it (see the module docstring):
       * nothing but filler may come before the first cue;
       * a stretch the cues do not cover opens with a preposition or a question word
-        (lexicon GAP_START_OK), or, when it is a whole clause, with SAFE_START;
+        (lexicon GAP_START_OK); a whole clause the cues do not touch must be exactly one
+        phrase of the CLOSED list SAFE_CLAUSES ("how about you"), or, after a thanks, a
+        closing from CLOSINGS ("that helped");
       * no such stretch opens with a TURN_WORDS word, and none holds a negation, a
         contrast word or one of GAP_STOP ("now", "stop", "fix", ...);
       * the cues span COVER of the sentence's tokens, or the sentence has at most
@@ -466,15 +517,28 @@ def _sentence_is_cue_plus_filler(clauses, raw):
     covered = set()
     for _, ci, start, end in raw:
         covered.update((ci, j) for j in range(start, end))
+    thanked = any(r[0].family == "thanks" for r in raw)
+    greeted = any(r[0].rule in lex.GREETING_RULES for r in raw)
     core = cov = 0
     seen_cue = False
     for ci, cl in enumerate(clauses):
+        if not any((ci, j) in covered for j in range(len(cl))):
+            # a clause the cues do not touch: filler, or one phrase of the closed list
+            rest_core = sum(1 for t in cl if t not in lex.STRIP)
+            if rest_core == 0:
+                continue
+            if not seen_cue:
+                return False            # something other than filler before the cue
+            if any(t in _CONTRAST or t in lex.GAP_STOP or t.endswith("n't") for t in cl):
+                return False
+            if not _safe_clause(cl, thanked):
+                return False
+            core += rest_core
+            continue
         in_gap = False                  # inside a stretch the cues do not cover
-        clause_core = 0                 # tokens of this clause counted so far
         for j, tok in enumerate(cl):
             if (ci, j) in covered:
                 core += 1
-                clause_core += 1
                 cov += 1
                 in_gap = False
                 seen_cue = True
@@ -482,17 +546,19 @@ def _sentence_is_cue_plus_filler(clauses, raw):
             if tok in lex.STRIP:
                 continue
             core += 1
-            clause_core += 1
             if not seen_cue:
                 return False            # something other than filler before the cue
             if tok in _CONTRAST or tok in lex.GAP_STOP or tok.endswith("n't"):
                 return False
             if not in_gap:
                 in_gap = True
+                if thanked and tok == "that" and _phrase_then_tail(cl[j:], lex.CLOSINGS):
+                    core += sum(1 for t in cl[j + 1:] if t not in lex.STRIP)
+                    break               # "thanks that helped": a closed closing, then done
                 if tok in lex.TURN_WORDS:
                     return False
-                allowed = lex.SAFE_START if clause_core == 1 else lex.GAP_START_OK
-                if tok not in allowed:
+                if tok not in lex.GAP_START_OK and not (
+                        greeted and _phrase_then_tail(cl[j:], lex.GREET_FOLLOW)):
                     return False
                 if (tok, cl[j + 1] if j + 1 < len(cl) else "") in lex.GAP_BAD_PAIRS:
                     return False        # "what a joke" is an exclamation, not a question
@@ -503,6 +569,38 @@ def _sentence_is_cue_plus_filler(clauses, raw):
     return core <= SHORT_CORE or cov >= COVER * core
 
 
+def _conflict(sentences, flat):
+    """The conflict checks, over the WHOLE read (every sentence), not one sentence at a time.
+
+    sentences is [(kept hits [(cue, clause index, start, end)], sentence has laughter)].
+    True when the read contradicts itself, so it gives nothing:
+      * sorrow or worry (worry, support) with any laughter anywhere: a joke or irony,
+        whichever sentence the laugh is in ("my dog died. haha.");
+      * a retraction ("just kidding", "jk") with any other cue, in either order;
+      * sorrow or worry with a "thanks a lot" anywhere, or any thanks after it: a dig;
+      * a positive cue (warm, thanks, surprise) followed by a LATER sentence that is
+        laughter ("thank you pip. lol"): it may be mocking.
+    A laugh BEFORE a positive ("haha. thank you pip") is fine.
+    """
+    hits = [(si, h) for si, (kept, _) in enumerate(sentences) for h in kept]
+    sorrow = [(si, h[1], h[2]) for si, h in hits if h[0].family in ("worry", "support")]
+    if sorrow:
+        if any(t in lex.LAUGH_TOKENS for t in flat) or any(h[0].family == "humour" for _, h in hits):
+            return True
+        first = min(sorrow)
+        if any(h[0].family == "thanks" and (si, h[1], h[2]) > first for si, h in hits):
+            return True
+        if any(tuple(flat[i:i + 3]) in lex.IRONIC_THANKS for i in range(len(flat) - 2)):
+            return True
+    if any(h[0].rule == "kidding" for _, h in hits) and any(h[0].family != "humour" for _, h in hits):
+        return True
+    for si, h in hits:
+        if h[0].family in ("warm", "thanks", "surprise") and any(
+                laugh for _, laugh in sentences[si + 1:]):
+            return True
+    return False
+
+
 def read(text):
     """The person's words -> Cue or None. Deterministic; bounded work."""
     if not isinstance(text, str) or not text or len(text) > MAX_CHARS:
@@ -510,7 +608,8 @@ def read(text):
     groups, quoted, flat = _scan(text)
     if quoted or not flat or len(flat) > MAX_TOKENS or _sarcastic(flat):
         return None
-    hits = []
+    sentences = []
+    shrugged = False
     for clauses, term in groups:
         clauses = _merge_vocative(clauses)
         raw = []
@@ -518,33 +617,29 @@ def read(text):
             nxt = clauses[ci + 1][0] if ci + 1 < len(clauses) else ""
             for cue, start, end in _clause_hits(cl, ci == len(clauses) - 1, term, nxt):
                 raw.append((cue, ci, start, end))
-        if _ironic_thanks_after(clauses, raw):
-            raw = []
         kept = [
             r for r in raw
             if not (r[0].family in lex.POSITIVE_FAMILIES
                     and r[0].rule not in lex.NO_CONTRAST_VETO
                     and _turns_on_it(clauses, r[1], r[2], r[3], r[0].rule))
             and not _accused(clauses, r[1], r[0].rule)
+            and not (r[0].family == "thanks" and _grudging_thanks(clauses, r[1], r[2], shrugged))
         ]
-        if kept and any(t in lex.LAUGH_TOKENS for cl in clauses for t in cl):
-            # sorrow and laughter in one sentence is a joke or irony: say nothing,
-            # unless it is plainly laughter on its own
-            if any(r[0].family in ("worry", "support") for r in kept):
-                kept = []
         # every sentence must be the cue plus filler, or the whole read is None
         if not _sentence_is_cue_plus_filler(clauses, kept):
             return None
-        hits.extend(r[0] for r in kept)
+        laugh = (any(r[0].family == "humour" for r in kept)
+                 or any(t in lex.LAUGH_TOKENS for cl in clauses for t in cl))
+        sentences.append((kept, laugh))
+        shrugged = shrugged or any(t in lex.HESITATION for cl in clauses for t in cl)
+    if _conflict(sentences, flat):
+        return None
+    hits = [r[0] for kept, _ in sentences for r in kept]
     if not hits:
         return None
     kidding = [h for h in hits if h.rule == "kidding"]
     if kidding:
-        # a joke marker never overrides a worry or a support cue ("I'm sad, just
-        # kidding" is a retraction, not a laugh): say nothing
-        if any(h.family in ("worry", "support") for h in hits):
-            return None
-        hits = kidding
+        hits = kidding              # only humour is left here (see _conflict)
     best = min(hits, key=lambda h: (PRIORITY.index(h.family), -h.strength))
     return best
 

@@ -21,14 +21,16 @@ position   start         the match begins the clause (after a few lead-in words)
                          speech in the three words before it
 tail       what may follow the match inside the clause: any, tight (only
            vocatives and fillers), tightlast (tight, and nothing else in the
-           sentence either), greet (vocatives, then a known follow-on),
-           thanks (padding, or "for" plus a whitelisted noun or gerund) or
-           noway (the "no way" rule: the next word must be "really", "that's"...)
+           sentence either), vtime (only a vocative or a time filler: "pip",
+           "yesterday", "last night"; the rule for loss and crying), gasp (nothing,
+           or "really"), greet (vocatives, then nothing or one phrase of the CLOSED
+           list GREET_FOLLOW), thanks (padding, or "for" plus a whitelisted noun or
+           gerund) or noway (the "no way" rule: the next word must be "really", ...)
 question_ok  False, True, or "rest" (a question is fine when the match is not
            the whole clause, as in "good morning, how are you?")
 Whatever a rule matches, mind/affect.py only lets a read() through when the
 WHOLE utterance is the cue plus filler (the short-utterance rule; STRIP,
-TURN_WORDS and SAFE_START below are its data).
+TURN_WORDS and SAFE_CLAUSES below are its data).
 Families are the ten ids of the shared contract; this module emits warm,
 humour, worry, support, surprise and thanks only. Nothing here maps a sense or
 a body state ("I see", "I hear", "I feel hot", "I'm tired" are never rules).
@@ -43,10 +45,16 @@ FILLERS = frozenset((
 ))
 # Calling Pip or the room by name, after a greeting or thanks.
 VOCATIVES = frozenset(("pip", "there", "again", "everyone", "buddy", "friend", "mate"))
-# What may follow a greeting inside its own clause without making it something else.
-FOLLOW = frozenset((
-    "how", "it's", "i", "i'm", "i've", "we", "nice", "what", "did", "hope", "see",
-    "talk", "sleep", "sweet", "thanks", "thank", "long", "glad", "welcome", "let's",
+# What may follow a greeting (or good night) inside its own clause: a CLOSED list of whole
+# phrases, nothing else. "hello, what's your problem" and "good morning, how is this useful"
+# are jabs, so no open "how" or "what" is allowed; a phrase may be followed by vocatives or
+# a time word ("how are you today pip").
+GREET_FOLLOW = frozenset((
+    ("how", "are", "you"), ("how", "are", "you", "doing"), ("how", "you", "doing"),
+    ("how's", "it", "going"), ("how", "did", "you", "sleep"), ("how", "was", "your", "day"),
+    ("how's", "everything"), ("how", "have", "you", "been"), ("what's", "up"), ("what's", "new"),
+    ("see", "you", "tomorrow"), ("see", "you", "later"), ("see", "you", "soon"),
+    ("sleep", "well"), ("sweet", "dreams"),
 ))
 # Lead-in words that do not stop a clause from being a question ("so, what is ...").
 QLEADS = frozenset(("well", "so", "and", "um", "uh", "hmm", "hm", "ok", "okay",
@@ -80,6 +88,15 @@ REJECT_ANY = {
 TIGHT = frozenset((
     "pip", "there", "again", "too", "today", "buddy", "friend", "mate", "really",
     "so", "much", "one", "little", "guy", "always", "now", "as", "ever",
+))
+# Only a vocative or a time filler may follow "died", "passed away", "I lost my dog" or
+# "I'm crying": "yesterday", "last week", "this morning". Anything else ("in minecraft",
+# "of embarrassment", "at the mall", "at this video") is a game, an idiom or another
+# story. "again", "twice" and "there" are not vocatives here ("my sister died again").
+VTIME = frozenset((
+    "pip", "buddy", "friend", "mate", "today", "tonight", "yesterday", "lately", "this",
+    "last", "morning", "afternoon", "evening", "night", "week", "weekend", "month", "all",
+    "day",
 ))
 # What may trail a closing "thanks".
 ENDTAIL = frozenset(("pip", "again", "so", "much", "very", "a", "lot", "everyone"))
@@ -157,7 +174,8 @@ ACCUSE_START = frozenset(("you", "you're", "your", "you've", "you'll", "why", "s
 # and holds a CONTRAST word: "I'm so upset, you ruined it".
 YOU_START = frozenset(("you", "you're", "your", "you've", "you'll"))
 # The wildcard "_" never matches these (so "my dog barked and died" cannot match).
-WILD_STOP = frozenset(("and", "but", "said", "says", "who", "that", "which", "because", "or"))
+WILD_STOP = frozenset(("and", "but", "said", "says", "who", "that", "which", "because", "or",
+                       "almost", "nearly", "again", "twice", "also", "ever", "even"))
 
 # ---- the short-utterance rule (mind/affect.py read) ------------------------------------
 # read() reacts only when the WHOLE utterance is the cue plus filler. These sets are its data.
@@ -210,11 +228,25 @@ GAP_STOP = frozenset(("now", "stop", "quit", "shut", "enough", "then", "forget",
 GAP_BAD_PAIRS = frozenset((("what", "a"), ("what", "an"), ("this", "is"), ("this", "was"),
                            ("this", "has"), ("this", "isn't"), ("this", "sucks"),
                            ("how", "could"), ("how", "dare"), ("how", "come")))
-# A whole clause with nothing from the cue in it may only open with one of these (a
-# question after a greeting, "see you tomorrow", the answer to a knock-knock); anything
-# else, including a second claim about oneself ("I'm crying, I'm cutting onions"), makes
-# the whole read None.
-SAFE_START = frozenset(("how", "what's", "see", "who's"))
+# A whole clause with nothing from the cue in it must be exactly one of these phrases (a
+# question after a greeting, "see you tomorrow", "how about you"); anything else, including a
+# second claim about oneself ("I'm crying, I'm cutting onions") or an open "how" or "what"
+# ("what's your problem"), makes the whole read None. STRIP words (pip, today, ...) are
+# ignored when comparing.
+SAFE_CLAUSES = GREET_FOLLOW | frozenset((
+    ("how", "about", "you"), ("who's", "there"),
+))
+# What may trail one of the phrases above, or a closing: a vocative or a time word.
+PHRASE_TAIL = VTIME | frozenset(("everyone", "tomorrow", "please"))
+# After a thanks: a short closing that says the help worked. Whole clause, or the end of the
+# thanks clause; "that helped, but ..." never matches.
+CLOSINGS = frozenset((
+    ("that", "helped"), ("that", "worked"), ("that", "was", "helpful"), ("that", "helps"),
+    ("that", "helped", "a", "lot"), ("that", "was", "helpful", "a", "lot"),
+))
+# A hesitation or a shrug in front of thanks makes it grudging ("well, thanks", "uh, thank
+# you", "hmm thanks"). They stay in STRIP for coverage, but a thanks hit after one is dropped.
+HESITATION = frozenset(("well", "uh", "um", "hmm", "hm", "meh"))
 # "thanks" may be padded ("thank you so much pip") or followed by "for" and a whitelisted
 # noun or gerund ("thanks for the help", "thanks for coming"). "thanks for <anything
 # else>" ("thanks for waking up the baby") is not thanks.
@@ -256,7 +288,8 @@ IRONIC_THANKS = frozenset((("thanks", "a", "lot"), ("thanks", "a", "bunch"),
                            ("thanks", "a", "million")))
 
 SETS = {
-    "SAD": ("sad", "unhappy", "lonely"),
+    "SAD": ("sad", "unhappy"),
+    "LONELY": ("lonely",),
     # "upset" is mild and often aimed at someone: concern, never the sad pose
     "UPSET": ("upset",),
     "SAD_STRONG": ("miserable", "depressed", "heartbroken", "gutted", "devastated"),
@@ -299,7 +332,7 @@ SETS = {
 
 # Tokens that count as laughter for the "this sentence is a joke" conflict check.
 LAUGH_TOKENS = frozenset(SETS["LAUGH_SMALL"]) | frozenset(SETS["LAUGH_BIG"]) | frozenset((
-    "laughing", "laughter", "laugh", "funny", "hilarious", "hysterical",
+    "laughing", "laughter", "laugh", "funny", "hilarious", "hysterical", "ha",
 ))
 
 TL = FILLERS | frozenset(("oh", "aw", "aww", "wow", "great", "cool", "perfect",
@@ -312,6 +345,9 @@ PRAISE_BOOST = (frozenset(("great", "excellent", "amazing", "awesome", "brillian
 NO_WORDS = frozenset()
 # "nervous about / to / with / and ..." is anticipation, a target or a mixed feeling
 ANX_NOT_NEXT = frozenset(("but", "with", "to", "and", "about"))
+# After "sad", "unhappy", "upset", "down": a preposition or "because" makes it about a thing.
+FEEL_PREP = frozenset(("with", "at", "about", "over", "by", "of", "for", "from", "because",
+                       "that", "when", "since", "in", "on", "to", "after", "as", "cause"))
 RULES = (
     ("greeting", "warm", 0.25, "start", "greet", "rest", GL, NO_WORDS, None,
      ("good_morning|good_afternoon|good_evening",)),
@@ -340,15 +376,20 @@ RULES = (
       "|i'm_sorry_about_that_pip|my_bad_pip|pip_my_bad|i_apologize_pip|i_apologise_pip"
       "|sorry_for_that_pip",)),
 
-    ("sad", "worry", 0.62, "start", "any", False, FILLERS, NO_WORDS, None,
+    # "unhappy with the couch", "sad about the score", "sad at the price": a complaint or a
+    # reaction to a thing, not a feeling to soothe. Only "lonely" and the strong words below
+    # may be followed by a preposition.
+    ("sad", "worry", 0.62, "start", "any", False, FILLERS, FEEL_PREP, None,
      ("i'm|i_feel|i'm_feeling|i've_been_feeling|i've_been|feeling @SAD",)),
+    ("sad", "worry", 0.62, "start", "any", False, FILLERS, NO_WORDS, None,
+     ("i'm|i_feel|i'm_feeling|i've_been_feeling|i've_been|feeling @LONELY",)),
     ("sad", "worry", 0.75, "start", "any", False, FILLERS, NO_WORDS, None,
      ("i'm|i_feel|i'm_feeling|i've_been_feeling|i've_been|feeling @SAD_STRONG",)),
     ("upset", "worry", 0.40, "start", "any", False, FILLERS,
-     frozenset(("with", "at", "because", "by", "about_you", "that", "when", "since")), None,
+     FEEL_PREP, None,
      ("i'm|i_feel|i'm_feeling|i've_been_feeling|feeling @UPSET",)),
     ("down", "worry", 0.45, "start", "any", False, FILLERS,
-     frozenset(("on", "in", "for", "at", "to", "of", "with", "key", "ish")), None,
+     FEEL_PREP | frozenset(("key", "ish")), None,
      ("i_feel|i'm_feeling|i've_been_feeling|feeling @DOWN",)),
     ("rough_day", "worry", 0.30, "start", "any", False, FILLERS,
      frozenset(("on", "with", "for")), None,
@@ -357,9 +398,11 @@ RULES = (
     ("rough_day", "worry", 0.30, "start", "any", False, FILLERS,
      frozenset(("on", "with", "for")), None,
      ("today_was|today's_been|today_has_been @ROUGH",)),
-    ("loss", "worry", 0.68, "any", "any", False, FILLERS, NO_WORDS, None,
+    # tail "vtime": only a vocative or a time word may follow, so "in minecraft", "on level
+    # three", "of embarrassment", "at the mall" have nothing to stand on
+    ("loss", "worry", 0.68, "any", "vtime", False, FILLERS, NO_WORDS, None,
      ("my @OLDADJ? @KIN _? has? died|passed_away",)),
-    ("loss", "worry", 0.65, "start", "any", False, FILLERS, NO_WORDS, None,
+    ("loss", "worry", 0.65, "start", "vtime", False, FILLERS, NO_WORDS, None,
      ("i_lost|i've_lost my @OLDADJ? @KIN",)),
     ("lost_job", "worry", 0.50, "start", "tight", False, FILLERS,
      frozenset(("up", "application", "applications", "search", "interview", "interviews",
@@ -371,10 +414,11 @@ RULES = (
       "i_failed|i_flunked my|the|a|an @TESTKIND test")),
     ("miss", "worry", 0.50, "start", "tight", False, FILLERS, NO_WORDS, None,
      ("i_miss|we_miss my|our|the @OLDADJ? @MISSKIN",)),
-    ("crying", "worry", 0.62, "start", "any", False, FILLERS,
+    # tail "vtime": "crying at / over / about <a video, a puppy, an ending>" is amusement or
+    # cuteness as often as grief, so nothing but a vocative or a time word may follow
+    ("crying", "worry", 0.62, "start", "vtime", False, FILLERS,
      frozenset(("laughing", "laughter", "laugh", "with", "from")), None,
-     ("i'm_crying|i've_been_crying|i_feel_like_crying|i_could_cry|i_want_to_cry"
-      "|i_just_want_to_cry",)),
+     ("i'm_crying|i've_been_crying|i_feel_like_crying|i_want_to_cry|i_just_want_to_cry",)),
 
     ("anxious", "support", 0.30, "start", "any", False, FILLERS, ANX_NOT_NEXT, None,
      ("i'm|i_feel|i'm_feeling|i've_been_feeling|feeling @ANX out?",)),
@@ -406,7 +450,10 @@ RULES = (
 
     ("wow", "surprise", 0.40, "start", "tightlast", False, FILLERS | frozenset(("oh",)), NO_WORDS, None,
      ("wow|whoa|woah|whoah|wowza|oh_wow|holy_cow|holy_moly",)),
-    ("big_surprise", "surprise", 0.65, "start", "tightlast", False, FILLERS, NO_WORDS, None,
+    # tail "gasp": nothing, or "really", after it. A vocative ("oh my god pip") is as often
+    # exasperation as awe, so it gives no reaction at all (the lower "wow" strength was the
+    # other option; None was chosen: a wrong gasp is worse than none).
+    ("big_surprise", "surprise", 0.65, "start", "gasp", False, FILLERS, NO_WORDS, None,
      ("oh_my_god|oh_my_gosh|oh_my_goodness|oh_my_word|omg|good_heavens|holy_smokes"
       "|i_can't_believe_it",)),
     ("no_way", "surprise", 0.55, "start", "noway", True, FILLERS, NO_WORDS, None,

@@ -383,16 +383,25 @@ struct Row {
     phrases: Vec<Slots>,
     family: Family,
     strength: f64,
-    /// Words must be separated by spaces only (a comma between them breaks the phrase).
+    /// Words must be separated by spaces only (a comma between them breaks the
+    /// phrase). The default; a row opts out with `"tight": false`.
     tight: bool,
     /// The match must be followed by the end of the clause or one of `.,!?;:`
-    /// (so a word after it cannot turn the phrase into something else).
+    /// (so a word after it cannot turn the phrase into something else). Also
+    /// true for `after_end` rows, which are stricter.
     after_break: bool,
+    /// The match must END the clause: nothing after it but the closing
+    /// punctuation, or one comma and one more word (a name or a pronoun).
+    after_end: bool,
+    /// With `after_break`: phrases that may follow the match directly instead
+    /// of a break (a closed whitelist, `thank you for`).
+    or_next: Vec<Slots>,
     /// The polarity of the row's family (-1, 0, 1).
     polarity: i8,
     /// A weak greeting: dropped when any other row matches the clause.
     opener: bool,
-    /// Phrases that must not follow the match directly (`thanks to`).
+    /// Phrases that must not follow the match, directly or after a comma
+    /// (`thanks to`, `thanks, so`).
     refuse_next: Vec<Slots>,
     /// At most this many words may follow the match.
     max_rest: Option<usize>,
@@ -400,6 +409,16 @@ struct Row {
     /// negator outside the match (default true; the comforting support rows,
     /// which answer bad news, set false).
     cautions: bool,
+    /// A closed whitelist of what may follow the match. The match must END
+    /// the clause (closing punctuation, or one break and a name), or one of
+    /// these phrases must follow it (after a space or a break) and END the
+    /// clause. Anything else after the match is silence. `Some(empty)` means
+    /// the bare phrase only. Replaces `after`.
+    rest: Option<Vec<Slots>>,
+    /// A negator right after the match, or in front of the match's own last
+    /// word again (`sorry, not sorry`), takes the reading back. On for every
+    /// apology row.
+    negated_after: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -427,6 +446,12 @@ pub struct Table {
     contrast: Vec<Vec<u8>>,
     /// words of trouble or loss: a positive or neutral reading is refused beside them
     cautions: HashSet<Vec<u8>>,
+    /// sense verbs and body or hardware nouns: a positive or neutral reading
+    /// is refused beside them (no sense or body claim raises a pose)
+    body_words: HashSet<Vec<u8>>,
+    /// greeting idioms that carry a sense verb but claim no sense (`good to
+    /// see you`): exempt from the body guard when they end the clause
+    body_idioms: Vec<Slots>,
     tags: Vec<(String, Option<Cue>)>,
     ladders: Vec<Ladder>,
     lexicon: Vec<Row>,
@@ -670,6 +695,14 @@ impl Table {
         if contrast.is_empty() || cautions.is_empty() {
             return Err("contrast and cautions must not be empty".into());
         }
+        let body_words: HashSet<Vec<u8>> = strings(&root, "body_words")?.into_iter().map(String::into_bytes).collect();
+        if body_words.is_empty() || body_words.iter().any(|w| !std::str::from_utf8(w).is_ok_and(is_word_text)) {
+            return Err("body_words must be a non-empty list of single lowercase words".into());
+        }
+        let mut body_idioms = Vec::new();
+        for p in strings(&root, "body_idioms")? {
+            body_idioms.push(parse_phrase(&p).map_err(|e| format!("body_idioms: {e}"))?);
+        }
 
         // tags: all seven present; neutral and sleepy count nothing
         let mut tags = Vec::new();
@@ -711,13 +744,14 @@ impl Table {
                 return Err(format!("{rule}: strength must be above 0"));
             }
             let tight = match r.get("tight") {
-                None => false,
+                None => true,
                 Some(v) => v.as_bool().ok_or_else(|| format!("{rule}: tight must be true or false"))?,
             };
-            let after_break = match r.get("after") {
-                None => false,
-                Some(v) if v.as_str() == Some("break") => true,
-                Some(_) => return Err(format!("{rule}: after can only be \"break\"")),
+            let (after_break, after_end) = match r.get("after") {
+                None => (false, false),
+                Some(v) if v.as_str() == Some("break") => (true, false),
+                Some(v) if v.as_str() == Some("end") => (true, true),
+                Some(_) => return Err(format!("{rule}: after can only be \"break\" or \"end\"")),
             };
             let opener = match r.get("opener") {
                 None => false,
@@ -737,6 +771,28 @@ impl Table {
                     refuse_next.push(parse_phrase(&p).map_err(|e| format!("{rule}: {e}"))?);
                 }
             }
+            let mut or_next = Vec::new();
+            if r.get("or_next").is_some() {
+                if !after_break || after_end {
+                    return Err(format!("{rule}: or_next needs after break"));
+                }
+                for p in strings(r, "or_next")? {
+                    or_next.push(parse_phrase(&p).map_err(|e| format!("{rule}: {e}"))?);
+                }
+            }
+            let rest = match r.get("rest") {
+                None => None,
+                Some(_) => {
+                    if r.get("after").is_some() {
+                        return Err(format!("{rule}: rest replaces after"));
+                    }
+                    let mut v = Vec::new();
+                    for p in strings(r, "rest")? {
+                        v.push(parse_phrase(&p).map_err(|e| format!("{rule}: {e}"))?);
+                    }
+                    Some(v)
+                }
+            };
             if opener && kind != Kind::Start {
                 return Err(format!("{rule}: an opener must be a start row"));
             }
@@ -763,11 +819,15 @@ impl Table {
                 strength,
                 tight,
                 after_break,
+                after_end,
+                or_next,
                 polarity: fam_ladder.polarity,
                 opener,
                 refuse_next,
                 max_rest,
                 cautions,
+                rest,
+                negated_after: family == Family::Apology,
             });
         }
 
@@ -794,6 +854,8 @@ impl Table {
             scan_bytes,
             contrast,
             cautions,
+            body_words,
+            body_idioms,
             tags,
             ladders,
             lexicon,
@@ -1084,6 +1146,10 @@ impl Table {
     /// (a wrong reaction is worse than none):
     /// * a contrast word (`but`, `however`, `though` ...) anywhere gives
     ///   `None`: the clause holds two opinions;
+    /// * a word that reports or defines words (`said`, `says`, `the word`,
+    ///   `called`, `means`, `spelled`, `stands for` ...) anywhere gives `None`
+    ///   (the words are mentioned, not meant), and so do quote marks around
+    ///   the match (`row_hit`);
     /// * a weak greeting (`opener`) is dropped when any other row matched, so
     ///   it can never beat the content of the clause (`hello, unfortunately
     ///   that is late` reads as worry);
@@ -1129,7 +1195,9 @@ impl Table {
             return None;
         }
         let hits = &hits[..count];
-        if self.has_contrast(&norm) {
+        // two opinions, or words that are being reported, defined or quoted
+        // rather than meant: no reaction
+        if self.has_contrast(&norm) || norm.mentions_words() {
             return None;
         }
         // a weak greeting never competes with content (a suppressed match is
@@ -1179,16 +1247,38 @@ impl Table {
         (0..n.toks.len()).any(|i| self.cautions.contains(n.word(i)))
     }
 
+    /// A sense verb or a body or hardware noun anywhere in the clause outside
+    /// the match (tokens `at` to `last`): `I'm glad I can see you`, `I'm happy
+    /// my battery is full`.
+    fn has_body_claim(&self, n: &Norm, at: usize, last: usize) -> bool {
+        (0..n.toks.len()).any(|i| {
+            let w = n.word(i);
+            // cheap length filter first: the list is 3 to 11 bytes
+            (i < at || i > last) && (3..=11).contains(&w.len()) && self.body_words.contains(w) && !self.in_body_idiom(n, i)
+        })
+    }
+
+    /// Token `i` sits in a greeting idiom (`good to see you`) that ends the clause.
+    fn in_body_idiom(&self, n: &Norm, i: usize) -> bool {
+        self.body_idioms.iter().any(|p| {
+            let from = (i + 1).saturating_sub(p.len());
+            (from..=i).any(|start| n.slots_at(p, start, true) && n.ends_clause(start + p.len() - 1))
+        })
+    }
+
     /// Does this phrase of a row match with its first word at token `at`, in
     /// a context that allows the reaction?
     ///
     /// `row_matches_at` covers the shape and the local guards. On top of it:
-    /// * `refuse_next` phrases right after the match, and `max_rest`;
+    /// * a match inside or beside quote marks is never read;
+    /// * `refuse_next` phrases right after the match (or after a comma), and
+    ///   `max_rest`;
     /// * word and phrase rows refuse a sentence that opens with a conditional
     ///   (`if`, `would`, `could`, `might`, `whether`, `in case`);
-    /// * rows of a family with polarity 0 or above also refuse a question
-    ///   (the first break after the match is `?`, or the sentence opens with
-    ///   an interrogative or auxiliary and ends with `?`), and a clause that
+    /// * every row refuses a question (the first break after the match is
+    ///   `?`, or the sentence opens with an interrogative or auxiliary and
+    ///   ends with `?`);
+    /// * rows of a family with polarity 0 or above also refuse a clause that
     ///   carries a caution word or a negator outside the match (unless the row
     ///   opts out with `cautions: false`). What follows a positive opener may
     ///   take it back (`thanks, that is not what I asked`).
@@ -1197,10 +1287,14 @@ impl Table {
             return Seen::No;
         }
         let last = at + slots.len() - 1;
+        if n.quoted(at, last) {
+            return Seen::No;
+        }
+        // the next word, directly or after a comma (`thanks, so`, `oh no, not`)
         if !row.refuse_next.is_empty()
             && last + 1 < n.toks.len()
-            && n.joined(last + 1, true)
-            && row.refuse_next.iter().any(|p| n.slots_at(p, last + 1, true))
+            && n.joined(last + 1, false)
+            && row.refuse_next.iter().any(|p| n.slots_at(p, last + 1, false))
         {
             return Seen::No;
         }
@@ -1213,13 +1307,19 @@ impl Table {
         if matches!(row.kind, Kind::Word | Kind::Phrase) && n.opens_conditional(first) {
             return Seen::No;
         }
-        if row.polarity >= 0 {
-            if n.question_at(first, last) {
-                return Seen::No;
-            }
-            if row.cautions && (self.has_caution(n) || n.negated_outside(at, last)) {
-                return Seen::Suppressed;
-            }
+        // a question is no reaction, whatever the polarity of the row
+        if n.question_at(first, last) {
+            return Seen::No;
+        }
+        // an apology that a negator right after it takes back (`sorry, not sorry`)
+        if row.negated_after && n.negated_after(last) {
+            return Seen::No;
+        }
+        // no sense or body claim raises a pose, whatever the row
+        if row.polarity >= 0
+            && (self.has_body_claim(n, at, last) || (row.cautions && (self.has_caution(n) || n.negated_outside(at, last))))
+        {
+            return Seen::Suppressed;
         }
         Seen::Yes
     }
@@ -1256,6 +1356,8 @@ impl Table {
             buf[n] = match ch {
                 '\u{2019}' | '\u{2018}' => b'\'',
                 '\u{2010}' | '\u{2011}' => b'-',
+                // curly and angle double quotes stay quote marks
+                '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{ab}' | '\u{bb}' => b'"',
                 c if c.is_ascii_whitespace() => b' ',
                 c if c.is_ascii() => {
                     if c.is_ascii_uppercase() {
@@ -1342,7 +1444,22 @@ const NEGATORS: &[&[u8]] = &[
 
 /// Words that make what follows hypothetical (`it could be wonderful`). They
 /// count like negators in the look-back window.
-const HEDGES: &[&[u8]] = &[b"if", b"would", b"could", b"might", b"may", b"should", b"whether", b"unless"];
+///
+/// Also the words that report an opinion or a wish rather than state one
+/// (`some people think that's amazing`, `I wish I had good news`).
+const HEDGES: &[&[u8]] = &[
+    b"if", b"would", b"could", b"might", b"may", b"should", b"whether", b"unless", b"wish", b"hope", b"hoped",
+    b"suppose", b"perhaps", b"maybe", b"apparently", b"seems", b"supposedly", b"think", b"say", b"says", b"said",
+];
+
+/// Words that report, define or spell out words (`the email says
+/// congratulations`, `the word wow`, `LOL stands for ...`). A clause that has
+/// one mentions words instead of meaning them: no reaction.
+const MENTIONS: &[&[u8]] = &[
+    b"word", b"words", b"phrase", b"phrases", b"called", b"means", b"meaning", b"say", b"says", b"said", b"spelled",
+    b"spelling", b"spells", b"wrote", b"written", b"writes", b"reads", b"stands", b"quote", b"quoted", b"quotes",
+    b"defined", b"headline",
+];
 
 /// Phrases that turn the word after them around (`far from fantastic`). They
 /// count when they end up to `GUARD_GAP` tokens before the match.
@@ -1501,6 +1618,52 @@ impl Norm<'_> {
         })
     }
 
+    /// A negator takes back the match that ends at token `last`: it is the
+    /// very next token (`sorry, not sorry`, `my apologies, no`), or it comes
+    /// within `NEGATION_WINDOW` tokens and the match's own last word follows
+    /// it within two tokens (`I'm sorry, I'm really not sorry`). Same
+    /// sentence only. A plain failure after an apology (`sorry, I can't find
+    /// it`) does not take it back.
+    fn negated_after(&self, last: usize) -> bool {
+        let head = self.word(last);
+        let mut j = last + 1;
+        while j < self.toks.len() && j <= last + NEGATION_WINDOW && self.same_sentence(last, j) {
+            let w = self.word(j);
+            if w != b"any" && NEGATORS.contains(&w) {
+                if j == last + 1 {
+                    return true;
+                }
+                let mut k = j + 1;
+                while k < self.toks.len() && k <= j + 2 && self.same_sentence(j, k) {
+                    if self.word(k) == head {
+                        return true;
+                    }
+                    k += 1;
+                }
+            }
+            j += 1;
+        }
+        false
+    }
+
+    /// The match that ends at token `last` ends the clause, or one of the
+    /// `rest` phrases follows it (after spaces or a break) and ends the
+    /// clause.
+    fn rest_ok(&self, rest: &[Slots], last: usize) -> bool {
+        if self.ends_clause(last) {
+            return true;
+        }
+        let next = last + 1;
+        if self.truncated || next >= self.toks.len() {
+            return false;
+        }
+        let gap = &self.buf[self.toks[last].1 as usize..self.toks[next].0 as usize];
+        if !gap.iter().all(|&b| matches!(b, b' ' | b',' | b':' | b';' | b'.' | b'!' | b'-' | b'_')) {
+            return false;
+        }
+        rest.iter().any(|p| self.slots_at(p, next, true) && self.ends_clause(next + p.len() - 1))
+    }
+
     /// The first token of the sentence that holds token `at` (`. ! ?` end a sentence).
     fn sentence_start(&self, at: usize) -> usize {
         let mut j = at;
@@ -1550,12 +1713,57 @@ impl Norm<'_> {
     }
 
     /// After token `last`: the end of the clause, or one of `. , ! ? ; :`.
+    /// The end of a scan that was cut short is not the end of the clause.
     fn breaks_after(&self, last: usize) -> bool {
         let rest = &self.buf[self.toks[last].1 as usize..];
         match rest.iter().find(|&&b| b != b' ') {
-            None => true,
+            None => !self.truncated,
             Some(b) => matches!(b, b'.' | b',' | b'!' | b'?' | b';' | b':' | b'_'),
         }
+    }
+
+    /// The match ends token `last` and also ends the clause: nothing after it
+    /// but closing punctuation, or one break and one more word (`good job,
+    /// Richard.`; a name or a pronoun). `good job, now run it` and `good job
+    /// market` do not end the clause.
+    fn ends_clause(&self, last: usize) -> bool {
+        if self.truncated {
+            return false;
+        }
+        let closing = |tail: &[u8]| tail.iter().all(|&b| matches!(b, b' ' | b'.' | b'!' | b'?' | b'_'));
+        let after = self.toks.len() - 1 - last;
+        let tail_from = |i: usize| &self.buf[self.toks[i].1 as usize..];
+        match after {
+            0 => closing(tail_from(last)),
+            1 => {
+                let gap = &self.buf[self.toks[last].1 as usize..self.toks[last + 1].0 as usize];
+                let breaks = gap.iter().any(|b| matches!(b, b',' | b'.' | b'!' | b'?' | b';' | b':' | b'_'));
+                let only_breaks = gap.iter().all(|b| matches!(b, b' ' | b',' | b'.' | b'!' | b'?' | b';' | b':' | b'_'));
+                breaks && only_breaks && closing(tail_from(last + 1))
+            }
+            _ => false,
+        }
+    }
+
+    /// The match from token `at` to token `last` sits inside quote marks
+    /// (an odd number of double quotes before it) or touches one.
+    fn quoted(&self, at: usize, last: usize) -> bool {
+        let s = self.toks[at].0 as usize;
+        let e = self.toks[last].1 as usize;
+        let inside = self.buf[..s].iter().filter(|&&b| b == b'"').count() % 2 == 1;
+        let before = s > 0 && matches!(self.buf[s - 1], b'"' | b'\'');
+        let after = e < self.buf.len() && matches!(self.buf[e], b'"' | b'\'');
+        inside || before || after
+    }
+
+    /// A word that reports or defines words appears in the clause (`MENTIONS`).
+    /// `to say` is the stock phrase of a compliment (`that's kind of you to
+    /// say`) and does not count.
+    fn mentions_words(&self) -> bool {
+        (0..self.toks.len()).any(|i| {
+            let w = self.word(i);
+            (3..=8).contains(&w.len()) && MENTIONS.contains(&w) && !(w == b"say" && i > 0 && self.word(i - 1) == b"to")
+        })
     }
 }
 
@@ -1594,7 +1802,25 @@ fn row_matches_at(row: &Row, slots: &Slots, n: &Norm, at: usize) -> bool {
     if matches!(row.kind, Kind::Word | Kind::Phrase) && n.negated_before(at) {
         return false;
     }
-    !row.after_break || n.breaks_after(last)
+    after_ok(row, n, last)
+}
+
+/// The `after` rule of a row: nothing, a break (or one of the whitelisted
+/// words in `or_next`), or the end of the clause.
+fn after_ok(row: &Row, n: &Norm, last: usize) -> bool {
+    if let Some(rest) = &row.rest {
+        return n.rest_ok(rest, last);
+    }
+    if row.after_end {
+        return n.ends_clause(last);
+    }
+    if !row.after_break {
+        return true;
+    }
+    n.breaks_after(last)
+        || (last + 1 < n.toks.len()
+            && n.joined(last + 1, true)
+            && row.or_next.iter().any(|p| n.slots_at(p, last + 1, true)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1647,7 +1873,8 @@ pub fn afterglow(c: &Choice<'static>) -> Option<Choice<'static>> {
 /// Pacing of director pose changes. Time is an argument (seconds on any
 /// monotonic base), so it replays with fake time.
 ///
-/// * at least `min_gap` (1.2 s) between pose changes;
+/// * a pose change comes at least `min_gap` (1.2 s) after the last show (a
+///   refresh of the same pose counts as a show);
 /// * at most `max_per_turn` (3) changes per turn;
 /// * no startle-kick pose (surprise, startled, scared, shocked) twice within
 ///   `kick_gap` (10 s), the same pose or another;
@@ -1724,8 +1951,10 @@ impl Dwell {
         if self.last_name.as_deref() != Some(name) {
             self.changes += 1;
             self.last_name = Some(name.to_owned());
-            self.last_at = Some(now);
         }
+        // every show counts for the gap, a refresh of the same pose too: a
+        // change right after a refresh is still too soon
+        self.last_at = Some(now);
         if self.is_kick(name) {
             self.kick_at = Some(now);
         }
@@ -2723,7 +2952,7 @@ mod tests {
         ] {
             assert_eq!(read_clause(s), None, "{s}");
         }
-        for s in ["Well done!", "Well done, Richard.", "Keep going!", "Keep going, you are close.", "Keep it up."] {
+        for s in ["Well done!", "Well done, Richard.", "Keep going!", "Keep it up."] {
             assert_eq!(read(s), Some(Family::Support), "{s}");
             assert!(strength_of(s).unwrap() <= 0.4, "{s}");
             let c = t().choose(&[(Source::Reply, read_clause(s).unwrap())], &day()).unwrap();
@@ -2765,7 +2994,7 @@ mod tests {
     fn row_attributes_are_validated() {
         let bad = TABLE_JSON.replace("\"after\": \"break\"", "\"after\": \"never\"");
         assert!(Table::parse(&bad).is_err());
-        let bad = TABLE_JSON.replace("\"tight\": true", "\"tight\": \"yes\"");
+        let bad = TABLE_JSON.replace("\"tight\": false", "\"tight\": \"yes\"");
         assert!(Table::parse(&bad).is_err());
     }
 
@@ -3150,7 +3379,9 @@ mod tests {
         assert_eq!(read("Hello, how are you?"), Some(Family::Warm));
         assert_eq!(read("Thank you, would you like some tea?"), Some(Family::Thanks));
         assert_eq!(read("Wow, did you do that?"), Some(Family::Surprise));
-        assert_eq!(read("Great news. Do you want to hear it?"), Some(Family::Warm));
+        // (round 5: the question is no good payload, and `hear` is a sense word: silent)
+        assert_eq!(read("Great news. Do you want to hear it?"), None);
+        assert_eq!(read("Great news!"), Some(Family::Warm));
         // a negative reading still stands in a question (the rule is for positive families)
         assert_eq!(read("Sorry to hear that, how are you feeling?"), Some(Family::Worry));
         assert_eq!(read("Oh no, did it fail?"), Some(Family::Worry));
@@ -3178,7 +3409,7 @@ mod tests {
         assert_eq!(read_clause("Haha, sorry to hear that."), None);
         assert_eq!(read_clause("That's wonderful, I'm worried."), None);
         // a negative match beats a weak greeting, and so does any other content
-        assert_eq!(read("Hello, unfortunately that is late."), Some(Family::Worry));
+        assert_eq!(read("Hello, sorry to hear that."), Some(Family::Worry));
         let (c, rule) = t().read_clause_rule("Hi, good news!").unwrap();
         assert_eq!((c.family, rule), (Family::Warm, "warm-good-news"));
         let (_, rule) = t().read_clause_rule("Hello there.").unwrap();
@@ -3610,7 +3841,7 @@ mod tests {
         assert!(Table::parse(&bad).is_err());
         let bad = TABLE_JSON.replace("\"max_rest\": 4", "\"max_rest\": \"four\"");
         assert!(Table::parse(&bad).is_err());
-        let bad = TABLE_JSON.replace("\"refuse_next\": [\"to\", \"for nothing\"]", "\"refuse_next\": [\"To\"]");
+        let bad = TABLE_JSON.replace("\"refuse_next\": [", "\"refuse_next\": [\"To\", ");
         assert!(Table::parse(&bad).is_err());
         let bad = TABLE_JSON.replace("\"cautions\": false", "\"cautions\": \"no\"");
         assert!(Table::parse(&bad).is_err());
@@ -3703,9 +3934,822 @@ mod tests {
             ("Happy to help, don't hesitate to ask.", "a negator in the clause"),
             ("That sounds wonderful.", "praise needs a demonstrative"),
             ("Wow that is a lot.", "wow needs a break after"),
+            // round 4: structural rules
+            ("Thank you, so glad you told me.", "thanks, so is a continuation"),
+            ("Sorry to bother you.", "sorry needs a break or about, for, again"),
+            ("Keep going, you are close.", "support must end the clause"),
+            ("Keep going, you're almost there.", "support must end the clause"),
+            ("Good job, you finished it.", "support must end the clause"),
+            ("Nice work, that was quick.", "support must end the clause"),
+            ("You can do it, I believe in you.", "support must end the clause"),
+            ("Great job, that was the last one.", "support must end the clause"),
+            ("Well done, that was hard.", "support must end the clause"),
+            ("You're welcome to ask again anytime.", "welcome needs a break after"),
+            ("It worked, yay!", "hooray is a clause start"),
+            ("Hooray for the new shelf!", "hooray needs a break after"),
+            ("Great news about the update!", "good news needs a break after"),
+            ("Good morning, I hope you slept well.", "a greeting needs a short clause"),
+            ("Hi, I've set your timer for seven.", "a greeting needs a short clause"),
+            ("I doubt you can fix that.", "i doubt needs that, it, this, so, whether, if or a break"),
+            ("Oh no, it failed.", "oh no refuses it, i, not and no next"),
+            ("Oh no, I lost it.", "oh no refuses it, i, not and no next"),
+            ("Oh no, the file you asked about is gone.", "oh no needs a short clause"),
+            ("Unfortunately, the file you asked about earlier is not in that folder.", "unfortunately is short"),
+            ("Thank you, that means a lot.", "a clause that says what words mean"),
+            ("Thank you for what you said.", "a clause that reports words"),
         ] {
             assert_eq!(read_clause(s), None, "{s} ({why})");
         }
+    }
+
+
+    // -- round 4: structural rules (the round-3 review) ----------------------
+
+    /// Round-3 reviewer lines (Rust half) that read wrongly after round 3 and
+    /// must now say nothing. The lines whose acceptable set also allowed a
+    /// reaction are checked separately below.
+    const ROUND4_SILENT: &[&str] = &[
+        "I wish I had good news for you today.",
+        "I wish I could say congratulations on the result.",
+        "The email says congratulations on your purchase and asks for your password.",
+        "Some people think that's amazing.",
+        "I suppose that's great.",
+        "Perhaps it was wonderful.",
+        "Thanks, a lot of people ask me that.",
+        "The word congratulations has fifteen letters.",
+        "LOL stands for laughing out loud.",
+        "The phrase \"good news\" is a common headline opener.",
+        "How sad is that song, honestly?",
+        "Oh no, not at all, it was no trouble.",
+        "Hey, watch your step on the stairs.",
+        "You're welcome to try the other mode if you like.",
+        "Good news travels fast in small towns.",
+        "Great news sites often use that layout.",
+        "Sorry seems to be the hardest word for computers.",
+        "Thank you cards are usually sent within two weeks.",
+        "I doubt you will regret it.",
+        "Keep going, then turn left at the bakery.",
+        "You can do it. Open the menu and choose Save As.",
+        "Unfortunately, I found three recipes and they all sound delicious.",
+        "The vote was yay, twelve to three.",
+        "Brilliant, the printer is out of paper again.",
+        "I'm kidding myself if I think the answer is that simple.",
+        "Welcome back, Kotter was a sitcom from the seventies.",
+        "Hello, and sorry for the delay with the answer.",
+        "Good job, now run the command with sudo.",
+        "Nice work, open the file next.",
+        "You can do it, just press the green button.",
+        "Keep going, the next exit is yours.",
+        "Well done, the oven is now preheated.",
+        "How sad would you say the ending was?",
+        "Oh no, I was only asking about lunch.",
+        "Thanks, so what do you want for dinner tonight?",
+        "Thanks, so I will set the timer now.",
+        "Hey, over here, the keys are on the shelf.",
+        "The sign says wonderful, but I would not count on it.",
+        "He wrote congratulations on the card.",
+    ];
+
+    #[test]
+    fn round4_reviewer_lines_are_silent() {
+        for s in ROUND4_SILENT {
+            assert_eq!(t().read_clause_rule(s), None, "{s}");
+        }
+        // lines whose acceptable set allowed a reaction: silent or that family
+        for (s, ok) in [
+            ("Thank you, so far the update looks fine.", Family::Thanks),
+            ("No way!", Family::Surprise),
+            ("Sorry, could you say that again?", Family::Apology),
+            ("I cannot save files to your desktop.", Family::Worry),
+            ("Just kidding about the rain, the sky is clear.", Family::Humour),
+            ("That's great news for the garden, since rain is coming.", Family::Warm),
+            ("Interesting, the number you gave me has no square root.", Family::Curious),
+            ("My apologies, the previous answer was wrong.", Family::Apology),
+        ] {
+            assert!(read(s).is_none() || read(s) == Some(ok), "{s}");
+        }
+        // the controls keep their answers
+        assert_eq!(read("Oh no, the build failed."), Some(Family::Worry));
+        assert_eq!(read("Congratulations on the new job!"), Some(Family::Warm));
+        // (round 5: a payload outside the closed whitelist is silent)
+        assert_eq!(read("Great news, the update installed fine."), None);
+        assert_eq!(read("Great news, it worked."), Some(Family::Warm));
+        assert_eq!(read("Thank you for waiting."), Some(Family::Thanks));
+        assert_eq!(read("I'm so sorry to hear that."), Some(Family::Worry));
+    }
+
+    // -- (1) mentioned, quoted and reported words --
+
+    #[test]
+    fn mentioned_quoted_and_reported_words_do_not_react() {
+        for s in [
+            "The email says congratulations on your purchase.",
+            "The word congratulations has fifteen letters.",
+            "He wrote congratulations on the card.",
+            "The card reads congratulations in gold.",
+            "The sign said wow in red letters.",
+            "A haha is called a laugh.",
+            "Yay means hooray in some chats.",
+            "LOL stands for laughing out loud.",
+            "It is spelled hahaha in the book.",
+            "The phrase \"good news\" is common.",
+            "The title is \"hooray\" in the file.",
+            "She typed \"thank you\" twice.",
+            "The text says \u{201c}great news\u{201d} on top.",
+            "He said congratulations twice.",
+            "They say that's wonderful.",
+        ] {
+            assert_eq!(read_clause(s), None, "{s}");
+        }
+        // quote marks around or against the match, even without a mention word
+        assert_eq!(read_clause("I typed 'lol' there."), None);
+        assert_eq!(read_clause("The log has \"haha\" in it."), None);
+        assert_eq!(read_clause("Look at the \u{201c}lol\u{201d} here."), None);
+        // a quote elsewhere in the clause does not take a plain reaction back
+        assert_eq!(read("Thanks for the \"update\"."), Some(Family::Thanks));
+        // the stock compliment `to say` is not a mention
+        assert_eq!(read("That's so kind of you to say."), Some(Family::Thanks));
+        // none of the mention words is itself a lexicon word
+        for row in &t().lexicon {
+            for slots in &row.phrases {
+                for alts in slots {
+                    for w in alts {
+                        assert!(!MENTIONS.contains(&w.as_bytes()), "{}: {w} is a mention word", row.rule);
+                    }
+                }
+            }
+        }
+        for w in ["word", "called", "means", "say", "said", "says", "spelled", "stands", "wrote"] {
+            assert!(MENTIONS.contains(&w.as_bytes()), "{w}");
+        }
+    }
+
+    #[test]
+    fn the_scan_buffer_keeps_curly_quotes_as_quote_marks() {
+        let mut buf = [0u8; SCAN_BYTES_LIMIT];
+        let mut toks = [(0u16, 0u16); SCAN_WORDS_LIMIT];
+        let n = t().normalise("a \u{201c}b\u{201d} \u{ab}c\u{bb}", &mut buf, &mut toks).unwrap();
+        assert_eq!(n.buf.iter().filter(|&&b| b == b'"').count(), 4);
+        assert!(n.quoted(1, 1) && n.quoted(2, 2));
+        assert!(!n.quoted(0, 0));
+    }
+
+    // -- (2) support rows must end the clause --
+
+    #[test]
+    fn support_praise_you_can_and_keep_going_must_end_the_clause() {
+        for s in [
+            "Good job, now run the command with sudo.",
+            "Nice work, open the file next.",
+            "You can do it, just press the green button.",
+            "You can do it. Open the menu and choose Save As.",
+            "Keep going, then turn left at the bakery.",
+            "Keep going, the next exit is yours.",
+            "Well done, the oven is now preheated.",
+            "Good job market.",
+            "Good job pip, you broke it.",
+            "Nice work breaking everything.",
+            "Good job, Richard and Sam.",
+            "Well done, you broke the timer.",
+        ] {
+            assert_eq!(read_clause(s), None, "{s}");
+        }
+        for s in [
+            "Good job!",
+            "Good job.",
+            "Good job, Richard.",
+            "Good job, you.",
+            "Nice work!",
+            "Great job, Richard!",
+            "You can do it!",
+            "You can do it, Richard.",
+            "You've got this.",
+            "You got this!",
+            "Keep going!",
+            "Keep it up.",
+            "Well done!",
+            "Well done, Richard.",
+            "Well done\u{2026}",
+        ] {
+            assert_eq!(read(s), Some(Family::Support), "{s}");
+        }
+        for row in &t().lexicon {
+            if matches!(row.rule.as_str(), "support-praise" | "support-you-can" | "support-keep-going") {
+                assert!(row.after_end && row.after_break, "{}", row.rule);
+            }
+        }
+        // a scan that was cut short never counts as the end of the clause
+        let filler = "alpha ".repeat(60);
+        assert_eq!(read_clause(&format!("Good job {filler}")), None);
+        assert_eq!(read_clause(&format!("Well done, {}", "x".repeat(450))), None);
+    }
+
+    // -- (3) phrases are tight, thanks needs its full forms --
+
+    #[test]
+    fn every_phrase_is_tight_unless_the_row_says_otherwise() {
+        for row in &t().lexicon {
+            let loose = row.rule == "humour-ha-ha";
+            assert_eq!(row.tight, !loose, "{}", row.rule);
+        }
+        for s in [
+            "Thanks, a lot of people ask me that.",
+            "Thank you, so far the update looks fine.",
+            "Thanks, so I will set the timer now.",
+            "Thanks, so what do you want for dinner tonight?",
+            "Thank you cards are usually sent within two weeks.",
+            "Thank you notes are lovely.",
+            "Thank you letters are rare.",
+            "Thanks to the heavy rain, the road is flooded.",
+            "Thank you, to be honest.",
+            "Thank, you so much.",
+            "Happy, to help.",
+            "I'm, glad you came.",
+        ] {
+            assert_eq!(read_clause(s), None, "{s}");
+        }
+        // the one loose row
+        assert_eq!(read("Ha, ha, good one."), Some(Family::Humour));
+        assert_eq!(read("Ha ha."), Some(Family::Humour));
+    }
+
+    #[test]
+    fn a_strong_thanks_needs_so_much_a_lot_or_very_much() {
+        for s in [
+            "Thank you so much for waiting.",
+            "Thanks so much!",
+            "Thank you very much.",
+            "Thanks very much for that.",
+            "Thanks a lot for the help.",
+            "Thank you a lot.",
+        ] {
+            assert_eq!(strength_of(s), Some(0.8), "{s}");
+            let c = t().choose(&[(Source::Reply, read_clause(s).unwrap())], &day()).unwrap();
+            assert_eq!(c.name, "grateful", "{s}");
+        }
+        // everything else stays at the plain thanks rung
+        for s in ["Thanks for waiting.", "Thank you, Richard.", "Thanks, that helps.", "Thank you for telling me."] {
+            assert_eq!(strength_of(s), Some(0.55), "{s}");
+            let c = t().choose(&[(Source::Reply, read_clause(s).unwrap())], &day()).unwrap();
+            assert_eq!(c.name, "pleased", "{s}");
+        }
+        // `thank you so` alone is a polite opener, never the strong rung
+        for s in ["Thank you so far.", "Thank you, so far the update looks fine.", "Thanks a few times."] {
+            assert!(strength_of(s).is_none_or(|v| v < 0.7), "{s}");
+        }
+    }
+
+    // -- (4) the question guard for every polarity --
+
+    #[test]
+    fn negative_rows_refuse_a_question_too() {
+        for s in [
+            "How sad is that song, honestly?",
+            "How sad would you say the ending was?",
+            "Is that a shame?",
+            "Was it too bad?",
+            "How sad?",
+            "Do you think that's a shame?",
+            "Did something go wrong?",
+            "Are you worried?",
+            "Sorry to hear that?",
+        ] {
+            assert_eq!(read_clause(s), None, "{s}");
+        }
+        // a question that follows the reaction does not take it back
+        assert_eq!(read("Oh no, did it fail?"), Some(Family::Worry));
+        assert_eq!(read("Sorry to hear that, how are you feeling?"), Some(Family::Worry));
+        // `how sad` needs the clause start and a break after it
+        assert_eq!(read("How sad."), Some(Family::Worry));
+        assert_eq!(read("How sad!"), Some(Family::Worry));
+        assert_eq!(read("How sad, Richard."), Some(Family::Worry));
+        assert_eq!(read_clause("It is how sad people look."), None);
+        assert_eq!(read_clause("How sad that song is."), None);
+        let (_, rule) = t().read_clause_rule("How sad!").unwrap();
+        assert_eq!(rule, "worry-how-sad");
+        for row in &t().lexicon {
+            if row.rule == "worry-how-sad" {
+                assert_eq!(row.kind, Kind::Start);
+                assert!(row.after_break);
+            }
+            for slots in &row.phrases {
+                for ex in expand(slots) {
+                    if ex == "how sad" {
+                        assert_eq!(row.rule, "worry-how-sad");
+                    }
+                }
+            }
+        }
+        // that's sad stays an anywhere phrase
+        assert_eq!(read("That's sad."), Some(Family::Worry));
+    }
+
+    // -- (5) hedges, wishes and reports in the look-back --
+
+    #[test]
+    fn hedges_wishes_and_reports_turn_a_nearby_praise_around() {
+        for w in [
+            "wish", "hope", "hoped", "suppose", "perhaps", "maybe", "apparently", "seems", "supposedly", "think", "say",
+            "says", "said",
+        ] {
+            assert!(HEDGES.contains(&w.as_bytes()), "{w}");
+        }
+        for s in [
+            "I wish I had good news for you today.",
+            "I hope that's great.",
+            "She hoped it was wonderful.",
+            "I suppose that's great.",
+            "Perhaps it was wonderful.",
+            "Maybe that's amazing.",
+            "Apparently that's fantastic.",
+            "It seems that's great.",
+            "Supposedly it was awesome.",
+            "Some people think that's amazing.",
+            "People say it was wonderful.",
+            "He said that's great.",
+            "I'd say that's fantastic.",
+        ] {
+            assert_eq!(read_clause(s), None, "{s}");
+        }
+        // the same words read when they are not just before the match
+        assert_eq!(read("That's great!"), Some(Family::Warm));
+        assert_eq!(read("Maybe. That's great!"), Some(Family::Warm));
+        // and a negative reading is turned around by them too
+        assert_eq!(read_clause("I hope that's a shame."), None);
+    }
+
+    // -- (6) prefix-of-a-longer-idiom rows --
+
+    #[test]
+    fn welcome_good_news_and_sorry_need_a_break_or_a_listed_word() {
+        for s in [
+            "You're welcome to try the other mode if you like.",
+            "You are welcome to stay.",
+            "Good news travels fast in small towns.",
+            "Great news sites often use that layout.",
+            "Good news about the update!",
+            "Sorry seems to be the hardest word.",
+            "Sorry could you say that again",
+            "Sorry to bother you.",
+        ] {
+            assert_eq!(read_clause(s), None, "{s}");
+        }
+        for (s, f) in [
+            ("You're welcome.", Family::Warm),
+            ("You're welcome, Richard.", Family::Warm),
+            ("You are welcome!", Family::Warm),
+            ("Good news!", Family::Warm),
+            ("Great news, it saved.", Family::Warm),
+            ("That's good news.", Family::Warm),
+            ("Sorry!", Family::Apology),
+            ("Sorry, I missed that.", Family::Apology),
+            ("Sorry about the wait.", Family::Apology),
+            ("Sorry for the delay.", Family::Apology),
+            ("Sorry again.", Family::Apology),
+        ] {
+            assert_eq!(read(s), Some(f), "{s}");
+        }
+        for rule in ["warm-welcome", "apology-sorry"] {
+            let row = t().lexicon.iter().find(|r| r.rule == rule).unwrap();
+            assert!(row.after_break, "{rule}");
+        }
+        // (round 5: good news takes a closed rest instead of a break)
+        let row = t().lexicon.iter().find(|r| r.rule == "warm-good-news").unwrap();
+        assert!(row.rest.is_some() && !row.after_break);
+    }
+
+    // -- (7) oh no and openers --
+
+    #[test]
+    fn oh_no_is_short_and_refuses_a_polite_denial() {
+        for s in [
+            "Oh no, not at all, it was no trouble.",
+            "Oh no, no trouble at all.",
+            "Oh no, I was only asking about lunch.",
+            "Oh no, it was nothing.",
+            "Uh oh, I broke it.",
+            "Oh no, the file you asked about earlier is gone.",
+            "Oh no, the file you asked about is gone.",
+        ] {
+            assert_eq!(read_clause(s), None, "{s}");
+        }
+        for s in [
+            "Oh no!",
+            "Oh no, the build failed.",
+            "Oh no, the file is gone.",
+            "Uh oh, that did not save.",
+            "Oh no, did it fail?",
+        ] {
+            assert_eq!(read(s), Some(Family::Worry), "{s}");
+        }
+        let row = t().lexicon.iter().find(|r| r.rule == "worry-oh-no").unwrap();
+        assert_eq!(row.max_rest, Some(4));
+        assert!(row.tight);
+    }
+
+    #[test]
+    fn greetings_fire_only_on_a_short_clause() {
+        for s in [
+            "Hey, watch your step on the stairs.",
+            "Hey, over here, the keys are on the shelf.",
+            "Welcome back, Kotter was a sitcom from the seventies.",
+            "Hello, and sorry for the delay with the answer.",
+            "Good morning, I hope you slept well tonight.",
+            "Hi, I have set your timer for seven in the morning.",
+        ] {
+            assert_eq!(read_clause(s), None, "{s}");
+        }
+        for s in [
+            "Hi!",
+            "Hey, good to see you.",
+            "Hello there.",
+            "Hello, how are you?",
+            "Good morning, Richard.",
+            "Hi, I found it.",
+            "Welcome back!",
+        ] {
+            assert_eq!(read(s), Some(Family::Warm), "{s}");
+        }
+        let row = t().lexicon.iter().find(|r| r.rule == "warm-greeting").unwrap();
+        assert_eq!(row.max_rest, Some(4));
+        assert!(row.opener);
+    }
+
+    // -- (8) the dwell gap counts every show --
+
+    #[test]
+    fn dwell_a_refresh_counts_for_the_gap() {
+        let mut d = Dwell::new();
+        assert!(d.try_show("pleased", 0.0));
+        assert!(d.try_show("pleased", 5.0), "a refresh of the same pose is free of the gap");
+        assert!(!d.allow("joy", 5.1), "a change right after a refresh is too soon");
+        assert!(!d.try_show("joy", 6.19));
+        assert!(d.try_show("joy", 6.2));
+        assert_eq!(d.changes_this_turn(), 2);
+        // a refused show records nothing
+        let mut d = Dwell::new();
+        assert!(d.try_show("pleased", 0.0));
+        assert!(!d.try_show("joy", 0.5));
+        assert!(d.try_show("joy", 1.2));
+        // a non-finite time records nothing, a refresh at a later time moves the gap
+        let mut d = Dwell::new();
+        d.try_show("pleased", 0.0);
+        d.record("pleased", f64::NAN);
+        assert!(d.allow("joy", 1.2));
+        d.record("pleased", 3.0);
+        assert!(!d.allow("joy", 3.5));
+        assert!(d.allow("joy", 4.2));
+        // a new turn keeps the time gap (the remembered pose is cleared)
+        d.new_turn();
+        assert!(!d.allow("joy", 3.5));
+        assert!(d.allow("joy", 4.2));
+    }
+
+    // -- (9) i'm kidding, unfortunately, i doubt --
+
+    #[test]
+    fn kidding_myself_unfortunately_and_doubt_need_their_forms() {
+        for s in [
+            "I'm kidding myself if I think the answer is that simple.",
+            "I am joking myself out of this.",
+            "I'm kidding yourself, no.",
+            "Well, unfortunately the backup failed.",
+            "It failed, unfortunately.",
+            "The backup unfortunately failed.",
+            "Unfortunately, I found three recipes and they all sound delicious.",
+            "I doubt you will regret it.",
+            "I doubt Richard will mind.",
+        ] {
+            assert_eq!(read_clause(s), None, "{s}");
+        }
+        for (s, f) in [
+            ("I'm kidding.", Family::Humour),
+            ("I'm kidding, of course.", Family::Humour),
+            ("Just kidding.", Family::Humour),
+            ("I'm joking!", Family::Humour),
+            ("Unfortunately the backup failed.", Family::Worry),
+            ("Unfortunately, that did not work.", Family::Worry),
+            ("Unfortunately.", Family::Worry),
+            ("I doubt that.", Family::Doubt),
+            ("I doubt it.", Family::Doubt),
+            ("I doubt that is true.", Family::Doubt),
+            ("I doubt it will work.", Family::Doubt),
+            ("I doubt whether it works.", Family::Doubt),
+            ("I doubt, honestly.", Family::Doubt),
+        ] {
+            assert_eq!(read(s), Some(f), "{s}");
+        }
+        let row = t().lexicon.iter().find(|r| r.rule == "worry-unfortunately").unwrap();
+        assert_eq!(row.kind, Kind::Start);
+        let row = t().lexicon.iter().find(|r| r.rule == "warm-hooray").unwrap();
+        assert_eq!((row.kind, row.after_break), (Kind::Start, true));
+    }
+
+    #[test]
+    fn praise_openers_need_a_short_tail_and_hooray_a_clause_start() {
+        for s in [
+            "Brilliant, the printer is out of paper again.",
+            "Excellent, the report is ready and waiting for you in the shared folder.",
+            "The vote was yay, twelve to three.",
+            "It worked, yay!",
+            "Hooray for the new shelf!",
+        ] {
+            assert_eq!(read_clause(s), None, "{s}");
+        }
+        for (s, f) in [
+            ("Wonderful, thank you.", Family::Warm),
+            ("Awesome, thanks.", Family::Warm),
+            ("Excellent, the file is saved.", Family::Warm),
+            ("Hooray!", Family::Warm),
+            ("Yay, it worked.", Family::Warm),
+            ("Woohoo, we did it.", Family::Warm),
+        ] {
+            assert_eq!(read(s), Some(f), "{s}");
+        }
+    }
+
+    // -- the wiring decision for a positive tag over negative text --
+
+    #[test]
+    fn a_positive_tag_over_negative_reply_words_shows_nothing_from_the_director() {
+        // The director emits nothing here; the face's own speech cue for the
+        // tag stays (the voice's echo is never stripped). Pinned so the wiring
+        // step takes it as a decision, not as an accident.
+        let table = t();
+        let joy = table.tag_cue("joy").unwrap();
+        for text in ["Sorry to hear that.", "Oh no, the file is gone.", "I'm sorry about that."] {
+            let clause = table.read_clause(text).unwrap();
+            assert_eq!(table.polarity(clause.family), -1, "{text}");
+            assert_eq!(table.choose_reply(Some(clause), Some(joy), &[], &day()), None, "{text}");
+            // without the tag the words show
+            assert!(table.choose_reply(Some(clause), None, &[], &day()).is_some(), "{text}");
+        }
+    }
+
+    // -- attribute validation of the new rows --
+
+    #[test]
+    fn after_end_and_or_next_are_validated() {
+        // after can be break or end only
+        let bad = TABLE_JSON.replace("\"after\": \"end\"", "\"after\": \"never\"");
+        assert!(Table::parse(&bad).is_err());
+        let ok = TABLE_JSON.replace("\"after\": \"end\"", "\"after\": \"break\"");
+        assert!(Table::parse(&ok).is_ok());
+        // or_next needs after break (not end, not nothing)
+        let bad = TABLE_JSON.replace("\"after\": \"break\", \"or_next\"", "\"after\": \"end\", \"or_next\"");
+        assert!(Table::parse(&bad).is_err());
+        let bad = TABLE_JSON.replace("\"after\": \"break\", \"or_next\"", "\"or_next\"");
+        assert!(Table::parse(&bad).is_err());
+        // or_next entries are words
+        let bad = TABLE_JSON.replace("\"or_next\": [\"for\", \"again\"]", "\"or_next\": [\"For\"]");
+        assert!(Table::parse(&bad).is_err());
+        // tight must be a boolean, and defaults to true
+        let bad = TABLE_JSON.replace("\"tight\": false", "\"tight\": \"no\"");
+        assert!(Table::parse(&bad).is_err());
+    }
+
+    #[test]
+    fn question_mention_and_quote_guards_hold_over_every_generated_row() {
+        let table = t();
+        let mut checks = 0usize;
+        for row in &table.lexicon {
+            for slots in &row.phrases {
+                for ex in expand(slots) {
+                    for tpl in [
+                        "The email says {} on top.",
+                        "The word {} has letters.",
+                        "He wrote {} on the card.",
+                        "The phrase \"{}\" is common.",
+                    ] {
+                        let v = tpl.replace("{}", &ex);
+                        assert_eq!(table.read_clause_rule(&v), None, "{}: {v:?}", row.rule);
+                        checks += 1;
+                    }
+                }
+            }
+        }
+        assert!(checks >= 300, "{checks}");
+    }
+
+    // -- round 5: closed rests, body claims, negated apologies ------------------
+
+    fn rule_of(text: &str) -> Option<(Family, f64, String)> {
+        t().read_clause_rule(text).map(|(c, r)| (c.family, c.strength, r.to_owned()))
+    }
+
+    #[test]
+    fn glad_happy_pleased_take_only_a_closed_social_rest() {
+        // sense and body claims, and anything outside the whitelist: silent
+        for s in [
+            "I'm glad I can see you.",
+            "I'm glad I can hear you now.",
+            "I'm happy to hear you.",
+            "I'm happy to see your face.",
+            "I'm happy my battery is full.",
+            "I'm glad I can see again.",
+            "I'm glad to hear you can see me.",
+            "I am glad I can feel the fan.",
+            "I'm pleased the screen is bright.",
+            "I'm so glad the speaker works.",
+            "I'm glad I can smell it.",
+            "I'm glad I noticed the camera.",
+            "I'm happy the file is open.",
+            "I'm glad it worked, the power is back.",
+            "I'm glad the server is on fire.",
+            "Glad to hear the temperature is fine.",
+            "Great to hear I can watch you.",
+            "Glad to hear that, I can see you now.",
+            "Happy to help you see it.",
+            "Happy to help, I can hear you.",
+        ] {
+            assert_eq!(read_clause(s), None, "{s}");
+        }
+        // plain social continuations, the end of the clause and a vocative read
+        for (s, rule) in [
+            ("I'm glad.", "warm-im-glad"),
+            ("I'm glad, Richard.", "warm-im-glad"),
+            ("I'm glad I can help.", "warm-im-glad"),
+            ("I'm glad it worked.", "warm-im-glad"),
+            ("I'm glad that helped!", "warm-im-glad"),
+            ("I'm glad you like it.", "warm-im-glad"),
+            ("I'm glad you're back.", "warm-im-glad"),
+            ("I'm pleased you're here.", "warm-im-glad"),
+            ("I'm so glad to help.", "warm-im-glad"),
+            ("Glad to hear that.", "warm-glad-hear"),
+            ("Great to hear it!", "warm-glad-hear"),
+            ("Glad to hear that it worked.", "warm-glad-hear"),
+            ("Happy to help.", "warm-happy-help"),
+            ("Glad I could help!", "warm-happy-help"),
+            ("Happy to help you.", "warm-happy-help"),
+        ] {
+            let (f, _, r) = rule_of(s).unwrap_or_else(|| panic!("{s} must read"));
+            assert_eq!((f, r.as_str()), (Family::Warm, rule), "{s}");
+        }
+    }
+
+    #[test]
+    fn good_news_is_the_bare_phrase_or_a_good_payload() {
+        for s in [
+            "Great news: the server is on fire.",
+            "Great news, the battery is almost empty.",
+            "Great news: the disk is full.",
+            "Good news, I can hear you.",
+            "Good news, the file is open.",
+            "Good news, I found it and the fan is loud.",
+            "Good news. The update is late.",
+            "Good news about the update!",
+        ] {
+            assert_eq!(read_clause(s), None, "{s}");
+        }
+        for s in [
+            "Good news!",
+            "Great news.",
+            "Good news, Richard!",
+            "Good news, I found the file.",
+            "Good news: I found it.",
+            "Great news, it worked!",
+            "Good news, it's done.",
+            "Good news, we did it!",
+            "Good news: it's ready.",
+            "Great news, you passed.",
+            "Great news, you got it.",
+            "That's good news.",
+        ] {
+            let (f, st, r) = rule_of(s).unwrap_or_else(|| panic!("{s} must read"));
+            assert_eq!((f, r.as_str()), (Family::Warm, "warm-good-news"), "{s}");
+            assert!((st - 0.6).abs() < 1e-9, "{s}");
+        }
+    }
+
+    #[test]
+    fn apologies_take_a_negator_after_the_match_back() {
+        for s in [
+            "Sorry, not sorry.",
+            "Sorry not sorry!",
+            "Sorry, never sorry.",
+            "I'm sorry, I'm not sorry.",
+            "I'm sorry, but not really sorry.",
+            "Sorry, I'm really not sorry.",
+            "I am sorry, not.",
+            "My apologies, no.",
+            "My bad, not my problem.",
+            "I apologize, not.",
+            "Forgive me, never.",
+        ] {
+            assert_eq!(read_clause(s), None, "{s}");
+        }
+        // an ordinary apology with a plain failure after it still reads
+        for (s, st) in [
+            ("I'm sorry, I can't find it.", 0.5),
+            ("Sorry, I didn't catch that.", 0.45),
+            ("Sorry about that.", 0.45),
+            ("I'm sorry, I could not open it.", 0.5),
+        ] {
+            let (f, got, _) = rule_of(s).unwrap_or_else(|| panic!("{s} must read"));
+            assert_eq!(f, Family::Apology, "{s}");
+            assert!((got - st).abs() < 1e-9, "{s}");
+        }
+        // only apologies are guarded this way: bad news keeps its reading
+        assert_eq!(read("Unfortunately, no results came back."), Some(Family::Worry));
+    }
+
+    #[test]
+    fn round5_probe_lines() {
+        let want: [(&str, Option<(Family, f64)>); 12] = [
+            ("I'm glad I can help.", Some((Family::Warm, 0.5))),
+            ("I'm happy to help.", Some((Family::Warm, 0.35))),
+            ("I'm glad it worked.", Some((Family::Warm, 0.5))),
+            ("I'm glad you're back.", Some((Family::Warm, 0.5))),
+            ("I'm glad I can see the file.", None),
+            ("I'm happy the file is open.", None),
+            ("Good news, I found the file.", Some((Family::Warm, 0.6))),
+            ("Good news!", Some((Family::Warm, 0.6))),
+            ("Great news: the disk is full.", None),
+            ("Sorry about that.", Some((Family::Apology, 0.45))),
+            ("Sorry, not sorry.", None),
+            ("I'm sorry, I can't find it.", Some((Family::Apology, 0.5))),
+        ];
+        for (s, expected) in want {
+            let got = read_clause(s).map(|c| (c.family, c.strength));
+            match (got, expected) {
+                (None, None) => {}
+                (Some((gf, gs)), Some((ef, es))) => assert!(gf == ef && (gs - es).abs() < 1e-9, "{s}: {gf:?} {gs}"),
+                (g, e) => panic!("{s}: got {g:?}, want {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_body_or_sense_claim_never_raises_a_pose_beside_any_positive_row() {
+        let table = t();
+        let mut checks = 0usize;
+        for row in &table.lexicon {
+            if row.polarity < 0 {
+                continue;
+            }
+            for slots in &row.phrases {
+                for ex in expand(slots) {
+                    for tail in [
+                        " and I can see you.",
+                        ", I can hear you now.",
+                        " because I feel better.",
+                        ", my battery is full.",
+                        " and the fan is quiet.",
+                        ", the screen is on.",
+                        " and I noticed the camera.",
+                    ] {
+                        let v = format!("{}{tail}", cap(&ex));
+                        assert_eq!(table.read_clause_rule(&v), None, "{}: {v:?}", row.rule);
+                        checks += 1;
+                    }
+                }
+            }
+        }
+        assert!(checks >= 500, "{checks}");
+    }
+
+    #[test]
+    fn a_closed_rest_row_refuses_every_other_payload() {
+        let table = t();
+        let mut rows = 0usize;
+        for row in table.lexicon.iter().filter(|r| r.rest.is_some()) {
+            rows += 1;
+            for slots in &row.phrases {
+                for ex in expand(slots) {
+                    for tail in [" the server is on fire.", ", the file is open.", ": nothing else.", " and then some."] {
+                        let v = format!("{}{tail}", cap(&ex));
+                        assert_eq!(table.read_clause_rule(&v), None, "{}: {v:?}", row.rule);
+                    }
+                    // the bare phrase and a vocative always read
+                    for ok in [format!("{}!", cap(&ex)), format!("{}, Richard.", cap(&ex))] {
+                        assert!(table.read_clause_rule(&ok).is_some(), "{}: {ok:?}", row.rule);
+                    }
+                }
+            }
+        }
+        assert!(rows >= 4, "{rows}");
+    }
+
+    #[test]
+    fn round5_row_attributes_are_validated_and_present() {
+        for rule in ["warm-im-glad", "warm-glad-hear", "warm-happy-help", "warm-good-news"] {
+            let row = t().lexicon.iter().find(|r| r.rule == rule).unwrap();
+            assert!(row.rest.as_ref().is_some_and(|r| !r.is_empty()), "{rule}");
+            assert!(!row.after_break, "{rule}");
+        }
+        for row in t().lexicon.iter().filter(|r| r.family == Family::Apology) {
+            assert!(row.negated_after, "{}", row.rule);
+        }
+        // rest replaces after, and holds words
+        let bad = TABLE_JSON.replace("\"rule\": \"warm-good-news\", \"kind\": \"phrase\",", "\"rule\": \"warm-good-news\", \"kind\": \"phrase\", \"after\": \"break\",");
+        assert!(Table::parse(&bad).is_err());
+        let bad = TABLE_JSON.replace("\"i found it\"", "\"I found it\"");
+        assert!(Table::parse(&bad).is_err());
+        // body words are single lowercase words and must exist
+        let bad = TABLE_JSON.replace("\"battery\"", "\"Battery\"");
+        assert!(Table::parse(&bad).is_err());
+        let bad = TABLE_JSON.replace("\"body_words\"", "\"body_wordz\"");
+        assert!(Table::parse(&bad).is_err());
     }
 
     // -- cost (host) -------------------------------------------------------

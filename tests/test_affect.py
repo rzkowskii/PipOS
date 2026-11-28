@@ -13,6 +13,10 @@ mind/affect.py). read() reacts only when the whole utterance is the cue plus
 filler, so the checks in ShortUtteranceRule are GENERATED: every positive, with
 each of ten complaint or neutral sentences appended, and with each of four hedges
 in front, must give None. A line the builder never thought of fails the same way.
+
+Fourth (last) review round: the conflict checks run over the WHOLE read, and the loose
+tails became closed lists. ReviewRound4 pins the reviewers' lines; GeneratedRound4 crosses
+every cue with every laugh, retraction, jab and game or idiom tail and expects None.
 """
 
 import json
@@ -57,7 +61,6 @@ POSITIVES = [
     ("Hi!", "warm"),
     ("hi pip", "warm"),
     ("Well, hello again", "warm"),
-    ("hello pip what time is it", "warm"),
     ("good morning, how did you sleep?", "warm"),
     ("good morning pip how are you", "warm"),
     ("Oh hello", "warm"),
@@ -117,7 +120,7 @@ POSITIVES = [
     ("I'm kind of sad", "worry"),
     ("feeling sad today", "worry"),
     ("I'm unhappy", "worry"),
-    ("I'm really upset about it", "worry"),
+    ("I'm really upset", "worry"),
     ("I'm lonely", "worry"),
     ("I've been feeling lonely lately", "worry"),
     ("I'm heartbroken", "worry"),
@@ -219,10 +222,8 @@ POSITIVES = [
     ("good morning. I'm so nervous today", "support"),
     ("haha. thank you Pip", "thanks"),
     ("hello Pip. thank you for yesterday", "thanks"),
-    ("hello pip can you set a timer", "warm"),
     ("my hamster passed away", "worry"),
     ("I miss my old dog", "worry"),
-    ("oh my god pip", "surprise"),
     ("Today was rough", "worry"),
     ("knock knock who's there", "humour"),
 ]
@@ -245,6 +246,26 @@ RECALL_COST = [
     ("I'm kidding, my dog is fine", "humour", "kidding must end the sentence"),
     ("I'm feeling lonely and that is fine", "worry", "a stretch opening with 'and'"),
     ("my dad died in a car crash and I am angry", "worry", "a stretch opening with 'in', then more than the cue"),
+    # round 4 (the last fix round): structural rules, each one costs recall on purpose
+    ("hello pip what time is it", "warm", "after a greeting only the closed list GREET_FOLLOW may follow"),
+    ("hello pip can you set a timer", "warm", "after a greeting only the closed list GREET_FOLLOW may follow"),
+    ("good morning, what's on my calendar", "warm", "an open 'what' clause after a greeting is not on the closed list"),
+    ("hey pip I'm home", "warm", "after a greeting only the closed list GREET_FOLLOW may follow"),
+    ("oh my god pip", "surprise", "a gasp reacts only with nothing after it, or 'really'"),
+    ("omg pip", "surprise", "a gasp reacts only with nothing after it, or 'really'"),
+    ("I'm really upset about it", "worry", "unhappy, upset and sad with a preposition are about a thing"),
+    ("I'm sad about the score", "worry", "unhappy, upset and sad with a preposition are about a thing"),
+    ("I'm sad at night", "worry", "unhappy, upset and sad with a preposition are about a thing"),
+    ("my dad died in March", "worry", "loss: only a vocative or a time word may follow 'died'"),
+    ("my dog died at the vet", "worry", "loss: only a vocative or a time word may follow 'died'"),
+    ("my mom passed away in her sleep", "worry", "loss: only a vocative or a time word may follow 'died'"),
+    ("I lost my dog at the park", "worry", "loss: only a vocative or a time word may follow"),
+    ("I'm crying about my mom", "worry", "crying: only a vocative or a time word may follow"),
+    ("I could cry", "worry", "'i could cry' dropped: it is slang as often as grief"),
+    ("thanks pip. lol", "thanks", "a laugh in a later sentence undoes an earlier positive"),
+    ("well, thank you", "thanks", "a hesitation lead (well, uh, um, hmm, meh) makes thanks grudging"),
+    ("hmm thanks pip", "thanks", "a hesitation lead (well, uh, um, hmm, meh) makes thanks grudging"),
+    ("I'm anxious. Thanks a lot.", "support", "worry, then 'thanks a lot' anywhere in the read, is a dig"),
 ]
 
 # Every rule's allowed poses (the ladders of crates/brainstem/data/emotion-director.json).
@@ -286,7 +307,7 @@ RUNG_PINS = [
     ("I'm sad", "sad"),
     ("I'm a bit sad", "concern"),
     ("I'm so depressed", "disappointed"),
-    ("I'm really upset about it", "concern"),
+    ("I'm really upset", "concern"),
     ("I had a rough day", "concern"),
     ("my dog died", "sad"),
     ("I lost my job", "concern"),
@@ -899,6 +920,53 @@ NEGATIVES = [
     "lol i guess",
     "haha ok sure",
     "ha ha ha no",
+    # fourth review round: every line of the round-4 reviewer's files that must be silent
+    "what's the weather tomorrow",
+    "play some jazz please",
+    "turn off the kitchen lights",
+    "I'm so tired",
+    "the kids are driving me crazy today",
+    "you're so slow today",
+    "I'm hungry, what's for dinner",
+    "my son says he's sad the game ended",
+    "pip, are you my friend",
+    "is my daughter's bus late",
+    "My dog died. Haha.",
+    "I'm so lonely. Lol.",
+    "I'm crying. Lmao.",
+    "I'm anxious. Thanks a lot.",
+    "I love you pip. Just kidding.",
+    "my cat died. jk",
+    "I'm crying at this video",
+    "I'm crying over this puppy video",
+    "I could cry at that",
+    "my brother died in minecraft",
+    "my sister died on level three",
+    "my sister died of embarrassment",
+    "my dad almost died of boredom",
+    "I lost my friend at the mall",
+    "I lost my brother in the crowd",
+    "I'm unhappy with the new couch",
+    "I'm unhappy with the delivery",
+    "wish me luck stealing the cookies",
+    "wish me luck sneaking out",
+    "wish me luck pranking my brother",
+    "hello, what's your problem",
+    "hi, what's the point of you",
+    "good morning, how is this useful",
+    "hello what is wrong with you",
+    "hey pip, did you break the thermostat",
+    "omg pip",
+    "well, thanks",
+    "uh, thank you",
+    "hmm thanks",
+    "good night moon",
+    "goodnight room, goodnight moon",
+    "how do you say thank you in french",
+    "thank you for calling customer service",
+    "hi mom, I'm home",
+    "oh my god pip",
+    "omg you again",
     # edge forms
     "",
     "   ",
@@ -1149,7 +1217,7 @@ class ReviewFixes(unittest.TestCase):
         for text in ("I'm so upset at you pip", "i'm upset with you", "I'm upset you did that",
                      "I'm upset because of you"):
             self.assertIsNone(affect.read(text), text)
-        cue = affect.read("I'm so upset about it")
+        cue = affect.read("I'm so upset")
         self.assertEqual(cue.family, "worry")
         self.assertLess(cue.strength, 0.6)      # concern, never the sad pose
 
@@ -1162,8 +1230,9 @@ class ReviewFixes(unittest.TestCase):
 
     def test_thanks_a_lot_after_worry_is_irony(self):
         self.assertIsNone(affect.read("I'm anxious, thanks a lot"))
-        # a separate sentence is read on its own: sorrow still wins over thanks
-        self.assertEqual(affect.read("I'm sad. Thanks a lot").family, "worry")
+        # round 4: the check runs over the whole read, so a later sentence does not escape it
+        self.assertIsNone(affect.read("I'm sad. Thanks a lot"))
+        self.assertIsNone(affect.read("Thanks a lot. I'm sad"))
         self.assertEqual(affect.read("thanks a lot").family, "thanks")
         self.assertEqual(affect.read("thanks, I had a rough day").family, "worry")
 
@@ -1176,7 +1245,9 @@ class ReviewFixes(unittest.TestCase):
         for text in ("good morning, you woke me up too early", "hello pip you are late",
                      "hi pip stop talking", "hello, why are you so slow"):
             self.assertIsNone(affect.read(text), text)
-        self.assertEqual(affect.read("hello pip can you set a timer").family, "warm")
+        # round 4: after a greeting only the closed list may follow, so a request is silent too
+        self.assertIsNone(affect.read("hello pip can you set a timer"))
+        self.assertEqual(affect.read("hello pip how are you").family, "warm")
 
     def test_a_worry_next_to_an_accusation_is_silent(self):
         self.assertIsNone(affect.read("I'm so upset, you ruined it"))
@@ -1315,17 +1386,18 @@ class ShortUtteranceRule(unittest.TestCase):
         self.assertIsNone(affect.read("wish me luck on my interview downtown"))
 
     def test_nothing_but_filler_may_come_before_the_cue(self):
-        for text in ("oh well, thank you", "um okay so thank you pip", "oh hello", "yeah thanks pip"):
+        for text in ("oh, thank you", "okay so thank you pip", "oh hello", "yeah thanks pip"):
             self.assertIsNotNone(affect.read(text), text)
         for text in ("dinner is late thank you", "obama thank you", "my cat is sad thank you"):
             self.assertIsNone(affect.read(text), text)
 
     def test_what_follows_the_cue_must_open_like_a_detail_or_a_question(self):
         for text in ("I had a rough day at work", "my cat died last night",
-                     "hello pip what time is it", "good morning, how did you sleep?"):
+                     "good morning pip how are you", "good morning, how did you sleep?"):
             self.assertIsNotNone(affect.read(text), text)
         for text in ("I had a rough day obama", "my cat died gross", "hello pip bye",
                      "good morning, what a joke", "hello pip what a joke",
+                     "hello pip what time is it",
                      "I'm so sad this is awful", "I'm sad now fix it", "I'm stressed out stop it"):
             self.assertIsNone(affect.read(text), text)
 
@@ -1425,10 +1497,11 @@ class ReviewRound3(unittest.TestCase):
 
     def test_surprise_follow_ons(self):
         for text in ("oh my god, please stop", "omg, you talk too much", "no way, put that down!",
+                     "oh my god pip", "omg pip", "oh my god again", "oh my god buddy",
                      "I can't believe it, you talk too much", "oh my god you are slow",
                      "wow. you are so slow."):
             self.assertIsNone(affect.read(text), text)
-        for text in ("oh my god", "omg!", "I can't believe it", "oh my god pip", "wow"):
+        for text in ("oh my god", "omg!", "I can't believe it", "oh my god really", "wow"):
             self.assertEqual(affect.read(text).family, "surprise", text)
 
     def test_the_new_safe_rows_end_the_sentence(self):
@@ -1456,6 +1529,196 @@ class ReviewRound3(unittest.TestCase):
                      "I'm sad, thanks"):
             self.assertIsNone(affect.read(text), text)
         self.assertEqual(affect.read("thanks, I had a rough day").family, "worry")
+
+
+class ReviewRound4(unittest.TestCase):
+    """The last fix round: one test per structural rule (each line is synthetic)."""
+
+    def test_the_conflict_checks_run_over_the_whole_read(self):
+        # sorrow or worry with laughter, a retraction or "thanks a lot": in either order and
+        # across a full stop (speech-to-text puts full stops everywhere)
+        for text in ("My dog died. Haha.", "I'm so lonely. Lol.", "I'm crying. Lmao.",
+                     "I'm anxious. Thanks a lot.", "my cat died. jk", "Haha. My dog died.",
+                     "Lol. I'm so lonely.", "Thanks a lot. I'm anxious.", "I'm sad. Ha ha.",
+                     "I'm sad, ha ha", "I'm sad. That's funny."):
+            self.assertIsNone(affect.read(text), text)
+        # a retraction undoes a positive too, and is not turned into a laugh
+        for text in ("I love you pip. Just kidding.", "thank you pip. jk", "Just kidding. Good job pip",
+                     "good morning pip. I'm kidding."):
+            self.assertIsNone(affect.read(text), text)
+        # a laugh in a LATER sentence undoes an earlier positive; before it, it does not
+        self.assertIsNone(affect.read("thank you pip. lol"))
+        self.assertEqual(affect.read("haha. thank you Pip").family, "thanks")
+        # laughter alone, and a retraction alone, still react
+        self.assertEqual(affect.read("haha. lol").family, "humour")
+        self.assertEqual(affect.read("just kidding").rule, "kidding")
+
+    def test_crying_only_takes_a_vocative_or_a_time_word(self):
+        for text in ("I'm crying at this video", "I'm crying over this puppy video",
+                     "I could cry at that", "I'm crying about the ending", "I feel like crying at this song",
+                     "I'm crying laughing", "I'm crying because of you"):
+            self.assertIsNone(affect.read(text), text)
+        for text in ("I'm crying", "I'm crying pip", "I'm crying this morning", "I've been crying all day",
+                     "I feel like crying today", "I want to cry"):
+            self.assertEqual(affect.read(text).rule, "crying", text)
+
+    def test_loss_only_takes_a_vocative_or_a_time_word(self):
+        for text in ("my brother died in minecraft", "my sister died on level three",
+                     "my sister died of embarrassment", "my dad almost died of boredom",
+                     "my dad nearly died", "my dad almost died", "my dog died again", "my dog died twice today",
+                     "I lost my friend at the mall", "I lost my brother in the crowd",
+                     "my dog died in the movie"):
+            self.assertIsNone(affect.read(text), text)
+        for text in ("my dog died", "my dog died yesterday", "my grandpa passed away last week",
+                     "my cat died this morning", "my dad has died pip", "I lost my dog", "I lost my dog yesterday"):
+            self.assertEqual(affect.read(text).rule, "loss", text)
+
+    def test_a_greeting_takes_only_the_closed_list(self):
+        for text in ("hello, what's your problem", "hi, what's the point of you", "good morning, how is this useful",
+                     "hello what is wrong with you", "hello pip can you set a timer", "hello pip what time is it",
+                     "good morning, what's on my calendar", "hi pip how come you are slow", "hello how is that my fault"):
+            self.assertIsNone(affect.read(text), text)
+        for greeting in ("hello", "hi pip", "good morning", "good evening pip"):
+            for phrase in ("how are you", "how's it going", "how did you sleep", "how was your day",
+                           "how are you doing", "what's up", "what's new", "how's everything"):
+                for joint in (" ", ", "):
+                    text = greeting + joint + phrase
+                    self.assertEqual(affect.read(text).rule, "greeting", text)
+        self.assertEqual(affect.read("hi pip, how are you today").family, "warm")
+        self.assertEqual(affect.read("good night sleep well").family, "warm")
+
+    def test_sad_unhappy_and_upset_with_a_preposition_are_about_a_thing(self):
+        for text in ("I'm unhappy with the new couch", "I'm unhappy with the delivery", "I'm unhappy about the bill",
+                     "I'm sad about the score", "I'm sad at the price", "I'm upset about the delivery",
+                     "I feel low about the bill", "I'm really upset about it", "I'm sad because it rained"):
+            self.assertIsNone(affect.read(text), text)
+        for text in ("I'm unhappy", "I'm sad today", "I'm so upset", "I'm lonely at night",
+                     "I've been feeling lonely lately", "I feel low today"):
+            self.assertEqual(affect.read(text).family, "worry", text)
+
+    def test_a_hesitation_before_thanks_makes_it_grudging(self):
+        for text in ("well, thanks", "uh, thank you", "hmm thanks", "um thanks", "meh, thanks pip",
+                     "well thank you", "hm, thank you so much", "hmm. thanks.", "well. thank you pip"):
+            self.assertIsNone(affect.read(text), text)
+        for text in ("thanks", "okay thanks", "yeah thanks pip", "oh, thank you", "great, thanks"):
+            self.assertEqual(affect.read(text).family, "thanks", text)
+        # the whitelisted gerunds and nouns after "thanks for" stay
+        for text in ("thanks for coming", "thanks for the reminder", "thanks for telling me"):
+            self.assertEqual(affect.read(text).family, "thanks", text)
+
+    def test_oh_my_god_reacts_only_with_nothing_after_it(self):
+        for text in ("oh my god pip", "omg pip", "oh my god again", "oh my god buddy", "oh my god there",
+                     "I can't believe it pip", "omg pip really"):
+            self.assertIsNone(affect.read(text), text)
+        for text in ("oh my god", "omg", "omg!", "oh my god really", "oh my god!"):
+            self.assertEqual(affect.read(text).rule, "big_surprise", text)
+        # the choice: None, not the lower "wow" strength; "wow" itself still reacts
+        self.assertEqual(affect.read("wow pip").rule, "wow")
+
+    def test_a_short_closing_after_thanks(self):
+        for text in ("thanks, that helped a lot", "thanks that helped", "thank you, that worked",
+                     "thanks pip, that was helpful", "thanks that worked pip"):
+            cue = affect.read(text)
+            self.assertEqual((cue.family, cue.rule), ("thanks", "thanks"), text)
+        for text in ("thanks, that helped but now it is broken", "thanks, that did not help",
+                     "thanks, that helped a lot, now fix it", "thanks. that worked", "thanks, that helped me die",
+                     "hello, that helped", "I'm sad, that helped", "that helped"):
+            self.assertIsNone(affect.read(text), text)
+
+
+ROUND4_SORROW = ("I'm sad", "I'm so lonely", "my dog died", "I had a rough day", "I'm crying", "I'm anxious")
+ROUND4_POSITIVE = ("I love you pip", "thank you pip", "good morning pip", "great job pip")
+ROUND4_LAUGH = ("Haha.", "Lol.", "Lmao.", "Ha ha.")
+ROUND4_RETRACT = ("Jk.", "Just kidding.", "I'm kidding.")
+ROUND4_DIG = ("Thanks a lot.",)
+ROUND4_JABS = ("what's your problem", "what's the point of you", "what's wrong with you", "how is this useful",
+               "how is that helpful", "what is this nonsense", "what is your deal", "how are you still broken",
+               "what's with the noise", "what's your issue", "how is that my fault")
+
+
+class GeneratedRound4(unittest.TestCase):
+    """GENERATED: classes, not lines. Each one crosses every base with every tail."""
+
+    def assert_all_silent(self, lines, least):
+        self.assertGreaterEqual(len(lines), least)
+        loud = [(t, affect.read(t)) for t in lines if affect.read(t) is not None]
+        self.assertEqual(loud, [], "\n".join(map(str, loud[:40])))
+
+    def test_the_bases_react_alone(self):
+        for text in ROUND4_SORROW + ROUND4_POSITIVE:
+            self.assertIsNotNone(affect.read(text), text)
+
+    def test_sorrow_with_a_laugh_a_retraction_or_a_dig_in_another_sentence_is_silent(self):
+        lines = []
+        for base in ROUND4_SORROW:
+            for second in ROUND4_LAUGH + ROUND4_RETRACT + ROUND4_DIG:
+                lines += ["%s. %s" % (base, second), "%s %s." % (second, base)]
+        self.assert_all_silent(lines, 90)
+
+    def test_a_positive_with_a_retraction_in_another_sentence_is_silent(self):
+        lines = []
+        for base in ROUND4_POSITIVE:
+            for second in ROUND4_RETRACT:
+                lines += ["%s. %s" % (base, second), "%s %s." % (second, base)]
+        self.assert_all_silent(lines, 20)
+
+    def test_a_positive_followed_by_a_laugh_sentence_is_silent(self):
+        lines = ["%s. %s" % (base, second) for base in ROUND4_POSITIVE for second in ROUND4_LAUGH]
+        self.assert_all_silent(lines, 12)
+
+    def test_a_death_or_a_loss_with_a_game_or_an_idiom_is_silent(self):
+        tails = ("in minecraft", "in fortnite", "on level three", "in the raid", "in the first round",
+                 "of embarrassment", "of boredom", "of shame", "of cringe", "of laughter", "of hunger",
+                 "again", "twice today", "in the arena", "at the mall", "in the crowd")
+        lines = []
+        for kin in ("brother", "sister", "dad", "mom", "dog", "friend"):
+            for tail in tails:
+                lines += ["my %s died %s" % (kin, tail), "my %s nearly died %s" % (kin, tail),
+                          "my %s almost died %s" % (kin, tail), "I lost my %s %s" % (kin, tail)]
+        self.assert_all_silent(lines, 300)
+
+    def test_crying_at_a_thing_is_silent(self):
+        lines = ["%s %s" % (pre, obj)
+                 for pre in ("I'm crying at", "I'm crying over", "I could cry at", "I'm crying about",
+                             "I feel like crying at", "I want to cry at")
+                 for obj in ("this video", "this meme", "this puppy", "that clip", "the ending", "this song",
+                             "that joke")]
+        self.assert_all_silent(lines, 40)
+
+    def test_a_feeling_word_with_a_preposition_and_a_thing_is_silent(self):
+        things = ("the new couch", "the delivery", "the service", "the hotel", "this phone", "the wifi",
+                  "the bill", "the menu", "my haircut")
+        lines = ["%s %s %s" % (feel, prep, thing)
+                 for feel in ("I'm unhappy", "I'm sad", "I'm upset", "I feel low", "I feel blue", "I'm feeling down")
+                 for prep in ("with", "about", "at", "over")
+                 for thing in things]
+        self.assert_all_silent(lines, 200)
+
+    def test_a_greeting_with_a_jab_is_silent(self):
+        lines = []
+        for greeting in ("hello", "hi", "good morning", "hey pip", "good evening", "hi pip", "good night"):
+            for jab in ROUND4_JABS:
+                lines += ["%s, %s" % (greeting, jab), "%s %s" % (greeting, jab), "%s pip, %s" % (greeting, jab)]
+        self.assert_all_silent(lines, 200)
+
+    def test_luck_for_a_mischievous_goal_is_silent(self):
+        goals = ("stealing the cookies", "sneaking out", "pranking my brother", "hiding this from mom",
+                 "skipping class", "lying to my boss", "cheating at cards", "scaring my sister",
+                 "robbing a bank", "getting away with it")
+        self.assert_all_silent(["wish me luck %s" % g for g in goals], 10)
+
+    def test_a_hesitation_before_thanks_is_silent(self):
+        lines = []
+        for lead in ("well", "uh", "um", "hmm", "hm", "meh"):
+            for thanks in ("thanks", "thank you", "thanks pip", "thank you so much"):
+                lines += ["%s, %s" % (lead, thanks), "%s %s" % (lead, thanks), "oh %s, %s" % (lead, thanks)]
+        self.assert_all_silent(lines, 60)
+
+    def test_a_gasp_with_a_vocative_is_silent(self):
+        lines = ["%s %s" % (pre, post)
+                 for pre in ("oh my god", "omg", "oh my gosh", "holy smokes", "good heavens", "I can't believe it")
+                 for post in ("pip", "pip.", "buddy", "again", "there", "friend")]
+        self.assert_all_silent(lines, 30)
 
 
 class Bounded(unittest.TestCase):
