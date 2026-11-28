@@ -247,6 +247,10 @@ class TypeChat:
         seq = event.get("seq")
         playing = next((held for held in self._held if held[:2] == (reply, seq)), None)
         if playing is None:
+            # A written reply: the mind reports the clause as shown and carries its words.
+            text = event.get("text")
+            if isinstance(text, str) and printable(text):
+                self._show_reply(printable(text), reply)
             return
         # Its earlier clauses still held were skipped.
         self._held = [held for held in self._held if held[0] != reply or held[1] > seq]

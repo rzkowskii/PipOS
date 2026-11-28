@@ -347,6 +347,18 @@ class Bridge(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(chat_bridge.guest_latched(str(path)))
 
 
+class WrittenReceipts(unittest.TestCase):
+    def test_a_receipt_that_carries_words_is_shown_as_a_written_reply(self):
+        shown = []
+        chat = chat_bridge.type_chat.TypeChat(FakeBus(), name="Pip", owner="Richard",
+                                              show=lambda text, tone="text": shown.append((tone, text)))
+        chat.on_event({"t": "say.played", "reply": "r" * 16, "seq": 1, "text": "Ten minutes, starting now."})
+        chat.on_event({"t": "say.played", "reply": "r" * 16, "seq": 2, "text": "I will tell\x1b[0m you."})
+        chat.on_event({"t": "say.played", "reply": "r" * 16, "seq": 3, "text": "  "})
+        chat.on_event({"t": "say.played", "reply": "r" * 16, "final": True})
+        self.assertEqual(shown, [("first_reply", "Ten minutes, starting now."), ("reply", "I will tell [0m you.")])
+
+
 class Wiring(unittest.TestCase):
     def test_the_bridge_sees_exactly_the_topics_it_handles(self):
         for topic in ("ui.text", "ui.action", "chat.mode.request", "app.privacy", "say.played", "state.changed",

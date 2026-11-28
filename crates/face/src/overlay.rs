@@ -216,6 +216,13 @@ impl Captions {
                 }
                 let Some(seq) = ev.data.get("seq").and_then(|seq| seq.as_u64()) else { return };
                 let Some(at) = self.pending.iter().position(|clause| clause.reply == reply && clause.seq == seq) else {
+                    // A written reply: with nothing to play, the mind reports the clause
+                    // as shown and carries its words (there was no say.request).
+                    let text = ev.str("text").unwrap_or("").trim();
+                    if !text.is_empty() {
+                        self.show(Some(reply.to_string()), text);
+                        self.changed_caption();
+                    }
                     return;
                 };
                 // Earlier clauses of this reply that are still waiting were skipped.
@@ -499,6 +506,27 @@ mod tests {
 
     fn said(c: &Captions) -> String {
         c.lines(&health(), 100).into_iter().find(|l| l.starts_with("said")).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_written_reply_is_captioned_from_the_receipt_that_carries_its_words() {
+        // In written-replies mode the mind sends no say.request: its receipt has the text.
+        let mut c = Captions::default();
+        c.toggle();
+        let receipt = |seq: u64, text: &str| played("cccccccccccccccc", seq).with("text", text);
+        c.event(&receipt(1, "Ten minutes, starting now."));
+        assert_eq!(said(&c), "said    Ten minutes, starting now.");
+        c.event(&receipt(2, "I will tell you."));
+        assert_eq!(said(&c), "said    Ten minutes, starting now. I will tell you.");
+        c.event(&receipt(3, "   "));
+        assert_eq!(said(&c), "said    Ten minutes, starting now. I will tell you.", "blank text shows nothing");
+        c.event(&ended("cccccccccccccccc", false));
+        // A guest sees none of it.
+        let mut guest = Captions::default();
+        guest.toggle();
+        guest.event(&Event::new("app.privacy").with("guest", true));
+        guest.event(&receipt(1, "Secret."));
+        assert_eq!(said(&guest), "said    (nothing yet)");
     }
 
     #[test]
